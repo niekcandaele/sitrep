@@ -167,21 +167,6 @@ func TestFailedRefreshKeepsTheLastGoodReading(t *testing.T) {
 	}
 }
 
-// Enter is declared and shown in help so nothing else claims it, and does
-// nothing until the Ticket Detail drill-in exists.
-func TestEnterIsAReservedNoOp(t *testing.T) {
-	m := listModel(t, []model.Ticket{ticket("#1", model.StatusTodo)})
-
-	next, cmd := m.onKey(tea.KeyPressMsg{Code: tea.KeyEnter})
-
-	if cmd != nil {
-		t.Error("enter issued a command; it is reserved, not wired")
-	}
-	if next.(Model).selected != m.selected {
-		t.Error("enter moved the selection")
-	}
-}
-
 // Only the two filtering keys this work ships are bound: a key shipped early is
 // a key that has to be un-shipped.
 func TestUnclaimedKeysDoNothing(t *testing.T) {

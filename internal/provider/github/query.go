@@ -41,3 +41,53 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
     }
   }
 }`
+
+// detailQuery is the second GraphQL document this driver sends, and it is
+// deliberately separate from epicQuery rather than an addition to it: the epic
+// document is polled every interval, this one is sent once, when a human opens a
+// Ticket (ADR-0003). Merging them would put a body, a hundred comments and two
+// dependency connections per Ticket on the hot path.
+//
+// It is a node(id:) lookup because model.TicketID already *is* GitHub's GraphQL
+// node ID for this driver (see newTicket), so no owner, repo or number has to be
+// carried around to reach one Ticket again.
+//
+// The caps are one request's worth of data and nothing paginates:
+//
+//   - comments(last:100) rather than first:100 — GraphQL returns a `last` page
+//     in chronological order, so model.Detail.Comments stays oldest-first while
+//     a thousand-comment Ticket shows the recent hundred rather than the ancient
+//     hundred.
+//   - blockedBy(first:50) / blocking(first:50) are GitHub's issue-dependency
+//     connections. Fifty of either is already more than a screen.
+//
+// author is an Actor and is nullable: a deleted account arrives as null and a
+// bot as an Actor with no name or avatarUrl, which is why name and avatarUrl sit
+// behind the `... on User` fragment.
+const detailQuery = `query($id:ID!) {
+  node(id:$id) {
+    ... on Issue {
+      id number url body
+      repository { nameWithOwner }
+      comments(last:100) {
+        totalCount
+        nodes {
+          id url body createdAt
+          author { login ... on User { name avatarUrl } }
+        }
+      }
+      blockedBy(first:50) {
+        nodes {
+          id number title url state stateReason
+          repository { nameWithOwner }
+        }
+      }
+      blocking(first:50) {
+        nodes {
+          id number title url state stateReason
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+}`

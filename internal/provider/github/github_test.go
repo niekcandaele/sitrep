@@ -151,18 +151,9 @@ func fullEpic(t *testing.T) *replayServer {
 	)
 }
 
-func TestNameAndCapabilities(t *testing.T) {
-	p := github.New("github.com")
-
-	if p.Name() != "github" {
+func TestName(t *testing.T) {
+	if p := github.New("github.com"); p.Name() != "github" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "github")
-	}
-
-	// A capability declares what this driver returns today. Comments and
-	// blocking links are fetchable from GitHub and neither is served yet.
-	want := model.Capabilities{Hierarchy: true, PullRequests: true}
-	if got := p.Capabilities(); got != want {
-		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
 }
 
@@ -880,15 +871,5 @@ func TestFetchEpicHonoursContextCancellation(t *testing.T) {
 
 	if err := <-done; err == nil {
 		t.Fatal("FetchEpic returned no error after its context was cancelled")
-	}
-}
-
-func TestFetchDetailIsNotAvailableYet(t *testing.T) {
-	_, err := github.New("github.com").FetchDetail(context.Background(), "I_kwDO")
-	if err == nil {
-		t.Fatal("FetchDetail succeeded, want a clear not-available-yet error")
-	}
-	if !strings.Contains(err.Error(), "not available yet") {
-		t.Errorf("error %q does not say detail is not available yet", err)
 	}
 }

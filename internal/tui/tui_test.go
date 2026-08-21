@@ -65,10 +65,17 @@ type session struct {
 // the staleness indicator report an age nobody lived through.
 func start(t *testing.T, c *clock, src Source, interval time.Duration) *session {
 	t.Helper()
+	return startWith(t, c, Options{Source: src, Interval: interval, Now: c.now})
+}
 
-	m := New(t.Context(), Options{Source: src, Interval: interval, Now: c.now})
+// startWith runs the monitor with explicit Options, for the sessions that need a
+// second seam — the Detail source — beside the list's.
+func startWith(t *testing.T, c *clock, opts Options) *session {
+	t.Helper()
+
 	return &session{
-		tm:    teatest.NewTestModel(t, m, teatest.WithInitialTermSize(termWidth, termHeight)),
+		tm: teatest.NewTestModel(t, New(t.Context(), opts),
+			teatest.WithInitialTermSize(termWidth, termHeight)),
 		clock: c,
 	}
 }

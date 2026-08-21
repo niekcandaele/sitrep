@@ -56,6 +56,17 @@ type Styles struct {
 	// EmptyFilter styles the notice that stands in for a list a filter has
 	// emptied.
 	EmptyFilter lipgloss.Style
+	// Breadcrumb styles the Detail screen's parent-collection line.
+	Breadcrumb lipgloss.Style
+	// SectionHeader styles a Detail section heading, e.g. "COMMENTS (3)".
+	SectionHeader lipgloss.Style
+	// CommentAuthor styles a comment's "@login · time" byline.
+	CommentAuthor lipgloss.Style
+	// LinkLabel styles a Link's native label. The label carries the meaning; the
+	// colour carries none.
+	LinkLabel lipgloss.Style
+	// Body styles the Detail screen's wrapped prose.
+	Body lipgloss.Style
 	// Error styles the refresh error line.
 	Error lipgloss.Style
 	// Muted styles secondary prose, such as the empty-collection notice.
@@ -108,6 +119,11 @@ func DefaultStyles(isDark bool) Styles {
 		FilterLine:      base.Foreground(dim),
 		SearchBox:       base.Foreground(accent).Bold(true),
 		EmptyFilter:     base.Foreground(dim),
+		Breadcrumb:      base.Foreground(dim),
+		SectionHeader:   base.Foreground(accent).Bold(true),
+		CommentAuthor:   base.Foreground(accent),
+		LinkLabel:       base.Foreground(dim),
+		Body:            base.Foreground(text),
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 	}

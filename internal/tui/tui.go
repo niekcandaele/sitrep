@@ -40,6 +40,32 @@
 // a q — because a find box that quits when you search for "queue" is worse
 // than no find box.
 //
+// # The Detail screen is a second mode over the same model
+//
+// enter opens one Ticket's Detail; esc closes it. Both are a change to one mode
+// field: the list's state — the reading, the rows, the selection, the scroll
+// offset, the Filter — is never touched while Detail is open, which is why the
+// position and the filters survive the round trip without any code restoring
+// them. The golden that proves it is a byte-for-byte comparison against the
+// unfiltered list frame, not a golden of its own.
+//
+// Detail is fetched on drill-in and at no other moment, and is cached per Ticket
+// for the session: re-opening a Ticket costs the Tracker nothing, r in Detail
+// re-reads that one Ticket, and no list refresh — automatic or forced — ever
+// calls FetchDetail (ADR-0003). A cached Detail carries its own "read Ns ago"
+// stamp so a stale reading is visible rather than looking as fresh as the list
+// beside it.
+//
+// The screen consumes a DetailInput — a Ticket header, an optional parent
+// breadcrumb and the Detail itself — the same way the list consumes a ListInput.
+// DetailFromTicket is the adapter this package needs today; a Ticket opened
+// without a list behind it, a bare Ticket Ref decoded straight into Detail,
+// fills the same fields and needs no new entry point here.
+//
+// The body is wrapped into lines once and scrolled by slicing them, for the same
+// reason the list window is hand-rolled: the arithmetic has to exist anyway, and
+// a golden of bubbles/viewport is a golden of somebody else's scrollbar.
+//
 // # Why the list is hand-rolled
 //
 // ADR-0001 names bubbles/list and bubbles/viewport as available, not
@@ -76,6 +102,10 @@ import (
 type Options struct {
 	// Source produces one reading of the collection on every refresh.
 	Source Source
+	// DetailSource reads one Ticket's Detail when the user opens it, and at no
+	// other moment (ADR-0003). A monitor without one still lists Tickets; enter
+	// then says why it cannot open them.
+	DetailSource DetailSource
 	// Interval is how long the monitor waits between automatic refreshes.
 	Interval time.Duration
 	// Now reads the clock the staleness indicator and the refresh schedule are

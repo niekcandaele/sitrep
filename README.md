@@ -26,6 +26,11 @@ cadence — `sitrep 111 --interval 15s` — down to a floor of 5 seconds, becaus
 API is rate-limited. A refresh that fails leaves the last good reading on screen and says
 so in the footer rather than blanking or exiting.
 
+`enter` opens the selected Ticket's Detail — its description, its comments and its links, each
+with the tracker's own label — fetched at that moment and never during a list refresh. `esc`
+returns to the list with the selection, the scroll position and any filters exactly as they
+were.
+
 Two keys narrow what the list shows. `d` hides Done and Cancelled Tickets, and the progress
 bar keeps counting the whole Epic while they are hidden, so the header still says how far
 along the work really is. `/` opens a fuzzy find over Ticket titles and keys — type to

@@ -1,0 +1,86 @@
+{
+  "data": {
+    "node": {
+      "id": "I_kwDOT_WhQ88AAAABNqYEOA",
+      "number": 9,
+      "url": "https://github.com/niekcandaele/sitrep/issues/9",
+      "body": "## Parent\n\nEpic: #2 · Spec: #1\n\n## What to build\n\nThe daily-loop filters: one keystroke to hide finished work & fuzzy find to jump to a ticket in a big epic. Renseigner la métrique « éclair » du tableau de bord.\n\n## Acceptance criteria\n\n- [ ] `d` toggles hiding Done + Cancelled tickets; the progress header keeps whole-epic counts while hidden\n- [ ] `/` fuzzy-finds over ticket title and key; Esc clears the filter\n- [ ] Both interactions covered by golden frame tests\n\n## Blocked by\n\n- #8 (TUI epic monitor)\n",
+      "repository": {
+        "nameWithOwner": "niekcandaele/sitrep"
+      },
+      "comments": {
+        "totalCount": 3,
+        "nodes": [
+          {
+            "id": "IC_kwDOT_WhQ88AAAABQAYV9w",
+            "url": "https://github.com/niekcandaele/sitrep/issues/9#issuecomment-5369107959",
+            "body": "_Posted by an agent (epic-runner)._\n\nDone: delivered by PR #23, squash-merged into `epic/sitrep-v1` as 55f6059.\n",
+            "createdAt": "2026-08-21T11:13:40Z",
+            "author": {
+              "login": "niekcandaele",
+              "name": "Niek Candaele",
+              "avatarUrl": "https://avatars.githubusercontent.com/u/22315101?u=5df03d047b67f831c6f771212ab6442eb8770d28&v=4"
+            }
+          },
+          {
+            "id": "IC_kwDOT_WhQ88AAAABQAYWAA",
+            "url": "https://github.com/niekcandaele/sitrep/issues/9#issuecomment-5369107960",
+            "body": "Ran the goldens against a 80x24 terminal too.",
+            "createdAt": "2026-08-21T12:01:05Z",
+            "author": {
+              "login": "sitrep-bot"
+            }
+          },
+          {
+            "id": "IC_kwDOT_WhQ88AAAABQAYWAQ",
+            "url": "https://github.com/niekcandaele/sitrep/issues/9#issuecomment-5369107961",
+            "body": "Left by an account that no longer exists.",
+            "createdAt": "2026-08-21T13:22:00Z",
+            "author": null
+          }
+        ]
+      },
+      "blockedBy": {
+        "nodes": [
+          {
+            "id": "I_kwDOT_WhQ88AAAABNqYDsw",
+            "number": 8,
+            "title": "TUI epic monitor: grouped list, auto-refresh",
+            "url": "https://github.com/niekcandaele/sitrep/issues/8",
+            "state": "CLOSED",
+            "stateReason": "COMPLETED",
+            "repository": {
+              "nameWithOwner": "niekcandaele/sitrep"
+            }
+          },
+          {
+            "id": "I_kwDOACME00AAAAAB",
+            "number": 91,
+            "title": "Widget adapter, abandoned",
+            "url": "https://github.com/acme/widgets/issues/91",
+            "state": "CLOSED",
+            "stateReason": "NOT_PLANNED",
+            "repository": {
+              "nameWithOwner": "acme/widgets"
+            }
+          }
+        ]
+      },
+      "blocking": {
+        "nodes": [
+          {
+            "id": "I_kwDOT_WhQ88AAAABNqYH2Q",
+            "number": 16,
+            "title": "Errors that explain themselves + v0.1 release",
+            "url": "https://github.com/niekcandaele/sitrep/issues/16",
+            "state": "OPEN",
+            "stateReason": null,
+            "repository": {
+              "nameWithOwner": "niekcandaele/sitrep"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
