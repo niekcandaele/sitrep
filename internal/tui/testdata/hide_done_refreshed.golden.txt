@@ -15,19 +15,6 @@ TODO (3)
   #117     Renseigner la métrique « éclair » du tableau de bord
            [open]
 
-DONE (4)
-  #113     Retry & backoff for the sync worker
-           [closed]  @mara-vos @tobias  #502 open ci FAIL review pending
-  #118     Cache shard lookups
-           [closed]  @mara-vos  #504 merged
-  #119     Emit sync telemetry
-           [Done]  @tobias
-  #120     Write the sync v2 runbook
-           [closed]
-
-CANCELLED (1)
-  #121     Mirror shards to the legacy feed
-           [not planned]
 
 
 
@@ -37,4 +24,17 @@ CANCELLED (1)
 
 
 
-↑/k up • ↓/j down • d hide finished • / find • r refresh • ? help • q quit
+
+
+
+
+
+
+
+
+
+
+
+
+filter: done+cancelled hidden · 5 of 10 Tickets                                                                esc clear
+↑/k up • ↓/j down • d hide finished • / find • esc clear filter • r refresh • ? help • q quit

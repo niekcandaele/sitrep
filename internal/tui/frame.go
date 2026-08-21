@@ -95,7 +95,13 @@ func headerProgress(p model.Progress, staleness string, width int, s Styles) str
 	barWidth := width - lipgloss.Width(counts) - lipgloss.Width(right) - 6
 	barWidth = min(max(barWidth, minBarWidth), maxBarWidth)
 
-	left := renderBar(p, barWidth, s) + "  " + s.Counts.Render(counts)
+	return pairLine(renderBar(p, barWidth, s)+"  "+s.Counts.Render(counts), right, width)
+}
+
+// pairLine lays a left fragment against the right-hand edge of the terminal on
+// one line, falling back to clipping when the two will not both fit. Nothing
+// here may wrap: a footer that takes two lines breaks the body's arithmetic.
+func pairLine(left, right string, width int) string {
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		return truncateLine(left+" "+right, width)

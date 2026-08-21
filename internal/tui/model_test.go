@@ -182,15 +182,15 @@ func TestEnterIsAReservedNoOp(t *testing.T) {
 	}
 }
 
-// No filtering key is bound: a key shipped early is a key that has to be
-// un-shipped.
-func TestNoFilteringKeysAreBound(t *testing.T) {
+// Only the two filtering keys this work ships are bound: a key shipped early is
+// a key that has to be un-shipped.
+func TestUnclaimedKeysDoNothing(t *testing.T) {
 	m := listModel(t, []model.Ticket{ticket("#1", model.StatusTodo), ticket("#2", model.StatusDone)})
 
-	for _, k := range []string{"/", "f", "h", "o"} {
+	for _, k := range []string{"f", "h", "o"} {
 		next, cmd := m.onKey(keyPress(k))
 		if cmd != nil {
-			t.Errorf("%q issued a command; filtering belongs to later work", k)
+			t.Errorf("%q issued a command; it is not bound", k)
 		}
 		if len(next.(Model).rows) != len(m.rows) {
 			t.Errorf("%q changed the list", k)
