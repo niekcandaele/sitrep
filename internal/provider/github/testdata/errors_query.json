@@ -1,0 +1,15 @@
+{
+  "data": null,
+  "errors": [
+    {
+      "type": "FORBIDDEN",
+      "path": ["repository", "issue"],
+      "message": "Resource not accessible by integration"
+    },
+    {
+      "type": "FORBIDDEN",
+      "path": ["repository", "issue", "subIssues"],
+      "message": "Field 'subIssues' doesn't exist on type 'Issue'"
+    }
+  ]
+}

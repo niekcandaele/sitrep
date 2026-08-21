@@ -21,6 +21,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 )
 
@@ -39,24 +41,40 @@ Usage:
   sitrep [flags] <ref>
 
 Arguments:
-  <ref>   the Epic Ref to report on
+  <ref>   the Epic Ref to report on, in any of these forms:
+            111                                        a bare issue number
+            acme/widgets#111                           owner, repository, number
+            https://github.com/acme/widgets/issues/111  a full issue URL
+          A bare number is resolved through the origin remote of the current
+          directory's git clone; the other forms work anywhere.
 
 Flags:
   -h, --help              show this help and exit
       --json              print the epic as a JSON document and exit
-      --provider <name>   Provider to read from (default "fake"; a development
-                          and testing selector until the tracker drivers land)
+      --provider <name>   Provider to read from: "auto" (the default) picks one
+                          from the Epic Ref, "github" forces the GitHub driver,
+                          "fake" serves a built-in fixture epic
       --version           show version information and exit
 `
 
-// Deps are the injectable dependencies of a sitrep run. The zero value uses
-// production defaults, which is what Run passes.
+// Deps are the injectable dependencies of a sitrep run. Every field's zero
+// value is the production behaviour, which is what Run passes.
 type Deps struct {
-	// Provider serves the run. When nil it is resolved from --provider.
+	// Provider serves the run. When nil it is resolved from the Epic Ref and
+	// --provider; when set it wins outright and nothing is constructed.
 	Provider provider.Provider
 	// Now reads the clock for the snapshot's timestamp. When nil it is
 	// time.Now.
 	Now func() time.Time
+	// RemoteLookup reads the git remote that resolves a bare Epic Ref number.
+	// When nil it is the real `git remote get-url`.
+	RemoteLookup ref.RemoteLookup
+	// Dir is the working directory whose git remote resolves a bare number.
+	// When empty it is the process working directory.
+	Dir string
+	// TokenSource discovers the GitHub API token. When nil it is
+	// github.DefaultTokenSource.
+	TokenSource github.TokenSource
 }
 
 // Run executes sitrep with the given command-line arguments (excluding argv[0])
@@ -99,12 +117,25 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	if len(positional) > 1 {
 		return usageError(stderr, "only one Epic Ref may be given")
 	}
-	ref := positional[0]
+	rawRef := positional[0]
+
+	if !knownProviderName(*providerName) {
+		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
+	}
+
+	// The Epic Ref is resolved once, here, before a Provider exists: the
+	// Provider is chosen from what the Ref points at, and FetchEpic is polled,
+	// so re-resolving a bare number there would re-run git forever.
+	ctx := context.Background()
+	r, err := deps.resolveRef(ctx, rawRef, *providerName)
+	if err != nil {
+		return runtimeError(stderr, err)
+	}
 
 	p := deps.Provider
 	if p == nil {
-		if p, err = resolveProvider(*providerName); err != nil {
-			return usageError(stderr, err.Error())
+		if p, err = deps.newProvider(*providerName, r); err != nil {
+			return runtimeError(stderr, err)
 		}
 	}
 
@@ -113,14 +144,14 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return exitUsage
 	}
 
-	return runJSON(stdout, stderr, p, ref, deps.now())
+	return runJSON(ctx, stdout, stderr, p, r, deps.now())
 }
 
 // runJSON produces the epic document for one ref. It renders into a buffer and
 // only then copies to stdout: a half-written document followed by an error
 // would poison whatever is consuming it.
-func runJSON(stdout, stderr io.Writer, p provider.Provider, ref string, now time.Time) int {
-	snap, err := p.FetchEpic(context.Background(), ref)
+func runJSON(ctx context.Context, stdout, stderr io.Writer, p provider.Provider, r ref.Ref, now time.Time) int {
+	snap, err := p.FetchEpic(ctx, r)
 	if err != nil {
 		return runtimeError(stderr, err)
 	}
@@ -178,18 +209,66 @@ func (d Deps) now() time.Time {
 	return d.Now()
 }
 
-// defaultProviderName is the fake Provider for now: the walking skeleton has to
-// walk before any Tracker driver exists.
-const defaultProviderName = "fake"
+// The --provider names. The default auto-detects the Tracker from the Epic
+// Ref; the others force one driver, which is how a development run reaches the
+// fake and how a GitHub Enterprise ref can be pinned to the GitHub driver.
+const (
+	providerAuto   = "auto"
+	providerGitHub = "github"
+	providerFake   = "fake"
+)
 
-// resolveProvider turns a --provider name into a Provider. The GitHub driver
-// ticket owns real resolution — auto-detecting the Tracker from the Epic Ref
-// and making --provider an override; until then "fake" is the only name.
-func resolveProvider(name string) (provider.Provider, error) {
+// defaultProviderName auto-detects the Provider from the Epic Ref: sitrep can
+// tell a GitHub URL from a GitLab one, so it should not make the user say.
+const defaultProviderName = providerAuto
+
+func knownProviderName(name string) bool {
 	switch name {
-	case "fake":
-		return fake.New(), nil
+	case providerAuto, providerGitHub, providerFake:
+		return true
 	default:
-		return nil, fmt.Errorf("unknown provider %q", name)
+		return false
 	}
+}
+
+// resolveRef parses the user's Epic Ref, reading the working directory's git
+// origin remote when it is a bare number.
+func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref, error) {
+	r, err := ref.Parse(ctx, raw, ref.WithRemoteLookup(d.RemoteLookup), ref.WithDir(d.Dir))
+	if err == nil {
+		return r, nil
+	}
+	// The fake serves any Epic Ref, so a Ref it cannot resolve is not fatal:
+	// development runs and the golden tests must not need a git remote.
+	if d.Provider != nil || providerName == providerFake {
+		return ref.Ref{Raw: raw}, nil
+	}
+	return ref.Ref{}, err
+}
+
+// newProvider chooses the driver that serves this Ref. --provider is an
+// override, not the normal path.
+func (d Deps) newProvider(name string, r ref.Ref) (provider.Provider, error) {
+	switch name {
+	case providerFake:
+		return fake.New(), nil
+	case providerGitHub:
+		if r.Tracker != ref.TrackerGitHub {
+			return nil, fmt.Errorf("%q is not a GitHub Epic Ref", r.Raw)
+		}
+		return d.newGitHub(r), nil
+	}
+
+	switch r.Tracker {
+	case ref.TrackerGitHub:
+		return d.newGitHub(r), nil
+	case ref.TrackerGitLab, ref.TrackerJira:
+		return nil, fmt.Errorf("%s is not supported yet", r.Tracker)
+	default:
+		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
+	}
+}
+
+func (d Deps) newGitHub(r ref.Ref) provider.Provider {
+	return github.New(r.Host, github.WithTokenSource(d.TokenSource))
 }

@@ -1,0 +1,126 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+        "number": 2,
+        "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+        "url": "https://github.com/niekcandaele/sitrep/issues/2",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "subIssues": {
+          "totalCount": 10,
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "Y3Vyc29yOjEwMA=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOT_WhQ88AAAABNqYAww",
+              "number": 3,
+              "title": "Rails: bootstrap, CI gates, release pipeline",
+              "url": "https://github.com/niekcandaele/sitrep/issues/3",
+              "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_WhQ88AAAABNqYB8w",
+              "number": 4,
+              "title": "Walking skeleton: domain model, Provider interface, fake Provider, --json",
+              "url": "https://github.com/niekcandaele/sitrep/issues/4",
+              "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_WhQ88AAAABNqYCjw",
+              "number": 5,
+              "title": "GitHub driver: epic fetch, ref grammar, auth",
+              "url": "https://github.com/niekcandaele/sitrep/issues/5",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_WhQ88AAAABNqYDCA",
+              "number": 6,
+              "title": "GitHub PR correlation",
+              "url": "https://github.com/niekcandaele/sitrep/issues/6",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_WhQ88AAAABNqYDWA",
+              "number": 7,
+              "title": "--plain snapshot renderer",
+              "url": "https://github.com/niekcandaele/sitrep/issues/7",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_90",
+              "number": 90,
+              "title": "Ship the résumé & CV importer",
+              "url": "https://github.com/niekcandaele/sitrep/issues/90",
+              "state": "OPEN",
+              "stateReason": "REOPENED",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": [
+                  {
+                    "login": "alice",
+                    "name": "Alice Ansel",
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/1?v=4"
+                  },
+                  {
+                    "login": "bob",
+                    "name": null,
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/2?v=4"
+                  },
+                  {
+                    "login": "carol",
+                    "name": "Carol Chen",
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // allCapabilities is what New declares by default: everything on, so a test
@@ -41,6 +42,7 @@ type Provider struct {
 	detailErr      error
 	delay          time.Duration
 	cursor         int
+	lastRef        ref.Ref
 	epicCalls      int
 	detailCalls    int
 	detailCallsFor map[model.TicketID]int
@@ -128,11 +130,12 @@ func (p *Provider) Capabilities() model.Capabilities {
 	return p.caps
 }
 
-// FetchEpic returns the current fixture snapshot, ignoring the Epic Ref. The
+// FetchEpic returns the current fixture snapshot, serving any Epic Ref. The
 // result is a deep copy filtered to the declared Capabilities, with FetchedAt
 // left zero for the caller to stamp. Successive calls advance through the
-// snapshots given to WithSnapshots.
-func (p *Provider) FetchEpic(ctx context.Context, _ string) (model.EpicSnapshot, error) {
+// snapshots given to WithSnapshots. The Ref is recorded for LastRef and
+// otherwise ignored.
+func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
 	if err := p.wait(ctx); err != nil {
 		return model.EpicSnapshot{}, err
 	}
@@ -141,6 +144,7 @@ func (p *Provider) FetchEpic(ctx context.Context, _ string) (model.EpicSnapshot,
 	defer p.mu.Unlock()
 
 	p.epicCalls++
+	p.lastRef = r
 	if p.epicErr != nil {
 		return model.EpicSnapshot{}, p.epicErr
 	}
@@ -190,6 +194,14 @@ func (p *Provider) EpicCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.epicCalls
+}
+
+// LastRef returns the Epic Ref passed to the most recent FetchEpic call, so a
+// caller's ref resolution can be asserted at the seam where it lands.
+func (p *Provider) LastRef() ref.Ref {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastRef
 }
 
 // DetailCalls returns how many times FetchDetail has been called. A list

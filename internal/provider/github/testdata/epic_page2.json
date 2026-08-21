@@ -1,0 +1,88 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+        "number": 2,
+        "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+        "url": "https://github.com/niekcandaele/sitrep/issues/2",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "subIssues": {
+          "totalCount": 10,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOjIwMA=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOT_FIXTURE_91",
+              "number": 91,
+              "title": "Widget adapter for the sitrep epic",
+              "url": "https://github.com/acme/widgets/issues/91",
+              "state": "CLOSED",
+              "stateReason": "NOT_PLANNED",
+              "repository": {
+                "nameWithOwner": "acme/widgets"
+              },
+              "assignees": {
+                "nodes": [
+                  {
+                    "login": "dana",
+                    "name": "Dana Diaz",
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/4?v=4"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_92",
+              "number": 92,
+              "title": "Duplicate of the ref grammar ticket",
+              "url": "https://github.com/niekcandaele/sitrep/issues/92",
+              "state": "CLOSED",
+              "stateReason": "DUPLICATE",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_93",
+              "number": 93,
+              "title": "Closed for a reason sitrep has never heard of",
+              "url": "https://github.com/niekcandaele/sitrep/issues/93",
+              "state": "CLOSED",
+              "stateReason": "REASON_FROM_THE_FUTURE",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_94",
+              "number": 94,
+              "title": "Closed with no reason at all",
+              "url": "https://github.com/niekcandaele/sitrep/issues/94",
+              "state": "CLOSED",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
