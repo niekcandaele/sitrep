@@ -91,8 +91,13 @@ func TestJSONGitHubEpicDocument(t *testing.T) {
 	}
 	checkGolden(t, "epic_github.golden.json", []byte(got.stdout))
 
-	// The GitHub driver declares no pull request capability yet, and an
-	// undeclared capability is silently absent: no Ticket carries the key.
+	// The GitHub driver declares the PullRequests capability, so the pull
+	// requests moving a Ticket reach stdout — and a Ticket nothing is working on
+	// carries no key at all rather than an empty list.
+	//
+	// The mirror image, a Provider that does not declare the capability, is
+	// pinned by TestJSONOmitsUndeclaredCapabilities against
+	// epic_no_pr_capability.golden.json.
 	var doc struct {
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
@@ -102,10 +107,17 @@ func TestJSONGitHubEpicDocument(t *testing.T) {
 	if len(doc.Tickets) == 0 {
 		t.Fatal("the document has no tickets")
 	}
+	var withPRs int
 	for _, ticket := range doc.Tickets {
 		if _, ok := ticket["pull_requests"]; ok {
-			t.Errorf("ticket %s carries pull_requests, which the GitHub driver does not serve yet", ticket["key"])
+			withPRs++
 		}
+	}
+	if withPRs == 0 {
+		t.Error("no ticket carries pull_requests, which the GitHub driver serves")
+	}
+	if withPRs == len(doc.Tickets) {
+		t.Error("every ticket carries pull_requests; the fixture epic has Tickets with none")
 	}
 }
 

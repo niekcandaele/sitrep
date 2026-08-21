@@ -41,7 +41,8 @@ type issueNode struct {
 	Assignees   struct {
 		Nodes []assigneeNode `json:"nodes"`
 	} `json:"assignees"`
-	SubIssues struct {
+	ClosedByPullRequestsReferences *pullRequestConnection `json:"closedByPullRequestsReferences"`
+	SubIssues                      struct {
 		TotalCount int `json:"totalCount"`
 		PageInfo   struct {
 			HasNextPage bool   `json:"hasNextPage"`
@@ -105,15 +106,20 @@ func newEpic(n issueNode) model.Epic {
 // yet.
 func newTicket(n issueNode, epicRepo string) model.Ticket {
 	status, native := normalizeStatus(n.State, n.StateReason)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences)
 	return model.Ticket{
-		ID:           model.TicketID(n.ID),
-		Key:          issueKey(n, epicRepo),
-		Title:        n.Title,
-		URL:          n.URL,
-		Status:       status,
+		ID:    model.TicketID(n.ID),
+		Key:   issueKey(n, epicRepo),
+		Title: n.Title,
+		URL:   n.URL,
+		// GitHub issues are open or closed and nothing else, so the in-progress
+		// half of the situation report is derived from the pull requests moving
+		// the Ticket. Native Status stays GitHub's own word for it.
+		Status:       statusWithPullRequests(status, prs),
 		NativeStatus: native,
 		Assignees:    newAssignees(n.Assignees.Nodes),
 		Repository:   n.Repository.NameWithOwner,
+		PullRequests: prs,
 		// ParentID stays empty: one level of the sub-issue graph is fetched, so
 		// every Ticket hangs directly off the Epic.
 	}

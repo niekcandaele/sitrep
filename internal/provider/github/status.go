@@ -11,9 +11,10 @@ import (
 // in sitrep allowed to look at GitHub's state strings; everything downstream
 // reads Status.
 //
-// GitHub issues are open or closed and nothing else, so no GitHub Ticket is
-// StatusInProgress today. In-progress will be derived from an open pull request
-// when PR correlation lands — that is where to add it, not here.
+// GitHub issues are open or closed and nothing else, so this function never
+// returns StatusInProgress. In-progress is derived from the pull requests
+// moving a Ticket, by statusWithPullRequests, which runs after this — that is
+// where the rule lives, not here.
 //
 // An issue closed as not planned is Cancelled, not Done: it never happened, and
 // counting it as finished work would flatter every epic containing one.

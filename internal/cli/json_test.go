@@ -75,6 +75,10 @@ func TestJSONOmitsUndeclaredCapabilities(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
+	// Absence is silent: no section, and no complaint about its absence either.
+	if got.stderr != "" {
+		t.Errorf("stderr = %q, want empty: an undeclared Capability is not a problem", got.stderr)
+	}
 	checkGolden(t, "epic_no_pr_capability.golden.json", []byte(got.stdout))
 
 	var doc struct {

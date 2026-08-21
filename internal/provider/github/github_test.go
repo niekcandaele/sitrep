@@ -158,10 +158,9 @@ func TestNameAndCapabilities(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", p.Name(), "github")
 	}
 
-	// A capability declares what this driver returns today. Pull requests,
-	// comments and blocking links are all fetchable from GitHub and none of them
-	// is served yet.
-	want := model.Capabilities{Hierarchy: true}
+	// A capability declares what this driver returns today. Comments and
+	// blocking links are fetchable from GitHub and neither is served yet.
+	want := model.Capabilities{Hierarchy: true, PullRequests: true}
 	if got := p.Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
@@ -212,17 +211,27 @@ func TestFetchEpicNormalizesEveryTicket(t *testing.T) {
 	}
 	// API order, preserved across both pages: ordering is a rendering concern
 	// and the driver never sorts.
+	//
+	// Several open Tickets read as InProgress because a pull request is moving
+	// them; Native Status stays GitHub's own "open" throughout.
 	wants := []want{
 		{"#3", model.StatusDone, "closed", "niekcandaele/sitrep"},
 		{"#4", model.StatusDone, "closed", "niekcandaele/sitrep"},
-		{"#5", model.StatusTodo, "open", "niekcandaele/sitrep"},
-		{"#6", model.StatusTodo, "open", "niekcandaele/sitrep"},
+		{"#5", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#6", model.StatusInProgress, "open", "niekcandaele/sitrep"},
 		{"#7", model.StatusTodo, "open", "niekcandaele/sitrep"},
-		{"#90", model.StatusTodo, "open", "niekcandaele/sitrep"},
+		{"#90", model.StatusInProgress, "open", "niekcandaele/sitrep"},
 		{"acme/widgets#91", model.StatusCancelled, "not planned", "acme/widgets"},
 		{"#92", model.StatusCancelled, "duplicate", "niekcandaele/sitrep"},
 		{"#93", model.StatusDone, "reason from the future", "niekcandaele/sitrep"},
 		{"#94", model.StatusDone, "closed", "niekcandaele/sitrep"},
+		{"#95", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#96", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#97", model.StatusTodo, "open", "niekcandaele/sitrep"},
+		{"#98", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#99", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#100", model.StatusInProgress, "open", "niekcandaele/sitrep"},
+		{"#101", model.StatusTodo, "open", "niekcandaele/sitrep"},
 	}
 
 	if len(snap.Tickets) != len(wants) {
@@ -247,7 +256,9 @@ func TestFetchEpicNormalizesEveryTicket(t *testing.T) {
 
 // The acceptance criterion made executable: an issue closed as not planned is
 // Cancelled, and a cancelled Ticket is excluded from the progress denominator
-// rather than holding the epic permanently short of 100%.
+// rather than holding the epic permanently short of 100%. The fixture's
+// not-planned Ticket carries a closed pull request, so this also proves pull
+// request correlation cannot promote a Ticket back out of Cancelled.
 func TestNotPlannedIsCancelledAndLeavesTheDenominator(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
@@ -270,11 +281,11 @@ func TestNotPlannedIsCancelledAndLeavesTheDenominator(t *testing.T) {
 	if progress.Cancelled != 2 {
 		t.Errorf("Progress.Cancelled = %d, want 2", progress.Cancelled)
 	}
-	if progress.Total != 10 {
-		t.Errorf("Progress.Total = %d, want 10", progress.Total)
+	if progress.Total != 17 {
+		t.Errorf("Progress.Total = %d, want 17", progress.Total)
 	}
-	if progress.Denominator != 8 {
-		t.Errorf("Progress.Denominator = %d, want 8: cancelled work cannot still be finished", progress.Denominator)
+	if progress.Denominator != 15 {
+		t.Errorf("Progress.Denominator = %d, want 15: cancelled work cannot still be finished", progress.Denominator)
 	}
 }
 
@@ -309,6 +320,269 @@ func TestCrossRepoChildKeepsItsOwnRepository(t *testing.T) {
 	}
 	if back.Owner != "acme" || back.Repo != "widgets" || back.Number != 91 {
 		t.Errorf("Key round-tripped to %+v, want acme/widgets#91", back)
+	}
+}
+
+// ticketsByKey indexes a fetched epic so a test can name the Ticket it means.
+func ticketsByKey(t *testing.T, snap model.EpicSnapshot) map[string]model.Ticket {
+	t.Helper()
+	byKey := make(map[string]model.Ticket, len(snap.Tickets))
+	for _, ticket := range snap.Tickets {
+		byKey[ticket.Key] = ticket
+	}
+	return byKey
+}
+
+// The heart of pull request correlation: every situation the overseer wants to
+// tell apart — the agent is coding, it is waiting on review, the checks are red
+// — arrives on the normalized model, per Ticket, from one fetch.
+func TestPullRequestsAreCorrelatedToTickets(t *testing.T) {
+	p := newProvider(fullEpic(t))
+
+	snap, err := p.FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+	byKey := ticketsByKey(t, snap)
+
+	tests := []struct {
+		ticket string
+		lead   model.PullRequest
+		count  int
+	}{
+		{
+			ticket: "#6",
+			lead: model.PullRequest{
+				Number: 20, Title: "GitHub PR correlation",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/20",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PRDraft, Review: model.ReviewNone, Checks: model.ChecksPending,
+			},
+			count: 1,
+		},
+		{
+			ticket: "#5",
+			lead: model.PullRequest{
+				Number: 19, Title: "GitHub driver: epic fetch, Epic Ref grammar, auth",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/19",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PROpen, Review: model.ReviewPending, Checks: model.ChecksPassing,
+			},
+			count: 1,
+		},
+		{
+			ticket: "#95",
+			lead: model.PullRequest{
+				Number: 104, Title: "Rate limit backoff",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/104",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PROpen, Review: model.ReviewChangesRequested, Checks: model.ChecksFailing,
+			},
+			count: 1,
+		},
+		{
+			// GitHub's ERROR rollup is a red pipeline as surely as FAILURE is.
+			ticket: "#96",
+			lead: model.PullRequest{
+				Number: 105, Title: "Approved work with an infrastructure error",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/105",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PROpen, Review: model.ReviewApproved, Checks: model.ChecksFailing,
+			},
+			count: 1,
+		},
+		{
+			ticket: "#3",
+			lead: model.PullRequest{
+				Number: 17, Title: "Add engineering rails: build, CI gates, release pipeline",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/17",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PRMerged, Review: model.ReviewApproved, Checks: model.ChecksPassing,
+			},
+			count: 1,
+		},
+		{
+			// includeClosedPrs earns its place here: without it "the agent's
+			// work was turned down" would look like "no work started".
+			ticket: "#97",
+			lead: model.PullRequest{
+				Number: 106, Title: "Rejected approach",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/106",
+				Repository: "niekcandaele/sitrep",
+				// Closed beats the draft flag.
+				State: model.PRClosed, Review: model.ReviewChangesRequested, Checks: model.ChecksPassing,
+			},
+			count: 1,
+		},
+		{
+			// A pull request in another repository is reported as living there.
+			ticket: "#99",
+			lead: model.PullRequest{
+				Number: 110, Title: "Cross-repo fix for the sitrep epic",
+				URL:        "https://github.com/acme/widgets/pull/110",
+				Repository: "acme/widgets",
+				State:      model.PROpen, Review: model.ReviewPending, Checks: model.ChecksPassing,
+			},
+			count: 1,
+		},
+		{
+			// A head commit that did not come back is "no CI", not "green".
+			ticket: "#100",
+			lead: model.PullRequest{
+				Number: 112, Title: "A pull request with no status check rollup",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/112",
+				Repository: "niekcandaele/sitrep",
+				State:      model.PROpen, Review: model.ReviewNone, Checks: model.ChecksNone,
+			},
+			count: 2,
+		},
+		{
+			// Enum values sitrep has never heard of never read as green.
+			ticket: "#101",
+			lead: model.PullRequest{
+				Number: 113, Title: "A state and a rollup sitrep has never heard of",
+				URL:   "https://github.com/niekcandaele/sitrep/pull/113",
+				State: model.PRUnknown, Review: model.ReviewNone, Checks: model.ChecksPending,
+			},
+			count: 1,
+		},
+		{
+			ticket: "acme/widgets#91",
+			lead: model.PullRequest{
+				Number: 7, Title: "Widget adapter, abandoned",
+				URL:        "https://github.com/acme/widgets/pull/7",
+				Repository: "acme/widgets",
+				State:      model.PRClosed, Review: model.ReviewNone, Checks: model.ChecksFailing,
+			},
+			count: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ticket, func(t *testing.T) {
+			ticket, ok := byKey[tt.ticket]
+			if !ok {
+				t.Fatalf("the fixture epic has no Ticket %s", tt.ticket)
+			}
+			if len(ticket.PullRequests) != tt.count {
+				t.Fatalf("Ticket %s has %d pull requests, want %d: none may be dropped",
+					tt.ticket, len(ticket.PullRequests), tt.count)
+			}
+			if got := ticket.PullRequests[0]; got != tt.lead {
+				t.Errorf("lead pull request = %+v, want %+v", got, tt.lead)
+			}
+		})
+	}
+}
+
+// A Ticket nothing is working on says so with nil, the model's documented
+// "none" — including the shapes GitHub can answer with instead of an empty
+// list.
+func TestTicketsWithNoPullRequests(t *testing.T) {
+	p := newProvider(fullEpic(t))
+
+	snap, err := p.FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+	byKey := ticketsByKey(t, snap)
+
+	for _, key := range []string{"#7", "#92", "#93", "#94"} {
+		if got := byKey[key].PullRequests; got != nil {
+			t.Errorf("Ticket %s has PullRequests %+v, want nil", key, got)
+		}
+	}
+}
+
+// Index 0 is the Provider's contract with renderers showing one pull request
+// per row, and it follows the predecessor's rule: merged if the work landed,
+// otherwise the newest open or draft one.
+func TestTheLeadPullRequestComesFirst(t *testing.T) {
+	p := newProvider(fullEpic(t))
+
+	snap, err := p.FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+	byKey := ticketsByKey(t, snap)
+
+	tests := map[string][]int{
+		// A closed attempt, the merged one that landed, and a newer open
+		// follow-up: merged leads, the rest keep GitHub's order.
+		"#90": {102, 101, 103},
+		// Two open ones: the newest leads.
+		"#98": {109, 107},
+		// Neither has a rollup; the newest still leads.
+		"#100": {112, 111},
+	}
+
+	for key, want := range tests {
+		t.Run(key, func(t *testing.T) {
+			var got []int
+			for _, pr := range byKey[key].PullRequests {
+				got = append(got, pr.Number)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("Ticket %s pull requests = %v, want %v", key, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("Ticket %s pull requests = %v, want %v", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// The acceptance criterion made executable: GitHub has no in-progress state, so
+// an open Ticket with an open or draft pull request is what "the agent is
+// working on it right now" looks like in the progress arithmetic.
+func TestOpenPullRequestsMakeTicketsInProgress(t *testing.T) {
+	p := newProvider(fullEpic(t))
+
+	snap, err := p.FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+
+	progress := model.ComputeProgress(snap.Tickets)
+	if progress.InProgress != 8 {
+		t.Errorf("Progress.InProgress = %d, want 8", progress.InProgress)
+	}
+	if progress.Todo != 3 {
+		t.Errorf("Progress.Todo = %d, want 3: a merged, closed or unknown pull request promotes nothing", progress.Todo)
+	}
+	if progress.Cancelled != 2 || progress.Denominator != 15 {
+		t.Errorf("Progress = %+v, want cancelled work still outside the denominator", progress)
+	}
+
+	// Native Status means the Tracker's own label. sitrep does not invent
+	// "in review" and put it in a field defined as GitHub's wording.
+	byKey := ticketsByKey(t, snap)
+	for _, key := range []string{"#5", "#6", "#90"} {
+		if got := byKey[key].NativeStatus; got != "open" {
+			t.Errorf("Ticket %s NativeStatus = %q, want %q", key, got, "open")
+		}
+	}
+}
+
+// ADR-0003: pull request data rides on the same request as the sub-issues. One
+// logical fetch per refresh, whatever the epic contains.
+func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
+	s := fullEpic(t)
+
+	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 2 {
+		t.Fatalf("the driver made %d requests, want 2: one per sub-issue page and none per Ticket", len(requests))
+	}
+	for i, r := range requests {
+		if !strings.Contains(r.query, "closedByPullRequestsReferences") {
+			t.Errorf("request %d does not ask for pull requests: %q", i, r.query)
+		}
 	}
 }
 

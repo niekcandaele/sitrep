@@ -71,7 +71,10 @@ type Ticket struct {
 	// GitHub, the project on Jira. May be empty.
 	Repository string
 	// PullRequests is populated only when the serving Provider declares the
-	// PullRequests Capability; nil otherwise.
+	// PullRequests Capability; nil otherwise. Providers list the lead pull
+	// request — the one that best represents the Ticket's current state —
+	// first, so a renderer showing a single pull request per row can take the
+	// first element.
 	PullRequests []PullRequest
 }
 

@@ -129,9 +129,9 @@ func endpointFor(host string) string {
 func (p *Provider) Name() string { return "github" }
 
 // Capabilities declares what this driver actually returns today, not what
-// GitHub is theoretically capable of. Pull request correlation, comments and
-// blocking links are all fetchable from GitHub but none of them is served yet,
-// and a capability declared ahead of its data renders an empty section.
+// GitHub is theoretically capable of. Comments and blocking links are fetchable
+// from GitHub but neither is served yet, and a capability declared ahead of its
+// data renders an empty section.
 //
 // Flip a flag in the same change that ships the data behind it.
 func (p *Provider) Capabilities() model.Capabilities {
@@ -139,7 +139,7 @@ func (p *Provider) Capabilities() model.Capabilities {
 		Hierarchy:     true,  // sub-issues are how an Epic is assembled
 		BlockingLinks: false, // Detail links are not served yet
 		Comments:      false, // Detail comments are not served yet
-		PullRequests:  false, // PR correlation is not served yet
+		PullRequests:  true,  // closedByPullRequestsReferences on the epic query
 	}
 }
 
