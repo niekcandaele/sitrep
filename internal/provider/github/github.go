@@ -13,7 +13,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -214,22 +213,24 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 // detailQuery say what a very long discussion or dependency list gives up.
 func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error) {
 	if id == "" {
-		return model.Detail{}, errors.New("github: a ticket id is required to read its detail")
+		return model.Detail{}, provider.Errorf(provider.KindBadRef,
+			"github: a ticket id is required to read its detail")
 	}
 
 	var resp detailResponse
-	if err := p.do(ctx, detailQuery, map[string]any{"id": string(id)}, &resp); err != nil {
+	header, err := p.do(ctx, detailQuery, map[string]any{"id": string(id)}, &resp)
+	if err != nil {
 		return model.Detail{}, err
 	}
 
-	if err := resp.err(id, p.endpoint); err != nil {
+	if err := resp.err(id, p.endpoint, header); err != nil {
 		return model.Detail{}, err
 	}
 	// A null node and a node that is not an Issue are the same thing to the
 	// reader: nothing came back. The inline fragment means a non-Issue node
 	// decodes to a struct with no id at all.
 	if resp.Data.Node == nil || resp.Data.Node.ID == "" {
-		return model.Detail{}, errors.New(detailNotFound(id))
+		return model.Detail{}, provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
 	}
 	return newDetail(*resp.Data.Node), nil
 }
@@ -237,10 +238,10 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // checkRef rejects a Ref this driver cannot serve before any network call.
 func checkRef(r ref.Ref) error {
 	if r.Tracker != ref.TrackerGitHub {
-		return fmt.Errorf("github: %q is not a GitHub Epic Ref", r.Raw)
+		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Epic Ref", r.Raw)
 	}
 	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
-		return fmt.Errorf("github: %q does not name a GitHub issue", r.Raw)
+		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)
 	}
 	return nil
 }
@@ -263,31 +264,38 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 	}
 
 	var resp graphQLResponse
-	if err := p.do(ctx, epicQuery, variables, &resp); err != nil {
+	header, err := p.do(ctx, epicQuery, variables, &resp)
+	if err != nil {
 		return issueNode{}, err
 	}
 
 	// A GraphQL response can carry both data and errors. A missing repository or
 	// issue is authoritative, but an errors[] entry usually says more, so it is
 	// preferred when there is one.
-	if err := resp.err(r, p.endpoint); err != nil {
+	if err := resp.err(r, p.endpoint, header); err != nil {
 		return issueNode{}, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
-		return issueNode{}, fmt.Errorf("github: %s not found (or you lack access)", refKey(r))
+		return issueNode{}, provider.Errorf(provider.KindBadRef,
+			"github: %s not found (or you lack access)", refKey(r))
 	}
 	return *resp.Data.Repository.Issue, nil
 }
 
-// do performs one GraphQL POST of document and decodes the response into out.
+// do performs one GraphQL POST of document and decodes the response into out,
+// returning the response headers.
 //
 // The document is a parameter so that every query this driver sends — the
 // polled epic one and the Detail one — shares exactly one place that knows about
 // auth, headers, status handling and decoding.
-func (p *Provider) do(ctx context.Context, document string, variables map[string]any, out any) error {
+//
+// The headers come back because GitHub reports an exhausted GraphQL point
+// budget as an errors[] entry on a *200*, and only the headers say when it
+// refills; see graphQLErrors.
+func (p *Provider) do(ctx context.Context, document string, variables map[string]any, out any) (http.Header, error) {
 	token, err := p.resolveToken(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	body, err := json.Marshal(struct {
@@ -295,12 +303,12 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 		Variables map[string]any `json:"variables"`
 	}{Query: document, Variables: variables})
 	if err != nil {
-		return fmt.Errorf("github: encoding the query: %w", err)
+		return nil, provider.Errorf(provider.KindUnavailable, "github: encoding the query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("github: building the request: %w", err)
+		return nil, provider.Errorf(provider.KindUnavailable, "github: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -313,37 +321,53 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("github: requesting %s: %w", p.endpoint, err)
+		return nil, provider.Errorf(provider.KindUnavailable, "github: requesting %s: %w", p.endpoint, err)
 	}
 	defer res.Body.Close()
 
 	if err := p.checkStatus(res); err != nil {
-		return err
+		return nil, err
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return fmt.Errorf("github: decoding the response from %s: %w", p.endpoint, err)
+		return nil, provider.Errorf(provider.KindUnavailable,
+			"github: decoding the response from %s: %w", p.endpoint, err)
 	}
-	return nil
+	return res.Header, nil
 }
 
 // checkStatus turns a non-200 response into the clearest one-line explanation
 // the status and headers support. No retries and no backoff: the TUI polls
 // anyway.
+//
+// The order of these branches is the whole point of the function, and 403 is
+// why. GitHub spends that one status on three unrelated situations — an
+// exhausted hourly quota, a secondary (burst) limit, and a token refused for
+// SAML SSO or scope reasons — which want three different sentences and two
+// different classifications. So the rate-limit evidence is read first, most
+// specific first, and the credential wording is what is left over.
 func (p *Provider) checkStatus(res *http.Response) error {
 	switch {
 	case res.StatusCode == http.StatusOK:
 		return nil
-	case res.StatusCode == http.StatusUnauthorized:
-		return errors.New(`github: authentication failed (401) — check "gh auth status" or GITHUB_TOKEN`)
 	case isRateLimited(res):
-		return fmt.Errorf("github: API rate limit exceeded; resets at %s", rateLimitReset(res))
+		return provider.Errorf(provider.KindRateLimit,
+			"github: API rate limit exceeded; resets at %s", rateLimitReset(res.Header))
+	case isSecondaryRateLimited(res):
+		return provider.Errorf(provider.KindRateLimit,
+			"github: secondary rate limit hit; retry after %s", retryAfter(res.Header))
+	case res.StatusCode == http.StatusUnauthorized:
+		return provider.Errorf(provider.KindAuth,
+			`github: authentication failed (401) — check "gh auth status" or GITHUB_TOKEN`)
+	case res.StatusCode == http.StatusForbidden:
+		return provider.Errorf(provider.KindAuth, "%s", forbidden(res.Header))
 	default:
-		return fmt.Errorf("github: unexpected response %d from %s", res.StatusCode, p.endpoint)
+		return provider.Errorf(provider.KindUnavailable,
+			"github: unexpected response %d from %s", res.StatusCode, p.endpoint)
 	}
 }
 
-// isRateLimited reports whether a rejection is GitHub saying "not now" rather
-// than "not ever": both 403 and 429 carry an exhausted rate limit.
+// isRateLimited reports whether a rejection is GitHub's primary rate limit —
+// the hourly quota — which both 403 and 429 carry.
 func isRateLimited(res *http.Response) bool {
 	if res.StatusCode != http.StatusForbidden && res.StatusCode != http.StatusTooManyRequests {
 		return false
@@ -351,14 +375,66 @@ func isRateLimited(res *http.Response) bool {
 	return res.Header.Get("x-ratelimit-remaining") == "0"
 }
 
+// isSecondaryRateLimited reports whether a rejection is one of GitHub's
+// secondary limits, which guard bursts rather than the hourly quota and are
+// answered with 403 or 429 plus a retry-after header. A 429 with no headers at
+// all is a rate limit too: GitHub spends that status on nothing else.
+func isSecondaryRateLimited(res *http.Response) bool {
+	switch res.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return res.Header.Get("retry-after") != ""
+	default:
+		return false
+	}
+}
+
+// forbidden words a 403 that is not a rate limit. Both causes GitHub uses this
+// status for are things the user can fix, and neither is guessable from
+// "unexpected response 403".
+func forbidden(header http.Header) string {
+	if sso := ssoHint(header.Get("x-github-sso")); sso != "" {
+		return "github: access denied (403) — this organisation requires SAML SSO; " +
+			"authorise your token at the URL in GitHub's x-github-sso header (" + sso + ")"
+	}
+	return `github: access denied (403) — your token may lack the scopes sitrep needs ` +
+		`(run "gh auth refresh -s read:project,repo")`
+}
+
+// ssoHintLimit bounds how much of the x-github-sso header is quoted. The header
+// carries a URL plus a list of organisation ids and can run long; an error is
+// one line.
+const ssoHintLimit = 120
+
+// ssoHint trims the SSO header down to something that fits on a terminal line.
+func ssoHint(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= ssoHintLimit {
+		return value
+	}
+	return value[:ssoHintLimit] + "…"
+}
+
 // rateLimitReset renders the reset moment in the user's own timezone, because
 // "resets at 14:32" is actionable and a unix timestamp is not.
-func rateLimitReset(res *http.Response) string {
-	secs, err := strconv.ParseInt(res.Header.Get("x-ratelimit-reset"), 10, 64)
+func rateLimitReset(header http.Header) string {
+	secs, err := strconv.ParseInt(header.Get("x-ratelimit-reset"), 10, 64)
 	if err != nil || secs <= 0 {
 		return "an unknown time"
 	}
 	return time.Unix(secs, 0).Local().Format(time.RFC1123)
+}
+
+// retryAfter renders the retry-after header a secondary limit carries, which
+// GitHub sends in seconds. It mirrors rateLimitReset: an unparseable value says
+// so rather than being echoed back as a number with no unit.
+func retryAfter(header http.Header) string {
+	secs, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
+	if err != nil || secs <= 0 {
+		return "an unknown time"
+	}
+	return (time.Duration(secs) * time.Second).String()
 }
 
 // resolveToken fetches the token once per Provider. A 60s poll must not fork a
@@ -368,11 +444,11 @@ func (p *Provider) resolveToken(ctx context.Context) (string, error) {
 	p.tokenOnce.Do(func() {
 		token, err := p.tokenSource(ctx, p.host)
 		if err != nil {
-			p.tokenErr = fmt.Errorf("github: %w", err)
+			p.tokenErr = provider.Errorf(provider.KindAuth, "github: %w", err)
 			return
 		}
 		if strings.TrimSpace(token) == "" {
-			p.tokenErr = fmt.Errorf("github: %w", errNoToken)
+			p.tokenErr = provider.Errorf(provider.KindAuth, "github: %w", errNoToken)
 			return
 		}
 		p.token = strings.TrimSpace(token)

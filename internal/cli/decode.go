@@ -53,6 +53,9 @@ func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider
 	snap model.EpicSnapshot, asJSON bool) int {
 	detail, err := p.FetchDetail(ctx, snap.Epic.ID)
 	if err != nil {
+		if code, ok := interrupted(ctx); ok {
+			return code
+		}
 		return runtimeError(stderr, err)
 	}
 

@@ -21,6 +21,9 @@ builds:
       - -X github.com/niekcandaele/sitrep/internal/buildinfo.Date={{.Date}}
     goos: [linux, darwin]
     goarch: [amd64, arm64]
+    # Stamp every file with the commit's own time rather than the build's, so
+    # rebuilding the same tag produces the same archive bytes.
+    mod_timestamp: '{{ .CommitTimestamp }}'
 
 archives:
   - id: sitrep

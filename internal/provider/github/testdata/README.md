@@ -79,10 +79,19 @@ gh api graphql -f query='{ __type(name:"Issue") { fields { name } } }' | grep -i
 | `ticket_cross_repo_parent.json` | a parent in another repository keyed `owner/repo#N`, with a null `closedByPullRequestsReferences` and no assignees |
 | `ticket_no_parent.json` | `parent: null` — a Ticket that hangs off nothing, which is an ordinary state and not an error |
 
-`issue_null.json`, `errors_not_found.json` and `errors_query.json` are hand-written to the
-shapes GitHub's GraphQL API documents: a 200 with a null issue, a 200 carrying a
-`NOT_FOUND` error entry, and a 200 carrying ordinary errors. The 401, rate-limit, 500 and
-malformed-JSON cases need no file — the test server produces them directly.
+`issue_null.json`, `errors_not_found.json`, `errors_query.json` and
+`errors_rate_limited.json` are hand-written to the shapes GitHub's GraphQL API documents —
+none of them is a recorded capture:
+
+| Fixture | proves |
+|---|---|
+| `issue_null.json` | a 200 with a null issue: the ref names nothing |
+| `errors_not_found.json` | a 200 carrying a `NOT_FOUND` error entry |
+| `errors_query.json` | a 200 carrying two ordinary `FORBIDDEN` entries, joined into one line |
+| `errors_rate_limited.json` | a 200 carrying a `RATE_LIMITED` entry — how GitHub reports an exhausted GraphQL **point budget**, which never appears as an HTTP status; the reset time comes from the response's `x-ratelimit-reset` header, which the test supplies |
+
+The 401, 403, HTTP rate-limit, secondary-rate-limit, 500 and malformed-JSON cases need no
+file — the test server produces those statuses and headers directly.
 
 ## Ticket detail
 

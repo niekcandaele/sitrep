@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // milestoneWire is one milestone, as the milestone list endpoint returns it in
@@ -68,7 +69,7 @@ func (p *Provider) fetchMilestone(ctx context.Context, t target) (milestoneWire,
 
 	switch len(milestones) {
 	case 0:
-		return milestoneWire{}, fmt.Errorf("gitlab: %s not found (or you lack access)", t)
+		return milestoneWire{}, provider.Errorf(provider.KindBadRef, "gitlab: %s not found (or you lack access)", t)
 	case 1:
 		return milestones[0], nil
 	default:

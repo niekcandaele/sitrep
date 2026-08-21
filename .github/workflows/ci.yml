@@ -84,3 +84,45 @@ jobs:
             exit 1
           fi
           test -f dist/checksums.txt
+
+      # Building is not the same as working. This runs the binary the matrix
+      # just produced and asserts the three things a published archive has to be
+      # true about: it starts, it knows its own version, and it is static enough
+      # to drop onto a headless box with no Go and no libc surprises.
+      - name: Run the binary the release would publish
+        run: |
+          set -euo pipefail
+
+          # goreleaser's per-target directory naming has changed across
+          # versions, so find the binary rather than hard-coding a path.
+          bin="$(find dist -type f -name sitrep -path '*linux*amd64*' | head -n 1)"
+          if [ -z "$bin" ]; then
+            echo "no linux/amd64 sitrep binary in dist/"
+            find dist -type f
+            exit 1
+          fi
+          echo "testing $bin"
+
+          version="$("$bin" --version)"
+          echo "$version"
+          case "$version" in
+            "sitrep "*) ;;
+            *) echo "--version did not start with 'sitrep ': $version"; exit 1 ;;
+          esac
+          # "dev" here would mean the ldflags path silently broke and every
+          # published binary is unidentifiable in a bug report.
+          case "$version" in
+            *dev*) echo "--version still reports the unlinked default: $version"; exit 1 ;;
+          esac
+
+          "$bin" --help > /dev/null
+
+          # CGO_ENABLED=0 is what makes the archive runnable on a musl box or a
+          # distroless image. `file` is asserted rather than `ldd` because ldd
+          # on a non-dynamic binary exits non-zero on some distributions, which
+          # would mask a real failure under `set -e`.
+          file "$bin"
+          if ! file "$bin" | grep -q 'statically linked'; then
+            echo "the published binary is not statically linked"
+            exit 1
+          fi

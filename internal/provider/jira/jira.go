@@ -37,7 +37,6 @@ package jira
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -250,7 +249,8 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error) {
 	key, ok := normalizeKey(string(id))
 	if !ok {
-		return model.Detail{}, fmt.Errorf("jira: %q does not name a Jira issue", string(id))
+		return model.Detail{}, provider.Errorf(provider.KindBadRef,
+			"jira: %q does not name a Jira issue", string(id))
 	}
 
 	// A failed discovery is not a failed Detail: the links fall back to the type
@@ -278,16 +278,17 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // returns the issue key it names.
 func checkRef(r ref.Ref) (string, error) {
 	if r.Tracker != ref.TrackerJira {
-		return "", fmt.Errorf("jira: %q is not a Jira Epic Ref", r.Raw)
+		return "", provider.Errorf(provider.KindBadRef, "jira: %q is not a Jira Epic Ref", r.Raw)
 	}
 	key, ok := normalizeKey(r.Key)
 	if !ok {
-		return "", fmt.Errorf("jira: %q does not name a Jira issue", r.Raw)
+		return "", provider.Errorf(provider.KindBadRef, "jira: %q does not name a Jira issue", r.Raw)
 	}
 	if strings.TrimSpace(r.Host) == "" {
 		// A key names a project, not a site. A Ref that reached this driver
 		// without a host means the Profile that matched it did not complete it.
-		return "", fmt.Errorf("jira: %q names no Jira site — its Profile is missing a host", r.Raw)
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q names no Jira site — its Profile is missing a host", r.Raw)
 	}
 	return key, nil
 }
@@ -384,7 +385,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("jira: building the request: %w", err)
+		return provider.Errorf(provider.KindUnavailable, "jira: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", credentials.header())
 	req.Header.Set("Accept", "application/json")
@@ -392,15 +393,17 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("jira: requesting %s: %w", p.baseURL+apiBase+path, err)
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: requesting %s: %w", p.baseURL+apiBase+path, err)
 	}
 	defer res.Body.Close()
 
-	if err := checkStatus(res, resource, apiBase+path); err != nil {
+	if err := checkStatus(res, resource, apiBase+path, p.host); err != nil {
 		return err
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return fmt.Errorf("jira: decoding the response from %s: %w", apiBase+path, err)
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: decoding the response from %s: %w", apiBase+path, err)
 	}
 	return nil
 }
@@ -418,27 +421,54 @@ const errorBodyLimit = 64 << 10
 // errorMessages for a 401 or a 404 say less than sitrep can say about what the
 // user should do next. An error payload is what a status with no specific
 // wording falls back to.
-func checkStatus(res *http.Response, resource, path string) error {
+//
+// host names the site, which the CAPTCHA message needs so the user knows which
+// browser tab to open.
+func checkStatus(res *http.Response, resource, path, host string) error {
 	if res.StatusCode == http.StatusOK {
 		return nil
 	}
 
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
-		return errors.New("jira: authentication failed (401) — check the Atlassian email " +
-			"and API token your Profile names")
+		return provider.Errorf(provider.KindAuth,
+			"jira: authentication failed (401) — check the Atlassian email "+
+				"and API token your Profile names")
 	case http.StatusForbidden:
-		return fmt.Errorf("jira: access denied (403) to %s", resource)
+		if isCaptchaChallenge(res.Header) {
+			// Atlassian answers 403 with this header after repeated failed
+			// logins, and no credential change clears it — only a browser does.
+			// The generic access-denied wording would send the user hunting
+			// through permissions that are fine.
+			return provider.Errorf(provider.KindAuth,
+				"jira: Atlassian is challenging this login with a CAPTCHA — "+
+					"log in to %s in a browser to clear it, then retry", host)
+		}
+		return provider.Errorf(provider.KindAuth, "jira: access denied (403) to %s", resource)
 	case http.StatusNotFound:
-		return fmt.Errorf("jira: %s not found (or you lack access)", resource)
+		return provider.Errorf(provider.KindBadRef, "jira: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("jira: API rate limit exceeded; retry after %s", retryAfter(res))
+		return provider.Errorf(provider.KindRateLimit,
+			"jira: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
 	if msg := errorPayload(res); msg != "" {
-		return fmt.Errorf("jira: API error: %s", msg)
+		return provider.Errorf(provider.KindUnavailable, "jira: API error: %s", msg)
 	}
-	return fmt.Errorf("jira: unexpected response %d from %s", res.StatusCode, path)
+	return provider.Errorf(provider.KindUnavailable,
+		"jira: unexpected response %d from %s", res.StatusCode, path)
+}
+
+// captchaHeader is the header Atlassian sets on a 403 raised by its CAPTCHA
+// challenge, documented for Jira Server and Data Center and sent by Jira Cloud's
+// basic-auth path too. Its value is "CAPTCHA_CHALLENGE; login-url=…", so this
+// matches on the prefix and never echoes the value: the login URL it carries is
+// the site's own login page, which the message already names by host.
+const captchaHeader = "X-Authentication-Denied-Reason"
+
+func isCaptchaChallenge(header http.Header) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(header.Get(captchaHeader))),
+		"CAPTCHA_CHALLENGE")
 }
 
 // errorPayload reads Jira's own error document, or "" when the body is not one
@@ -455,16 +485,25 @@ func errorPayload(res *http.Response) string {
 	return payload.message()
 }
 
-// retryAfter renders the Retry-After header, which Jira sends in seconds.
+// retryAfter renders when a rate-limited caller may try again: the Retry-After
+// header when Jira sends one — it is in seconds — else the X-RateLimit-Reset
+// timestamp, which Jira Cloud sends instead on some 429s and which is an RFC
+// 3339 moment rather than a duration.
 func retryAfter(res *http.Response) string {
-	value := strings.TrimSpace(res.Header.Get("Retry-After"))
-	if value == "" {
-		return "an unknown time"
+	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
+		if secs, err := time.ParseDuration(value + "s"); err == nil && secs > 0 {
+			return secs.String()
+		}
+		return value
 	}
-	if secs, err := time.ParseDuration(value + "s"); err == nil && secs > 0 {
-		return secs.String()
+	if value := strings.TrimSpace(res.Header.Get("X-RateLimit-Reset")); value != "" {
+		// Rendered in the user's own timezone, because "13:32 CEST" is
+		// actionable and a UTC timestamp read at a glance is not.
+		if reset, err := time.Parse(time.RFC3339, value); err == nil {
+			return reset.Local().Format(time.RFC1123)
+		}
 	}
-	return value
+	return "an unknown time"
 }
 
 // resolveCredentials resolves the email + token pair once per Provider. A 60s
@@ -479,7 +518,7 @@ func (p *Provider) resolveCredentials(ctx context.Context) (Credentials, error) 
 		if p.credentialSource != nil {
 			credentials, err := p.credentialSource(ctx, p.host)
 			if err != nil {
-				p.credentialsErr = fmt.Errorf("jira: %w", err)
+				p.credentialsErr = provider.Errorf(provider.KindAuth, "jira: %w", err)
 				return
 			}
 			p.credentials = credentials

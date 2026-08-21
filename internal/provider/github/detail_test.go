@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 )
 
 // detailID is the node ID the Detail fixtures were recorded for. It is a
@@ -251,32 +253,54 @@ func TestFetchDetailErrors(t *testing.T) {
 	tests := []struct {
 		name     string
 		response response
-		want     []string
+		want     providertest.Want
 	}{
 		{
 			name:     "the node is null",
 			response: response{file: "detail_node_null.json"},
-			want:     []string{"no ticket found", string(detailID)},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"no ticket found", string(detailID)},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "the node is not an Issue",
 			response: response{file: "detail_not_an_issue.json"},
-			want:     []string{"no ticket found", string(detailID)},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"no ticket found", string(detailID)},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "a NOT_FOUND error entry",
 			response: response{file: "errors_not_found.json"},
-			want:     []string{"no ticket found", string(detailID)},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"no ticket found", string(detailID)},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "other GraphQL errors",
 			response: response{file: "errors_query.json"},
-			want:     []string{"API error", "Resource not accessible by integration"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"API error", "Resource not accessible by integration"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
+			// A drill-in classifies exactly as the polled path does: a 401 on
+			// Enter is the same auth failure it is on a refresh.
 			name:     "bad token",
 			response: response{status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`},
-			want:     []string{"authentication failed (401)", "gh auth status", "GITHUB_TOKEN"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)", "gh auth status", "GITHUB_TOKEN"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "rate limited",
@@ -285,12 +309,20 @@ func TestFetchDetailErrors(t *testing.T) {
 				body:    `{"message":"API rate limit exceeded"}`,
 				headers: map[string]string{"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1767225600"},
 			},
-			want: []string{"rate limit exceeded", "resets at"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "resets at"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "malformed JSON",
 			response: response{body: `{"data": {`},
-			want:     []string{"decoding the response"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"decoding the response"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
 
@@ -298,21 +330,8 @@ func TestFetchDetailErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := newProvider(newReplayServer(t, tt.response))
 
-			d, err := p.FetchDetail(context.Background(), detailID)
-			if err == nil {
-				t.Fatalf("FetchDetail = %+v, want an error", d)
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not mention %q", err, want)
-				}
-			}
-			if !strings.HasPrefix(err.Error(), "github: ") {
-				t.Errorf("error %q is not attributed to the driver", err)
-			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Errorf("error %q leaks the token", err)
-			}
+			_, err := p.FetchDetail(context.Background(), detailID)
+			providertest.CheckError(t, "github", err, tt.want)
 		})
 	}
 }

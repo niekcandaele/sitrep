@@ -36,12 +36,27 @@ import (
 
 // Exit codes returned by Run. They are a contract: 0 means the report was
 // produced, 1 means sitrep tried and failed, 2 means the command line was
-// wrong.
+// wrong, and 130 means a signal ended the run.
 const (
 	exitOK      = 0
 	exitFailure = 1
 	exitUsage   = 2
+	// exitInterrupted is the conventional shell exit code for a process ended
+	// by SIGINT (128 + 2). sitrep needs its own, because signal.NotifyContext
+	// disables the default SIGINT kill: without this a ctrl+c during a slow
+	// fetch would exit 1 and blame the Tracker for the user's own interrupt.
+	exitInterrupted = 130
 )
+
+// interrupted reports whether the run was cancelled by a signal rather than
+// failing. A ctrl+c is not an error and prints nothing: the user knows what
+// they did.
+func interrupted(ctx context.Context) (int, bool) {
+	if ctx.Err() != nil {
+		return exitInterrupted, true
+	}
+	return exitFailure, false
+}
 
 const usage = `sitrep - a read-only terminal situation report on a delegated epic.
 
@@ -296,13 +311,27 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// the monitor is seeded with it rather than fetching it again.
 	snap, err := p.FetchEpic(ctx, r)
 	if err != nil {
+		if code, ok := interrupted(ctx); ok {
+			return code
+		}
 		if *asJSON || *asPlain {
 			return runtimeError(stderr, err)
 		}
-		// A failed pre-flight opens the monitor anyway, unseeded, and lets the
-		// TUI's own first fetch fail and draw its retry body: #8 decided that a
-		// monitor must not exit on one bad DNS lookup, and one wasted request in
-		// an already-failing situation is the right price for keeping that.
+		if !provider.KindOf(err).Retryable() {
+			// A bad ref and a rejected credential are not going to fix
+			// themselves on the next tick, and an alt-screen retry loop is a
+			// worse way to read one sentence than stderr is. Note the asymmetry:
+			// this is the *pre-flight* only. A monitor that is already open
+			// keeps its last good reading and its footer message on any failed
+			// refresh, retryable or not — that is #8's contract and users depend
+			// on it.
+			return runtimeError(stderr, err)
+		}
+		// An otherwise-failed pre-flight opens the monitor anyway, unseeded, and
+		// lets the TUI's own first fetch fail and draw its retry body: #8 decided
+		// that a monitor must not exit on one bad DNS lookup, and one wasted
+		// request in an already-failing situation is the right price for keeping
+		// that.
 		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
 			Source:       tui.EpicSource(p, r, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),

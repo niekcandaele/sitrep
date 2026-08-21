@@ -1,12 +1,13 @@
 package github
 
 import (
-	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -122,14 +123,15 @@ type actorNode struct {
 
 // err turns a GraphQL errors[] payload into one line. A NOT_FOUND entry is the
 // same situation as a null issue and reads better said plainly.
-func (r graphQLResponse) err(target ref.Ref, endpoint string) error {
-	return graphQLErrors(r.Errors, fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint)
+func (r graphQLResponse) err(target ref.Ref, endpoint string, header http.Header) error {
+	return graphQLErrors(r.Errors,
+		fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint, header)
 }
 
 // err turns the Detail query's errors[] payload into one line, naming the node
 // id the caller asked for rather than an Epic Ref it does not have.
-func (r detailResponse) err(id model.TicketID, endpoint string) error {
-	return graphQLErrors(r.Errors, detailNotFound(id), endpoint)
+func (r detailResponse) err(id model.TicketID, endpoint string, header http.Header) error {
+	return graphQLErrors(r.Errors, detailNotFound(id), endpoint, header)
 }
 
 // detailNotFound is the one wording for "that Ticket did not come back",
@@ -142,13 +144,33 @@ func detailNotFound(id model.TicketID) string {
 // graphQLErrors renders an errors[] payload. notFound is what a NOT_FOUND entry
 // means for the document that was sent, which is the only thing the two
 // documents word differently.
-func graphQLErrors(errs []graphQLError, notFound, endpoint string) error {
+//
+// GitHub answers HTTP 200 with one of these for an exhausted GraphQL point
+// budget, for a refused scope and for a missing node alike, so this — not
+// checkStatus — is where those situations are told apart. header carries the
+// response's rate-limit headers, because a RATE_LIMITED entry says nothing
+// about when the budget refills and the headers do.
+//
+// It stays a pure function of its arguments so the wire tests can stay
+// table-driven.
+func graphQLErrors(errs []graphQLError, notFound, endpoint string, header http.Header) error {
 	if len(errs) == 0 {
 		return nil
 	}
+
+	kind := provider.KindUnknown
 	for _, e := range errs {
-		if strings.EqualFold(e.Type, "NOT_FOUND") {
-			return errors.New(notFound)
+		switch {
+		case strings.EqualFold(e.Type, "RATE_LIMITED"):
+			return provider.Errorf(provider.KindRateLimit,
+				"github: API rate limit exceeded; resets at %s", rateLimitReset(header))
+		case strings.EqualFold(e.Type, "NOT_FOUND"):
+			return provider.Errorf(provider.KindBadRef, "%s", notFound)
+		case isAuthErrorType(e.Type):
+			// GitHub's own sentence about a refused scope says more than sitrep
+			// could, so the wording is left exactly as it was and only the
+			// classification is added: the next poll will not fix a scope.
+			kind = provider.KindAuth
 		}
 	}
 
@@ -159,9 +181,20 @@ func graphQLErrors(errs []graphQLError, notFound, endpoint string) error {
 		}
 	}
 	if len(messages) == 0 {
-		return fmt.Errorf("github: API error from %s", endpoint)
+		return provider.Errorf(kind, "github: API error from %s", endpoint)
 	}
-	return fmt.Errorf("github: API error: %s", strings.Join(messages, "; "))
+	return provider.Errorf(kind, "github: API error: %s", strings.Join(messages, "; "))
+}
+
+// isAuthErrorType reports whether a GraphQL error type is GitHub refusing the
+// credential rather than failing to serve the query.
+func isAuthErrorType(t string) bool {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "FORBIDDEN", "UNAUTHORIZED", "INSUFFICIENT_SCOPES":
+		return true
+	default:
+		return false
+	}
 }
 
 // newEpic maps the fetched issue onto sitrep's Epic. Its Key is repo-qualified
