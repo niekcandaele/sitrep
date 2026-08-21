@@ -305,6 +305,11 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 			return runtimeError(stderr, err)
 		}
 	}
+	// Every piece of tracker-controlled text crosses the Provider seam exactly
+	// once, so it is cleaned of terminal control sequences exactly once, here:
+	// the TUI, both one-shot renderers and the decoder path all read what comes
+	// out of this call.
+	p = provider.Sanitized(p)
 
 	// One batched fetch, before the mode switch, because every mode needs its
 	// result: it is what decides whether this Ref named an Epic or a Ticket, and
@@ -573,8 +578,12 @@ func usageError(stderr io.Writer, msg string) int {
 	return exitUsage
 }
 
+// runtimeError writes the one sentence a failed run leaves behind. The message
+// is sanitized as a backstop: provider.Errorf already cleans everything a
+// driver builds, and this covers anything constructed outside it that still
+// quotes tracker text.
 func runtimeError(stderr io.Writer, err error) int {
-	fmt.Fprintf(stderr, "%s: %v\n", buildinfo.Name, err)
+	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, provider.SanitizeLine(err.Error()))
 	return exitFailure
 }
 

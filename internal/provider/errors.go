@@ -98,9 +98,31 @@ func (e *Error) Unwrap() error { return e.Err }
 // prefix ("github: …"), exactly as fmt.Errorf did before it, so classifying a
 // call site changes no message text — and %w still wraps, because the message
 // is built by fmt.Errorf itself.
+//
+// The rendered message is sanitized here because this is the single funnel
+// every driver's prose passes through, and several of those messages quote a
+// server-supplied "message" field verbatim — tracker-controlled text on its way
+// to a terminal, exactly like a title or a comment body. It also keeps rule 1
+// of the prose contract true by construction: a message cannot carry a
+// newline.
 func Errorf(kind Kind, format string, a ...any) error {
-	return &Error{Kind: kind, Err: fmt.Errorf(format, a...)}
+	err := fmt.Errorf(format, a...)
+	if msg := SanitizeLine(err.Error()); msg != err.Error() {
+		err = &sanitizedMessage{msg: msg, err: err}
+	}
+	return &Error{Kind: kind, Err: err}
 }
+
+// sanitizedMessage replaces an error's rendered text while keeping everything
+// it wrapped reachable, so errors.Is still finds a context.Canceled through a
+// classified error whose message needed cleaning.
+type sanitizedMessage struct {
+	msg string
+	err error
+}
+
+func (e *sanitizedMessage) Error() string { return e.msg }
+func (e *sanitizedMessage) Unwrap() error { return e.err }
 
 // KindOf reports the Kind of err, walking wrapped errors, and KindUnknown when
 // nothing in the chain is classified.
