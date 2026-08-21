@@ -1,0 +1,25 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+        "number": 2,
+        "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+        "url": "https://github.com/niekcandaele/sitrep/issues/2",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "subIssues": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

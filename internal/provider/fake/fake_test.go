@@ -12,12 +12,18 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // The fake must satisfy the interface every other Provider does.
 var _ provider.Provider = (*fake.Provider)(nil)
 
 const richTicket = model.TicketID("acme/widgets#112")
+
+// testRef is any Epic Ref: the fake serves them all alike.
+func testRef(raw string) ref.Ref {
+	return ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Raw: raw}
+}
 
 func TestNameAndCapabilities(t *testing.T) {
 	p := fake.New()
@@ -33,11 +39,11 @@ func TestNameAndCapabilities(t *testing.T) {
 func TestFetchEpicIsDeterministic(t *testing.T) {
 	p := fake.New()
 
-	first, err := p.FetchEpic(context.Background(), "111")
+	first, err := p.FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), "something-else")
+	second, err := p.FetchEpic(context.Background(), testRef("something-else"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -58,7 +64,7 @@ func TestFetchEpicIsDeterministic(t *testing.T) {
 func TestFetchEpicReturnsADefensiveCopy(t *testing.T) {
 	p := fake.New()
 
-	snap, err := p.FetchEpic(context.Background(), "111")
+	snap, err := p.FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -66,7 +72,7 @@ func TestFetchEpicReturnsADefensiveCopy(t *testing.T) {
 	snap.Tickets[0].Title = "clobbered"
 	snap.Tickets = snap.Tickets[:1]
 
-	again, err := p.FetchEpic(context.Background(), "111")
+	again, err := p.FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -79,7 +85,7 @@ func TestFetchEpicReturnsADefensiveCopy(t *testing.T) {
 }
 
 func TestFixtureSpansTheModel(t *testing.T) {
-	snap, err := fake.New().FetchEpic(context.Background(), "111")
+	snap, err := fake.New().FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -131,7 +137,7 @@ func TestFixtureSpansTheModel(t *testing.T) {
 func TestWithCapabilitiesStripsTheData(t *testing.T) {
 	p := fake.New(fake.WithCapabilities(model.Capabilities{}))
 
-	snap, err := p.FetchEpic(context.Background(), "111")
+	snap, err := p.FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -202,7 +208,7 @@ func TestWithSnapshotsAdvancesAndRepeatsTheLast(t *testing.T) {
 
 	want := []string{"#1", "#2", "#2"}
 	for i, key := range want {
-		snap, err := p.FetchEpic(context.Background(), "111")
+		snap, err := p.FetchEpic(context.Background(), testRef("111"))
 		if err != nil {
 			t.Fatalf("FetchEpic %d: %v", i, err)
 		}
@@ -219,7 +225,7 @@ func TestWithSnapshotReplacesTheFixture(t *testing.T) {
 	replacement := model.EpicSnapshot{Epic: model.Epic{Key: "#42"}}
 	p := fake.New(fake.WithSnapshot(replacement))
 
-	snap, err := p.FetchEpic(context.Background(), "111")
+	snap, err := p.FetchEpic(context.Background(), testRef("111"))
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}
@@ -233,7 +239,7 @@ func TestErrorInjection(t *testing.T) {
 
 	p := fake.New(fake.WithEpicError(boom), fake.WithDetailError(boom))
 
-	if _, err := p.FetchEpic(context.Background(), "111"); !errors.Is(err, boom) {
+	if _, err := p.FetchEpic(context.Background(), testRef("111")); !errors.Is(err, boom) {
 		t.Errorf("FetchEpic error = %v, want %v", err, boom)
 	}
 	if _, err := p.FetchDetail(context.Background(), richTicket); !errors.Is(err, boom) {
@@ -255,7 +261,7 @@ func TestCallCounters(t *testing.T) {
 	}
 
 	for range 2 {
-		if _, err := p.FetchEpic(context.Background(), "111"); err != nil {
+		if _, err := p.FetchEpic(context.Background(), testRef("111")); err != nil {
 			t.Fatalf("FetchEpic: %v", err)
 		}
 	}
@@ -282,7 +288,7 @@ func TestCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := p.FetchEpic(ctx, "111"); !errors.Is(err, context.Canceled) {
+	if _, err := p.FetchEpic(ctx, testRef("111")); !errors.Is(err, context.Canceled) {
 		t.Errorf("FetchEpic error = %v, want context.Canceled", err)
 	}
 	if _, err := p.FetchDetail(ctx, richTicket); !errors.Is(err, context.Canceled) {
@@ -297,7 +303,7 @@ func TestWithDelayRespectsCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.FetchEpic(ctx, "111")
+		_, err := p.FetchEpic(ctx, testRef("111"))
 		done <- err
 	}()
 
@@ -322,7 +328,7 @@ func TestConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := p.FetchEpic(context.Background(), "111"); err != nil {
+			if _, err := p.FetchEpic(context.Background(), testRef("111")); err != nil {
 				t.Errorf("FetchEpic: %v", err)
 			}
 			if _, err := p.FetchDetail(context.Background(), richTicket); err != nil {
@@ -337,5 +343,22 @@ func TestConcurrentUse(t *testing.T) {
 	}
 	if got := p.DetailCallsFor(richTicket); got != 8 {
 		t.Errorf("DetailCallsFor() = %d, want 8", got)
+	}
+}
+
+// The fake ignores the Epic Ref's content but records it, so a caller's ref
+// resolution can be asserted at the seam where it lands.
+func TestLastRef(t *testing.T) {
+	p := fake.New()
+	if got := p.LastRef(); got != (ref.Ref{}) {
+		t.Errorf("LastRef() before any fetch = %+v, want the zero Ref", got)
+	}
+
+	want := testRef("111")
+	if _, err := p.FetchEpic(context.Background(), want); err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+	if got := p.LastRef(); got != want {
+		t.Errorf("LastRef() = %+v, want %+v", got, want)
 	}
 }

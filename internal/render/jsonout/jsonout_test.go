@@ -10,6 +10,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 )
 
@@ -128,7 +129,7 @@ func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
 func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 	p := fake.New()
 
-	snap, err := p.FetchEpic(context.Background(), "111")
+	snap, err := p.FetchEpic(context.Background(), ref.Ref{Raw: "111"})
 	if err != nil {
 		t.Fatalf("FetchEpic: %v", err)
 	}

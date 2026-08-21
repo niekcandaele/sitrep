@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "github",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": false,
+      "comments": false,
+      "pull_requests": false
+    }
+  },
+  "epic": {
+    "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+    "key": "niekcandaele/sitrep#2",
+    "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+    "url": "https://github.com/niekcandaele/sitrep/issues/2",
+    "status": "todo",
+    "native_status": "open"
+  },
+  "progress": {
+    "todo": 4,
+    "in_progress": 0,
+    "done": 4,
+    "cancelled": 2,
+    "unknown": 0,
+    "total": 10,
+    "denominator": 8,
+    "percent_done": 50
+  },
+  "tickets": [
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYAww",
+      "key": "#3",
+      "title": "Rails: bootstrap, CI gates, release pipeline",
+      "url": "https://github.com/niekcandaele/sitrep/issues/3",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYB8w",
+      "key": "#4",
+      "title": "Walking skeleton: domain model, Provider interface, fake Provider, --json",
+      "url": "https://github.com/niekcandaele/sitrep/issues/4",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYCjw",
+      "key": "#5",
+      "title": "GitHub driver: epic fetch, ref grammar, auth",
+      "url": "https://github.com/niekcandaele/sitrep/issues/5",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYDCA",
+      "key": "#6",
+      "title": "GitHub PR correlation",
+      "url": "https://github.com/niekcandaele/sitrep/issues/6",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYDWA",
+      "key": "#7",
+      "title": "--plain snapshot renderer",
+      "url": "https://github.com/niekcandaele/sitrep/issues/7",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_90",
+      "key": "#90",
+      "title": "Ship the résumé & CV importer",
+      "url": "https://github.com/niekcandaele/sitrep/issues/90",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "assignees": [
+        {
+          "login": "alice",
+          "display_name": "Alice Ansel",
+          "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        {
+          "login": "bob",
+          "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4"
+        },
+        {
+          "login": "carol",
+          "display_name": "Carol Chen",
+          "avatar_url": "https://avatars.githubusercontent.com/u/3?v=4"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_91",
+      "key": "acme/widgets#91",
+      "title": "Widget adapter for the sitrep epic",
+      "url": "https://github.com/acme/widgets/issues/91",
+      "status": "cancelled",
+      "native_status": "not planned",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "dana",
+          "display_name": "Dana Diaz",
+          "avatar_url": "https://avatars.githubusercontent.com/u/4?v=4"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_92",
+      "key": "#92",
+      "title": "Duplicate of the ref grammar ticket",
+      "url": "https://github.com/niekcandaele/sitrep/issues/92",
+      "status": "cancelled",
+      "native_status": "duplicate",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_93",
+      "key": "#93",
+      "title": "Closed for a reason sitrep has never heard of",
+      "url": "https://github.com/niekcandaele/sitrep/issues/93",
+      "status": "done",
+      "native_status": "reason from the future",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_94",
+      "key": "#94",
+      "title": "Closed with no reason at all",
+      "url": "https://github.com/niekcandaele/sitrep/issues/94",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep"
+    }
+  ]
+}

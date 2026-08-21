@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // Provider translates one Tracker's API into sitrep's model. Implementations
@@ -32,11 +33,14 @@ type Provider interface {
 	// supports. It is cheap and pure: callers may ask on every render.
 	Capabilities() model.Capabilities
 
-	// FetchEpic resolves an Epic Ref and returns the Epic plus its Tickets in
-	// one logical fetch. Implementations must be safe to call repeatedly for
-	// polling and must return Tickets in a stable order. The returned
-	// snapshot's FetchedAt is left zero for the caller to stamp.
-	FetchEpic(ctx context.Context, ref string) (model.EpicSnapshot, error)
+	// FetchEpic returns the Epic named by an Epic Ref plus its Tickets in one
+	// logical fetch. The Ref is resolved once by the caller; FetchEpic is
+	// polled and must not repeat ref resolution — re-reading a git remote on
+	// every refresh is exactly the cost this value type exists to avoid.
+	// Implementations must be safe to call repeatedly for polling and must
+	// return Tickets in a stable order. The returned snapshot's FetchedAt is
+	// left zero for the caller to stamp.
+	FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error)
 
 	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
 	// called only on drill-in, never during a list refresh.
