@@ -20,6 +20,15 @@
 // collection it belongs to in Parent (model.EpicSnapshot). A Provider reports
 // that and stops there: which screen opens is the caller's decision, and no
 // third method exists to ask the question (ADR-0003).
+//
+// # A Provider's failures are part of its contract
+//
+// A driver is the only thing that knows why a Tracker said no, so the sentence
+// the user reads is the driver's to write — and the class that sentence belongs
+// to is the driver's to declare. errors.go holds that classification: a small
+// Kind, the Errorf that attaches one without touching the message, and the
+// prose rules every classified error satisfies. A caller reads a Kind to decide
+// whether retrying is worth anything; it never prints one.
 package provider
 
 import (

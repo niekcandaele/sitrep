@@ -16,6 +16,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -710,54 +711,155 @@ func TestEmptyEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicErrors(t *testing.T) {
-	tests := []struct {
-		name     string
-		response response
-		want     []string
-	}{
+// epicFailure is one replayed failure and the error contract it must satisfy.
+type epicFailure struct {
+	name     string
+	response response
+	want     providertest.Want
+}
+
+// epicFailures is the driver's failure table, hoisted out of the test that
+// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// it covers rather than trusting a comment.
+func epicFailures() []epicFailure {
+	return []epicFailure{
 		{
 			name:     "bad token",
 			response: response{status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`},
-			want:     []string{"authentication failed (401)", "gh auth status", "GITHUB_TOKEN"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)", "gh auth status", "GITHUB_TOKEN"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
-			name: "rate limited",
+			// GitHub spends 403 on SAML SSO enforcement too, and the header is
+			// the only thing that says so.
+			name: "403 from SAML SSO enforcement",
+			response: response{
+				status:  http.StatusForbidden,
+				body:    `{"message":"Resource protected by organization SAML enforcement"}`,
+				headers: map[string]string{"x-github-sso": "required; url=https://github.com/orgs/acme/sso"},
+			},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"access denied (403)", "SAML SSO", "https://github.com/orgs/acme/sso"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			name:     "403 from a token missing a scope",
+			response: response{status: http.StatusForbidden, body: `{"message":"Forbidden"}`},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"access denied (403)", "scopes", "gh auth refresh"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			name: "the primary rate limit is exhausted",
 			response: response{
 				status:  http.StatusForbidden,
 				body:    `{"message":"API rate limit exceeded"}`,
 				headers: map[string]string{"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1767225600"},
 			},
-			want: []string{"rate limit exceeded", "resets at"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "resets at"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// A secondary limit is a burst guard: 403 or 429 plus a retry-after,
+			// and no x-ratelimit-remaining at all.
+			name: "a secondary rate limit with a retry-after",
+			response: response{
+				status:  http.StatusForbidden,
+				body:    `{"message":"You have exceeded a secondary rate limit"}`,
+				headers: map[string]string{"retry-after": "30"},
+			},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"secondary rate limit", "retry after 30s"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			name:     "a 429 with nothing to say",
+			response: response{status: http.StatusTooManyRequests, body: `{"message":"Too many requests"}`},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"secondary rate limit", "an unknown time"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// The GraphQL point budget is reported on a *200*, so only the
+			// errors[] entry and the headers give it away.
+			name: "the GraphQL point budget is exhausted",
+			response: response{
+				file:    "errors_rate_limited.json",
+				headers: map[string]string{"x-ratelimit-reset": "1767225600"},
+			},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "resets at"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "issue missing",
 			response: response{file: "issue_null.json"},
-			want:     []string{"niekcandaele/sitrep#2", "not found"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"niekcandaele/sitrep#2", "not found"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "repository missing, reported as a GraphQL error",
 			response: response{file: "errors_not_found.json"},
-			want:     []string{"niekcandaele/sitrep#2", "not found"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"niekcandaele/sitrep#2", "not found"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "other GraphQL errors",
 			response: response{file: "errors_query.json"},
-			want:     []string{"API error", "Resource not accessible by integration", ";"},
+			want: providertest.Want{
+				// FORBIDDEN entries keep GitHub's own joined wording; only the
+				// classification is added, so the monitor does not poll a scope
+				// problem forever.
+				Kind:     provider.KindAuth,
+				Contains: []string{"API error", "Resource not accessible by integration", ";"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "server error",
 			response: response{status: http.StatusInternalServerError, body: `{"message":"oops"}`},
-			want:     []string{"unexpected response 500"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"unexpected response 500"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name:     "malformed JSON",
 			response: response{body: `{"data": {`},
-			want:     []string{"decoding the response"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"decoding the response"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestFetchEpicErrors(t *testing.T) {
+	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			p := newProvider(newReplayServer(t, tt.response))
 
@@ -765,20 +867,21 @@ func TestFetchEpicErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("FetchEpic = %+v, want an error", snap)
 			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not mention %q", err, want)
-				}
-			}
-			if !strings.HasPrefix(err.Error(), "github: ") {
-				t.Errorf("error %q is not attributed to the driver", err)
-			}
-			// A token is a credential. It never reaches an error message.
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Errorf("error %q leaks the token", err)
-			}
+			providertest.CheckError(t, "github", err, tt.want)
 		})
 	}
+}
+
+// The ticket's promise is per-driver: a bad ref, an auth failure and rate
+// limiting each explain themselves on this Tracker. This asserts the table
+// above actually exercises all three, so deleting the only rate-limit row is
+// loud rather than quiet.
+func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+	kinds := []provider.Kind{}
+	for _, tt := range epicFailures() {
+		kinds = append(kinds, tt.want.Kind)
+	}
+	providertest.CheckCoversTheNamedClasses(t, "github", kinds)
 }
 
 // A user with no token gets one line naming both ways to fix it, and sitrep
@@ -799,14 +902,10 @@ func TestFetchEpicWithoutAToken(t *testing.T) {
 			p := github.New("github.com", github.WithEndpoint(s.URL), github.WithTokenSource(source))
 
 			_, err := p.FetchEpic(context.Background(), epicRef)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded without a token, want an error")
-			}
-			for _, want := range []string{"github:", "gh auth login", "GITHUB_TOKEN"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not mention %q", err, want)
-				}
-			}
+			providertest.CheckError(t, "github", err, providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"gh auth login", "GITHUB_TOKEN"},
+			})
 			if n := len(s.recorded()); n != 0 {
 				t.Errorf("the driver made %d requests without a token, want none", n)
 			}
@@ -847,9 +946,12 @@ func TestFetchEpicRejectsANonGitHubRef(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchEpic accepted a GitLab Ref, want an error")
 	}
-	if !strings.Contains(err.Error(), "not a GitHub Epic Ref") {
-		t.Errorf("error %q does not say the Ref is not GitHub's", err)
-	}
+	// A Ref this driver cannot serve is a bad ref, and sitrep says so before it
+	// spends a request finding out.
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"not a GitHub Epic Ref", "https://gitlab.com/a/b/-/issues/1"},
+	})
 }
 
 func TestFetchEpicHonoursContextCancellation(t *testing.T) {

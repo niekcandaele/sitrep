@@ -3,11 +3,12 @@ package jira_test
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 )
 
 // fullDetail serves the drill-in fixtures: the catalogue, the issue and its
@@ -155,29 +156,45 @@ func TestFetchDetailFailures(t *testing.T) {
 		name string
 		id   model.TicketID
 		resp *response
-		want []string
+		want providertest.Want
 	}{
 		{
 			name: "an empty id",
 			id:   "",
-			want: []string{"does not name a Jira issue"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"does not name a Jira issue"},
+			},
 		},
 		{
 			name: "a malformed id",
 			id:   "not a key",
-			want: []string{"does not name a Jira issue"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"does not name a Jira issue"},
+			},
 		},
 		{
 			name: "an unknown issue",
 			id:   "ABC-12",
 			resp: &response{status: http.StatusNotFound, file: "errors_not_found.json"},
-			want: []string{"ABC-12 not found (or you lack access)"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"ABC-12 not found (or you lack access)"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
+			// A drill-in classifies exactly as the polled path does: a 401 on
+			// Enter is the same auth failure it is on a refresh.
 			name: "an unauthorized read",
 			id:   "ABC-12",
 			resp: &response{status: http.StatusUnauthorized, file: "errors_auth.json"},
-			want: []string{"authentication failed (401)"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
 
@@ -191,17 +208,7 @@ func TestFetchDetailFailures(t *testing.T) {
 			p := newProvider(s)
 
 			_, err := p.FetchDetail(context.Background(), tt.id)
-			if err == nil {
-				t.Fatal("FetchDetail succeeded, want an error")
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error = %q, want it to mention %q", err, want)
-				}
-			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Error("the error carries the API token")
-			}
+			providertest.CheckError(t, "jira", err, tt.want)
 			if tt.resp == nil && len(s.recorded()) != 0 {
 				t.Error("a malformed ticket id reached the network")
 			}

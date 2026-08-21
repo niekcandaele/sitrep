@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // Credentials are the Atlassian email + API token pair Jira Cloud's documented
@@ -46,11 +48,11 @@ type CredentialSource func(ctx context.Context, host string) (Credentials, error
 // because a user who has neither usually does not know which one they are
 // missing. Neither ever contains a credential.
 func missingTokenError(host string) error {
-	return fmt.Errorf("jira: no API token for %s — set the environment variable "+
+	return provider.Errorf(provider.KindAuth, "jira: no API token for %s — set the environment variable "+
 		"your Profile's auth.token_env names", host)
 }
 
 func missingEmailError(host string) error {
-	return fmt.Errorf("jira: no Atlassian account email for %s — set auth.user "+
+	return provider.Errorf(provider.KindAuth, "jira: no Atlassian account email for %s — set auth.user "+
 		"(or auth.user_env) in your Profile", host)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
@@ -668,12 +669,10 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
 			_, err := newProvider(s).FetchEpic(context.Background(), tt.r)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error %q, want it to mention %q", err, tt.want)
-			}
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.want},
+			})
 			if n := len(s.recorded()); n != 0 {
 				t.Errorf("%d requests were sent; a bad Ref must fail before any of them", n)
 			}
@@ -681,98 +680,154 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
-	tests := []struct {
-		name    string
-		resp    response
-		want    []string
-		notWant []string
-	}{
+// epicFailure is one replayed failure and the error contract it must satisfy.
+type epicFailure struct {
+	name string
+	resp response
+	want providertest.Want
+}
+
+// epicFailures is the driver's failure table, hoisted out of the test that
+// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// it covers rather than trusting a comment.
+func epicFailures() []epicFailure {
+	return []epicFailure{
 		{
 			name: "401",
 			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
-			want: []string{"gitlab:", "authentication failed (401)", "glab auth status", "GITLAB_TOKEN"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)", "glab auth status", "GITLAB_TOKEN"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			// Epics are Premium/Ultimate, so a 403 on an epic path is a tier
 			// problem and says so.
 			name: "403 on an epic path",
 			resp: response{status: http.StatusForbidden, file: "error_forbidden.json"},
-			want: []string{"gitlab:", "GitLab Premium or Ultimate (403)", "gitlab-org&23356"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"GitLab Premium or Ultimate (403)", "gitlab-org&23356"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "404",
 			resp: response{status: http.StatusNotFound, body: `{"message":"404 Group Not Found"}`},
-			want: []string{"gitlab:", "gitlab-org&23356", "not found (or you lack access)"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"gitlab-org&23356", "not found (or you lack access)"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "429 with Retry-After",
 			resp: response{status: http.StatusTooManyRequests, body: `{}`,
 				headers: map[string]string{"Retry-After": "60"}},
-			want: []string{"rate limit exceeded", "1m0s"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "1m0s"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "429 with only a ratelimit-reset",
 			resp: response{status: http.StatusTooManyRequests, body: `{}`,
 				headers: map[string]string{"ratelimit-reset": "1755000000"}},
-			want: []string{"rate limit exceeded", "retry after"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "retry after"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// GitLab sends this HTTP-date twin of ratelimit-reset alongside it,
+			// and sometimes instead of it.
+			name: "429 with only a ratelimit-resettime",
+			resp: response{status: http.StatusTooManyRequests, body: `{}`,
+				headers: map[string]string{"ratelimit-resettime": "Wed, 12 Aug 2026 12:00:00 GMT"}},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "retry after"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "429 with nothing to say",
 			resp: response{status: http.StatusTooManyRequests, body: `{}`},
-			want: []string{"rate limit exceeded", "an unknown time"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "an unknown time"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "an error payload",
 			resp: response{status: http.StatusInternalServerError, file: "error_message.json"},
-			want: []string{"gitlab: API error:", "500 Internal Server Error"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"API error:", "500 Internal Server Error"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "a status with nothing to say",
 			resp: response{status: http.StatusBadGateway, body: `<html>bad gateway</html>`},
-			want: []string{"unexpected response 502"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"unexpected response 502"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "malformed JSON",
 			resp: response{body: `{"iid": `},
-			want: []string{"decoding the response from"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"decoding the response from"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestFetchEpicFailures(t *testing.T) {
+	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
 
 			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q, want it to mention %q", err, want)
-				}
-			}
-			// A credential never reaches an error message.
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Error("the token reached an error message")
-			}
+			providertest.CheckError(t, "gitlab", err, tt.want)
 		})
 	}
 }
 
-// A 403 away from an epic endpoint is a permission problem, not a tier one.
+// The ticket's promise is per-driver: a bad ref, an auth failure and rate
+// limiting each explain themselves on this Tracker. This asserts the table
+// above actually exercises all three.
+func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+	kinds := []provider.Kind{}
+	for _, tt := range epicFailures() {
+		kinds = append(kinds, tt.want.Kind)
+	}
+	providertest.CheckCoversTheNamedClasses(t, "gitlab", kinds)
+}
+
+// A 403 away from an epic endpoint is a permission problem, not a tier one —
+// and the commonest cause is a token created without a scope that may read the
+// API, so the message names it.
 func TestForbiddenOnANonEpicPath(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath: {{status: http.StatusForbidden, body: `{"message":"403 Forbidden"}`}},
 	})
 
 	_, err := newProvider(s).FetchEpic(context.Background(), issueRef)
-	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
-	}
-	if !strings.Contains(err.Error(), "access denied (403)") {
-		t.Errorf("error %q, want the plain access-denied wording", err)
-	}
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindAuth,
+		Contains: []string{"access denied (403)", "read_api"},
+		Secret:   fixtureToken,
+	})
 	if strings.Contains(err.Error(), "Premium") {
 		t.Errorf("error %q, want no tier claim about a project endpoint", err)
 	}
@@ -879,14 +934,10 @@ func TestNoTokenFailsWithoutARequest(t *testing.T) {
 		}))
 
 	_, err := p.FetchEpic(context.Background(), epicRef)
-	if err == nil {
-		t.Fatal("FetchEpic succeeded with no token, want an error")
-	}
-	for _, want := range []string{"gitlab:", "glab auth login", "GITLAB_TOKEN"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q, want it to mention %q", err, want)
-		}
-	}
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindAuth,
+		Contains: []string{"glab auth login", "GITLAB_TOKEN"},
+	})
 	if n := len(s.recorded()); n != 0 {
 		t.Errorf("%d requests were sent without a token", n)
 	}

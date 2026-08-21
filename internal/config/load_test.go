@@ -101,14 +101,21 @@ func TestDefaultPathAcceptsTheYamlExtension(t *testing.T) {
 }
 
 // The "GitHub with gh logged in works with no config file at all" criterion, at
-// its own seam.
-func TestLoadMissingFileIsSilence(t *testing.T) {
-	cfg, err := config.Load(filepath.Join(t.TempDir(), "sitrep", "config.yml"))
+// its own seam — and the other half of it: a missing file yields no Profiles,
+// but the Config still remembers which file was looked for, because that is the
+// file an error telling the user to add a Profile has to name.
+func TestLoadMissingFileIsSilenceButRemembersThePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sitrep", "config.yml")
+
+	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load of a missing file must not be an error: %v", err)
 	}
-	if len(cfg.Profiles) != 0 || cfg.Path != "" {
-		t.Errorf("Load = %+v, want the empty Config", cfg)
+	if len(cfg.Profiles) != 0 {
+		t.Errorf("Load = %+v, want no Profiles", cfg)
+	}
+	if cfg.Path != path {
+		t.Errorf("Path = %q, want %q: the file sitrep looked for", cfg.Path, path)
 	}
 }
 

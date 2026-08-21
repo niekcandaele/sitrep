@@ -91,7 +91,6 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -509,7 +508,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("gitlab: building the request: %w", err)
+		return nil, provider.Errorf(provider.KindUnavailable, "gitlab: building the request: %w", err)
 	}
 	// Bearer covers both a personal access token and an OAuth token, which is
 	// what DefaultTokenSource may return; PRIVATE-TOKEN would work for the
@@ -520,7 +519,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("gitlab: requesting %s: %w", apiBase+path, err)
+		return nil, provider.Errorf(provider.KindUnavailable, "gitlab: requesting %s: %w", apiBase+path, err)
 	}
 	defer res.Body.Close()
 
@@ -528,7 +527,8 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 		return nil, err
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return nil, fmt.Errorf("gitlab: decoding the response from %s: %w", apiBase+path, err)
+		return nil, provider.Errorf(provider.KindUnavailable,
+			"gitlab: decoding the response from %s: %w", apiBase+path, err)
 	}
 	return res.Header, nil
 }
@@ -542,6 +542,11 @@ const errorBodyLimit = 64 << 10
 // it. The message is unchanged and is what every caller prints; the code exists
 // for the one caller that has to *branch* on it — correlate, which degrades a
 // Ticket on a 403 or 404 and fails the whole snapshot on anything else.
+//
+// It wraps the classified error statusMessage built rather than replacing it,
+// so provider.KindOf still reaches the Kind through Unwrap: an HTTP status and
+// a failure class are two different questions about one failure, and each has
+// exactly one answer here.
 type statusError struct {
 	status int
 	err    error
@@ -571,35 +576,43 @@ func checkStatus(res *http.Response, resource, path, host string) error {
 func statusMessage(res *http.Response, resource, path, host string) error {
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
-		return errors.New(`gitlab: authentication failed (401) — ` +
+		return provider.Errorf(provider.KindAuth, `gitlab: authentication failed (401) — `+
 			`check "glab auth status" or $GITLAB_TOKEN`)
 	case http.StatusForbidden:
 		if isMilestonePath(path) {
 			// Milestones are Free tier, so a 403 here is an access problem rather
 			// than a tier one, and saying "Premium" would send the user shopping.
-			return fmt.Errorf("gitlab: access denied (403) to the milestone %s — "+
-				"milestones need at least Reporter access", resource)
+			return provider.Errorf(provider.KindAuth,
+				"gitlab: access denied (403) to the milestone %s — "+
+					"milestones need at least Reporter access", resource)
 		}
 		if isEpicPath(path) {
 			// Epics are a Premium/Ultimate feature and a Free instance answers 403
 			// on exactly these paths, so the tier is the overwhelmingly likely
 			// cause and the one a user can act on. It is also actionable now that
 			// sitrep reports a milestone as an Epic, so the message says how.
-			return fmt.Errorf("gitlab: epics on %s need GitLab Premium or Ultimate (403) — "+
-				"point sitrep at a milestone instead, e.g. https://%s/groups/<group>/-/milestones/<n>",
+			return provider.Errorf(provider.KindAuth,
+				"gitlab: epics on %s need GitLab Premium or Ultimate (403) — "+
+					"point sitrep at a milestone instead, e.g. https://%s/groups/<group>/-/milestones/<n>",
 				resource, host)
 		}
-		return fmt.Errorf("gitlab: access denied (403) to %s", resource)
+		// Everywhere else a 403 is an ordinary permission problem — and the
+		// commonest cause is a token that authenticated fine but was created
+		// without a scope that may read the API at all.
+		return provider.Errorf(provider.KindAuth,
+			"gitlab: access denied (403) to %s — your token needs the api or read_api scope", resource)
 	case http.StatusNotFound:
-		return fmt.Errorf("gitlab: %s not found (or you lack access)", resource)
+		return provider.Errorf(provider.KindBadRef, "gitlab: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("gitlab: API rate limit exceeded; retry after %s", retryAfter(res))
+		return provider.Errorf(provider.KindRateLimit,
+			"gitlab: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
 	if msg := errorPayload(res); msg != "" {
-		return fmt.Errorf("gitlab: API error: %s", msg)
+		return provider.Errorf(provider.KindUnavailable, "gitlab: API error: %s", msg)
 	}
-	return fmt.Errorf("gitlab: unexpected response %d from %s", res.StatusCode, path)
+	return provider.Errorf(provider.KindUnavailable,
+		"gitlab: unexpected response %d from %s", res.StatusCode, path)
 }
 
 // isEpicPath reports whether a request was for one of the epic endpoints, which
@@ -628,8 +641,13 @@ func errorPayload(res *http.Response) string {
 	return payload.message()
 }
 
-// retryAfter renders when a rate-limited caller may try again: the Retry-After
-// header when GitLab sends one, else its ratelimit-reset unix timestamp.
+// retryAfter renders when a rate-limited caller may try again, in the order
+// GitLab's headers are worth believing: Retry-After when it sends one, then the
+// ratelimit-reset unix timestamp, then ratelimit-resettime, which carries the
+// same moment as an HTTP date and is sometimes the only one present.
+//
+// The two reset headers render as a local time, because "3:04PM" is actionable
+// and a unix timestamp is not.
 func retryAfter(res *http.Response) string {
 	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
 		if secs, err := time.ParseDuration(value + "s"); err == nil && secs > 0 {
@@ -640,6 +658,11 @@ func retryAfter(res *http.Response) string {
 	if value := strings.TrimSpace(res.Header.Get("ratelimit-reset")); value != "" {
 		if unix, err := strconv.ParseInt(value, 10, 64); err == nil && unix > 0 {
 			return time.Unix(unix, 0).Local().Format(time.Kitchen)
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("ratelimit-resettime")); value != "" {
+		if reset, err := http.ParseTime(value); err == nil {
+			return reset.Local().Format(time.Kitchen)
 		}
 	}
 	return "an unknown time"
@@ -653,11 +676,11 @@ func (p *Provider) resolveToken(ctx context.Context) (string, error) {
 		token, err := p.tokenSource(ctx, p.host)
 		if err != nil {
 			// The error is wrapped, never the token.
-			p.tokenErr = fmt.Errorf("gitlab: %w", err)
+			p.tokenErr = provider.Errorf(provider.KindAuth, "gitlab: %w", err)
 			return
 		}
 		if strings.TrimSpace(token) == "" {
-			p.tokenErr = fmt.Errorf("gitlab: %w", errNoToken)
+			p.tokenErr = provider.Errorf(provider.KindAuth, "gitlab: %w", errNoToken)
 			return
 		}
 		p.token = strings.TrimSpace(token)

@@ -71,15 +71,20 @@ func DefaultPath(env func(string) string) (string, error) {
 }
 
 // Load reads and validates the config file at path. A file that does not exist
-// is not an error: it yields the empty Config, because a GitHub user is
-// expected never to write one. A file that exists but cannot be read — wrong
+// is not an error: it yields a Config with no Profiles, because a GitHub user
+// is expected never to write one. A file that exists but cannot be read — wrong
 // permissions, a directory where the file should be — is an error naming the
 // path, because that is a config the user believes is in effect.
 func Load(path string) (Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return Config{}, nil
+			// A missing file is silence, not an error — but sitrep still knows
+			// which file it looked for, and an error telling the user where to
+			// add a Profile has to name that file rather than the documented
+			// default. $SITREP_CONFIG pointing somewhere empty is exactly the
+			// case that got this wrong.
+			return Config{Path: path}, nil
 		}
 		return Config{}, fmt.Errorf("reading sitrep's config file %s: %w", path, err)
 	}

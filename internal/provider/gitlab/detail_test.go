@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 )
 
 // fullDetail serves an issue's three drill-in answers.
@@ -223,12 +225,10 @@ func TestFetchDetailRejectsABadTicketID(t *testing.T) {
 		t.Run(string(id), func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
 			_, err := newProvider(s).FetchDetail(context.Background(), id)
-			if err == nil {
-				t.Fatal("FetchDetail succeeded, want an error")
-			}
-			if !strings.Contains(err.Error(), "does not name a GitLab epic, issue or milestone") {
-				t.Errorf("error %q, want the addressing wording", err)
-			}
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"does not name a GitLab epic, issue or milestone"},
+			})
 			if n := len(s.recorded()); n != 0 {
 				t.Errorf("%d requests were sent for a malformed id", n)
 			}
@@ -240,17 +240,27 @@ func TestFetchDetailFailures(t *testing.T) {
 	tests := []struct {
 		name string
 		resp response
-		want []string
+		want providertest.Want
 	}{
 		{
 			name: "not found",
 			resp: response{status: http.StatusNotFound, body: `{"message":"404 Not found"}`},
-			want: []string{"gitlab:", "gitlab-org/cli#8509", "not found (or you lack access)"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"gitlab-org/cli#8509", "not found (or you lack access)"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
+			// A drill-in classifies exactly as the polled path does: a 401 on
+			// Enter is the same auth failure it is on a refresh.
 			name: "unauthorized",
 			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
-			want: []string{"gitlab:", "authentication failed (401)"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
 
@@ -259,17 +269,7 @@ func TestFetchDetailFailures(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{issuePath: {tt.resp}})
 
 			_, err := newProvider(s).FetchDetail(context.Background(), issueTicketID)
-			if err == nil {
-				t.Fatal("FetchDetail succeeded, want an error")
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q, want it to mention %q", err, want)
-				}
-			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Error("the token reached an error message")
-			}
+			providertest.CheckError(t, "gitlab", err, tt.want)
 		})
 	}
 }

@@ -51,6 +51,49 @@ filter, and clears the find box first if it is open.
 takes over the screen, so it is safe over SSH, in a log file, or piped into something else.
 `--json` prints the same snapshot as a stable, documented wire format.
 
+## Keybindings
+
+The monitor's footer always shows the keys that apply right now, and `?` expands it to the
+full list. This table is the lookup.
+
+**The list**
+
+| Key | Does |
+|---|---|
+| `↑` / `k`, `↓` / `j` | move the selection |
+| `pgup`, `pgdn` | move one page |
+| `g`, `G` | first Ticket, last Ticket |
+| `enter` | open the selected Ticket's Detail |
+| `d` | hide Done and Cancelled Tickets |
+| `/` | open the fuzzy find |
+| `esc` | clear the filters — and quit when none are active |
+| `r` | refresh now |
+| `?` | expand the help |
+| `q`, `ctrl+c` | quit |
+
+**The find box** — everything not listed here is text, so searching for `queue` types a `q`
+rather than quitting.
+
+| Key | Does |
+|---|---|
+| `enter` | keep the query and close the box |
+| `esc` | abandon the query and close the box |
+| `↑`, `↓`, `pgup`, `pgdn` | move the selection without leaving the box |
+| `ctrl+c` | quit |
+
+**A Ticket's Detail**
+
+| Key | Does |
+|---|---|
+| `↑` / `k`, `↓` / `j` | scroll one line |
+| `pgup`, `pgdn` | scroll one page |
+| `g`, `G` | top, bottom |
+| `esc` | back to the list — or quit, when the Ticket was opened directly |
+| `u` | open the Epic this Ticket belongs to, when it has one |
+| `r` | re-read this Ticket's Detail |
+| `?` | expand the help |
+| `q`, `ctrl+c` | quit |
+
 ## Configuration
 
 **GitHub with `gh auth login` done needs no config file at all.** Everything below is for
@@ -174,6 +217,200 @@ Ticket with an open or draft merge request is reported as in progress. Note that
 roughly one extra request per Ticket per refresh, so raise `--interval` on a large Epic
 against a rate-limited instance.
 
+## The `--json` document
+
+`--json` is the machine-readable contract, and it is what an agent should read rather than
+scraping `--plain`.
+
+**Conventions.** `schema_version` is `1` and always comes first. Keys are snake_case. Times
+are RFC 3339 in UTC, truncated to the second. `tickets` is always present and always an
+array, never null. **Optional and capability-gated keys are omitted, never null** — absence
+is how sitrep says "this Tracker does not do that", so a script must test for the key
+rather than for an empty value.
+
+There are **two documents**. An Epic Ref that names a collection emits the epic document;
+one that names a plain Ticket emits the ticket document (the same Ref, decoded — see
+[Usage](#usage)).
+
+### The epic document
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema_version` | number | always `1` |
+| `generated_at` | string | when this snapshot was read |
+| `provider.name` | string | `github`, `gitlab`, `jira` or `fake` |
+| `provider.capabilities` | object | `hierarchy`, `blocking_links`, `comments`, `pull_requests`, each a bool — which optional keys can appear at all |
+| `epic` | object | `id`, `key`, `title`, `url`, `status`, `native_status` |
+| `progress` | object | the completion arithmetic, below |
+| `tickets` | array | every Ticket, flat, in the Tracker's own order |
+
+`progress` counts Tickets by Status Category: `todo`, `in_progress`, `done`, `cancelled`,
+`unknown`, plus `total` (every Ticket), `denominator` (`total` minus `cancelled` — **the
+Tickets that can still be finished**) and `percent_done` (`done` over `denominator`, 0–100,
+rounded; `0` when `denominator` is `0`). Cancelled work is counted but excluded from the
+denominator, so an epic reads "7/11 done, 1 cancelled" rather than being permanently short
+of 100%.
+
+Each entry in `tickets`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `id` | string | the Provider's opaque handle — do not parse it |
+| `key` | string | the display identity, e.g. `#113` or `acme/widgets#113` |
+| `title`, `url` | string | the Ticket's summary and its Tracker page |
+| `status` | string | the normalized Status Category |
+| `native_status` | string | the Tracker's own word for it; omitted when there is none |
+| `repository` | string | where the Ticket lives; omitted when the Tracker has no such notion |
+| `parent_id` | string | present only with the `hierarchy` capability, and omitted when empty |
+| `assignees` | array | `login`, plus optional `display_name` and `avatar_url` |
+| `pull_requests` | array | present only with the `pull_requests` capability |
+
+Each entry in `pull_requests` carries `number`, `title`, `url`, an optional `repository`,
+and the three tokens below. A GitLab merge request uses this same object — `number` is its
+iid — and sitrep renders every one of them as `#N`, on every Tracker.
+
+### The ticket document
+
+Emitted when the Ref named a plain Ticket. It carries `schema_version`, `generated_at` and
+`provider` exactly as above, plus:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `ticket` | object | the Ticket itself, in the same shape as a `tickets` entry |
+| `parent` | object | `id` and optional `key`, `title`, `url` — omitted when the Ticket hangs off nothing |
+| `ticket_id` | string | the Ticket's opaque handle, matching `ticket.id` |
+| `description` | string | the raw body, exactly as the Tracker returned it, unrendered |
+| `comments` | array | `id`, `author`, `body`, `created_at`, optional `url`; needs the `comments` capability |
+| `links` | array | `kind`, optional `native_label`, and a `target` object; blocking kinds need the `blocking_links` capability |
+
+### Enumerations
+
+Every one of these is a fixed token; anything else is a bug.
+
+| Field | Values |
+|---|---|
+| `status`, `target.status` | `unknown`, `todo`, `in_progress`, `done`, `cancelled` |
+| `pull_requests[].state` | `unknown`, `draft`, `open`, `merged`, `closed` |
+| `pull_requests[].review` | `none`, `pending`, `approved`, `changes_requested` |
+| `pull_requests[].checks` | `none`, `pending`, `passing`, `failing` |
+| `links[].kind` | `relates`, `blocked_by`, `blocks` |
+
+### An example
+
+Trimmed from sitrep's own golden output:
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "fake",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": true,
+      "comments": true,
+      "pull_requests": true
+    }
+  },
+  "epic": {
+    "id": "acme/widgets#111",
+    "key": "#111",
+    "title": "Widget sync v2: shards, retries & telemetry",
+    "url": "https://tracker.example.test/acme/widgets/111",
+    "status": "in_progress",
+    "native_status": "open"
+  },
+  "progress": {
+    "todo": 3,
+    "in_progress": 3,
+    "done": 3,
+    "cancelled": 1,
+    "unknown": 0,
+    "total": 10,
+    "denominator": 9,
+    "percent_done": 33
+  },
+  "tickets": [
+    {
+      "id": "acme/widgets#113",
+      "key": "#113",
+      "title": "Retry & backoff for the sync worker",
+      "url": "https://tracker.example.test/acme/widgets/113",
+      "status": "in_progress",
+      "native_status": "In Progress",
+      "repository": "acme/widgets",
+      "assignees": [
+        { "login": "mara-vos", "display_name": "Mara Vos" },
+        { "login": "tobias" }
+      ],
+      "pull_requests": [
+        {
+          "number": 502,
+          "title": "Exponential backoff with jitter",
+          "url": "https://tracker.example.test/acme/widgets/pull/502",
+          "repository": "acme/widgets",
+          "state": "open",
+          "review": "pending",
+          "checks": "failing"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Two one-liners an agent actually needs:
+
+```sh
+sitrep 111 --json | jq '.progress.percent_done'
+sitrep 111 --json | jq -r '.tickets[] | select(.status != "done" and .status != "cancelled") | .key'
+```
+
+**The compatibility promise:** additive changes — a new optional key, a new Provider — keep
+`schema_version` at `1`. A breaking change to the shape or to a token bumps it. Pin on
+`schema_version` and ignore keys you do not know.
+
+## When something fails
+
+Every failure is one line on stderr, prefixed `sitrep:` and then the driver's name, and
+sitrep exits `1`. There are three classes worth knowing, because the fix is different for
+each.
+
+**A bad ref** — `github: acme/widgets#999 not found (or you lack access)`. The ref named
+nothing the Tracker has: a typo, the wrong repository, a deleted issue, or a private one
+your token cannot see. The message quotes the ref as you typed it, or the key sitrep
+derived from it, so the first thing to check is whether that is the thing you meant. A bare
+number is resolved through the current clone's `origin` remote, so running it in the wrong
+directory points it at the wrong repository — pass `owner/repo#111` or the full URL from
+anywhere.
+
+**An auth failure** — `github: authentication failed (401) — check "gh auth status" or
+GITHUB_TOKEN`. The credential is missing, rejected, or lacks a scope. On GitHub, `gh auth
+status`; on GitLab, `glab auth status` or `$GITLAB_TOKEN`; on Jira, the Atlassian email and
+API token your Profile names, remembering that **a Profile names a token, it never holds
+one** — `auth.token_env` is a variable name and sitrep reads the value from your
+environment. A `403` is the same class: on GitHub it usually means a missing scope or an
+organisation enforcing SAML SSO, on GitLab a token without `api` or `read_api`, on Jira a
+project you cannot read.
+
+**Rate limiting** — `github: API rate limit exceeded; resets at Mon, 01 Jan 2026 14:32:00
+CET`. The Tracker said "not now" and the message says when the limit clears.
+**sitrep never retries behind your back**: there is no backoff loop and no hidden second
+request, so what you are seeing is one refresh's worth of traffic. Raise `--interval` (or a
+Profile's `refresh_interval`) if a large Epic is hitting the limit — GitLab's per-Ticket
+merge request correlation is the usual reason.
+
+Two more things about failures, both deliberate:
+
+- A **pre-flight failure you cannot retry away** — a bad ref, a missing or rejected
+  credential — prints its line and exits instead of opening the monitor. An alt-screen
+  retry loop is a bad way to read one sentence on a headless box. Anything that might
+  recover — a network blip, a rate limit, a 5xx — still opens the monitor.
+- **A monitor already open survives a failed refresh**, keeping its last good reading on
+  screen and saying so in the footer, whatever the failure was.
+- **`ctrl+c` is silent.** It prints nothing and exits `130`; a cancelled fetch is not the
+  Tracker's fault and sitrep does not report it as one.
+
 ## Install
 
 Download the archive for your OS/arch from the
@@ -181,11 +418,30 @@ Download the archive for your OS/arch from the
 `PATH`. The binaries are static (linux and darwin, amd64 and arm64), so they drop onto an
 SSH box without dependencies.
 
+On a fresh headless linux/amd64 box, with the version you want:
+
+```sh
+v=0.1.0
+curl -fsSLO "https://github.com/niekcandaele/sitrep/releases/download/v$v/sitrep_${v}_linux_amd64.tar.gz"
+curl -fsSLO "https://github.com/niekcandaele/sitrep/releases/download/v$v/checksums.txt"
+sha256sum --check --ignore-missing checksums.txt
+tar -xzf "sitrep_${v}_linux_amd64.tar.gz" sitrep
+install -m 0755 sitrep ~/.local/bin/sitrep
+sitrep --version
+```
+
+`sitrep --version` is the "it works" check, and every release publishes `checksums.txt`
+beside the archives so the download can be verified before it is run.
+
 Or, with a Go toolchain:
 
 ```sh
 go install github.com/niekcandaele/sitrep/cmd/sitrep@latest
 ```
+
+A `go install` build reports the version the Go toolchain embedded from the module and the
+commit it stamped, where a release archive reports the tag it was built from. Both are
+enough to identify a binary in a bug report.
 
 ## Build from source
 
@@ -208,8 +464,10 @@ make build
 | `make test` | `go test -race ./...` |
 
 CI runs those four gates on every pull request and fails on any violation, plus a release
-dry-run (`goreleaser check` and a snapshot build) that proves the release pipeline without
-cutting a release. Pushing a `v*` tag publishes the archives to GitHub Releases.
+dry-run (`goreleaser check`, a snapshot build, and running the linux/amd64 binary that
+build produced) that proves the release pipeline without cutting a release. Pushing a `v*`
+tag publishes the archives to GitHub Releases — see [docs/RELEASING.md](docs/RELEASING.md)
+for the one command that does it and what to verify afterwards.
 
 `golangci-lint` is pinned to the version CI uses:
 

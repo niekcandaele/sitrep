@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -51,7 +52,7 @@ func (t target) isMilestone() bool {
 // after a round trip.
 func targetFor(r ref.Ref, defaultPath string) (target, error) {
 	if r.Tracker != ref.TrackerGitLab {
-		return target{}, fmt.Errorf("gitlab: %q is not a GitLab Epic Ref", r.Raw)
+		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Epic Ref", r.Raw)
 	}
 
 	t := target{kind: kindIssue, iid: r.Number}
@@ -89,14 +90,14 @@ func targetFor(r ref.Ref, defaultPath string) (target, error) {
 		if t.isMilestone() {
 			example = "acme/widgets%3"
 		}
-		return target{}, fmt.Errorf("gitlab: %q does not name a GitLab group or project — "+
+		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q does not name a GitLab group or project — "+
 			"write the full reference (%s) or add a Profile whose project names it", r.Raw, example)
 	}
 	if t.iid <= 0 {
 		if t.isMilestone() {
-			return target{}, fmt.Errorf("gitlab: %q does not name a GitLab milestone", r.Raw)
+			return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q does not name a GitLab milestone", r.Raw)
 		}
-		return target{}, fmt.Errorf("gitlab: %q does not name a GitLab epic or issue", r.Raw)
+		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q does not name a GitLab epic or issue", r.Raw)
 	}
 	return t, nil
 }
@@ -167,7 +168,7 @@ func parseTicketID(id model.TicketID) (target, error) {
 }
 
 func malformedTicketID(id model.TicketID) error {
-	return fmt.Errorf("gitlab: %q does not name a GitLab epic, issue or milestone", string(id))
+	return provider.Errorf(provider.KindBadRef, "gitlab: %q does not name a GitLab epic, issue or milestone", string(id))
 }
 
 // String names the target in an error the way a human wrote it, which is also

@@ -17,6 +17,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/jira"
+	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
@@ -480,12 +481,10 @@ func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 			p := newProvider(s)
 
 			_, err := p.FetchEpic(context.Background(), tt.r)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %q, want it to mention %q", err, tt.want)
-			}
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.want},
+			})
 			if n := len(s.recorded()); n != 0 {
 				t.Errorf("%d requests reached the server; a bad Ref is rejected before any of them", n)
 			}
@@ -493,26 +492,61 @@ func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
-	tests := []struct {
-		name string
-		resp response
-		want []string
-	}{
+// epicFailure is one replayed failure and the error contract it must satisfy.
+type epicFailure struct {
+	name string
+	resp response
+	want providertest.Want
+}
+
+// epicFailures is the driver's failure table, hoisted out of the test that
+// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// it covers rather than trusting a comment.
+func epicFailures() []epicFailure {
+	return []epicFailure{
 		{
 			name: "unauthorized",
 			resp: response{status: http.StatusUnauthorized, file: "errors_auth.json"},
-			want: []string{"authentication failed (401)", "email", "API token"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"authentication failed (401)", "email", "API token"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "forbidden",
 			resp: response{status: http.StatusForbidden, body: `{"errorMessages":[],"errors":{}}`},
-			want: []string{"access denied (403)", "ABC-1"},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"access denied (403)", "ABC-1"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// Atlassian raises this after repeated failed logins, and no
+			// credential change clears it — only a browser does.
+			name: "forbidden by a CAPTCHA challenge",
+			resp: response{
+				status: http.StatusForbidden,
+				body:   `{"errorMessages":[],"errors":{}}`,
+				headers: map[string]string{
+					"X-Authentication-Denied-Reason": "CAPTCHA_CHALLENGE; login-url=https://acme.atlassian.net/login.jsp",
+				},
+			},
+			want: providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: []string{"CAPTCHA", "acme.atlassian.net", "browser"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "not found",
 			resp: response{status: http.StatusNotFound, file: "errors_not_found.json"},
-			want: []string{"ABC-1 not found (or you lack access)"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"ABC-1 not found (or you lack access)"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "rate limited with a Retry-After",
@@ -521,49 +555,86 @@ func TestFetchEpicFailures(t *testing.T) {
 				body:    `{}`,
 				headers: map[string]string{"Retry-After": "30"},
 			},
-			want: []string{"rate limit exceeded", "30s"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "30s"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
-			name: "rate limited with no Retry-After",
+			// Jira Cloud sends this instead of Retry-After on some 429s. It is a
+			// moment, not a duration, so it renders as a local time.
+			name: "rate limited with only an X-RateLimit-Reset",
+			resp: response{
+				status:  http.StatusTooManyRequests,
+				body:    `{}`,
+				headers: map[string]string{"X-RateLimit-Reset": "2026-08-21T13:32:00Z"},
+			},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "retry after", "2026"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			name: "rate limited with nothing to say",
 			resp: response{status: http.StatusTooManyRequests, body: `{}`},
-			want: []string{"rate limit exceeded", "an unknown time"},
+			want: providertest.Want{
+				Kind:     provider.KindRateLimit,
+				Contains: []string{"rate limit exceeded", "an unknown time"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "a server error",
 			resp: response{status: http.StatusInternalServerError, body: `<html>oh no</html>`},
-			want: []string{"unexpected response 500"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"unexpected response 500"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "an error payload with no status wording of its own",
 			resp: response{status: http.StatusBadRequest, file: "errors_not_found.json"},
-			want: []string{"API error:", "Issue does not exist"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"API error:", "Issue does not exist"},
+				Secret:   fixtureToken,
+			},
 		},
 		{
 			name: "a malformed body",
 			resp: response{body: `{"key": "ABC-1", "fields": `},
-			want: []string{"decoding the response"},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"decoding the response"},
+				Secret:   fixtureToken,
+			},
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestFetchEpicFailures(t *testing.T) {
+	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
-			p := newProvider(s)
 
-			_, err := p.FetchEpic(context.Background(), epicRef)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error = %q, want it to mention %q", err, want)
-				}
-			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Error("the error carries the API token; a credential never reaches an error")
-			}
+			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			providertest.CheckError(t, "jira", err, tt.want)
 		})
 	}
+}
+
+// The ticket's promise is per-driver: a bad ref, an auth failure and rate
+// limiting each explain themselves on this Tracker. This asserts the table
+// above actually exercises all three.
+func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+	kinds := []provider.Kind{}
+	for _, tt := range epicFailures() {
+		kinds = append(kinds, tt.want.Kind)
+	}
+	providertest.CheckCoversTheNamedClasses(t, "jira", kinds)
 }
 
 // A missing half of the credential is reported at the first request, naming the
@@ -592,17 +663,11 @@ func TestMissingCredentials(t *testing.T) {
 			p := jira.New(fixtureHost, jira.WithBaseURL(s.URL), jira.WithCredentials(tt.credentials))
 
 			_, err := p.FetchEpic(context.Background(), epicRef)
-			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error = %q, want it to mention %q", err, want)
-				}
-			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Error("the error carries the API token")
-			}
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindAuth,
+				Contains: tt.want,
+				Secret:   fixtureToken,
+			})
 			if n := len(s.recorded()); n != 0 {
 				t.Errorf("%d requests were sent without a complete credential", n)
 			}
