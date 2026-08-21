@@ -98,16 +98,16 @@ func TestTruncate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := truncate(tt.title, tt.width)
+			got := Truncate(tt.title, tt.width)
 
 			if got != tt.want {
-				t.Errorf("truncate(%q, %d) = %q, want %q", tt.title, tt.width, got, tt.want)
+				t.Errorf("Truncate(%q, %d) = %q, want %q", tt.title, tt.width, got, tt.want)
 			}
 			if n := len([]rune(got)); n > tt.width {
-				t.Errorf("truncate(%q, %d) is %d runes, want at most %d", tt.title, tt.width, n, tt.width)
+				t.Errorf("Truncate(%q, %d) is %d runes, want at most %d", tt.title, tt.width, n, tt.width)
 			}
 			if !utf8.ValidString(got) {
-				t.Errorf("truncate(%q, %d) = %q, which corrupted a code point", tt.title, tt.width, got)
+				t.Errorf("Truncate(%q, %d) = %q, which corrupted a code point", tt.title, tt.width, got)
 			}
 		})
 	}

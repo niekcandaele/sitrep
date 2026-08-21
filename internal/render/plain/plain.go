@@ -70,7 +70,7 @@ func RenderEpic(w io.Writer, snap model.EpicSnapshot) error {
 		return err
 	}
 
-	keyColumn := keyColumnWidth(snap.Tickets)
+	keyColumn := KeyColumnWidth(snap.Tickets)
 	for _, group := range model.GroupByCategory(snap.Tickets) {
 		writeGroup(&b, group, keyColumn, snap.Capabilities)
 	}
@@ -103,13 +103,17 @@ func CategoryLabel(c model.StatusCategory) string {
 	}
 }
 
-// ProgressBar renders a fixed-width completion bar for an Epic's Progress.
-// Cancelled Tickets are already out of Progress.Denominator, so the bar shows
-// real finished work rather than a total that can never be reached. The result
-// is always exactly width runes wide, including when the Denominator is zero.
-func ProgressBar(p model.Progress, width int) string {
+// BarFill returns how many of width cells a progress bar should draw as
+// filled: Done over Denominator, rounded to nearest, clamped into [0, width].
+// A zero Denominator fills nothing rather than dividing by zero.
+//
+// It is exported so the TUI's width-adaptive coloured bar and this package's
+// fixed-width monochrome one share a single rounding rule: two renderers that
+// disagree about where the bar ends is a bug a reader would have to diff two
+// packages to find.
+func BarFill(p model.Progress, width int) int {
 	if width <= 0 {
-		return ""
+		return 0
 	}
 	filled := 0
 	if p.Denominator > 0 {
@@ -123,7 +127,52 @@ func ProgressBar(p model.Progress, width int) string {
 	if filled > width {
 		filled = width
 	}
+	return filled
+}
+
+// ProgressBar renders a fixed-width completion bar for an Epic's Progress.
+// Cancelled Tickets are already out of Progress.Denominator, so the bar shows
+// real finished work rather than a total that can never be reached. The result
+// is always exactly width runes wide, including when the Denominator is zero.
+func ProgressBar(p model.Progress, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	filled := BarFill(p, width)
 	return strings.Repeat(barFilledRune, filled) + strings.Repeat(barEmptyRune, width-filled)
+}
+
+// KeyColumnWidth computes the column the Ticket titles start in, in runes,
+// over every Ticket rather than per group, so keys line up across the whole
+// report. It is exported so the TUI's list aligns identically: a user who has
+// seen one view recognises the other.
+func KeyColumnWidth(tickets []model.Ticket) int {
+	width := minKeyColumn
+	for _, t := range tickets {
+		if n := len([]rune(t.Key)) + keyColumnPadding; n > width {
+			width = n
+		}
+	}
+	return width
+}
+
+// PadKey pads a Ticket key out to the key column, measured in runes.
+func PadKey(key string, width int) string {
+	if pad := width - len([]rune(key)); pad > 0 {
+		return key + strings.Repeat(" ", pad)
+	}
+	return key
+}
+
+// Truncate shortens s to at most width runes, ending in an ellipsis when it
+// had to cut. It counts runes rather than bytes: a byte-slice truncation
+// corrupts a multi-byte title such as "Renseigner la métrique « éclair »".
+func Truncate(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) <= width || width <= 0 {
+		return s
+	}
+	return string(runes[:width-1]) + ellipsis
 }
 
 // PullRequestSummary renders one pull request as a single line fragment:
@@ -186,7 +235,7 @@ func writeTicket(b *strings.Builder, t model.Ticket, keyColumn int, caps model.C
 	// Ticket.Key is printed verbatim: the Provider already qualifies cross-repo
 	// children, so re-deriving a prefix from Ticket.Repository would double the
 	// qualification on GitHub and guess wrong on the next Tracker.
-	fmt.Fprintf(b, "%s%s%s\n", ticketIndent, padKey(t.Key, keyColumn), truncate(t.Title, maxTitleWidth))
+	fmt.Fprintf(b, "%s%s%s\n", ticketIndent, PadKey(t.Key, keyColumn), Truncate(t.Title, maxTitleWidth))
 
 	meta := ticketMeta(t, caps)
 	if meta == "" {
@@ -300,35 +349,4 @@ func reviewWord(s model.ReviewState) string {
 	default:
 		return ""
 	}
-}
-
-// keyColumnWidth computes the key column once for the whole report, over every
-// Ticket, so columns line up across groups and not merely within one.
-func keyColumnWidth(tickets []model.Ticket) int {
-	width := minKeyColumn
-	for _, t := range tickets {
-		if n := len([]rune(t.Key)) + keyColumnPadding; n > width {
-			width = n
-		}
-	}
-	return width
-}
-
-// padKey pads a key to the key column, measured in runes.
-func padKey(key string, width int) string {
-	if pad := width - len([]rune(key)); pad > 0 {
-		return key + strings.Repeat(" ", pad)
-	}
-	return key
-}
-
-// truncate shortens s to at most width runes, ending in an ellipsis when it
-// had to cut. It counts runes rather than bytes: a byte-slice truncation
-// corrupts a multi-byte title.
-func truncate(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) <= width || width <= 0 {
-		return s
-	}
-	return string(runes[:width-1]) + ellipsis
 }

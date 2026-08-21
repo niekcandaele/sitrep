@@ -17,6 +17,7 @@ package provider
 
 import (
 	"context"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/ref"
@@ -45,4 +46,21 @@ type Provider interface {
 	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
 	// called only on drill-in, never during a list refresh.
 	FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error)
+}
+
+// StampSnapshot completes a snapshot a Provider just returned, so it is ready
+// to render: FetchedAt is stamped from the caller's clock, because a Provider
+// leaves it zero, and the Capabilities are back-filled from the Provider when
+// it did not set them itself.
+//
+// Every read path goes through it — the one-shot --json and --plain renderers
+// and the TUI's refresh — so "what turns a fetch into something displayable"
+// has exactly one definition and the monitor and the snapshot cannot disagree
+// about which Capabilities are in force.
+func StampSnapshot(p Provider, snap model.EpicSnapshot, now time.Time) model.EpicSnapshot {
+	snap.FetchedAt = now
+	if snap.Capabilities == (model.Capabilities{}) {
+		snap.Capabilities = p.Capabilities()
+	}
+	return snap
 }

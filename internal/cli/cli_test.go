@@ -54,10 +54,10 @@ func TestRun(t *testing.T) {
 			wantEmptyOut: true,
 		},
 		{
-			name:           "help documents the one-shot modes and the provider flag",
+			name:           "help documents the one-shot modes, the provider flag and the refresh cadence",
 			args:           []string{"--help"},
 			wantCode:       0,
-			wantStdout:     []string{"--json", "--plain", "--provider"},
+			wantStdout:     []string{"--json", "--plain", "--provider", "--interval"},
 			wantEmptyError: true,
 		},
 		{
@@ -75,10 +75,26 @@ func TestRun(t *testing.T) {
 			wantEmptyOut: true,
 		},
 		{
-			name:         "a ref is not implemented yet",
-			args:         []string{"123"},
+			name:         "a zero refresh interval is a usage error",
+			args:         []string{"--interval", "0", "123"},
 			wantCode:     2,
-			wantStderr:   []string{"not implemented yet"},
+			wantStderr:   []string{"refresh interval must be positive"},
+			wantEmptyOut: true,
+		},
+		{
+			name:         "a negative refresh interval is a usage error",
+			args:         []string{"--interval", "-5s", "123"},
+			wantCode:     2,
+			wantStderr:   []string{"refresh interval must be positive"},
+			wantEmptyOut: true,
+		},
+		{
+			// sitrep polls a rate-limited API; a sub-second poll is a way to
+			// get throttled, not a feature.
+			name:         "a refresh interval below the floor is a usage error",
+			args:         []string{"--interval", "1s", "123"},
+			wantCode:     2,
+			wantStderr:   []string{"refresh interval must be at least 5s"},
 			wantEmptyOut: true,
 		},
 	}
