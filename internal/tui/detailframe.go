@@ -146,29 +146,12 @@ func commentByline(c model.Comment) string {
 	return "@" + login + separator + c.CreatedAt.UTC().Format(commentTimeLayout) + " UTC"
 }
 
-// visibleLinks returns the Links the Capabilities allow on screen. Relates links
-// survive without BlockingLinks; only the directed blocking ones go. That is the
-// same rule fake.applyDetailCapabilities and jsonout.RenderDetail already
-// encode, and the three must not drift.
-func visibleLinks(in DetailInput) []model.Link {
-	if in.Capabilities.BlockingLinks {
-		return in.Detail.Links
-	}
-	kept := make([]model.Link, 0, len(in.Detail.Links))
-	for _, l := range in.Detail.Links {
-		if l.Kind == model.LinkRelates {
-			kept = append(kept, l)
-		}
-	}
-	return kept
-}
-
 // linkLines renders the links section as aligned columns: the Tracker's own
 // label, the target's key, its title, and its Native Status. The label is the
 // meaning — it is displayed and never interpreted — so nothing here branches on
 // the Kind except to pick a colour.
 func linkLines(in DetailInput, width int, s Styles) []string {
-	links := visibleLinks(in)
+	links := model.VisibleLinks(in.Detail.Links, in.Capabilities)
 	if len(links) == 0 {
 		return nil
 	}

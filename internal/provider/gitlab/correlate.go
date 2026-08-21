@@ -11,8 +11,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
-// mergeRequestWorkers bounds how many related_merge_requests requests are in
-// flight at once.
+// mergeRequestWorkers bounds how many closed_by requests are in flight at
+// once.
 //
 // Serial is unusable: a forty-Ticket epic at a sixty-second poll would spend
 // most of its interval waiting on round trips. Unbounded is how a polling tool
@@ -32,7 +32,7 @@ const mergeRequestWorkers = 8
 //
 // # Degrade per Ticket, fail as a whole only for systemic problems
 //
-// A 403 or 404 from one Ticket's related_merge_requests means that one issue's
+// A 403 or 404 from one Ticket's closed_by means that one issue's
 // project is not fully visible to this token, or has merge requests disabled:
 // that Ticket records no merge requests and the snapshot carries on. Anything
 // else — 401, 429, 5xx, a transport failure, a decode failure — will hit every
@@ -102,25 +102,44 @@ func (p *Provider) correlateTicket(ctx context.Context, ticket *model.Ticket) er
 	return nil
 }
 
-// mergeRequestsFor reads the merge requests related to one issue, lead first.
+// mergeRequestsFor reads the merge requests that will close one issue, lead
+// first.
 //
-// It is one request, plus at most one more for the lead's approvals; see
-// approvalsFor for why that second one is worth its cost and why it is never
-// fatal.
+// Which merge requests those are comes from /closed_by, GitLab's own closing
+// linkage. What each of them looks like comes from /related_merge_requests,
+// because the two endpoints serialize a merge request differently: only the
+// wider list carries head_pipeline, and without it the Checks half of the
+// PullRequests Capability goes dark. (Verified against gitlab.com on
+// 2026-08-21: closed_by omits head_pipeline; related_merge_requests carries
+// it.) So closed_by decides membership and the related payload supplies the
+// pipeline for the merge requests it named.
+//
+// An issue nothing is closing — the common case on a Todo ticket — costs one
+// request: the second is skipped when closed_by is empty.
 func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.PullRequest, error) {
 	query := url.Values{"per_page": {strconv.Itoa(pageSize)}}
 
 	var mrs []mergeRequestWire
-	if _, err := p.do(ctx, t.relatedMergeRequestsPath(), query, t.String(), &mrs); err != nil {
+	if _, err := p.do(ctx, t.closedByPath(), query, t.String(), &mrs); err != nil {
 		if isTicketScopedFailure(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	if len(mrs) == 0 {
+		return nil, nil
+	}
+	if err := p.attachPipelines(ctx, t, query, mrs); err != nil {
+		return nil, err
+	}
 
 	prs := newPullRequests(mrs)
 	if lead, ok := leadIndex(prs); ok {
-		if approvals := p.approvalsFor(ctx, mrs[lead], prs[lead]); approvals != nil {
+		approvals, err := p.approvalsFor(ctx, mrs[lead], prs[lead])
+		if err != nil {
+			return nil, err
+		}
+		if approvals != nil {
 			prs[lead].Review = normalizeReview(
 				mrs[lead].DetailedMergeStatus, len(mrs[lead].Reviewers), approvals)
 		}
@@ -128,8 +147,36 @@ func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.Pull
 	return leadFirst(prs), nil
 }
 
+// attachPipelines fills in the head pipeline closed_by does not serialize,
+// reading it from the wider related_merge_requests list and matching on the
+// merge request's own id. A merge request the wider list does not mention keeps
+// no pipeline, which reads as ChecksNone — the same answer as a project running
+// no CI, and the honest one when nothing said otherwise.
+func (p *Provider) attachPipelines(ctx context.Context, t target, query url.Values, mrs []mergeRequestWire) error {
+	var related []mergeRequestWire
+	if _, err := p.do(ctx, t.relatedMergeRequestsPath(), query, t.String(), &related); err != nil {
+		if isTicketScopedFailure(err) {
+			return nil
+		}
+		return err
+	}
+
+	pipelines := make(map[int]*pipelineWire, len(related))
+	for _, m := range related {
+		if m.HeadPipeline != nil {
+			pipelines[m.ID] = m.HeadPipeline
+		}
+	}
+	for i := range mrs {
+		if mrs[i].HeadPipeline == nil {
+			mrs[i].HeadPipeline = pipelines[mrs[i].ID]
+		}
+	}
+	return nil
+}
+
 // approvalsFor reads the lead merge request's approvals, or returns nil when
-// there is nothing to learn or the request did not work.
+// there is nothing to learn.
 //
 // The call is lead-only, live-only and short-circuited, which bounds the extra
 // cost at one request per Ticket. It exists because detailed_merge_status can
@@ -138,31 +185,38 @@ func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.Pull
 // it ReviewApproved would be unreachable, a visible hole in telling coding from
 // waiting-on-review.
 //
-// A failure of any status is deliberately swallowed: normalizeReview falls
-// through to Pending or None and the report is one nuance poorer rather than
-// absent.
-func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr model.PullRequest) *approvalsWire {
+// A 403 or 404 is swallowed and reported as no approvals: that is the Free-tier
+// or restricted-project case, where the endpoint is legitimately unreadable and
+// normalizeReview falls through to Pending or None, leaving the report one
+// nuance poorer rather than absent. Anything else — 401, 429, 5xx, a transport
+// or decode failure — is the same systemic problem for every Ticket, so it
+// fails the fetch instead of being laundered into a review state, which is the
+// distinction correlate's doc comment already draws.
+func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr model.PullRequest) (*approvalsWire, error) {
 	if pr.State != model.PROpen && pr.State != model.PRDraft {
 		// A merged or closed merge request's review posture is history, and its
 		// detailed_merge_status reads not_open.
-		return nil
+		return nil, nil
 	}
 	if pr.Review == model.ReviewChangesRequested {
 		// GitLab has already answered the question, and the answer outranks an
 		// approval anyway.
-		return nil
+		return nil, nil
 	}
 	project := m.projectPath()
 	if project == "" || m.IID <= 0 {
-		return nil
+		return nil, nil
 	}
 
 	t := target{kind: kindIssue, path: project, iid: m.IID}
 	var approvals approvalsWire
 	if _, err := p.do(ctx, t.mergeRequestApprovalsPath(m.IID), nil, t.String(), &approvals); err != nil {
-		return nil
+		if isTicketScopedFailure(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return &approvals
+	return &approvals, nil
 }
 
 // isTicketScopedFailure reports whether an error is one Ticket's problem rather

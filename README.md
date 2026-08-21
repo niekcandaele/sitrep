@@ -99,6 +99,15 @@ rather than quitting.
 **GitHub with `gh auth login` done needs no config file at all.** Everything below is for
 connecting to something else, or for changing a default.
 
+**A credential is only ever sent to the host it was configured for.** An ambient
+`$GITHUB_TOKEN` / `$GH_TOKEN` goes to github.com and nowhere else; an ambient
+`$GITLAB_TOKEN` (or `$GITLAB_ACCESS_TOKEN` / `$OAUTH_TOKEN`) goes to gitlab.com and nowhere
+else — unless `$GH_HOST` or `$GITLAB_HOST` names the host, which is `gh`'s and `glab`'s own
+way of pointing an ambient token at an Enterprise or self-managed instance. Any other host
+needs a `gh auth login --hostname <host>` or `glab auth login --hostname <host>` for that
+host, or a Profile naming it and the environment variable holding its token. sitrep will
+not hand a github.com token to whatever host a pasted URL or a git remote happened to name.
+
 sitrep reads one file, `~/.config/sitrep/config.yml` (`$XDG_CONFIG_HOME/sitrep/config.yml`
 when that is set, or the path in `$SITREP_CONFIG`). There is no per-repository config and
 no search: one file, one place. sitrep never writes it — a missing file is silence, and a
@@ -175,7 +184,9 @@ guess: the section is simply absent from a Jira report rather than empty or wron
 
 **`glab auth login` alone is enough** on gitlab.com — no Profile and no config file. sitrep
 reads `$GITLAB_TOKEN` (or `$GITLAB_ACCESS_TOKEN`, or `$OAUTH_TOKEN`) first and falls back to
-`glab`'s stored login, which is `glab`'s own documented order.
+`glab`'s stored login, which is `glab`'s own documented order. On a self-managed host those
+variables are not offered at all unless `$GITLAB_HOST` names that host: see the credential
+rule at the top of [Configuration](#configuration).
 
 A Profile is what pins a self-managed instance, names a default group or project, or points
 at a different token variable:
@@ -230,7 +241,10 @@ rather than for an empty value.
 
 There are **two documents**. An Epic Ref that names a collection emits the epic document;
 one that names a plain Ticket emits the ticket document (the same Ref, decoded — see
-[Usage](#usage)).
+[Usage](#usage)). Children are the only signal that means the same thing on all three
+Trackers, so a collection with no children yet is emitted as a **ticket** document and
+becomes an epic document once something hangs off it. Branch on the presence of the
+top-level `epic` or `ticket` key rather than on the Ref you passed in.
 
 ### The epic document
 

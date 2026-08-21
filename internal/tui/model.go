@@ -84,7 +84,18 @@ type Model struct {
 	help       help.Model
 	styles     Styles
 	quitting   bool
+	// interrupted reports that the quit was a ctrl+c rather than a q or an esc.
+	// README states ctrl+c prints nothing and exits 130, which is true of the
+	// one-shot path because a signal reaches it; in the monitor raw mode
+	// delivers ctrl+c as an ordinary key press, so the program has to carry the
+	// fact out itself. See tui.Run and cli.runMonitor.
+	interrupted bool
 }
+
+// interruptKey is the key press that means "the user interrupted this", as
+// opposed to the other keys bound to quitting. It is compared by name because
+// that is what the Model has: raw mode gives a key press, not a signal.
+const interruptKey = "ctrl+c"
 
 // New returns the monitor's Model reading from opts.Source.
 //
@@ -396,6 +407,18 @@ func (m Model) rebuildRows() Model {
 	return m
 }
 
+// quit records that the program is ending, and whether the key that ended it
+// was the interrupt. q and esc exit 0; ctrl+c exits 130.
+func (m Model) quit(msg tea.KeyPressMsg) Model {
+	m.quitting = true
+	m.interrupted = msg.String() == interruptKey
+	return m
+}
+
+// Interrupted reports whether the session ended with ctrl+c. tui.Run reads it
+// off the final model to decide which error, if any, the caller sees.
+func (m Model) Interrupted() bool { return m.interrupted }
+
 // onKey dispatches a key press in list mode.
 //
 // ClearFilter is matched before Quit because both answer to esc: the ladder is
@@ -422,8 +445,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case key.Matches(msg, m.keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
+		return m.quit(msg), tea.Quit
 
 	case key.Matches(msg, m.keys.Help):
 		// The expanded listing eats body height, so the window has to be
@@ -462,8 +484,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.searchKeys.Quit):
-		m.quitting = true
-		return m, tea.Quit
+		return m.quit(msg), tea.Quit
 
 	case key.Matches(msg, m.searchKeys.Cancel):
 		// Abandon: the draft and the applied query go together. HideFinished

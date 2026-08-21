@@ -18,7 +18,11 @@ builds:
       - -s -w
       - -X github.com/niekcandaele/sitrep/internal/buildinfo.Version={{.Version}}
       - -X github.com/niekcandaele/sitrep/internal/buildinfo.Commit={{.ShortCommit}}
-      - -X github.com/niekcandaele/sitrep/internal/buildinfo.Date={{.Date}}
+      # The commit's date, not the build's clock: stamping the latter would
+      # make two builds of one commit differ, which is exactly what
+      # mod_timestamp below exists to prevent. CommitDate also honours
+      # SOURCE_DATE_EPOCH.
+      - -X github.com/niekcandaele/sitrep/internal/buildinfo.Date={{.CommitDate}}
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     # Stamp every file with the commit's own time rather than the build's, so

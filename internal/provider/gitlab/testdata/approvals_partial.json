@@ -1,0 +1,37 @@
+{
+  "id": 522090275,
+  "iid": 3761,
+  "project_id": 34675721,
+  "title": "fix(telemetry): attribute events to the executed command",
+  "description": "Closes #8499.\n\n## What\n\nThe `gitlab_cli_command_used` hook bound to the command returned by `rootCmd.Traverse`, before alias expansion and before cobra resolved the invocation. Two classes of invocation were mis-recorded:\n\n1. **Recorded as null** — anything resolving to the root command (aliases, bare `glab`, `--help`, `--version`, typos) fired an event with `label`, `property`, and `command_and_subcommand` all empty.\n2. **Not recorded at all** — anything where `Traverse` returned `nil`, such as a subcommand flag placed before the subcommand (`glab --output json mr list`), fired no event, because `sendTelemetryData` returns early on a nil command. Those invocations succeed normally, so the loss is invisible in the data rather than showing up as a Null row.\n\n## How\n\n`main`'s argument handling moves into `resolveExecution`, which expands aliases first and then resolves the expanded arguments through `rootCmd.Find` — the same lookup cobra itself uses in `ExecuteC`, since glab does not set `TraverseChildren`. Telemetry binds to that result, so events follow what actually ran regardless of argument order or alias expansion.\n\nThe issue suggested recording the resolved command from a root `PersistentPreRun`. That does not work here: cobra runs only the *nearest* ancestor's persistent pre-run hook and then breaks out of the loop, and `EnableRepoOverride` sets `PersistentPreRunE` on nouns like `mr`, so a root hook would never fire for the common case. `Find` is cobra's own resolution, so it cannot drift from what executes.\n\n## Test evidence\n\n`TestMain_resolveExecution` covers the pipeline end to end, including both bug classes. To confirm the tests actually pin the fix, I temporarily reintroduced the old binding inside `resolveExecution` and reran them:\n\n```\n--- FAIL: TestMain_resolveExecution/subcommand_flag_before_the_subcommand   (nil cmd — class 2, event dropped)\n--- FAIL: TestMain_resolveExecution/alias      expected: \"glab mr checkout\"  actual: \"glab\"   (class 1)\n--- FAIL: TestMain_resolveExecution/shell_alias                             (bound root instead of nil)\n```\n\nAll nine subtests pass against the fix.\n\n## Notes for reviewers\n\nThe `GLAB_DEBUG` `args -> expandedArgs` line is now gated on `aliasExpanded`, preserving the previous \"only when the alias branch ran\" behaviour. It is deliberately not printed unconditionally, since it goes to stdout and would corrupt piped output for debug users.\n\nThe issue also suggested a comment on `AddGlobalRepoOverride`, since the hidden global `-R` was load-bearing for telemetry under `Traverse`. It no longer is — cobra's `stripFlags` consumes `-R`'s value whether or not the shorthand is registered — but that is out of scope here and left untouched.\n\nPer #7885, the fire-and-forget `go sendTelemetryData(f, cmd)` is untouched.",
+  "state": "opened",
+  "created_at": "2026-08-21T06:18:57.803Z",
+  "updated_at": "2026-08-21T07:13:51.585Z",
+  "merge_status": "can_be_merged",
+  "approved": false,
+  "approvals_required": 2,
+  "approvals_left": 1,
+  "require_password_to_approve": false,
+  "approved_by": [
+    {
+      "user": {
+        "id": 21826781,
+        "username": "GitLabDuo",
+        "name": "GitLab Duo",
+        "state": "active",
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/GitLabDuo"
+      }
+    }
+  ],
+  "suggested_approvers": [],
+  "approvers": [],
+  "approver_groups": [],
+  "user_has_approved": false,
+  "user_can_approve": false,
+  "approval_rules_left": [],
+  "has_approval_rules": false,
+  "merge_request_approvers_available": true,
+  "multiple_approval_rules_available": true,
+  "invalid_approvers_rules": []
+}

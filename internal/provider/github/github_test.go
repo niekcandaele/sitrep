@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -506,8 +507,9 @@ func TestTheLeadPullRequestComesFirst(t *testing.T) {
 
 	tests := map[string][]int{
 		// A closed attempt, the merged one that landed, and a newer open
-		// follow-up: merged leads, the rest keep GitHub's order.
-		"#90": {102, 101, 103},
+		// follow-up: the open one leads — it is what the Ticket's In Progress
+		// grouping is reading — and the rest keep GitHub's order.
+		"#90": {103, 101, 102},
 		// Two open ones: the newest leads.
 		"#98": {109, 107},
 		// Neither has a rollup; the newest still leads.
@@ -618,6 +620,67 @@ func TestAssigneesAreMapped(t *testing.T) {
 			t.Errorf("assignee %d = %+v, want %+v", i, three[i], w)
 		}
 	}
+}
+
+// Both pagination guards, which the happy path never reaches. The failure mode
+// they prevent is an unbounded request loop in a tool that polls, so the error
+// text is asserted rather than only the failure.
+func TestPaginationSafety(t *testing.T) {
+	// endlessPage is one sub-issue page that always promises another. cursor is
+	// what it hands back, which is the whole difference between the two cases.
+	endlessPage := func(cursor string) string {
+		return `{"data":{"repository":{"issue":{
+			"id":"I_1","number":2,"title":"Epic","url":"https://github.com/acme/widgets/issues/2",
+			"state":"OPEN","repository":{"nameWithOwner":"acme/widgets"},
+			"subIssues":{"totalCount":1,"pageInfo":{"hasNextPage":true,"endCursor":"` + cursor + `"},
+			"nodes":[]}}}}}`
+	}
+
+	t.Run("a repeated cursor is an error, not a loop", func(t *testing.T) {
+		s := newReplayServer(t,
+			response{body: endlessPage("same")},
+			response{body: endlessPage("same")},
+		)
+
+		_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+		if err == nil {
+			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
+		}
+		if !strings.Contains(err.Error(), "no new page cursor") {
+			t.Errorf("error = %q, want it to name the cursor problem", err)
+		}
+	})
+
+	t.Run("an endless epic stops paging", func(t *testing.T) {
+		var mu sync.Mutex
+		var pages int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			pages++
+			n := pages
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(endlessPage(fmt.Sprintf("cursor-%d", n))))
+		}))
+		t.Cleanup(srv.Close)
+
+		p := github.New("github.com",
+			github.WithEndpoint(srv.URL),
+			github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }))
+
+		_, err := p.FetchEpic(context.Background(), epicRef)
+		if err == nil {
+			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
+		}
+		if !strings.Contains(err.Error(), "refusing to keep paging") {
+			t.Errorf("error = %q, want it to say the fetch was bounded", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if pages > 60 {
+			t.Errorf("the driver made %d requests; the bound is meant to stop it far sooner", pages)
+		}
+	})
 }
 
 func TestPaginationFollowsTheCursor(t *testing.T) {
@@ -813,6 +876,19 @@ func epicFailures() []epicFailure {
 			want: providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{"niekcandaele/sitrep#2", "not found"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// GitHub shares one number namespace between issues and pull
+			// requests, so pasting a pull request link is a common mistake —
+			// and "not found" is a false claim about a page the user is looking
+			// at.
+			name:     "the number names a pull request",
+			response: response{file: "issue_is_a_pull_request.json"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"niekcandaele/sitrep#2", "is a pull request, not a Ticket"},
 				Secret:   fixtureToken,
 			},
 		},

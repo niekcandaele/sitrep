@@ -85,11 +85,16 @@ func replayGitLab(t *testing.T) *httptest.Server {
 			file = "milestone_issues_empty.json"
 		// The first Ticket of each collection carries a real merge request, so
 		// the whole-program assertion has something to find; the rest carry none.
-		case strings.HasSuffix(path, "/issues/101/related_merge_requests"),
+		case strings.HasSuffix(path, "/issues/101/closed_by"),
+			strings.HasSuffix(path, "/issues/201/closed_by"),
+			// The wider list is read for head_pipeline alone, and the recorded
+			// payload is the same merge-request shape, so it answers both.
+			strings.HasSuffix(path, "/issues/101/related_merge_requests"),
 			strings.HasSuffix(path, "/issues/201/related_merge_requests"):
-			file = "related_merge_requests.json"
-		case strings.HasSuffix(path, "/related_merge_requests"):
-			file = "related_merge_requests_empty.json"
+			file = "closed_by.json"
+		case strings.HasSuffix(path, "/closed_by"),
+			strings.HasSuffix(path, "/related_merge_requests"):
+			file = "closed_by_empty.json"
 		case strings.HasSuffix(path, "/merge_requests/3761/approvals"):
 			file = "approvals_approved.json"
 		default:
@@ -332,9 +337,8 @@ func TestPlainGitLabEpicReport(t *testing.T) {
 	}
 }
 
-// A run that resolves a real token prints it nowhere. This is the promise #12
-// made against the then-unimplemented GitLab seam; now that the driver exists it
-// is kept against a replay server instead, which is both stronger and hermetic.
+// A run that resolves a real token prints it nowhere (#12). The token reaches a
+// real Provider and a real fetch, against a replay server.
 func TestResolvedProfileNeverPrintsItsToken(t *testing.T) {
 	got := runWith([]string{"https://gitlab.com/groups/gitlab-org/-/epics/23356", "--json"}, cli.Deps{
 		Provider: gitlabProvider(t),
@@ -508,6 +512,56 @@ func TestBareGitLabReferenceWithNoProfile(t *testing.T) {
 	}
 }
 
+// A gitlab Profile with no project cannot supply the group path a bare "&12"
+// needs, so it is not a candidate — matching it would trade a selection-time
+// error for a confusing one two requests later.
+func TestBareGitLabReferenceIgnoresAProjectlessProfile(t *testing.T) {
+	cfg := parseConfig(t, `
+profiles:
+  host-only:
+    provider: gitlab
+    host: gitlab.acme.test
+`)
+
+	got := runWith([]string{"&12", "--json"}, cli.Deps{Config: cfg})
+
+	if got.code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
+	}
+	for _, want := range []string{"which GitLab instance", "group or project", "project", `"&12"`} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
+		}
+	}
+}
+
+// A milestone reference carries its own path, so a Profile that names only a
+// host still resolves it.
+func TestMilestoneReferenceAcceptsAProjectlessProfile(t *testing.T) {
+	cfg := parseConfig(t, `
+profiles:
+  host-only:
+    provider: gitlab
+    host: gitlab.acme.test
+`)
+
+	got := runWith([]string{"acme/widgets%3", "--json"}, cli.Deps{
+		Config:            cfg,
+		GitLabTokenSource: noGitLabToken,
+	})
+
+	if got.code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
+	}
+	// Reaching the driver's own token error means the Profile was accepted and
+	// the run got as far as needing a credential.
+	for _, want := range []string{"gitlab:", "glab auth login"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
+		}
+	}
+}
+
 // Two gitlab Profiles cannot both answer a hostless reference, so sitrep asks
 // rather than guessing.
 func TestBareGitLabReferenceWithSeveralProfiles(t *testing.T) {
@@ -565,6 +619,28 @@ func TestProviderGitLabForcesTheDriver(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
+	for _, want := range []string{"gitlab:", "glab auth login"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
+		}
+	}
+}
+
+// The case --provider exists for. A self-managed GitLab URL with no "/-/" in
+// it is indistinguishable from a GitHub Enterprise one, so the grammar guesses
+// GitHub Enterprise — and until this, --provider gitlab could not correct that
+// guess, because it demanded the parser already agree.
+func TestProviderGitLabForcesAGuessedHost(t *testing.T) {
+	got := runWith([]string{"--provider", "gitlab",
+		"https://git.acme.test/acme/widgets/issues/7", "--json"}, cli.Deps{
+		GitLabTokenSource: noGitLabToken,
+	})
+
+	if got.code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
+	}
+	// Reaching the GitLab driver's own token error is the proof: the run got
+	// past driver selection to a driver that would have talked to GitLab.
 	for _, want := range []string{"gitlab:", "glab auth login"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)

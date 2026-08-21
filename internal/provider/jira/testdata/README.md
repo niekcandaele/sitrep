@@ -35,6 +35,7 @@ is `ABC-1`.
 | `epic_issue.json` | the Epic `ABC-1`: `To Do` in category `new`, one assignee, `parent: null`, project `ABC`; the browse URL is built from the site and the key, never from `self` |
 | `epic_children_page1.json` | five children plus a `nextPageToken` and `isLast: false`, which is what makes this two pages; categories `new`, `indeterminate` and `done`; one unassigned child; `ABC-6`'s title carries an `&` and `« éclair »` and must survive verbatim |
 | `epic_children_page2.json` | `isLast: true`; `ABC-7` resolved **Won't Do** → Cancelled and out of the progress denominator; `ABC-8` resolved `Duplicate` → Cancelled; `ABC-9` in category `done` with `resolution: null` → Done; `ABC-10` with an unknown `statusCategory.key` → Unknown, so a broken instance is visible; `DEF-4` in another project, so a cross-project child identifies itself |
+| `epic_children_truncated.json` | page 2 with `isLast: false` and an empty `nextPageToken`: Jira saying there is more and handing over no way to ask for it, which must be an error rather than a short epic |
 | `epic_children_empty.json` | `issues: []`, `isLast: true` — a Ref that named a plain Ticket, which is not an error |
 | `ticket_with_parent.json` | an issue carrying `fields.parent`: the decoder's breadcrumb and the `u` walk-up |
 
@@ -44,6 +45,7 @@ is `ABC-1`.
 |---|---|
 | `issue_link_types.json` | the stock catalogue — `Blocks` (`is blocked by` / `blocks`), `Cloners`, `Duplicate`, `Relates` |
 | `issue_link_types_renamed.json` | the acceptance criterion: the blocking type renamed to `Dependency` but still phrased `is blocked by` / `blocks` still maps to BlockedBy/Blocks, and an invented `Causes` type falls back to Relates **carrying its own label** |
+| `issue_link_types_inverted.json` | an administrator who swapped the two directions: `inward: "blocks"` / `outward: "is blocked by"`, plus a `Gating` type phrased `is a blocker for` / `is waiting on` — each phrase has to be read in its own voice or a blocked ticket displays as blocking |
 
 ## Ticket detail
 

@@ -255,8 +255,8 @@ func TestPathsAreEscapedWhole(t *testing.T) {
 	if got := ti.issueLinksPath(); got != "/projects/acme%2Fwidgets/issues/7/links" {
 		t.Errorf("issueLinksPath = %q", got)
 	}
-	if got := ti.relatedMergeRequestsPath(); got != "/projects/acme%2Fwidgets/issues/7/related_merge_requests" {
-		t.Errorf("relatedMergeRequestsPath = %q", got)
+	if got := ti.closedByPath(); got != "/projects/acme%2Fwidgets/issues/7/closed_by" {
+		t.Errorf("closedByPath = %q", got)
 	}
 	if got := ti.mergeRequestApprovalsPath(3761); got != "/projects/acme%2Fwidgets/merge_requests/3761/approvals" {
 		t.Errorf("mergeRequestApprovalsPath = %q", got)

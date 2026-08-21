@@ -207,14 +207,18 @@ func newEpic(issue issueWire, host string) model.Epic {
 //
 // Sub-tasks of children are not expanded: one level of the parent graph is
 // fetched, exactly as the GitHub driver fetches one level of sub-issues.
-// ParentID carries the child's own fields.parent key, which for a child of the
-// fetched Epic is that Epic.
-func newTicket(issue issueWire, host string) model.Ticket {
+//
+// ParentID carries the child's own fields.parent key only when that key is not
+// the Epic being fetched. A child hanging directly off the Epic gets an empty
+// ParentID, which is what model.Ticket documents and what the GitHub mapping
+// produces — otherwise one logical shape would serialize differently per
+// Tracker. epicKey is the fetched Epic's key, for that comparison.
+func newTicket(issue issueWire, host, epicKey string) model.Ticket {
 	status, native := normalizeStatus(
 		issue.Fields.categoryKey(), issue.Fields.statusName(), issue.Fields.resolutionName())
 
 	var parentID model.TicketID
-	if issue.Fields.Parent != nil {
+	if issue.Fields.Parent != nil && !strings.EqualFold(issue.Fields.Parent.Key, epicKey) {
 		parentID = model.TicketID(issue.Fields.Parent.Key)
 	}
 

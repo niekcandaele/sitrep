@@ -110,6 +110,13 @@ func Parse(r io.Reader, path string) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, cfg.errorf("%s", err)
 	}
+	// A YAML stream may hold several documents. sitrep reads one, so a second
+	// "---" would silently discard Profiles the user believes are configured —
+	// the worst thing a config file can do.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Config{}, cfg.errorf("this config file has more than one YAML document; sitrep reads one")
+	}
 	cfg.Path = path
 
 	if err := cfg.validate(); err != nil {
@@ -176,11 +183,36 @@ func (c Config) validateHost(p Profile) error {
 		}
 		return c.profileErrorf(p.Name, "host is required for a %s profile", p.Provider)
 	}
-	if strings.ContainsAny(p.Host, ":/") {
+	// A self-hosted instance may listen on a non-default port, and after
+	// credential scoping a Profile is the only way such a host can get a token
+	// at all — so "acme.example:8443" has to be nameable. Anything else carrying
+	// a ":" or a "/" is a URL.
+	if !isHostname(p.Host) {
 		return c.profileErrorf(p.Name,
 			`host must be a hostname like "acme.atlassian.net", not a URL`)
 	}
 	return nil
+}
+
+// isHostname reports whether s is a bare host with an optional numeric port,
+// which is the shape a Profile's host must have.
+func isHostname(s string) bool {
+	if strings.Contains(s, "/") {
+		return false
+	}
+	host, port, found := strings.Cut(s, ":")
+	if !found {
+		return true
+	}
+	if host == "" || port == "" || strings.Contains(port, ":") {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Config) validateProject(p Profile) error {
@@ -209,20 +241,20 @@ func (c Config) validateAuth(p Profile) error {
 	}
 
 	if p.Auth.TokenEnv == "" {
-		// GitHub can find a token on its own (`gh auth token`); the others have
-		// no other way in.
-		if p.Provider == providerGitHub {
+		// GitHub and GitLab can find a token on their own (`gh auth token`,
+		// `glab auth login`); Jira has no other way in.
+		if p.Provider != providerJira {
 			return nil
 		}
 		return c.profileErrorf(p.Name, "auth.token_env is required for a %s profile", p.Provider)
 	}
 	if !isEnvName(p.Auth.TokenEnv) {
-		return c.profileErrorf(p.Name, "auth.token_env must be the NAME of an environment "+
-			"variable (e.g. JIRA_API_TOKEN), not a token")
+		return c.profileErrorf(p.Name, "auth.token_env must be the upper-case NAME of an "+
+			"environment variable (e.g. JIRA_API_TOKEN), not a token")
 	}
 	if p.Auth.UserEnv != "" && !isEnvName(p.Auth.UserEnv) {
-		return c.profileErrorf(p.Name, "auth.user_env must be the NAME of an environment "+
-			"variable (e.g. JIRA_USER), not a value")
+		return c.profileErrorf(p.Name, "auth.user_env must be the upper-case NAME of an "+
+			"environment variable (e.g. JIRA_USER), not a value")
 	}
 	return nil
 }
@@ -244,21 +276,23 @@ func (c Config) validateInterval(p *Profile) error {
 }
 
 // validateNoDuplicateKeyPrefixes rejects two Jira Profiles claiming one project
-// key. A Jira Profile serves exactly one project key, which keeps prefix
-// matching a single equality with no precedence rules — and keeps "which
-// Profile served this?" answerable.
+// key on one site. Two Atlassian sites may each have a project called ABC, and
+// a Ref that names its site picks between them at selection time; two Profiles
+// for the same key on the same site name no such difference, so "which Profile
+// served this?" would have no answer.
 func (c Config) validateNoDuplicateKeyPrefixes() error {
-	claimed := map[string]string{}
+	type claim struct{ host, key string }
+	claimed := map[claim]string{}
 	for _, name := range c.Names() {
 		p := c.Profiles[name]
 		if p.Provider != providerJira {
 			continue
 		}
-		key := strings.ToUpper(p.Project)
-		if first, ok := claimed[key]; ok {
-			return c.errorf("profiles %q and %q both claim the Jira project key %q", first, name, key)
+		k := claim{host: normalizeHost(p.effectiveHost()), key: strings.ToUpper(p.Project)}
+		if first, ok := claimed[k]; ok {
+			return c.errorf("profiles %q and %q both claim the Jira project key %q", first, name, k.key)
 		}
-		claimed[key] = name
+		claimed[k] = name
 	}
 	return nil
 }
@@ -267,13 +301,20 @@ func (c Config) validateNoDuplicateKeyPrefixes() error {
 // than a value. It is also the whole of sitrep's "that looks like a token"
 // check: a real token contains characters a variable name cannot. There is no
 // secret detection beyond this.
+//
+// The shape is the POSIX-conventional upper-case one — [A-Z_][A-Z0-9_]* —
+// which every example in the README and in sitrep's own error messages already
+// uses. Lower case is excluded on purpose: real GitHub, GitLab and Atlassian
+// tokens carry lower-case letters, so accepting them here is what lets a pasted
+// token pass validation and then be echoed back by Profile.Credential's "$X is
+// not set" error. Loosening this reopens that.
 func isEnvName(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, c := range s {
 		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c == '_':
+		case c >= 'A' && c <= 'Z', c == '_':
 		case c >= '0' && c <= '9' && i > 0:
 		default:
 			return false

@@ -248,10 +248,7 @@ func newDetailDocument(d model.Detail, caps model.Capabilities, providerName str
 		}
 	}
 
-	for _, l := range d.Links {
-		if !caps.BlockingLinks && l.Kind != model.LinkRelates {
-			continue
-		}
+	for _, l := range model.VisibleLinks(d.Links, caps) {
 		doc.Links = append(doc.Links, linkDoc{
 			Kind:        l.Kind,
 			NativeLabel: l.NativeLabel,

@@ -116,3 +116,112 @@ func TestDefaultTokenSourceWithNothingAnywhere(t *testing.T) {
 		}
 	}
 }
+
+// The ambient variables carry no host, so they belong to gitlab.com and to
+// whatever $GITLAB_HOST names — and to nothing else. A self-managed host with
+// no glab login is an error rather than a gitlab.com token sent abroad.
+func TestDefaultTokenSourceScopesTheAmbientToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		env     map[string]string
+		want    string
+		wantErr []string
+	}{
+		{
+			name: "gitlab.com keeps the documented order",
+			host: "gitlab.com",
+			env:  map[string]string{"GITLAB_TOKEN": "ambient"},
+			want: "ambient",
+		},
+		{
+			name: "an empty host is gitlab.com",
+			env:  map[string]string{"GITLAB_TOKEN": "ambient"},
+			want: "ambient",
+		},
+		{
+			name:    "a self-managed host is refused the ambient token",
+			host:    "git.acme.test",
+			env:     map[string]string{"GITLAB_TOKEN": "ambient", "OAUTH_TOKEN": "also-ambient"},
+			wantErr: []string{"git.acme.test", "glab auth login --hostname git.acme.test", "profile"},
+		},
+		{
+			name: "GITLAB_HOST opts the ambient token in",
+			host: "git.acme.test",
+			env:  map[string]string{"GITLAB_TOKEN": "ambient", "GITLAB_HOST": "git.acme.test"},
+			want: "ambient",
+		},
+		{
+			name:    "GITLAB_HOST naming another host does not opt in",
+			host:    "git.acme.test",
+			env:     map[string]string{"GITLAB_TOKEN": "ambient", "GITLAB_HOST": "other.test"},
+			wantErr: []string{"git.acme.test"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restoreEnv := getenv
+			getenv = func(name string) string { return tt.env[name] }
+			restoreGlab := glabAuthToken
+			glabAuthToken = func(context.Context, string) string { return "" }
+			t.Cleanup(func() {
+				getenv = restoreEnv
+				glabAuthToken = restoreGlab
+			})
+
+			got, err := DefaultTokenSource(context.Background(), tt.host)
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("DefaultTokenSource = %q, want an error", got)
+				}
+				if got != "" {
+					t.Errorf("DefaultTokenSource returned %q alongside its error", got)
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q, want it to name %q", err, want)
+					}
+				}
+				for _, value := range tt.env {
+					if strings.Contains(err.Error(), value) && value != tt.host {
+						t.Errorf("error %q leaks an environment value", err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DefaultTokenSource: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("DefaultTokenSource = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A host-scoped glab login serves a self-managed host, which is the way in the
+// error above names first.
+func TestDefaultTokenSourceUsesGlabForASelfManagedHost(t *testing.T) {
+	restoreEnv := getenv
+	getenv = func(string) string { return "" }
+	restoreGlab := glabAuthToken
+	glabAuthToken = func(_ context.Context, host string) string {
+		if host == "git.acme.test" {
+			return "glpat-self-managed"
+		}
+		return ""
+	}
+	t.Cleanup(func() {
+		getenv = restoreEnv
+		glabAuthToken = restoreGlab
+	})
+
+	got, err := DefaultTokenSource(context.Background(), "git.acme.test")
+	if err != nil {
+		t.Fatalf("DefaultTokenSource: %v", err)
+	}
+	if got != "glpat-self-managed" {
+		t.Errorf("DefaultTokenSource = %q, want the glab token", got)
+	}
+}

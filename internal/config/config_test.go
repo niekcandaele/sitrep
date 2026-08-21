@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -169,17 +171,35 @@ func TestParseValidation(t *testing.T) {
 		{
 			name: "token_env is a token, not a name",
 			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: glpat-abc-def\n",
-			want: []string{`profile "x"`, "auth.token_env must be the NAME of an environment variable"},
+			want: []string{`profile "x"`, "auth.token_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			// A real GitHub token is a plausible environment-variable name under
+			// any rule that accepts lower case, and Profile.Credential prints the
+			// name it was given.
+			name: "token_env is a token shaped like a name",
+			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: ghp_16CabcdefGHI\n",
+			want: []string{`profile "x"`, "auth.token_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "token_env is a lower-case name",
+			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: jira_api_token\n",
+			want: []string{`profile "x"`, "auth.token_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "user_env is a lower-case name",
+			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n      user_env: jira_user\n",
+			want: []string{`profile "x"`, "auth.user_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "a second YAML document",
+			doc:  "profiles:\n  x:\n    provider: github\n---\nprofiles:\n  y:\n    provider: github\n",
+			want: []string{testPath, "more than one YAML document"},
 		},
 		{
 			name: "token_env missing on jira",
 			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n",
 			want: []string{`profile "x"`, "auth.token_env is required for a jira profile"},
-		},
-		{
-			name: "token_env missing on gitlab",
-			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n",
-			want: []string{`profile "x"`, "auth.token_env is required for a gitlab profile"},
 		},
 		{
 			name: "user and user_env together",
@@ -202,10 +222,10 @@ func TestParseValidation(t *testing.T) {
 			want: []string{`profile "x"`, "refresh_interval must be at least 5s"},
 		},
 		{
-			name: "two jira profiles claiming one key prefix",
+			name: "two jira profiles claiming one key prefix on one site",
 			doc: "profiles:\n" +
 				"  a:\n    provider: jira\n    host: one.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n" +
-				"  b:\n    provider: jira\n    host: two.atlassian.net\n    project: abc\n    auth:\n      token_env: T\n",
+				"  b:\n    provider: jira\n    host: one.atlassian.net\n    project: abc\n    auth:\n      token_env: T\n",
 			want: []string{`profiles "a" and "b" both claim the Jira project key "ABC"`},
 		},
 		{
@@ -236,6 +256,50 @@ func TestParseValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Legitimate documents the validator has to accept.
+func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want config.Profile
+	}{
+		{
+			// glab's own login is the fallback the docs promise; a profile that
+			// only pins a host must not have to name a token variable to use it.
+			name: "a gitlab profile with no token_env",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    project: platform/widgets\n",
+			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "platform/widgets"},
+		},
+		{
+			// After credential scoping a Profile is the only way a self-hosted
+			// host on a custom port can get a token, so it has to be nameable.
+			name: "a host with an explicit port",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: acme.example:8443\n",
+			want: config.Profile{Name: "x", Provider: "gitlab", Host: "acme.example:8443"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parse(t, tt.doc)
+			if got := cfg.Profiles["x"]; got != tt.want {
+				t.Errorf("profile = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Two Atlassian sites may each have a project called ABC. That is a config the
+// file has to load, with the ambiguity resolved at selection time.
+func TestParseAcceptsOneKeyOnTwoSites(t *testing.T) {
+	cfg := parse(t, "profiles:\n"+
+		"  a:\n    provider: jira\n    host: one.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n"+
+		"  b:\n    provider: jira\n    host: two.atlassian.net\n    project: abc\n    auth:\n      token_env: T\n")
+	if len(cfg.Profiles) != 2 {
+		t.Fatalf("got %d profiles, want 2", len(cfg.Profiles))
 	}
 }
 
@@ -294,9 +358,15 @@ func TestSelectMatchesByProviderAndHost(t *testing.T) {
 			wantName: "enterprise", wantOK: true,
 		},
 		{
-			name:     "host matching ignores case and www.",
-			r:        ref.Ref{Tracker: ref.TrackerGitHub, Host: "www.GitHub.com"},
+			name:     "host matching ignores case",
+			r:        ref.Ref{Tracker: ref.TrackerGitHub, Host: "GitHub.com"},
 			wantName: "dotcom", wantOK: true,
+		},
+		{
+			// "www.ghe.example" and "ghe.example" are two origins; a credential
+			// scoped to one must not follow a ref naming the other.
+			name: "a www. host does not match the host without it",
+			r:    ref.Ref{Tracker: ref.TrackerGitHub, Host: "www.github.com"},
 		},
 		{
 			name: "an unknown host matches nothing, and that is not an error",
@@ -365,6 +435,108 @@ func TestSelectProfileOverride(t *testing.T) {
 			t.Errorf("error = %q, want it to mention %q", err, want)
 		}
 	}
+}
+
+// A Profile is a credential. An explicit --profile may name one for a Ref that
+// says nothing about its host, but never for a Ref that names a different one:
+// that would send one site's email and token to another site.
+func TestSelectProfileOverrideIsBoundToTheRefsHost(t *testing.T) {
+	cfg := parse(t, "profiles:\n"+
+		"  acme-jira:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n"+
+		"  dotcom:\n    provider: github\n")
+
+	tests := []struct {
+		name    string
+		r       ref.Ref
+		profile string
+		want    []string
+	}{
+		{
+			name:    "a jira profile for a github ref",
+			r:       ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Raw: "acme/widgets#1"},
+			profile: "acme-jira",
+			want:    []string{`profile "acme-jira" is a jira profile`, "acme/widgets#1", "github ref"},
+		},
+		{
+			name:    "a profile serving another site",
+			r:       ref.Ref{Tracker: ref.TrackerJira, Host: "other.atlassian.net", Key: "ABC-1", Raw: "https://other.atlassian.net/browse/ABC-1"},
+			profile: "acme-jira",
+			want:    []string{`profile "acme-jira" serves acme.atlassian.net`, "other.atlassian.net"},
+		},
+		{
+			name:    "a github profile for an enterprise host",
+			r:       ref.Ref{Tracker: ref.TrackerGitHub, Host: "ghe.acme.test", Raw: "https://ghe.acme.test/acme/widgets/issues/1"},
+			profile: "dotcom",
+			want:    []string{`profile "dotcom" serves github.com`, "ghe.acme.test"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := cfg.Select(tt.r, tt.profile)
+			if err == nil {
+				t.Fatalf("Select = (%+v, %v), want an error", got, ok)
+			}
+			if ok {
+				t.Error("Select reported a match alongside its error")
+			}
+			for _, want := range append(tt.want, testPath) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// A Jira /browse/ URL names its own site. Matching it to a profile for the same
+// key on a different site would hand that profile's credential to the site in
+// the URL.
+func TestSelectKeyPrefixHonoursAnExplicitHost(t *testing.T) {
+	cfg := parse(t, "profiles:\n"+
+		"  acme:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n"+
+		"  other:\n    provider: jira\n    host: other.atlassian.net\n    project: ABC\n    auth:\n      token_env: T\n")
+
+	t.Run("a ref naming a site selects that site's profile", func(t *testing.T) {
+		got, ok, err := cfg.Select(ref.Ref{Tracker: ref.TrackerJira, Host: "other.atlassian.net",
+			Key: "ABC-1", Raw: "https://other.atlassian.net/browse/ABC-1"}, "")
+		if err != nil || !ok {
+			t.Fatalf("Select = (%v, %v), want the other-site profile", ok, err)
+		}
+		if got.Name != "other" {
+			t.Errorf("Select = %q, want %q", got.Name, "other")
+		}
+	})
+
+	t.Run("a ref naming an unconfigured site matches nothing", func(t *testing.T) {
+		got, ok, err := cfg.Select(ref.Ref{Tracker: ref.TrackerJira, Host: "third.atlassian.net",
+			Key: "ABC-1", Raw: "https://third.atlassian.net/browse/ABC-1"}, "")
+		if err != nil {
+			t.Fatalf("Select: %v", err)
+		}
+		if ok {
+			t.Errorf("Select = %+v, want no match", got)
+		}
+	})
+
+	t.Run("a bare key claimed twice is an ambiguity worth asking about", func(t *testing.T) {
+		_, ok, err := cfg.Select(ref.Ref{Tracker: ref.TrackerJira, Key: "ABC-1", Raw: "ABC-1"}, "")
+		if err == nil {
+			t.Fatalf("Select matched = %v, want an ambiguity error", ok)
+		}
+		for _, want := range []string{`"acme"`, `"other"`, `"ABC"`, "--profile"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("the known-prefix hint lists the key once", func(t *testing.T) {
+		got := cfg.KeyPrefixes()
+		if len(got) != 1 || got[0] != "ABC" {
+			t.Errorf("KeyPrefixes() = %v, want [ABC]", got)
+		}
+	})
 }
 
 func TestKeyPrefixes(t *testing.T) {
@@ -480,5 +652,51 @@ func TestCredentialStringRedactsTheToken(t *testing.T) {
 	}
 	if s := c.String(); !strings.Contains(s, "REDACTED") {
 		t.Errorf("String() = %q, want it to say REDACTED", s)
+	}
+}
+
+// String alone is not enough: encoding/json and %#v both read the exported
+// Token field and walk straight past it.
+func TestCredentialIsRedactedHoweverItIsPrinted(t *testing.T) {
+	const token = "s3cret-token-value"
+	c := config.Credential{User: "me@acme.test", Token: token}
+
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	renderings := map[string]string{
+		"json.Marshal": string(encoded),
+		"String":       c.String(),
+	}
+	// The verbs are formatted through a variable so that this stays a test of
+	// what each one prints rather than of what a linter thinks it should be
+	// rewritten to.
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		renderings[verb] = fmt.Sprintf(verb, c)
+	}
+
+	for how, got := range renderings {
+		if strings.Contains(got, token) {
+			t.Errorf("%s = %q, want the token redacted", how, got)
+		}
+		// A substring is a leak too: half a token still narrows the search.
+		for _, part := range []string{"s3cret", "token-value"} {
+			if strings.Contains(got, part) {
+				t.Errorf("%s = %q, want no part of the token", how, got)
+			}
+		}
+		if !strings.Contains(got, "REDACTED") {
+			t.Errorf("%s = %q, want it to say REDACTED", how, got)
+		}
+	}
+
+	// An absent token and a hidden one are different facts.
+	empty, err := json.Marshal(config.Credential{User: "me@acme.test"})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(empty), "REDACTED") {
+		t.Errorf("json.Marshal of a tokenless credential = %q, want no REDACTED", empty)
 	}
 }

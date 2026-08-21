@@ -204,9 +204,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 // exit code. Tests drive the whole program through this seam.
 func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	fs := flag.NewFlagSet(buildinfo.Name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	// The flag package prints its own usage on both -h and a parse error; Run
-	// decides where each of those goes, so the built-in printer stays silent.
+	// The flag package prints its own message and usage on both -h and a parse
+	// error, in its own voice and with single-dash flag names sitrep spells
+	// nowhere. Run owns every byte it writes, so the built-in printer is
+	// silenced on both counts and the parse error is re-emitted below.
+	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 
 	showVersion := fs.Bool("version", false, "show version information and exit")
@@ -222,8 +224,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 			fmt.Fprint(stdout, usage)
 			return exitOK
 		}
-		fmt.Fprint(stderr, usage)
-		return exitUsage
+		return usageError(stderr, flagErrorMessage(fs, err))
 	}
 
 	if *showVersion {
@@ -285,6 +286,16 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// apart from a GitHub Enterprise one.
 	r = retagProfileClaimedHost(cfg, r)
 
+	// An explicit --provider is authoritative for a Ref whose Tracker the
+	// grammar had to guess at. It is applied here, before the Profile is
+	// selected, so everything downstream — Profile matching, the driver, the
+	// Ref the driver reads — agrees about which Tracker this is.
+	if *providerName != providerAuto && *providerName != providerFake {
+		if r.Tracker, err = forceTracker(*providerName, r); err != nil {
+			return runtimeError(stderr, err)
+		}
+	}
+
 	// A Profile is resolved once, here, between the Epic Ref and the Provider,
 	// and is consumed entirely at Provider-construction time. Nothing
 	// downstream — not the pre-flight fetch, not the renderers, not the TUI —
@@ -305,6 +316,11 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 			return runtimeError(stderr, err)
 		}
 	}
+	// Every piece of tracker-controlled text crosses the Provider seam exactly
+	// once, so it is cleaned of terminal control sequences exactly once, here:
+	// the TUI, both one-shot renderers and the decoder path all read what comes
+	// out of this call.
+	p = provider.Sanitized(p)
 
 	// One batched fetch, before the mode switch, because every mode needs its
 	// result: it is what decides whether this Ref named an Epic or a Ticket, and
@@ -375,13 +391,36 @@ func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, opts t
 	opts.Input = deps.stdin()
 	opts.Output = stdout
 
-	if err := tui.Run(ctx, opts); err != nil {
+	code, failure := monitorExit(ctx, tui.Run(ctx, opts))
+	if failure != nil {
+		return runtimeError(stderr, failure)
+	}
+	return code
+}
+
+// monitorExit turns the monitor's outcome into an exit code, and into the one
+// sentence stderr gets when there is one.
+//
+// A ctrl+c prints nothing and exits 130 — README's contract, and the user knows
+// what they did. Raw mode delivers ctrl+c as an ordinary key press rather than
+// a signal, so the monitor reports it as ErrInterrupted; a signal from outside
+// arrives on the context instead, and means the same thing. Anything else is a
+// real failure, and the one thing that can go wrong here is not having a
+// terminal.
+func monitorExit(ctx context.Context, err error) (int, error) {
+	if errors.Is(err, tui.ErrInterrupted) {
+		return exitInterrupted, nil
+	}
+	if err != nil {
 		// Bubble Tea is the one thing here that knows whether it has a
 		// terminal, so this is where "you are in a pipe" gets named — with the
 		// way out, since both one-shot modes work anywhere.
-		return runtimeError(stderr, fmt.Errorf("the monitor needs a terminal (use --plain or --json here): %w", err))
+		return exitFailure, fmt.Errorf("the monitor needs a terminal (use --plain or --json here): %w", err)
 	}
-	return exitOK
+	if code, ok := interrupted(ctx); ok {
+		return code, nil
+	}
+	return exitOK, nil
 }
 
 // checkInterval rejects a refresh cadence that would hammer a Tracker. sitrep
@@ -464,17 +503,36 @@ func selectProfile(cfg config.Config, r ref.Ref, name string) (*config.Profile, 
 // several are an ambiguity worth asking about, and none is fatal because there
 // is no instance to read.
 func gitLabProfileForHostlessRef(cfg config.Config, r ref.Ref) (*config.Profile, error) {
+	// A bare "&12" or "%3" carries no path of its own, so only a Profile that
+	// names a project can resolve it. A projectless gitlab Profile matched here
+	// would fail downstream with "does not name a GitLab group or project",
+	// which is the same problem reported later and less clearly. A milestone
+	// reference like "acme/widgets%3" does carry its own path, so a projectless
+	// Profile stays a valid match there.
+	needsProject := r.Owner == ""
+
 	var matches []config.Profile
 	for _, name := range cfg.Names() {
-		if p := cfg.Profiles[name]; p.Provider == string(ref.TrackerGitLab) {
-			matches = append(matches, p)
+		p := cfg.Profiles[name]
+		if p.Provider != string(ref.TrackerGitLab) {
+			continue
 		}
+		if needsProject && p.Project == "" {
+			continue
+		}
+		matches = append(matches, p)
 	}
 
 	switch len(matches) {
 	case 1:
 		return &matches[0], nil
 	case 0:
+		if needsProject {
+			return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on, "+
+				"and which group or project it names — add a gitlab profile with a host and a "+
+				"project to %s, or pass the epic's full URL",
+				r.Raw, configLocation(cfg.Path))
+		}
 		return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on — "+
 			"add a gitlab profile to %s, or pass the epic's full URL",
 			r.Raw, configLocation(cfg.Path))
@@ -567,14 +625,36 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
+// flagErrorMessage rewrites the flag package's own wording into sitrep's. The
+// stream and the exit code were already right; only the sentence was unowned —
+// it named flags with a single dash, which no sitrep document does, and said
+// "parse error" where the actual problem is that a duration needs a unit.
+func flagErrorMessage(fs *flag.FlagSet, err error) string {
+	msg := err.Error()
+	fs.VisitAll(func(f *flag.Flag) {
+		msg = strings.ReplaceAll(msg, " -"+f.Name, " --"+f.Name)
+	})
+	// An undeclared flag is not in that list, and the flag package strips the
+	// second dash off whatever the user typed.
+	msg = strings.Replace(msg, "not defined: -", "not defined: --", 1)
+	if strings.Contains(msg, "--interval") {
+		msg += " (durations need a unit: 60s, 2m)"
+	}
+	return msg
+}
+
 func usageError(stderr io.Writer, msg string) int {
 	fmt.Fprintf(stderr, "%s: %s\n\n", buildinfo.Name, msg)
 	fmt.Fprint(stderr, usage)
 	return exitUsage
 }
 
+// runtimeError writes the one sentence a failed run leaves behind. The message
+// is sanitized as a backstop: provider.Errorf already cleans everything a
+// driver builds, and this covers anything constructed outside it that still
+// quotes tracker text.
 func runtimeError(stderr io.Writer, err error) int {
-	fmt.Fprintf(stderr, "%s: %v\n", buildinfo.Name, err)
+	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, provider.SanitizeLine(err.Error()))
 	return exitFailure
 }
 
@@ -643,30 +723,17 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 }
 
 // newProvider chooses the driver that serves this Ref and constructs it from
-// the Profile, when there is one. --provider is an override, not the normal
-// path.
+// the Profile, when there is one. The Ref's Tracker is the only input: an
+// explicit --provider has already been applied to it by forceTracker, so there
+// is one answer to "which driver is this" rather than two that can disagree.
+// The fake is the exception, because it serves any Ref and belongs to no
+// Tracker.
 //
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
 func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPath string) (provider.Provider, error) {
-	switch name {
-	case providerFake:
+	if name == providerFake {
 		return fake.New(), nil
-	case providerGitHub:
-		if r.Tracker != ref.TrackerGitHub {
-			return nil, fmt.Errorf("%q is not a GitHub Epic Ref", r.Raw)
-		}
-		return d.newGitHub(r, prof), nil
-	case providerJira:
-		if r.Tracker != ref.TrackerJira {
-			return nil, fmt.Errorf("%q is not a Jira Epic Ref", r.Raw)
-		}
-		return d.newJira(r, prof, configPath)
-	case providerGitLab:
-		if r.Tracker != ref.TrackerGitLab {
-			return nil, fmt.Errorf("%q is not a GitLab Epic Ref", r.Raw)
-		}
-		return d.newGitLab(r, prof)
 	}
 
 	switch r.Tracker {
@@ -678,6 +745,44 @@ func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPa
 		return d.newGitLab(r, prof)
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
+	}
+}
+
+// forceTracker applies an explicit --provider to a Ref, which is the one thing
+// the flag exists for: telling sitrep which driver serves an unrecognized host.
+// A self-managed GitLab URL with no "/-/" in it, or a bare number inside such a
+// clone, parses as GitHub Enterprise — the grammar's documented guess — and
+// --provider is how a user corrects it.
+//
+// It overrides a guess, never a fact. A ref whose host names its own Tracker,
+// or which carries a Jira-style key, said what it is; contradicting that is a
+// mistake worth reporting rather than obeying.
+func forceTracker(name string, r ref.Ref) (ref.Tracker, error) {
+	forced := ref.Tracker(name)
+	if r.Tracker == forced {
+		return forced, nil
+	}
+
+	known := ref.HostTracker(r.Host)
+	keyed := ref.KeyPrefix(r.Key) != "" && forced != ref.TrackerJira
+	if (known != ref.TrackerUnknown && known != forced) || keyed {
+		return "", fmt.Errorf("%q is not a %s Epic Ref", r.Raw, providerDisplayName(name))
+	}
+	return forced, nil
+}
+
+// providerDisplayName is how an error spells a provider: the Trackers' own
+// capitalisation, because that is how the user reads them everywhere else.
+func providerDisplayName(name string) string {
+	switch name {
+	case providerGitHub:
+		return "GitHub"
+	case providerGitLab:
+		return "GitLab"
+	case providerJira:
+		return "Jira"
+	default:
+		return name
 	}
 }
 

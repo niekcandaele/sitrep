@@ -154,12 +154,6 @@ func TestJiraProfileWithAnUnsetTokenEnv(t *testing.T) {
 	}
 }
 
-// TestResolvedProfileNeverPrintsItsToken lived here while GitLab was the
-// unwritten seam it used to stay hermetic. #14 wrote that driver, so the
-// promise moved to gitlab_test.go and is now kept against a replay server: a
-// Profile whose token actually reaches a Provider and a fetch that actually
-// succeeds is a stronger statement than one that failed before connecting.
-
 func TestUnknownProfileNameListsTheRealOnes(t *testing.T) {
 	got := runWith([]string{"--profile", "nope", "ABC-123", "--json"}, cli.Deps{
 		Provider: fake.New(),

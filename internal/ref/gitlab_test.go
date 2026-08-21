@@ -232,7 +232,10 @@ func TestParseGitLabMilestoneReferenceForm(t *testing.T) {
 }
 
 func TestParseRejectsMalformedGitLabMilestoneReferences(t *testing.T) {
-	for _, raw := range []string{"%", "%0", "%abc", "acme%", "acme%x", "a%b%3"} {
+	// "groups/%3" and "groups/" name no group: accepting either would resolve
+	// silently against the Profile's default project, which is a different
+	// milestone than the one asked for.
+	for _, raw := range []string{"%", "%0", "%abc", "acme%", "acme%x", "a%b%3", "groups/%3", "groups/"} {
 		t.Run(raw, func(t *testing.T) {
 			got, err := ref.Parse(context.Background(), raw,
 				ref.WithRemoteLookup(stubLookup("git@github.com:acme/widgets.git", nil)))

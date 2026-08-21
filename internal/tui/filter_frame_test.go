@@ -290,6 +290,29 @@ func TestTheFindBoxOwnsTheKeyboard(t *testing.T) {
 	}
 }
 
+// The other half of that contract: the arrow keys are not text. A query can be
+// narrowed and one of its hits picked without leaving the box.
+func TestTheFindBoxStillMovesTheSelection(t *testing.T) {
+	_, s := startFixture(t)
+
+	s.tm.Send(keyPress("/"))
+	s.typeText("s")
+
+	s.tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+
+	m, _ := s.finishWith(t, ctrlCKey)
+
+	if m.selected == 0 {
+		t.Error("down did not move the selection inside the find box")
+	}
+	if !m.searching {
+		t.Error("down closed the find box; it must only move the selection")
+	}
+	if m.search.Value() != "s" {
+		t.Errorf("the box holds %q, want the query untouched by the arrow key", m.search.Value())
+	}
+}
+
 // The esc ladder: out of the box, out of the filter, out of the program.
 func TestEscapeLadder(t *testing.T) {
 	_, s := startFixture(t)

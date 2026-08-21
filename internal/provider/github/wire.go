@@ -19,6 +19,13 @@ type graphQLResponse struct {
 	Data struct {
 		Repository *struct {
 			Issue *issueNode `json:"issue"`
+			// Kind names what the number actually is. GitHub shares one number
+			// namespace between issues and pull requests, so `issue(number:)`
+			// is null for a pull request — and "not found" is then a false
+			// claim about a link the user can open in a browser.
+			Kind *struct {
+				TypeName string `json:"__typename"`
+			} `json:"kind"`
 		} `json:"repository"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`

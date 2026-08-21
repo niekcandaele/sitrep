@@ -68,13 +68,23 @@ func newLinkType(t linkTypeWire) linkType {
 // a blocking type whatever it has been renamed to, and everything else is
 // Relates — displayed through the instance's own label rather than dropped.
 //
+// Each direction is read in its own voice, because an administrator is free to
+// swap them. "is blocked by" is passive and means that end is BlockedBy;
+// "blocks" is active and means that end is Blocks. Whichever direction speaks
+// first decides, and the other end takes the complement — a type cannot have
+// both ends blocking the same way. Only when the directional phrases say
+// nothing and the *name* mentions blocking does this fall back to Jira's
+// built-in orientation, inward "is blocked by" / outward "blocks".
+//
 // Never key this on a numeric id such as 10000: ids differ per instance.
 func classify(t linkTypeWire) (inward, outward model.LinkKind) {
-	// Jira's built-in blocking type is inward "is blocked by" / outward
-	// "blocks", and a renamed instance keeps that phrasing in at least one of
-	// the three fields — which is exactly why the wording, not the name, is the
-	// signal.
-	if mentionsBlocking(t.Name) || mentionsBlocking(t.Inward) || mentionsBlocking(t.Outward) {
+	if kind, ok := blockingKind(t.Inward); ok {
+		return kind, complementOf(kind)
+	}
+	if kind, ok := blockingKind(t.Outward); ok {
+		return complementOf(kind), kind
+	}
+	if mentionsBlocking(t.Name) {
 		return model.LinkBlockedBy, model.LinkBlocks
 	}
 	// Relates, Duplicate, Cloners, Causes and any invented type all land here.
@@ -83,10 +93,39 @@ func classify(t linkTypeWire) (inward, outward model.LinkKind) {
 	return model.LinkRelates, model.LinkRelates
 }
 
+// blockingKind reads one direction's phrase in its own voice: "blocked" is
+// passive and names the end that is being blocked, and "block" without it is
+// active. A phrase that says nothing about blocking reports false.
+func blockingKind(phrase string) (model.LinkKind, bool) {
+	normalized := normalizePhrase(phrase)
+	switch {
+	case strings.Contains(normalized, "blocked"):
+		return model.LinkBlockedBy, true
+	case strings.Contains(normalized, "block"):
+		return model.LinkBlocks, true
+	default:
+		return model.LinkRelates, false
+	}
+}
+
+// complementOf is the other end of a blocking relationship.
+func complementOf(kind model.LinkKind) model.LinkKind {
+	if kind == model.LinkBlockedBy {
+		return model.LinkBlocks
+	}
+	return model.LinkBlockedBy
+}
+
 // mentionsBlocking reports whether a phrase speaks of blocking, ignoring case
 // and whatever whitespace an administrator typed.
 func mentionsBlocking(phrase string) bool {
-	return strings.Contains(strings.ToLower(strings.Join(strings.Fields(phrase), " ")), "block")
+	return strings.Contains(normalizePhrase(phrase), "block")
+}
+
+// normalizePhrase lower-cases a phrase and collapses whatever whitespace an
+// administrator typed.
+func normalizePhrase(phrase string) string {
+	return strings.ToLower(strings.Join(strings.Fields(phrase), " "))
 }
 
 // newLinks maps an issue's links onto sitrep's, in Jira's own order within

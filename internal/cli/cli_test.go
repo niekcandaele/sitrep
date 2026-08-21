@@ -97,6 +97,23 @@ func TestRun(t *testing.T) {
 			wantStderr:   []string{"refresh interval must be at least 5s"},
 			wantEmptyOut: true,
 		},
+		{
+			// The flag package's own wording named the flag with one dash,
+			// which no sitrep document does, and said "parse error" where the
+			// real problem is a duration with no unit.
+			name:         "a malformed duration speaks sitrep's voice",
+			args:         []string{"--interval=abc", "123"},
+			wantCode:     2,
+			wantStderr:   []string{"sitrep: ", "--interval", "durations need a unit"},
+			wantEmptyOut: true,
+		},
+		{
+			name:         "an unknown flag speaks sitrep's voice",
+			args:         []string{"--badflag", "123"},
+			wantCode:     2,
+			wantStderr:   []string{"sitrep: ", "--badflag"},
+			wantEmptyOut: true,
+		},
 	}
 
 	for _, tt := range tests {

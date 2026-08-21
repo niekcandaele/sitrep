@@ -47,6 +47,26 @@ func TestParseAcceptedForms(t *testing.T) {
 			want: ref.Ref{Tracker: ref.TrackerGitHub, Host: "ghe.corp.example", Owner: "acme", Repo: "widgets", Number: 111},
 		},
 		{
+			// "www." is a spelling of github.com, not a different origin, and the
+			// GitHub driver has to reach api.github.com rather than
+			// www.github.com/api/graphql.
+			name: "www.github.com canonicalises",
+			raw:  "https://www.github.com/acme/widgets/issues/111",
+			want: ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 111},
+		},
+		{
+			// An unrecognized host keeps its "www.": it is a distinct host, and
+			// therefore a distinct credential scope, from the one without it.
+			name: "www. on an unknown host is kept",
+			raw:  "https://www.ghe.example/acme/widgets/issues/111",
+			want: ref.Ref{Tracker: ref.TrackerGitHub, Host: "www.ghe.example", Owner: "acme", Repo: "widgets", Number: 111},
+		},
+		{
+			name: "a self-hosted instance on a custom port keeps it",
+			raw:  "https://git.acme.test:8443/acme/widgets/-/issues/7",
+			want: ref.Ref{Tracker: ref.TrackerGitLab, Host: "git.acme.test:8443", Owner: "acme", Repo: "widgets", Number: 7},
+		},
+		{
 			name: "owner/repo#N",
 			raw:  "acme/widgets#111",
 			want: ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 111},
@@ -197,6 +217,10 @@ func TestParseRemoteURL(t *testing.T) {
 		{raw: "https://ghe.corp.example/acme/widgets.git", tracker: ref.TrackerGitHub, host: "ghe.corp.example", owner: "acme", repo: "widgets"},
 		{raw: "git@gitlab.com:acme/widgets.git", tracker: ref.TrackerGitLab, host: "gitlab.com", owner: "acme", repo: "widgets"},
 		{raw: "git@gitlab.com:group/sub/project.git", tracker: ref.TrackerGitLab, host: "gitlab.com", owner: "group", repo: "sub/project"},
+		{raw: "https://www.github.com/acme/widgets.git", tracker: ref.TrackerGitHub, host: "github.com", owner: "acme", repo: "widgets"},
+		{raw: "https://www.ghe.example/acme/widgets.git", tracker: ref.TrackerGitHub, host: "www.ghe.example", owner: "acme", repo: "widgets"},
+		{raw: "ssh://git@git.acme.test:8443/acme/widgets.git", tracker: ref.TrackerGitHub, host: "git.acme.test:8443", owner: "acme", repo: "widgets"},
+		{raw: "git@git.acme.test:acme/widgets.git", tracker: ref.TrackerGitHub, host: "git.acme.test", owner: "acme", repo: "widgets"},
 		{raw: "/srv/git/bare.git", wantErr: true},
 		{raw: "", wantErr: true},
 		{raw: "not a url", wantErr: true},
@@ -243,6 +267,32 @@ func TestRefStringRoundTrips(t *testing.T) {
 			}
 			if second.Owner != first.Owner || second.Repo != first.Repo || second.Number != first.Number {
 				t.Errorf("%q round-tripped to %+v, want %+v", raw, second, first)
+			}
+		})
+	}
+}
+
+// HostTracker is what the CLI asks to tell a Ref whose Tracker was read off a
+// recognized host from one that was guessed.
+func TestHostTracker(t *testing.T) {
+	tests := []struct {
+		host string
+		want ref.Tracker
+	}{
+		{host: "github.com", want: ref.TrackerGitHub},
+		{host: "GitHub.com", want: ref.TrackerGitHub},
+		{host: "gitlab.com", want: ref.TrackerGitLab},
+		{host: "gitlab.com:8443", want: ref.TrackerGitLab},
+		{host: "acme.atlassian.net", want: ref.TrackerJira},
+		{host: "ghe.example", want: ref.TrackerUnknown},
+		{host: "www.ghe.example", want: ref.TrackerUnknown},
+		{host: "git.acme.test:8443", want: ref.TrackerUnknown},
+		{host: "", want: ref.TrackerUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if got := ref.HostTracker(tt.host); got != tt.want {
+				t.Errorf("HostTracker(%q) = %q, want %q", tt.host, got, tt.want)
 			}
 		})
 	}

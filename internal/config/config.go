@@ -45,6 +45,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -137,6 +138,31 @@ func (c Credential) String() string {
 	return fmt.Sprintf("config.Credential{User:%s, Token:%s}", c.User, token)
 }
 
+// GoString renders the same redacted form for %#v, which formats struct fields
+// directly and would otherwise walk straight past String.
+func (c Credential) GoString() string { return c.String() }
+
+// MarshalJSON renders the same redacted form for encoding/json, which reads the
+// exported Token field rather than String. Token stays exported because the
+// constructors in internal/cli read it, and because the point is that the type
+// is safe however it is printed rather than safe if everybody remembers.
+func (c Credential) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		User  string `json:"user"`
+		Token string `json:"token"`
+	}{User: c.User, Token: redactedToken(c.Token)})
+}
+
+// redactedToken is the stand-in a Credential prints in place of its secret,
+// and "" for a Credential that holds none — an absent token and a hidden one
+// are different facts.
+func redactedToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	return "REDACTED"
+}
+
 // The Provider names a Profile may select. They are the Tracker names
 // internal/ref uses, so a Profile's provider and a Ref's Tracker compare
 // directly.
@@ -165,15 +191,23 @@ func (c Config) Names() []string {
 }
 
 // KeyPrefixes returns the Jira project keys this Config's Profiles claim,
-// sorted and upper-cased. The "no Profile matches this key prefix" error lists
-// them, because the fastest way to fix a typo is to see the alternatives.
+// sorted, upper-cased and de-duplicated — one key may legitimately be claimed
+// on two Jira sites. The "no Profile matches this key prefix" error lists them,
+// because the fastest way to fix a typo is to see the alternatives.
 func (c Config) KeyPrefixes() []string {
+	seen := map[string]bool{}
 	var prefixes []string
 	for _, name := range c.Names() {
 		p := c.Profiles[name]
-		if p.Provider == providerJira && p.Project != "" {
-			prefixes = append(prefixes, strings.ToUpper(p.Project))
+		if p.Provider != providerJira || p.Project == "" {
+			continue
 		}
+		key := strings.ToUpper(p.Project)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		prefixes = append(prefixes, key)
 	}
 	sort.Strings(prefixes)
 	return prefixes
@@ -185,11 +219,18 @@ func (c Config) KeyPrefixes() []string {
 //  1. An Epic Ref carrying a Jira-style key matches the Profile whose project
 //     is that key's prefix, case-insensitively. This is the Epic Ref grammar's
 //     third form: "PROJ-12" means nothing until a Profile says which site PROJ
-//     lives on.
+//     lives on. When the Ref also names a site — a /browse/ URL does — the
+//     Profile must serve that site too.
 //  2. Any other Ref matches the single Profile whose provider is the Ref's
 //     Tracker and whose host is the Ref's host.
 //  3. No match is not an error: GitHub with `gh` logged in is expected to run
 //     with no config file at all.
+//
+// A Profile is a credential, so every road through here ends at a Profile whose
+// host is the host the Ref names — including the explicit --profile road, which
+// otherwise would hand one site's email and token to another site that merely
+// asked. A Ref carrying no host of its own has nothing to conflict with and is
+// accepted, which is the case --profile exists for.
 //
 // An ambiguous match is an error naming the candidates, because guessing which
 // Tracker to read from is worse than asking. "No match" is reported as a fact
@@ -201,19 +242,40 @@ func (c Config) Select(r ref.Ref, name string) (Profile, bool, error) {
 		if !ok {
 			return Profile{}, false, c.errorf("no profile named %q%s", name, c.knownProfiles())
 		}
+		if r.Tracker != ref.TrackerUnknown && p.Provider != string(r.Tracker) {
+			return Profile{}, false, c.errorf("profile %q is a %s profile, but %s is a %s ref",
+				name, p.Provider, r.Raw, r.Tracker)
+		}
+		if r.Host != "" && normalizeHost(p.effectiveHost()) != normalizeHost(r.Host) {
+			return Profile{}, false, c.errorf("profile %q serves %s, but %s names %s",
+				name, p.effectiveHost(), r.Raw, r.Host)
+		}
 		return p, true, nil
 	}
 
 	if prefix := ref.KeyPrefix(r.Key); prefix != "" {
-		// Two Jira Profiles claiming one key prefix is rejected at load time, so
-		// this match cannot be ambiguous.
+		// One key prefix may be claimed on two Jira sites, so a Ref that names a
+		// site narrows to it and a Ref that does not must be unambiguous.
+		var matches []Profile
 		for _, n := range c.Names() {
 			p := c.Profiles[n]
-			if p.Provider == providerJira && strings.EqualFold(p.Project, prefix) {
-				return p, true, nil
+			if p.Provider != providerJira || !strings.EqualFold(p.Project, prefix) {
+				continue
 			}
+			if r.Host != "" && normalizeHost(p.effectiveHost()) != normalizeHost(r.Host) {
+				continue
+			}
+			matches = append(matches, p)
 		}
-		return Profile{}, false, nil
+		switch len(matches) {
+		case 0:
+			return Profile{}, false, nil
+		case 1:
+			return matches[0], true, nil
+		default:
+			return Profile{}, false, c.errorf("profiles %s all claim the Jira project key %q — pass --profile to choose",
+				quoteJoin(profileNames(matches)), prefix)
+		}
 	}
 
 	if r.Tracker == ref.TrackerUnknown {
@@ -262,7 +324,9 @@ func (p Profile) Complete(r ref.Ref) ref.Ref {
 //
 // A named environment variable that is unset or empty is an error, and the
 // error names the Profile and the variable so the fix is obvious. It never
-// contains the value of anything.
+// contains the value of anything — which holds only because isEnvName ran at
+// load time and rejected anything shaped like a token, so the name this error
+// prints cannot itself be a secret somebody pasted into token_env.
 //
 // An empty TokenEnv yields a zero Credential and no error: that is the GitHub
 // Profile that exists only to set a host or an interval and lets `gh` do the
@@ -353,8 +417,12 @@ func quoteJoin(values []string) string {
 	return strings.Join(quoted, " and ")
 }
 
-// normalizeHost makes host comparison case-insensitive and blind to a leading
-// "www.", which is the only cosmetic difference a real host acquires.
+// normalizeHost makes host comparison case-insensitive and nothing else. Case
+// is the only difference between two spellings of one host that does not also
+// change which origin a credential is being sent to: "www.ghe.example" and
+// "ghe.example" are two hosts, and treating them as one is how a token scoped
+// to the first reaches the second. Canonicalising the handful of hosts where
+// "www." really is cosmetic is internal/ref's job, on the way into a Ref.
 func normalizeHost(host string) string {
-	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(host)), "www.")
+	return strings.ToLower(strings.TrimSpace(host))
 }

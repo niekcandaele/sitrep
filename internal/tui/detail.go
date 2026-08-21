@@ -315,8 +315,7 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.detailKeys.Quit):
-		m.quitting = true
-		return m, tea.Quit
+		return m.quit(msg), tea.Quit
 
 	case key.Matches(msg, m.detailKeys.Parent):
 		return m.walkUp()
@@ -326,8 +325,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// The esc ladder's last rung: a decoded Ticket has no list behind it,
 			// so "one level up" is out of the program. q and ctrl+c still quit
 			// from everywhere, so nobody is trapped either way.
-			m.quitting = true
-			return m, tea.Quit
+			return m.quit(msg), tea.Quit
 		}
 		m.mode = modeList
 		m.detail = detailState{}

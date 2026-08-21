@@ -76,6 +76,23 @@ func TestLinksWithARenamedCatalogue(t *testing.T) {
 	})
 }
 
+// An administrator may swap the two directions of the blocking type. Reading
+// the pair as a unit rather than each phrase in its own voice would show a
+// blocked ticket as blocking — the opposite of the truth, on the one field a
+// human uses to decide what to work on next.
+func TestLinksWithAnInvertedCatalogue(t *testing.T) {
+	checkLinks(t, linksFor(t, response{file: "issue_link_types_inverted.json"}), []wantLink{
+		// The entry Jira reports through inwardIssue now carries the active
+		// phrase, so this Ticket blocks ABC-3.
+		{model.LinkBlocks, "blocks", "ABC-3"},
+		{model.LinkBlockedBy, "is blocked by", "ABC-9"},
+		// Neither remaining type is in this catalogue, so both fall back to the
+		// type object Jira inlines on the entry.
+		{model.LinkRelates, "relates to", "ABC-6"},
+		{model.LinkRelates, "causes", "DEF-4"},
+	})
+}
+
 // The catalogue's job is consistency, not availability: a Detail that renders
 // its links through their inline labels is strictly better than one that
 // refuses to open.

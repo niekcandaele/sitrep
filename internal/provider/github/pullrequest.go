@@ -15,7 +15,12 @@ import (
 // did not resolve, a repository with no CI configured.
 
 type pullRequestConnection struct {
-	Nodes []pullRequestNode `json:"nodes"`
+	// TotalCount is how many closing pull requests the Ticket has, which can be
+	// more than Nodes holds: the query caps the connection rather than
+	// paginating it (see query.go). Nothing renders it yet; it is selected so
+	// the driver knows when it truncated instead of quietly reporting a subset.
+	TotalCount int               `json:"totalCount"`
+	Nodes      []pullRequestNode `json:"nodes"`
 }
 
 type pullRequestNode struct {
@@ -167,9 +172,15 @@ func leadFirst(prs []model.PullRequest) []model.PullRequest {
 }
 
 // leadPullRequest returns the pull request that best represents a Ticket's
-// current state: a merged one if the work landed, otherwise the newest open or
-// draft one, otherwise the newest of whatever is left. It is the rule that
-// makes a Ticket with three pull requests still read as one situation.
+// current state: the newest open or draft one if anything is still in flight,
+// otherwise a merged one, otherwise the newest of whatever is left. It is the
+// rule that makes a Ticket with three pull requests still read as one
+// situation.
+//
+// Work in flight outranks work that landed because that is the same evidence
+// statusWithPullRequests reads: a Ticket with one merged and one open pull
+// request is grouped as In Progress, so the pull request its row shows has to
+// be the open one. Two answers about one Ticket is worse than either answer.
 //
 // "Newest" is the highest pull request number. Numbers are unique per
 // repository, so a tie is only possible across repositories; it is broken by
@@ -187,16 +198,16 @@ func leadPullRequest(prs []model.PullRequest) (model.PullRequest, bool) {
 // the front needs: two pull requests in different repositories can share a
 // number, so a value is not an identity here.
 func leadIndex(prs []model.PullRequest) (int, bool) {
-	for i, pr := range prs {
-		if pr.State == model.PRMerged {
-			return i, true
-		}
-	}
-
 	if i, ok := newestWhere(prs, func(pr model.PullRequest) bool {
 		return pr.State == model.PROpen || pr.State == model.PRDraft
 	}); ok {
 		return i, true
+	}
+
+	for i, pr := range prs {
+		if pr.State == model.PRMerged {
+			return i, true
+		}
 	}
 
 	return newestWhere(prs, func(model.PullRequest) bool { return true })

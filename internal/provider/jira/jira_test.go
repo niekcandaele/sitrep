@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -264,8 +265,11 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 		if got.URL != "https://acme.atlassian.net/browse/"+w.key {
 			t.Errorf("Tickets[%d].URL = %q, want the browse URL", i, got.URL)
 		}
-		if got.ParentID != "ABC-1" {
-			t.Errorf("Tickets[%d].ParentID = %q, want ABC-1", i, got.ParentID)
+		// Every child here hangs directly off the fetched Epic, which
+		// model.Ticket documents as an empty ParentID — the same shape the
+		// GitHub driver produces for the same situation.
+		if got.ParentID != "" {
+			t.Errorf("Tickets[%d].ParentID = %q, want it empty for a direct child", i, got.ParentID)
 		}
 	}
 
@@ -678,10 +682,63 @@ func TestMissingCredentials(t *testing.T) {
 // Credentials never render, however they are printed.
 func TestCredentialsNeverRenderTheirToken(t *testing.T) {
 	c := jira.Credentials{Email: fixtureEmail, Token: fixtureToken}
-	for _, rendered := range []string{fmt.Sprint(c), fmt.Sprintf("%v", c), c.String()} {
+
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	// %#v and encoding/json both read the exported Token field and would walk
+	// straight past String.
+	renderings := []string{fmt.Sprint(c), c.String(), string(encoded)}
+	// The verbs are formatted through a variable so that this stays a test of
+	// what each one prints rather than of what a linter thinks it should be
+	// rewritten to.
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		renderings = append(renderings, fmt.Sprintf(verb, c))
+	}
+	for _, rendered := range renderings {
 		if strings.Contains(rendered, fixtureToken) {
 			t.Errorf("Credentials rendered as %q, which contains the token", rendered)
 		}
+		// A substring is a leak too: half a token still narrows the search.
+		if half := fixtureToken[:len(fixtureToken)/2]; strings.Contains(rendered, half) {
+			t.Errorf("Credentials rendered as %q, which contains part of the token", rendered)
+		}
+		if !strings.Contains(rendered, "REDACTED") {
+			t.Errorf("Credentials rendered as %q, want it to say REDACTED", rendered)
+		}
+	}
+}
+
+// An empty ParentID means "hangs directly off the Epic". A child whose parent
+// is something else still says so, so the field keeps meaning what
+// model.Ticket documents.
+func TestParentIDNamesOnlyANonEpicParent(t *testing.T) {
+	const children = `{"isLast":true,"issues":[
+		{"key":"ABC-2","fields":{"summary":"Direct","status":{"name":"To Do",
+		 "statusCategory":{"key":"new"}},"parent":{"key":"ABC-1"},
+		 "project":{"key":"ABC"}}},
+		{"key":"ABC-3","fields":{"summary":"Nested","status":{"name":"To Do",
+		 "statusCategory":{"key":"new"}},"parent":{"key":"ABC-2"},
+		 "project":{"key":"ABC"}}}]}`
+
+	s := newReplayServer(t, map[string][]response{
+		epicPath:   {{file: "epic_issue.json"}},
+		searchPath: {{body: children}},
+	})
+
+	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v", err)
+	}
+	if len(snap.Tickets) != 2 {
+		t.Fatalf("got %d Tickets, want 2", len(snap.Tickets))
+	}
+	if got := snap.Tickets[0].ParentID; got != "" {
+		t.Errorf("ABC-2.ParentID = %q, want it empty: its parent is the fetched Epic", got)
+	}
+	if got := snap.Tickets[1].ParentID; got != "ABC-2" {
+		t.Errorf("ABC-3.ParentID = %q, want ABC-2", got)
 	}
 }
 
@@ -700,6 +757,28 @@ func TestPaginationSafety(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "no new page cursor") {
 			t.Errorf("error = %q, want it to name the cursor problem", err)
+		}
+	})
+
+	// "there is more" with no cursor is an inconsistent answer, and the GitHub
+	// and GitLab drivers both refuse one. A situation report silently missing
+	// children is worse than one that failed.
+	t.Run("a truncated child list is an error, not a short epic", func(t *testing.T) {
+		s := newReplayServer(t, map[string][]response{
+			epicPath:   {{file: "epic_issue.json"}},
+			searchPath: {{file: "epic_children_truncated.json"}},
+		})
+		p := newProvider(s)
+
+		snap, err := p.FetchEpic(context.Background(), epicRef)
+		if err == nil {
+			t.Fatalf("FetchEpic returned %d children and no error; want an error",
+				len(snap.Tickets))
+		}
+		for _, want := range []string{"jira: ", "ABC-1", "no page cursor"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to mention %q", err, want)
+			}
 		}
 	})
 

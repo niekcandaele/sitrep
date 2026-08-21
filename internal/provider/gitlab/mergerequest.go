@@ -16,9 +16,9 @@ import (
 // head_pipeline is null on a merge request whose project runs no CI, and
 // references is missing from some payloads entirely.
 
-// mergeRequestWire is one merge request, in the *single*-merge-request shape the
-// related_merge_requests endpoint returns — which is the shape that carries
-// head_pipeline. See the package doc.
+// mergeRequestWire is one merge request. Both endpoints correlate reads —
+// closed_by and related_merge_requests — return this shape; only the latter
+// fills in head_pipeline, which is why both are read. See the package doc.
 type mergeRequestWire struct {
 	ID        int            `json:"id"`
 	IID       int            `json:"iid"`
@@ -172,10 +172,13 @@ func normalizePRState(state string, draft bool) model.PRState {
 //
 //  1. requested_changes is GitLab stating that reviewers have requested changes,
 //     and it is a hard block, so it wins.
-//  2. approvals.approved_by non-empty means somebody clicked Approve. Read
-//     approved_by, *not* `approved`: `approved` means "the approval requirement
-//     is satisfied", which is true with nobody having approved anything on a
-//     project whose approvals_required is 0.
+//  2. approvals.approved_by non-empty *and* nothing left to approve means the
+//     merge request is approved. Both halves are load-bearing. approved_by
+//     rather than `approved`, because `approved` means "the approval
+//     requirement is satisfied", which is true with nobody having approved
+//     anything on a project whose approvals_required is 0. approvals_left == 0
+//     as well, because a merge request needing two approvals and holding one is
+//     not approved — it is still waiting, which is step 3.
 //  3. not_approved, an outstanding approvals_left, or anybody asked to review at
 //     all is Pending.
 //
@@ -189,7 +192,7 @@ func normalizeReview(detailedMergeStatus string, reviewerCount int, approvals *a
 	if status == mergeStatusRequestedChanges {
 		return model.ReviewChangesRequested
 	}
-	if approvals != nil && len(approvals.ApprovedBy) > 0 {
+	if approvals != nil && len(approvals.ApprovedBy) > 0 && approvals.ApprovalsLeft == 0 {
 		return model.ReviewApproved
 	}
 	if status == mergeStatusNotApproved || (approvals != nil && approvals.ApprovalsLeft > 0) || reviewerCount > 0 {
@@ -244,9 +247,15 @@ func leadFirst(prs []model.PullRequest) []model.PullRequest {
 }
 
 // leadIndex returns the position of the merge request that best represents a
-// Ticket's current state: a merged one if the work landed, otherwise the newest
-// open or draft one, otherwise the newest of whatever is left. It is the rule
-// that makes a Ticket with three merge requests still read as one situation.
+// Ticket's current state: the newest open or draft one if anything is still in
+// flight, otherwise a merged one, otherwise the newest of whatever is left. It
+// is the rule that makes a Ticket with three merge requests still read as one
+// situation.
+//
+// Work in flight outranks work that landed because that is the same evidence
+// statusWithMergeRequests reads: a Ticket with one merged and one open merge
+// request is grouped as In Progress, so the merge request its row shows has to
+// be the open one. Two answers about one Ticket is worse than either answer.
 //
 // "Newest" is the highest merge request number. Numbers are unique per project,
 // so a tie is only possible across projects; it is broken by keeping the earlier
@@ -255,16 +264,16 @@ func leadFirst(prs []model.PullRequest) []model.PullRequest {
 // The index rather than the value is what the callers need: two merge requests
 // in different projects can share a number, so a value is not an identity here.
 func leadIndex(prs []model.PullRequest) (int, bool) {
-	for i, pr := range prs {
-		if pr.State == model.PRMerged {
-			return i, true
-		}
-	}
-
 	if i, ok := newestWhere(prs, func(pr model.PullRequest) bool {
 		return pr.State == model.PROpen || pr.State == model.PRDraft
 	}); ok {
 		return i, true
+	}
+
+	for i, pr := range prs {
+		if pr.State == model.PRMerged {
+			return i, true
+		}
 	}
 
 	return newestWhere(prs, func(model.PullRequest) bool { return true })

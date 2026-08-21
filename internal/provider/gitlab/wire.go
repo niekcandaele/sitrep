@@ -287,7 +287,7 @@ func newEpicFromIssue(i issueWire) model.Epic {
 // sub-epics are not expanded and an issue's own child work items (tasks) are
 // not read, so this driver does not claim to know whether descendants are
 // included.
-func newTicketFromIssue(i issueWire, parentID model.TicketID) model.Ticket {
+func newTicketFromIssue(i issueWire) model.Ticket {
 	status, native := normalizeStatus(i.State, i.Labels, i.closedAsDuplicate())
 	return model.Ticket{
 		ID:           i.ticketID(),
@@ -297,7 +297,12 @@ func newTicketFromIssue(i issueWire, parentID model.TicketID) model.Ticket {
 		Status:       status,
 		NativeStatus: native,
 		Assignees:    newAssignees(i.Assignees),
-		ParentID:     parentID,
+		// ParentID stays empty. Everything the epic-issues and milestone-issues
+		// endpoints return hangs directly off the Epic — sub-epics are not
+		// expanded and an issue's own tasks are not read — and model.Ticket
+		// documents an empty ParentID as exactly that. Copying the Epic's own ID
+		// onto every child would make the same logical shape serialize
+		// differently here than on GitHub.
 		// Repository is the child's own project path, per model.Ticket's doc
 		// ("the display origin"), so a cross-project child identifies itself.
 		Repository: i.projectPath(),

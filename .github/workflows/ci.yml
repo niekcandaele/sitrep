@@ -7,6 +7,10 @@ on:
       - main
       - 'epic/**'
 
+# Every `uses:` below is pinned to a full commit SHA with its human-readable
+# version in the trailing comment: a mutable major-version tag can be retagged
+# at any time, and a mixed convention between this workflow and release.yml
+# invites the next person to guess.
 permissions:
   contents: read
 
@@ -19,9 +23,9 @@ jobs:
     name: Format, vet, lint, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           check-latest: true
@@ -44,7 +48,7 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.1
 
@@ -55,24 +59,24 @@ jobs:
     name: Release dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: goreleaser check
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: '~> v2'
+          version: v2.17.1
           args: check
 
       - name: goreleaser snapshot build
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: '~> v2'
+          version: v2.17.1
           args: release --snapshot --clean --skip=publish
 
       - name: Verify the release matrix produced four archives
@@ -85,23 +89,30 @@ jobs:
           fi
           test -f dist/checksums.txt
 
-      # Building is not the same as working. This runs the binary the matrix
-      # just produced and asserts the three things a published archive has to be
-      # true about: it starts, it knows its own version, and it is static enough
-      # to drop onto a headless box with no Go and no libc surprises.
+      # Building is not the same as working, and the unpackaged binary is not
+      # what anybody downloads. This extracts the published archive and runs
+      # what comes out of it, so a defect in the archive stage — a missing file,
+      # a binary that never made it in — fails here rather than shipping.
       - name: Run the binary the release would publish
         run: |
           set -euo pipefail
 
-          # goreleaser's per-target directory naming has changed across
-          # versions, so find the binary rather than hard-coding a path.
-          bin="$(find dist -type f -name sitrep -path '*linux*amd64*' | head -n 1)"
-          if [ -z "$bin" ]; then
-            echo "no linux/amd64 sitrep binary in dist/"
-            find dist -type f
+          archive="$(ls dist/sitrep_*_linux_amd64.tar.gz)"
+          echo "testing $archive"
+          extracted="$(mktemp -d)"
+          tar -xzf "$archive" -C "$extracted"
+          ls -la "$extracted"
+
+          # .goreleaser.yml promises these are in every archive.
+          test -f "$extracted/LICENSE"
+          test -f "$extracted/README.md"
+
+          bin="$extracted/sitrep"
+          if [ ! -x "$bin" ]; then
+            echo "the archive contains no executable sitrep"
+            find "$extracted" -type f
             exit 1
           fi
-          echo "testing $bin"
 
           version="$("$bin" --version)"
           echo "$version"

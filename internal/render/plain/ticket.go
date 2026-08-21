@@ -128,7 +128,7 @@ func commentByline(c model.Comment) string {
 // label, the target's key, its title and its Native Status. The label is the
 // meaning — displayed, never interpreted — so nothing here branches on the Kind.
 func writeLinks(b *strings.Builder, in TicketSnapshot) {
-	links := visibleLinks(in)
+	links := model.VisibleLinks(in.Detail.Links, in.Capabilities)
 	if len(links) == 0 {
 		return
 	}
@@ -154,23 +154,6 @@ func writeLinks(b *strings.Builder, in TicketSnapshot) {
 		fmt.Fprintf(b, "%s%s[%s]\n", line, PadKey(titles[i], titleColumn), l.Target.NativeStatus)
 	}
 	b.WriteString("\n")
-}
-
-// visibleLinks returns the Links the Capabilities allow into the report. Relates
-// links survive without BlockingLinks; only the directed blocking ones go. That
-// is the same rule fake.applyDetailCapabilities, jsonout.RenderDetail and the
-// monitor's Detail screen encode, and the four must not drift.
-func visibleLinks(in TicketSnapshot) []model.Link {
-	if in.Capabilities.BlockingLinks {
-		return in.Detail.Links
-	}
-	kept := make([]model.Link, 0, len(in.Detail.Links))
-	for _, l := range in.Detail.Links {
-		if l.Kind == model.LinkRelates {
-			kept = append(kept, l)
-		}
-	}
-	return kept
 }
 
 // linkLabel is the Tracker's own wording for a relationship, falling back to the

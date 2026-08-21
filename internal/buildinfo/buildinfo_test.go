@@ -32,6 +32,21 @@ func TestStringInjectedValues(t *testing.T) {
 	}
 }
 
+// Nothing here parses the injected date, so the release pipeline is free to
+// stamp the commit's own timestamp — which is what makes two builds of one
+// commit identical — in whatever spelling its template produces.
+func TestStringDoesNotParseTheDate(t *testing.T) {
+	setVar(t, &Version, "0.1.0")
+	setVar(t, &Commit, "abc1234")
+	setVar(t, &Date, "Fri Aug 21 10:00:00 2026 +0000")
+
+	got := String()
+	want := "sitrep 0.1.0 (commit abc1234, built Fri Aug 21 10:00:00 2026 +0000)"
+	if got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
 // A release archive is linked with all three values, and what the toolchain
 // embedded must not touch them: §7.1's CI check asserts the same thing against
 // a real goreleaser build.
