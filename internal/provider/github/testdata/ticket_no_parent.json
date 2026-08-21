@@ -1,0 +1,32 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqYEOB",
+        "number": 12,
+        "title": "Config file & Profiles",
+        "url": "https://github.com/niekcandaele/sitrep/issues/12",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "parent": null,
+        "assignees": {
+          "nodes": []
+        },
+        "closedByPullRequestsReferences": {
+          "nodes": []
+        },
+        "subIssues": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

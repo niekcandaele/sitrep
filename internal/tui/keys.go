@@ -142,8 +142,13 @@ type DetailKeyMap struct {
 	End key.Binding
 	// Refresh re-reads this Ticket's Detail, and only this Ticket's.
 	Refresh key.Binding
-	// Back returns to the list, leaving it exactly as it was.
+	// Back returns to the list, leaving it exactly as it was. With no list
+	// behind the screen — a Ticket decoded straight into Detail — there is
+	// nowhere to go back to and esc is the ladder's last rung: it quits.
 	Back key.Binding
+	// Parent opens the collection this Ticket belongs to in the monitor. It is
+	// enabled only when there is one to walk up into.
+	Parent key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -165,6 +170,11 @@ func DefaultDetailKeyMap() DetailKeyMap {
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "back"),
 		),
+		Parent: key.NewBinding(
+			key.WithKeys("u"),
+			key.WithHelp("u", "epic"),
+			key.WithDisabled(),
+		),
 		Help: list.Help,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
@@ -174,8 +184,11 @@ func DefaultDetailKeyMap() DetailKeyMap {
 }
 
 // ShortHelp returns the bindings the Detail screen's one-line footer shows.
+// Parent appears only when it is enabled, so the footer never offers to open a
+// collection this Ticket has none of — and that footer line is the whole
+// affordance for the walk-up: no second help line, no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Back, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Back, k.Parent, k.Refresh, k.Help, k.Quit}
 }
 
 // FullHelp returns every binding, grouped into the columns "?" expands to.
@@ -183,7 +196,7 @@ func (k DetailKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown},
 		{k.Home, k.End},
-		{k.Back, k.Refresh},
+		{k.Back, k.Parent, k.Refresh},
 		{k.Help, k.Quit},
 	}
 }

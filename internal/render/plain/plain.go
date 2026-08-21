@@ -14,7 +14,8 @@
 // no sorting beyond the display order the model already defines. That purity
 // is what makes a golden test at the terminal seam a total test of the
 // renderer, and it is why RenderEpic takes a snapshot and an io.Writer and
-// nothing else.
+// nothing else. RenderTicket, the report an Epic Ref that named a Ticket
+// produces, obeys the same rules on the same terms.
 //
 // The shaping functions here are the rendering vocabulary the TUI reuses: it
 // styles these shapes rather than inventing its own.

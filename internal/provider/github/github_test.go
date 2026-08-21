@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -172,9 +173,14 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 		URL:          "https://github.com/niekcandaele/sitrep/issues/2",
 		Status:       model.StatusTodo,
 		NativeStatus: "open",
+		Repository:   "niekcandaele/sitrep",
 	}
-	if snap.Epic != want {
+	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
+	}
+	// The recorded epic hangs off nothing, and that is an ordinary state.
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero Parent", snap.Parent)
 	}
 
 	// FetchedAt belongs to the caller's clock; a Provider leaves it zero.

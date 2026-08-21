@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "fake",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": true,
+      "comments": true,
+      "pull_requests": true
+    }
+  },
+  "ticket": {
+    "id": "acme/widgets#112",
+    "key": "#112",
+    "title": "Draft the shard sync protocol",
+    "url": "https://tracker.example.test/acme/widgets/112",
+    "status": "in_progress",
+    "native_status": "In Review",
+    "repository": "acme/widgets",
+    "assignees": [
+      {
+        "login": "mara-vos",
+        "display_name": "Mara Vos",
+        "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+      }
+    ],
+    "pull_requests": [
+      {
+        "number": 501,
+        "title": "Shard sync protocol, first cut",
+        "url": "https://tracker.example.test/acme/widgets/pull/501",
+        "repository": "acme/widgets",
+        "state": "open",
+        "review": "changes_requested",
+        "checks": "passing"
+      }
+    ]
+  },
+  "parent": {
+    "id": "acme/widgets#111",
+    "key": "#111",
+    "title": "Widget sync v2: shards, retries & telemetry",
+    "url": "https://tracker.example.test/acme/widgets/111"
+  },
+  "ticket_id": "acme/widgets#112",
+  "description": "The shard sync protocol has to survive a shard going away mid-transfer & coming back with a different generation number.\n\n## Shape\n\n1. The sender announces `(shard, generation, offset)`.\n2. The receiver either accepts or replies with the offset it wants.\n3. Either side may abort; an aborted transfer leaves no partial state.\n\nOpen question: do we version the handshake itself, or rely on the generation number to carry it? Leaning towards an explicit version — see the linked ticket.",
+  "comments": [
+    {
+      "id": "c-1001",
+      "author": {
+        "login": "mara-vos",
+        "display_name": "Mara Vos",
+        "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+      },
+      "body": "Sketched the state machine; the abort path is the one that bites.",
+      "created_at": "2026-01-12T09:14:00Z",
+      "url": "https://tracker.example.test/acme/widgets/112#comment-1001"
+    },
+    {
+      "id": "c-1002",
+      "author": {
+        "login": "tobias"
+      },
+      "body": "Agreed on an explicit version byte. Costs nothing now, saves a migration later.",
+      "created_at": "2026-01-12T16:02:00Z",
+      "url": "https://tracker.example.test/acme/widgets/112#comment-1002"
+    },
+    {
+      "id": "c-1003",
+      "author": {
+        "login": "mara-vos",
+        "display_name": "Mara Vos",
+        "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+      },
+      "body": "Version byte it is. Updating the draft.",
+      "created_at": "2026-01-13T08:30:00Z",
+      "url": "https://tracker.example.test/acme/widgets/112#comment-1003"
+    }
+  ],
+  "links": [
+    {
+      "kind": "blocked_by",
+      "native_label": "is blocked by",
+      "target": {
+        "id": "acme/widgets#115",
+        "key": "#115",
+        "title": "Reconcile widget IDs across shards",
+        "url": "https://tracker.example.test/acme/widgets/115",
+        "status": "todo",
+        "native_status": "open"
+      }
+    },
+    {
+      "kind": "blocks",
+      "native_label": "blocks",
+      "target": {
+        "id": "acme/widgets#116",
+        "key": "#116",
+        "title": "Protocol conformance tests",
+        "url": "https://tracker.example.test/acme/widgets/116",
+        "status": "todo",
+        "native_status": "Selected for Development"
+      }
+    },
+    {
+      "kind": "relates",
+      "native_label": "is duplicated by",
+      "target": {
+        "id": "acme/gadgets#7",
+        "key": "#7",
+        "title": "Teach the gadget agent to speak sync v2",
+        "url": "https://tracker.example.test/acme/gadgets/7",
+        "status": "in_progress",
+        "native_status": "In Progress"
+      }
+    }
+  ]
+}

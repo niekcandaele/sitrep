@@ -31,6 +31,14 @@ with the tracker's own label — fetched at that moment and never during a list 
 returns to the list with the selection, the scroll position and any filters exactly as they
 were.
 
+A Ref with sub-tickets is an Epic; one without is a Ticket. Point sitrep at a Ticket —
+`sitrep 112` — and it lands straight in that Ticket's Detail, which is how you decode a
+number an agent just handed you. A breadcrumb above it names the Epic the Ticket belongs
+to, and `u` opens that Epic in the full monitor, from where `enter` on the same Ticket is
+instant. A Ticket with no parent opens the same way, without the breadcrumb and without
+`u`. `--plain` and `--json` decode the same Ref the same way, printing that one Ticket
+rather than an epic report.
+
 Two keys narrow what the list shows. `d` hides Done and Cancelled Tickets, and the progress
 bar keeps counting the whole Epic while they are hidden, so the header still says how far
 along the work really is. `/` opens a fuzzy find over Ticket titles and keys — type to

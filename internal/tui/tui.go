@@ -62,6 +62,18 @@
 // without a list behind it, a bare Ticket Ref decoded straight into Detail,
 // fills the same fields and needs no new entry point here.
 //
+// # The program can start in Detail, and can be seeded
+//
+// Options.Open starts the program on one Ticket's Detail — the decoder entry for
+// an Epic Ref that named a Ticket rather than a collection — with the parent
+// breadcrumb the Detail screen already had a seat for, and u to open that parent
+// in the monitor. Until the user presses it the list is never fetched at all.
+// Options.Initial seats a reading the caller already took, so a monitor draws
+// data on its first frame rather than re-fetching what its caller just fetched.
+//
+// Neither teaches this package about Epic Refs: the walk-up is a Source the
+// caller built, and the breadcrumb is a Header the caller filled.
+//
 // The body is wrapped into lines once and scrolled by slicing them, for the same
 // reason the list window is hand-rolled: the arithmetic has to exist anyway, and
 // a golden of bubbles/viewport is a golden of somebody else's scrollbar.
@@ -100,12 +112,25 @@ import (
 // Options are the monitor's injectable dependencies. Every zero value that has
 // a sensible production default takes it.
 type Options struct {
-	// Source produces one reading of the collection on every refresh.
+	// Source produces one reading of the collection on every refresh. It may be
+	// nil when Open is set and the decoded Ticket has no collection behind it:
+	// there is then nothing to monitor, and the walk-up key is not offered.
 	Source Source
 	// DetailSource reads one Ticket's Detail when the user opens it, and at no
 	// other moment (ADR-0003). A monitor without one still lists Tickets; enter
 	// then says why it cannot open them.
 	DetailSource DetailSource
+	// Open, when non-nil, starts the program on one Ticket's Detail instead of
+	// the list: the decoder entry point for an Epic Ref that named a Ticket. The
+	// Detail itself is read from DetailSource on the first frame, the same way a
+	// drill-in reads it, and the list is not fetched at all until the user walks
+	// up into it.
+	Open *OpenTicket
+	// Initial, when non-nil, seats a reading the caller already took, so the
+	// program draws data on its first frame instead of re-fetching what the
+	// caller just fetched. The refresh clock starts from the reading's own
+	// FetchedAt, not from startup.
+	Initial *ListInput
 	// Interval is how long the monitor waits between automatic refreshes.
 	Interval time.Duration
 	// Now reads the clock the staleness indicator and the refresh schedule are

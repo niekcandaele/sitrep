@@ -43,7 +43,38 @@ type Epic struct {
 	// NativeStatus is the Tracker's own label. Display-only: nothing in this
 	// package may branch on it.
 	NativeStatus string
+	// Assignees are the people the Epic is assigned to; may be empty. It exists
+	// for the Detail header a decoded Ticket is drawn with — an Epic Ref that
+	// named a Ticket comes back as this Epic — and the epic renderers
+	// deliberately do not draw it.
+	Assignees []User
+	// Repository is the display origin, "owner/repo" on GitHub. May be empty.
+	// Like Assignees it exists for the decoded Detail header only.
+	Repository string
+	// PullRequests is populated only when the serving Provider declares the
+	// PullRequests Capability; nil otherwise. Lead pull request first. Like
+	// Assignees it exists for the decoded Detail header only.
+	PullRequests []PullRequest
 }
+
+// Parent is the collection a Ticket belongs to: enough to draw a breadcrumb and
+// to re-enter sitrep on. Its Key and URL are both written in forms the Epic Ref
+// grammar accepts, so navigating up is a re-parse rather than a second lookup.
+// The zero value means "no parent", which is a normal state, never an error.
+type Parent struct {
+	// ID is the Provider's opaque handle for the parent.
+	ID TicketID
+	// Key is the parent's display identity, e.g. "#111" or "acme/widgets#111".
+	Key string
+	// Title is the parent's one-line summary.
+	Title string
+	// URL points at the parent in its Tracker.
+	URL string
+}
+
+// IsZero reports whether there is no parent at all. It is the one question
+// every call site asks — "is there a breadcrumb?" — so it is asked one way.
+func (p Parent) IsZero() bool { return p == Parent{} }
 
 // Ticket is the lightweight list-model view of one work item. Per ADR-0003 it
 // must never carry description, comments or links: those live in Detail.

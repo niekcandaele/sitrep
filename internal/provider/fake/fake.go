@@ -156,6 +156,12 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 
 	snap.Capabilities = p.caps
 	snap.FetchedAt = time.Time{}
+	applyEpicCapabilities(&snap.Epic, p.caps)
+	if !p.caps.Hierarchy {
+		// Without the Hierarchy Capability the Tracker exposes no parent links at
+		// all, so there is nothing to decode a breadcrumb from.
+		snap.Parent = model.Parent{}
+	}
 	for i := range snap.Tickets {
 		applyTicketCapabilities(&snap.Tickets[i], p.caps)
 	}
@@ -254,6 +260,16 @@ func applyTicketCapabilities(t *model.Ticket, caps model.Capabilities) {
 	}
 }
 
+// applyEpicCapabilities strips Epic data the declared Capabilities say the
+// Tracker cannot supply. The Epic carries pull requests only because a Ref that
+// named a Ticket comes back in this field, and the same Capability gates them
+// there as on a Ticket.
+func applyEpicCapabilities(e *model.Epic, caps model.Capabilities) {
+	if !caps.PullRequests {
+		e.PullRequests = nil
+	}
+}
+
 // applyDetailCapabilities strips Detail data the declared Capabilities say the
 // Tracker cannot supply. Relates links survive without the BlockingLinks
 // capability; only the directed blocking ones go.
@@ -281,11 +297,25 @@ func applyDetailCapabilities(d *model.Detail, caps model.Capabilities) {
 // corrupt the fixture for the next call.
 func cloneSnapshot(s model.EpicSnapshot) model.EpicSnapshot {
 	out := s
+	out.Epic = cloneEpic(s.Epic)
 	if s.Tickets != nil {
 		out.Tickets = make([]model.Ticket, len(s.Tickets))
 		for i, t := range s.Tickets {
 			out.Tickets[i] = cloneTicket(t)
 		}
+	}
+	return out
+}
+
+func cloneEpic(e model.Epic) model.Epic {
+	out := e
+	if e.Assignees != nil {
+		out.Assignees = make([]model.User, len(e.Assignees))
+		copy(out.Assignees, e.Assignees)
+	}
+	if e.PullRequests != nil {
+		out.PullRequests = make([]model.PullRequest, len(e.PullRequests))
+		copy(out.PullRequests, e.PullRequests)
 	}
 	return out
 }

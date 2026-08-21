@@ -177,6 +177,62 @@ func FixtureSnapshot() model.EpicSnapshot {
 	}
 }
 
+// FixtureTicketSnapshot returns what a batched fetch answers when the Epic Ref
+// named a plain Ticket rather than a collection: no Tickets, the Ticket's own
+// identity in the Epic field, and the collection it belongs to in Parent. It is
+// the fixture Ticket #112, so the Details FixtureDetails already serves — a
+// multi-paragraph description, three comments, all three Link kinds — are its
+// Detail.
+//
+// It is safe to mutate the returned value: each call builds a fresh copy.
+func FixtureTicketSnapshot() model.EpicSnapshot {
+	epic := FixtureSnapshot()
+	t := epic.Tickets[0]
+	return model.EpicSnapshot{
+		Epic: model.Epic{
+			ID:           t.ID,
+			Key:          t.Key,
+			Title:        t.Title,
+			URL:          t.URL,
+			Status:       t.Status,
+			NativeStatus: t.NativeStatus,
+			Assignees:    t.Assignees,
+			Repository:   t.Repository,
+			PullRequests: t.PullRequests,
+		},
+		Parent: model.Parent{
+			ID:    epic.Epic.ID,
+			Key:   epic.Epic.Key,
+			Title: epic.Epic.Title,
+			URL:   epic.Epic.URL,
+		},
+		Capabilities: allCapabilities,
+	}
+}
+
+// FixtureOrphanTicketSnapshot returns the same shape for a Ticket that hangs off
+// nothing: a zero Parent, which is an ordinary state and never an error. It is
+// the fixture Ticket #115, whose Detail is description-only.
+//
+// It is safe to mutate the returned value: each call builds a fresh copy.
+func FixtureOrphanTicketSnapshot() model.EpicSnapshot {
+	t := FixtureSnapshot().Tickets[3]
+	return model.EpicSnapshot{
+		Epic: model.Epic{
+			ID:           t.ID,
+			Key:          t.Key,
+			Title:        t.Title,
+			URL:          t.URL,
+			Status:       t.Status,
+			NativeStatus: t.NativeStatus,
+			Assignees:    t.Assignees,
+			Repository:   t.Repository,
+			PullRequests: t.PullRequests,
+		},
+		Capabilities: allCapabilities,
+	}
+}
+
 // FixtureDetails returns the built-in Details, keyed by TicketID: one rich
 // (multi-paragraph description, three comments, all three Link kinds), one
 // minimal (description only), and one with an empty description. Tickets absent

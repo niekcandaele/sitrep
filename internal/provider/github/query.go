@@ -17,11 +17,29 @@ package github
 // work was turned down" must not look like "no work started". The cap of five
 // per Ticket and the head-commit statusCheckRollup — rather than per-check
 // detail — keep the polled path cheap.
+//
+// The root issue carries three selections its children already had — parent,
+// assignees and closedByPullRequestsReferences — because an Epic Ref may name a
+// plain Ticket rather than a collection, and the answer to "which is it, and
+// what does it hang off" has to come from this same batched call (ADR-0003, no
+// third Provider method). They are O(1) per fetch, not per Ticket: one issue's
+// parent, one issue's assignees, one issue's pull requests, whatever the epic's
+// size. `parent` is the sub-issues feature's own field and rides on the
+// GraphQL-Features header the driver already sends.
 const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
     issue(number:$number) {
       id number title url state stateReason
       repository { nameWithOwner }
+      parent { id number title url repository { nameWithOwner } }
+      assignees(first:10) { nodes { login name avatarUrl } }
+      closedByPullRequestsReferences(first:5, includeClosedPrs:true) {
+        nodes {
+          number title url state isDraft reviewDecision
+          repository { nameWithOwner }
+          commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+        }
+      }
       subIssues(first:100, after:$cursor) {
         totalCount
         pageInfo { hasNextPage endCursor }
