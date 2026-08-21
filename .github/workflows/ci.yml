@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'epic/**'
+
+# Every `uses:` below is pinned to a full commit SHA with its human-readable
+# version in the trailing comment: a mutable major-version tag can be retagged
+# at any time, and a mixed convention between this workflow and release.yml
+# invites the next person to guess.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Format, vet, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
+
+      - name: go test
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+  release-dryrun:
+    name: Release dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.17.1
+          args: check
+
+      - name: goreleaser snapshot build
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.17.1
+          args: release --snapshot --clean --skip=publish
+
+      - name: Verify the release matrix produced four archives
+        run: |
+          ls -la dist/
+          archives="$(ls dist/*.tar.gz | wc -l)"
+          if [ "$archives" -ne 4 ]; then
+            echo "expected 4 archives in dist/, found $archives"
+            exit 1
+          fi
+          test -f dist/checksums.txt
+
+      # Building is not the same as working, and the unpackaged binary is not
+      # what anybody downloads. This extracts the published archive and runs
+      # what comes out of it, so a defect in the archive stage — a missing file,
+      # a binary that never made it in — fails here rather than shipping.
+      - name: Run the binary the release would publish
+        run: |
+          set -euo pipefail
+
+          archive="$(ls dist/sitrep_*_linux_amd64.tar.gz)"
+          echo "testing $archive"
+          extracted="$(mktemp -d)"
+          tar -xzf "$archive" -C "$extracted"
+          ls -la "$extracted"
+
+          # .goreleaser.yml promises these are in every archive.
+          test -f "$extracted/LICENSE"
+          test -f "$extracted/README.md"
+
+          bin="$extracted/sitrep"
+          if [ ! -x "$bin" ]; then
+            echo "the archive contains no executable sitrep"
+            find "$extracted" -type f
+            exit 1
+          fi
+
+          version="$("$bin" --version)"
+          echo "$version"
+          case "$version" in
+            "sitrep "*) ;;
+            *) echo "--version did not start with 'sitrep ': $version"; exit 1 ;;
+          esac
+          # "dev" here would mean the ldflags path silently broke and every
+          # published binary is unidentifiable in a bug report.
+          case "$version" in
+            *dev*) echo "--version still reports the unlinked default: $version"; exit 1 ;;
+          esac
+
+          "$bin" --help > /dev/null
+
+          # CGO_ENABLED=0 is what makes the archive runnable on a musl box or a
+          # distroless image. `file` is asserted rather than `ldd` because ldd
+          # on a non-dynamic binary exits non-zero on some distributions, which
+          # would mask a real failure under `set -e`.
+          file "$bin"
+          if ! file "$bin" | grep -q 'statically linked'; then
+            echo "the published binary is not statically linked"
+            exit 1
+          fi

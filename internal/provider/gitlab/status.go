@@ -1,0 +1,99 @@
+package gitlab
+
+import (
+	"strings"
+
+	"github.com/niekcandaele/sitrep/internal/model"
+)
+
+// GitLab's own state values for an issue or an epic. They are the whole of what
+// REST exposes: there is no resolution field and no closed-reason field.
+const (
+	stateOpened = "opened"
+	stateClosed = "closed"
+)
+
+// wontDoLabels are the label names that mean "nobody did this", as opposed to
+// "this is finished". Counting work nobody did as finished flatters every epic
+// containing one, so these become Cancelled and leave the progress denominator,
+// exactly as GitHub's not_planned and Jira's Won't Do do.
+//
+// The list is a judgement call — GitLab lets anyone invent a label — and it is
+// the only inference in this file. Names are matched after normalization:
+// lower-cased, reduced to the segment after the last "::" so a scoped label such
+// as "workflow::wontfix" is the same entry as a plain "wontfix", then stripped
+// of everything that is not a letter or a digit. A site with bespoke wording
+// adds one row here and nothing else.
+var wontDoLabels = map[string]bool{
+	"wontfix":         true,
+	"wontdo":          true,
+	"willnotfix":      true,
+	"willnotdo":       true,
+	"duplicate":       true,
+	"invalid":         true,
+	"declined":        true,
+	"rejected":        true,
+	"obsolete":        true,
+	"notplanned":      true,
+	"notreproducible": true,
+	"cannotreproduce": true,
+	"abandoned":       true,
+}
+
+// normalizeStatus maps a GitLab issue or epic state, its labels and its
+// closed-as-duplicate link onto sitrep's Status Category and the Native Status
+// shown to the user. It is the only place in sitrep allowed to look at GitLab's
+// vocabulary; everything downstream reads Status.
+//
+// GitLab issues and epics are opened or closed in REST and nothing else, so
+// this function never returns StatusInProgress, and that is intentional: the
+// in-progress half of a GitLab situation report comes from the merge requests
+// moving a Ticket, which statusWithMergeRequests infers afterwards. Do not guess
+// it from a scoped label — a "workflow::in dev" label is a plan, and GitLab
+// sites spell it a hundred ways.
+//
+// Won't-do work is Cancelled rather than Done. REST exposes no resolution
+// field, so the two available signals are checked in order of how much they are
+// a fact: _links.closed_as_duplicate_of is something GitLab states outright, and
+// a label is an inference. A label on an open node is never Cancelled whatever
+// it says — a label on live work is a plan, not an outcome.
+func normalizeStatus(state string, labels []string, closedAsDuplicate bool) (model.StatusCategory, string) {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case stateOpened:
+		return model.StatusTodo, "open"
+	case stateClosed:
+		if closedAsDuplicate {
+			return model.StatusCancelled, "duplicate"
+		}
+		for _, label := range labels {
+			if wontDoLabels[normalizeLabel(label)] {
+				// The label itself becomes the Native Status, which is what makes
+				// the Cancelled group readable rather than a list of "closed".
+				return model.StatusCancelled, strings.TrimSpace(label)
+			}
+		}
+		return model.StatusDone, "closed"
+	default:
+		// StatusUnknown is the model's deliberate "a Provider forgot to map
+		// something" signal: a broken or future instance should be visible rather
+		// than quietly Todo.
+		return model.StatusUnknown, strings.TrimSpace(state)
+	}
+}
+
+// normalizeLabel reduces a GitLab label to its comparable form: the segment
+// after the last "::" of a scoped label, lower-cased, with everything that is
+// not a letter or a digit stripped. "workflow::Won't Fix" and "wontfix" are one
+// entry.
+func normalizeLabel(label string) string {
+	if at := strings.LastIndex(label, "::"); at >= 0 {
+		label = label[at+2:]
+	}
+	var b strings.Builder
+	for _, c := range strings.ToLower(label) {
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}

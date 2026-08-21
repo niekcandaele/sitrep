@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Every `uses:` below is pinned to a full commit SHA with its human-readable
+# version in the trailing comment. A mutable major-version tag can be retagged
+# at any time, and this workflow holds a token that can replace published
+# artifacts.
+
+jobs:
+  # A tag must not publish code nobody ran. This repeats CI's checks against
+  # the tagged commit rather than querying CI's status for it: the duplication
+  # is two commands, needs no cross-workflow API call and no token, and a tag
+  # can never outrun it.
+  verify:
+    name: Verify the tagged commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+  goreleaser:
+    name: Publish binaries
+    needs: verify
+    runs-on: ubuntu-latest
+    # contents: write is scoped to the one job that publishes, so the verify
+    # job above runs the tagged commit's code with a read-only token.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.17.1
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

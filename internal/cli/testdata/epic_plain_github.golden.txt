@@ -1,0 +1,47 @@
+
+Epic niekcandaele/sitrep#2  Epic: sitrep v1 — cross-tracker epic monitor
+███████░░░░░░░░░░░░░░░░░░░░░  4/15 done  2 cancelled  27%
+https://github.com/niekcandaele/sitrep/issues/2
+
+IN PROGRESS (8)
+  #5               GitHub driver: epic fetch, ref grammar, auth
+                   [open]  #19 open ci ok review pending
+  #6               GitHub PR correlation
+                   [open]  #20 draft ci ...
+  #90              Ship the résumé & CV importer
+                   [open]  @alice @bob @carol  #103 open ci ok approved +2 more
+  #95              Back off when GitHub says slow down
+                   [open]  #104 open ci FAIL changes req
+  #96              Approved but the pipeline exploded
+                   [open]  #105 open ci FAIL approved
+  #98              Two open pull requests at once
+                   [open]  #109 open ci ok review pending +1 more
+  #99              Fixed in another repository
+                   [open]  acme/widgets#110 open ci ok review pending
+  #100             No CI configured anywhere
+                   [open]  #112 open +1 more
+
+TODO (3)
+  #7               --plain snapshot renderer
+                   [open]
+  #97              The agent's pull request was rejected
+                   [open]  #106 closed
+  #101             A pull request from the future
+                   [open]  #113 state unknown
+
+DONE (4)
+  #3               Rails: bootstrap, CI gates, release pipeline
+                   [closed]  #17 merged
+  #4               Walking skeleton: domain model, Provider interface, fake Provider, --json
+                   [closed]  #18 merged
+  #93              Closed for a reason sitrep has never heard of
+                   [reason from the future]
+  #94              Closed with no reason at all
+                   [closed]
+
+CANCELLED (2)
+  acme/widgets#91  Widget adapter for the sitrep epic
+                   [not planned]  @dana  #7 closed
+  #92              Duplicate of the ref grammar ticket
+                   [duplicate]
+

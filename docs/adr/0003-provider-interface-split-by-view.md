@@ -1,0 +1,3 @@
+# Provider interface split by view, not by entity
+
+Each Provider exposes two calls: a cheap batched epic call returning the Epic plus lightweight Tickets (one request per refresh), and a lazy per-ticket Detail call (description, comments, links) made only when a ticket is opened. The rejected alternative — one rich Ticket entity carrying everything — would push comments and link data into the polled hot path, multiply rate-limit pressure (Jira Cloud especially), and bloat the interface every time a tracker feature lands. Do not "fix" the thin Ticket by adding detail fields to it; add them to Detail.

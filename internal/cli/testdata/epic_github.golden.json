@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "github",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": true,
+      "comments": true,
+      "pull_requests": true
+    }
+  },
+  "epic": {
+    "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+    "key": "niekcandaele/sitrep#2",
+    "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+    "url": "https://github.com/niekcandaele/sitrep/issues/2",
+    "status": "todo",
+    "native_status": "open"
+  },
+  "progress": {
+    "todo": 3,
+    "in_progress": 8,
+    "done": 4,
+    "cancelled": 2,
+    "unknown": 0,
+    "total": 17,
+    "denominator": 15,
+    "percent_done": 27
+  },
+  "tickets": [
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYAww",
+      "key": "#3",
+      "title": "Rails: bootstrap, CI gates, release pipeline",
+      "url": "https://github.com/niekcandaele/sitrep/issues/3",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 17,
+          "title": "Add engineering rails: build, CI gates, release pipeline",
+          "url": "https://github.com/niekcandaele/sitrep/pull/17",
+          "repository": "niekcandaele/sitrep",
+          "state": "merged",
+          "review": "approved",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYB8w",
+      "key": "#4",
+      "title": "Walking skeleton: domain model, Provider interface, fake Provider, --json",
+      "url": "https://github.com/niekcandaele/sitrep/issues/4",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 18,
+          "title": "Walking skeleton: domain model, Provider, fake Provider, --json",
+          "url": "https://github.com/niekcandaele/sitrep/pull/18",
+          "repository": "niekcandaele/sitrep",
+          "state": "merged",
+          "review": "approved",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYCjw",
+      "key": "#5",
+      "title": "GitHub driver: epic fetch, ref grammar, auth",
+      "url": "https://github.com/niekcandaele/sitrep/issues/5",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 19,
+          "title": "GitHub driver: epic fetch, Epic Ref grammar, auth",
+          "url": "https://github.com/niekcandaele/sitrep/pull/19",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "pending",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYDCA",
+      "key": "#6",
+      "title": "GitHub PR correlation",
+      "url": "https://github.com/niekcandaele/sitrep/issues/6",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 20,
+          "title": "GitHub PR correlation",
+          "url": "https://github.com/niekcandaele/sitrep/pull/20",
+          "repository": "niekcandaele/sitrep",
+          "state": "draft",
+          "review": "none",
+          "checks": "pending"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_WhQ88AAAABNqYDWA",
+      "key": "#7",
+      "title": "--plain snapshot renderer",
+      "url": "https://github.com/niekcandaele/sitrep/issues/7",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_90",
+      "key": "#90",
+      "title": "Ship the résumé & CV importer",
+      "url": "https://github.com/niekcandaele/sitrep/issues/90",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "assignees": [
+        {
+          "login": "alice",
+          "display_name": "Alice Ansel",
+          "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4"
+        },
+        {
+          "login": "bob",
+          "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4"
+        },
+        {
+          "login": "carol",
+          "display_name": "Carol Chen",
+          "avatar_url": "https://avatars.githubusercontent.com/u/3?v=4"
+        }
+      ],
+      "pull_requests": [
+        {
+          "number": 103,
+          "title": "Follow-up: CV parsing edge cases",
+          "url": "https://github.com/niekcandaele/sitrep/pull/103",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "approved",
+          "checks": "passing"
+        },
+        {
+          "number": 101,
+          "title": "First attempt at the résumé importer",
+          "url": "https://github.com/niekcandaele/sitrep/pull/101",
+          "repository": "niekcandaele/sitrep",
+          "state": "closed",
+          "review": "changes_requested",
+          "checks": "failing"
+        },
+        {
+          "number": 102,
+          "title": "Résumé importer, second time lucky",
+          "url": "https://github.com/niekcandaele/sitrep/pull/102",
+          "repository": "niekcandaele/sitrep",
+          "state": "merged",
+          "review": "approved",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_91",
+      "key": "acme/widgets#91",
+      "title": "Widget adapter for the sitrep epic",
+      "url": "https://github.com/acme/widgets/issues/91",
+      "status": "cancelled",
+      "native_status": "not planned",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "dana",
+          "display_name": "Dana Diaz",
+          "avatar_url": "https://avatars.githubusercontent.com/u/4?v=4"
+        }
+      ],
+      "pull_requests": [
+        {
+          "number": 7,
+          "title": "Widget adapter, abandoned",
+          "url": "https://github.com/acme/widgets/pull/7",
+          "repository": "acme/widgets",
+          "state": "closed",
+          "review": "none",
+          "checks": "failing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_92",
+      "key": "#92",
+      "title": "Duplicate of the ref grammar ticket",
+      "url": "https://github.com/niekcandaele/sitrep/issues/92",
+      "status": "cancelled",
+      "native_status": "duplicate",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_93",
+      "key": "#93",
+      "title": "Closed for a reason sitrep has never heard of",
+      "url": "https://github.com/niekcandaele/sitrep/issues/93",
+      "status": "done",
+      "native_status": "reason from the future",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_94",
+      "key": "#94",
+      "title": "Closed with no reason at all",
+      "url": "https://github.com/niekcandaele/sitrep/issues/94",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "niekcandaele/sitrep"
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_95",
+      "key": "#95",
+      "title": "Back off when GitHub says slow down",
+      "url": "https://github.com/niekcandaele/sitrep/issues/95",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 104,
+          "title": "Rate limit backoff",
+          "url": "https://github.com/niekcandaele/sitrep/pull/104",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "changes_requested",
+          "checks": "failing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_96",
+      "key": "#96",
+      "title": "Approved but the pipeline exploded",
+      "url": "https://github.com/niekcandaele/sitrep/issues/96",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 105,
+          "title": "Approved work with an infrastructure error",
+          "url": "https://github.com/niekcandaele/sitrep/pull/105",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "approved",
+          "checks": "failing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_97",
+      "key": "#97",
+      "title": "The agent's pull request was rejected",
+      "url": "https://github.com/niekcandaele/sitrep/issues/97",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 106,
+          "title": "Rejected approach",
+          "url": "https://github.com/niekcandaele/sitrep/pull/106",
+          "repository": "niekcandaele/sitrep",
+          "state": "closed",
+          "review": "changes_requested",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_98",
+      "key": "#98",
+      "title": "Two open pull requests at once",
+      "url": "https://github.com/niekcandaele/sitrep/issues/98",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 109,
+          "title": "Newer open attempt",
+          "url": "https://github.com/niekcandaele/sitrep/pull/109",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "pending",
+          "checks": "passing"
+        },
+        {
+          "number": 107,
+          "title": "First open attempt",
+          "url": "https://github.com/niekcandaele/sitrep/pull/107",
+          "repository": "niekcandaele/sitrep",
+          "state": "draft",
+          "review": "none",
+          "checks": "pending"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_99",
+      "key": "#99",
+      "title": "Fixed in another repository",
+      "url": "https://github.com/niekcandaele/sitrep/issues/99",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 110,
+          "title": "Cross-repo fix for the sitrep epic",
+          "url": "https://github.com/acme/widgets/pull/110",
+          "repository": "acme/widgets",
+          "state": "open",
+          "review": "pending",
+          "checks": "passing"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_100",
+      "key": "#100",
+      "title": "No CI configured anywhere",
+      "url": "https://github.com/niekcandaele/sitrep/issues/100",
+      "status": "in_progress",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 112,
+          "title": "A pull request with no status check rollup",
+          "url": "https://github.com/niekcandaele/sitrep/pull/112",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "none",
+          "checks": "none"
+        },
+        {
+          "number": 111,
+          "title": "A pull request whose head commit did not come back",
+          "url": "https://github.com/niekcandaele/sitrep/pull/111",
+          "repository": "niekcandaele/sitrep",
+          "state": "open",
+          "review": "none",
+          "checks": "none"
+        }
+      ]
+    },
+    {
+      "id": "I_kwDOT_FIXTURE_101",
+      "key": "#101",
+      "title": "A pull request from the future",
+      "url": "https://github.com/niekcandaele/sitrep/issues/101",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "niekcandaele/sitrep",
+      "pull_requests": [
+        {
+          "number": 113,
+          "title": "A state and a rollup sitrep has never heard of",
+          "url": "https://github.com/niekcandaele/sitrep/pull/113",
+          "state": "unknown",
+          "review": "none",
+          "checks": "pending"
+        }
+      ]
+    }
+  ]
+}

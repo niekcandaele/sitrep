@@ -1,0 +1,6 @@
+{
+  "message": {
+    "base": "the group is not licensed for epics",
+    "access": "insufficient permissions"
+  }
+}

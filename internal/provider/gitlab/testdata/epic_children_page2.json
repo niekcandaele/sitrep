@@ -1,0 +1,157 @@
+[
+  {
+    "id": 198100006,
+    "iid": 105,
+    "project_id": 34675721,
+    "title": "Rewrite the renderer in another language",
+    "description": "Dropped on the polled path.",
+    "state": "closed",
+    "created_at": "2026-07-01T09:00:00.000Z",
+    "closed_at": "2026-08-06T11:00:00.000Z",
+    "closed_by": null,
+    "labels": ["backend", "workflow::wontfix"],
+    "milestone": null,
+    "assignees": [],
+    "assignee": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/105",
+    "references": {
+      "short": "#105",
+      "relative": "#105",
+      "full": "gitlab-org/cli#105"
+    },
+    "blocking_issues_count": 0,
+    "epic_iid": 23356,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/105",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/105/notes",
+      "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/105/award_emoji",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198100007,
+    "iid": 106,
+    "project_id": 34675721,
+    "title": "Filtering, again",
+    "description": "Dropped on the polled path.",
+    "state": "closed",
+    "created_at": "2026-07-02T09:00:00.000Z",
+    "closed_at": "2026-08-07T11:00:00.000Z",
+    "closed_by": null,
+    "labels": [],
+    "milestone": null,
+    "assignees": [],
+    "assignee": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/106",
+    "references": {
+      "short": "#106",
+      "relative": "#106",
+      "full": "gitlab-org/cli#106"
+    },
+    "blocking_issues_count": 0,
+    "epic_iid": 23356,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/106",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/106/notes",
+      "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/106/award_emoji",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": "https://gitlab.com/api/v4/projects/34675721/issues/102"
+    }
+  },
+  {
+    "id": 198100008,
+    "iid": 107,
+    "project_id": 34675721,
+    "title": "Config file & Profiles",
+    "description": "Dropped on the polled path.",
+    "state": "closed",
+    "created_at": "2026-07-03T09:00:00.000Z",
+    "closed_at": "2026-08-08T11:00:00.000Z",
+    "closed_by": null,
+    "labels": ["backend"],
+    "milestone": null,
+    "assignees": [],
+    "assignee": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/107",
+    "references": {
+      "short": "#107",
+      "relative": "#107",
+      "full": "gitlab-org/cli#107"
+    },
+    "blocking_issues_count": 0,
+    "epic_iid": 23356,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/107",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/107/notes",
+      "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/107/award_emoji",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198100009,
+    "iid": 108,
+    "project_id": 34675721,
+    "title": "A state this GitLab has and sitrep does not know",
+    "description": "Dropped on the polled path.",
+    "state": "archived",
+    "created_at": "2026-07-04T09:00:00.000Z",
+    "closed_at": null,
+    "closed_by": null,
+    "labels": [],
+    "milestone": null,
+    "assignees": [],
+    "assignee": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/108",
+    "references": {
+      "short": "#108",
+      "relative": "#108",
+      "full": "gitlab-org/cli#108"
+    },
+    "blocking_issues_count": 0,
+    "epic_iid": 23356,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/108",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/108/notes",
+      "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/108/award_emoji",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198100010,
+    "iid": 109,
+    "project_id": 34675721,
+    "title": "An instance old enough to send no references object",
+    "description": "Dropped on the polled path.",
+    "state": "opened",
+    "created_at": "2026-07-05T09:00:00.000Z",
+    "closed_at": null,
+    "closed_by": null,
+    "labels": [],
+    "milestone": null,
+    "assignees": [],
+    "assignee": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/109",
+    "blocking_issues_count": 0,
+    "epic_iid": 23356,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/109",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/109/notes",
+      "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/109/award_emoji",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  }
+]

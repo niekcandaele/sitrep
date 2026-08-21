@@ -1,0 +1,10 @@
+{
+  "data": {
+    "repository": {
+      "kind": {
+        "__typename": "PullRequest"
+      },
+      "issue": null
+    }
+  }
+}

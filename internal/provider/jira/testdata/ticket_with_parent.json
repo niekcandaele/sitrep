@@ -1,0 +1,24 @@
+{
+  "id": "10012",
+  "key": "ABC-12",
+  "self": "https://acme.atlassian.net/rest/api/2/issue/10012",
+  "fields": {
+    "summary": "Ticket decoder mode",
+    "status": {
+      "name": "In Progress",
+      "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+    },
+    "resolution": null,
+    "assignee": {
+      "accountId": "dddd4444eeee5555ffff6666",
+      "displayName": "Grace Hopper",
+      "avatarUrls": { "48x48": "https://avatar.example/grace/48" }
+    },
+    "parent": {
+      "id": "10001",
+      "key": "ABC-1",
+      "fields": { "summary": "Epic: sitrep v1 — cross-tracker epic monitor" }
+    },
+    "project": { "key": "ABC", "name": "Acme Backlog" }
+  }
+}

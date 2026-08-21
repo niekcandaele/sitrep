@@ -1,0 +1,4 @@
+/sitrep
+/dist/
+*.out
+coverage.out

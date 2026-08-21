@@ -1,0 +1,433 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+        "number": 2,
+        "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+        "url": "https://github.com/niekcandaele/sitrep/issues/2",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "subIssues": {
+          "totalCount": 17,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOjIwMA=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOT_FIXTURE_91",
+              "number": 91,
+              "title": "Widget adapter for the sitrep epic",
+              "url": "https://github.com/acme/widgets/issues/91",
+              "state": "CLOSED",
+              "stateReason": "NOT_PLANNED",
+              "repository": {
+                "nameWithOwner": "acme/widgets"
+              },
+              "assignees": {
+                "nodes": [
+                  {
+                    "login": "dana",
+                    "name": "Dana Diaz",
+                    "avatarUrl": "https://avatars.githubusercontent.com/u/4?v=4"
+                  }
+                ]
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 7,
+                    "title": "Widget adapter, abandoned",
+                    "url": "https://github.com/acme/widgets/pull/7",
+                    "state": "CLOSED",
+                    "isDraft": false,
+                    "reviewDecision": null,
+                    "repository": {
+                      "nameWithOwner": "acme/widgets"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "FAILURE"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_92",
+              "number": 92,
+              "title": "Duplicate of the ref grammar ticket",
+              "url": "https://github.com/niekcandaele/sitrep/issues/92",
+              "state": "CLOSED",
+              "stateReason": "DUPLICATE",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_93",
+              "number": 93,
+              "title": "Closed for a reason sitrep has never heard of",
+              "url": "https://github.com/niekcandaele/sitrep/issues/93",
+              "state": "CLOSED",
+              "stateReason": "REASON_FROM_THE_FUTURE",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": null
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_94",
+              "number": 94,
+              "title": "Closed with no reason at all",
+              "url": "https://github.com/niekcandaele/sitrep/issues/94",
+              "state": "CLOSED",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_95",
+              "number": 95,
+              "title": "Back off when GitHub says slow down",
+              "url": "https://github.com/niekcandaele/sitrep/issues/95",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 104,
+                    "title": "Rate limit backoff",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/104",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "FAILURE"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_96",
+              "number": 96,
+              "title": "Approved but the pipeline exploded",
+              "url": "https://github.com/niekcandaele/sitrep/issues/96",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 105,
+                    "title": "Approved work with an infrastructure error",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/105",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "APPROVED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "ERROR"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_97",
+              "number": 97,
+              "title": "The agent's pull request was rejected",
+              "url": "https://github.com/niekcandaele/sitrep/issues/97",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 106,
+                    "title": "Rejected approach",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/106",
+                    "state": "CLOSED",
+                    "isDraft": true,
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_98",
+              "number": 98,
+              "title": "Two open pull requests at once",
+              "url": "https://github.com/niekcandaele/sitrep/issues/98",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 107,
+                    "title": "First open attempt",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/107",
+                    "state": "OPEN",
+                    "isDraft": true,
+                    "reviewDecision": null,
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "PENDING"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "number": 109,
+                    "title": "Newer open attempt",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/109",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_99",
+              "number": 99,
+              "title": "Fixed in another repository",
+              "url": "https://github.com/niekcandaele/sitrep/issues/99",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 110,
+                    "title": "Cross-repo fix for the sitrep epic",
+                    "url": "https://github.com/acme/widgets/pull/110",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "repository": {
+                      "nameWithOwner": "acme/widgets"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_100",
+              "number": 100,
+              "title": "No CI configured anywhere",
+              "url": "https://github.com/niekcandaele/sitrep/issues/100",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 111,
+                    "title": "A pull request whose head commit did not come back",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/111",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": null,
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": []
+                    }
+                  },
+                  {
+                    "number": 112,
+                    "title": "A pull request with no status check rollup",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/112",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": null,
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": null
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOT_FIXTURE_101",
+              "number": 101,
+              "title": "A pull request from the future",
+              "url": "https://github.com/niekcandaele/sitrep/issues/101",
+              "state": "OPEN",
+              "stateReason": null,
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 113,
+                    "title": "A state and a rollup sitrep has never heard of",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/113",
+                    "state": "STATE_FROM_THE_FUTURE",
+                    "isDraft": false,
+                    "reviewDecision": "DECISION_FROM_THE_FUTURE",
+                    "repository": null,
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "ROLLUP_FROM_THE_FUTURE"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

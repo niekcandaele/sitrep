@@ -1,0 +1,36 @@
+{
+  "id": "10001",
+  "key": "ABC-1",
+  "self": "https://acme.atlassian.net/rest/api/2/issue/10001",
+  "fields": {
+    "summary": "Epic: sitrep v1 — cross-tracker epic monitor",
+    "status": {
+      "self": "https://acme.atlassian.net/rest/api/2/status/10000",
+      "name": "To Do",
+      "id": "10000",
+      "statusCategory": {
+        "self": "https://acme.atlassian.net/rest/api/2/statuscategory/2",
+        "id": 2,
+        "key": "new",
+        "colorName": "blue-gray",
+        "name": "To Do"
+      }
+    },
+    "resolution": null,
+    "assignee": {
+      "accountId": "aaaa1111bbbb2222cccc3333",
+      "displayName": "Ada Lovelace",
+      "active": true,
+      "avatarUrls": {
+        "48x48": "https://avatar.example/ada/48",
+        "24x24": "https://avatar.example/ada/24"
+      }
+    },
+    "parent": null,
+    "project": {
+      "id": "10000",
+      "key": "ABC",
+      "name": "Acme Backlog"
+    }
+  }
+}

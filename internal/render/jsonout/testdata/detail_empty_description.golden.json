@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "fake",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": true,
+      "comments": true,
+      "pull_requests": true
+    }
+  },
+  "ticket_id": "acme/widgets#119",
+  "description": "",
+  "comments": [
+    {
+      "id": "c-1004",
+      "author": {
+        "login": "tobias"
+      },
+      "body": "Dashboards are live.",
+      "created_at": "2026-01-14T11:45:00Z",
+      "url": "https://tracker.example.test/acme/widgets/119#comment-1004"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "10013",
+  "key": "ABC-13",
+  "fields": {
+    "summary": "Freshly filed, nothing written yet",
+    "status": {
+      "name": "To Do",
+      "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+    },
+    "resolution": null,
+    "project": { "key": "ABC", "name": "Acme Backlog" },
+    "description": null,
+    "issuelinks": []
+  }
+}
