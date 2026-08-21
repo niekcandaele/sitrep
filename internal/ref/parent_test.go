@@ -27,6 +27,13 @@ func TestParseParent(t *testing.T) {
 		Raw:     "https://ghe.acme.test/acme/widgets/issues/112",
 	}
 
+	jiraChild := ref.Ref{
+		Tracker: ref.TrackerJira,
+		Host:    "acme.atlassian.net",
+		Key:     "ABC-12",
+		Raw:     "ABC-12",
+	}
+
 	tests := []struct {
 		name    string
 		key     string
@@ -82,6 +89,27 @@ func TestParseParent(t *testing.T) {
 			url:   "https://github.com/acme/widgets/issues/111",
 			child: child,
 			want:  ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 111},
+		},
+		{
+			// A Jira parent carries a key and no number, which is the whole reason
+			// parentFromURL cannot demand one.
+			name:  "a Jira parent resolves from its browse URL",
+			key:   "ABC-1",
+			url:   "https://acme.atlassian.net/browse/ABC-1",
+			child: jiraChild,
+			want:  ref.Ref{Tracker: ref.TrackerJira, Host: "acme.atlassian.net", Key: "ABC-1"},
+		},
+		{
+			name:  "a Jira parent resolves from its key alone, inheriting the site",
+			key:   "ABC-1",
+			child: jiraChild,
+			want:  ref.Ref{Tracker: ref.TrackerJira, Host: "acme.atlassian.net", Key: "ABC-1"},
+		},
+		{
+			name:  "a lower-cased Jira parent key is the same key",
+			key:   "abc-1",
+			child: jiraChild,
+			want:  ref.Ref{Tracker: ref.TrackerJira, Host: "acme.atlassian.net", Key: "ABC-1"},
 		},
 		{
 			name:    "nothing usable at all",

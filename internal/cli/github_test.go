@@ -223,9 +223,11 @@ func TestRefResolutionFailures(t *testing.T) {
 			wantStderr: []string{"gitlab is not supported yet"},
 		},
 		{
-			name:       "a Jira URL",
+			// A Jira URL names its own site, but not the credential to read it
+			// with: that only comes from a Profile, so #13 asks for one.
+			name:       "a Jira URL with no Profile",
 			args:       []string{"https://acme.atlassian.net/browse/PROJ-12", "--json"},
-			wantStderr: []string{"jira is not supported yet"},
+			wantStderr: []string{"needs a Profile", "acme.atlassian.net"},
 		},
 		{
 			name:       "something that is not a ref at all",
