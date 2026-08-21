@@ -22,8 +22,8 @@ import (
 // Tracker identifies which Tracker an Epic Ref points at.
 type Tracker string
 
-// The Trackers sitrep knows how to name. A Ref may carry a Tracker sitrep has
-// no Provider for yet; the CLI turns that into a "not supported yet" error.
+// The Trackers sitrep knows how to name. Every one of them has a Provider; a
+// Ref whose Tracker is Unknown is one the CLI cannot route at all.
 const (
 	// TrackerUnknown is the zero value: the Ref names no recognizable Tracker.
 	TrackerUnknown Tracker = ""
@@ -52,9 +52,11 @@ type Ref struct {
 	// Number is the tracker-native issue number. Zero when the Ref names no
 	// single Epic, as ParseRemoteURL returns.
 	Number int
-	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased. It is empty
-	// for GitHub. A Ref that carries only a Key carries no Host: only a Profile
-	// knows which site the key's project lives on.
+	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased, or GitLab's
+	// own native epic reference, e.g. "acme/platform&12" — always the form a
+	// human can type back. It is empty for GitHub and for a GitLab project
+	// issue. A Ref that carries only a Key carries no Host: only a Profile knows
+	// which site or instance the key names.
 	Key string
 	// Raw is exactly what the user typed, kept for error messages.
 	Raw string
@@ -134,6 +136,13 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	if strings.Contains(trimmed, "://") {
 		return parseURL(trimmed, raw)
 	}
+	// GitLab's own reference form, "&12" or "acme/platform&12", is tried before
+	// the owner/repo forms because it cannot collide with any of them: no other
+	// Epic Ref form contains an "&" at all, so a string carrying one is either
+	// this form or nothing.
+	if r, ok := parseGitLabReference(trimmed, raw); ok {
+		return r, nil
+	}
 	if r, ok, err := parseOwnerRepoNumber(trimmed, raw); ok {
 		return r, err
 	}
@@ -193,6 +202,14 @@ func parentFromKey(raw string, child Ref) (Ref, bool) {
 	if s == "" {
 		return Ref{}, false
 	}
+	// A GitLab epic reference names a group and no instance, so the host is
+	// inherited from the child — the same rule inherit already encodes. It is
+	// read before the owner/repo forms for the same reason Parse tries it first:
+	// no other form contains an "&".
+	if r, ok := parseGitLabReference(s, s); ok {
+		return inherit(r, child), true
+	}
+
 	if r, ok, err := parseOwnerRepoNumber(s, s); ok {
 		if err != nil {
 			return Ref{}, false
@@ -336,9 +353,9 @@ func trackerForHost(host string) Tracker {
 
 // parseURL reads a full tracker URL. A GitHub-shaped path
 // (/{owner}/{repo}/issues/{n}, or pull/{n} for a link someone copied from a
-// pull request) is accepted on any host; other hosts still yield a Ref with the
-// Tracker their host implies, so the CLI can say "not supported yet" instead of
-// "cannot parse".
+// pull request) is accepted on any host; other hosts yield a Ref with the
+// Tracker their host — or their path shape — implies, so the CLI can route it
+// to that Tracker's driver instead of failing with "cannot parse".
 func parseURL(s, raw string) (Ref, error) {
 	u, err := url.Parse(s)
 	if err != nil || u.Hostname() == "" {
@@ -362,12 +379,32 @@ func parseURL(s, raw string) (Ref, error) {
 		}
 	}
 
+	// GitLab's "/-/" separator is a URL shape no other Tracker produces, so it
+	// identifies a self-managed GitLab instance the host name alone cannot —
+	// which is what keeps https://git.acme.test/acme/widgets/-/issues/7 from
+	// failing with "cannot parse". It is an additional signal, never a
+	// replacement: trackerForHost still decides for a host it recognizes.
+	if tracker == TrackerUnknown && hasGitLabSeparator(segments) {
+		tracker = TrackerGitLab
+	}
+
 	if tracker == TrackerUnknown || tracker == TrackerGitHub {
 		// A GitHub URL that is not an issue URL names no Epic, and an
 		// unrecognized host with a foreign path shape names nothing at all.
 		return Ref{}, unparseable(raw)
 	}
 	return foreignRef(tracker, host, segments, raw), nil
+}
+
+// hasGitLabSeparator reports whether a URL path carries GitLab's "/-/"
+// separator.
+func hasGitLabSeparator(segments []string) bool {
+	for _, s := range segments {
+		if s == "-" {
+			return true
+		}
+	}
+	return false
 }
 
 // githubIssuePath matches /{owner}/{repo}/issues/{n} and its pull-request
@@ -386,10 +423,8 @@ func githubIssuePath(segments []string) (owner, repo string, number int, ok bool
 	return segments[0], segments[1], n, true
 }
 
-// foreignRef builds a best-effort Ref for a Tracker sitrep has no driver for.
-// Nothing reads these fields today beyond the Tracker; the point is to carry
-// the user's input intact to the "not supported yet" message and to leave the
-// Jira and GitLab drivers something to sharpen.
+// foreignRef reads a URL belonging to a Tracker whose paths are not
+// GitHub-shaped: a Jira /browse/ key, or one of GitLab's four "/-/" forms.
 func foreignRef(tracker Tracker, host string, segments []string, raw string) Ref {
 	r := Ref{Tracker: tracker, Host: host, Raw: raw}
 	if tracker == TrackerJira {
@@ -405,22 +440,104 @@ func foreignRef(tracker Tracker, host string, segments []string, raw string) Ref
 		return r
 	}
 
-	// GitLab: /{namespace...}/-/issues/{n}, where the namespace may nest.
+	return gitLabRef(host, segments, raw)
+}
+
+// gitLabRef reads GitLab's four Epic-Ref-bearing URL shapes, all of which hang
+// off the "/-/" separator:
+//
+//	/{namespace…}/{project}/-/issues/{n}      a project issue
+//	/{namespace…}/{project}/-/work_items/{n}  the same issue, in the form
+//	                                          GitLab's API now returns as web_url
+//	/groups/{group path}/-/epics/{n}          a group epic
+//	/groups/{group path}/-/work_items/{n}     the same epic
+//
+// The leading "groups" segment is what distinguishes a group epic from a
+// project issue, and the "&" it puts in Key is what the GitLab driver reads to
+// tell the two apart afterwards.
+func gitLabRef(host string, segments []string, raw string) Ref {
+	r := Ref{Tracker: TrackerGitLab, Host: host, Raw: raw}
+
+	sep := -1
 	for i, s := range segments {
-		if s != "-" {
-			continue
+		if s == "-" {
+			sep = i
+			break
 		}
-		if owner, repo, err := splitOwnerRepo(strings.Join(segments[:i], "/")); err == nil {
-			r.Owner, r.Repo = owner, repo
+	}
+	if sep < 0 {
+		return r
+	}
+
+	head := segments[:sep]
+	group := len(head) > 1 && head[0] == "groups"
+	if group {
+		head = head[1:]
+	}
+
+	// A group path may be one segment ("gitlab-org") or nested
+	// ("acme/platform/core"), so it is not forced through splitOwnerRepo's
+	// two-segment minimum: the first segment is the Owner, the rest — possibly
+	// empty — is the Repo, and Key is authoritative.
+	if len(head) > 0 {
+		r.Owner, r.Repo = head[0], strings.Join(head[1:], "/")
+	}
+
+	if len(segments) != sep+3 {
+		return r
+	}
+	n, ok := parseNumber(segments[sep+2])
+	if !ok {
+		return r
+	}
+	switch segments[sep+1] {
+	case "issues":
+		if !group {
+			r.Number = n
 		}
-		if len(segments) == i+3 && segments[i+1] == "issues" {
-			if n, ok := parseNumber(segments[i+2]); ok {
-				r.Number = n
-			}
+	case "epics":
+		if group {
+			r.Number = n
+			r.Key = strings.Join(head, "/") + "&" + segments[sep+2]
 		}
-		break
+	case "work_items":
+		// GitLab now serves work-item URLs for both, so which one this is comes
+		// from the "groups" prefix rather than from the noun.
+		r.Number = n
+		if group {
+			r.Key = strings.Join(head, "/") + "&" + segments[sep+2]
+		}
 	}
 	return r
+}
+
+// parseGitLabReference reads GitLab's own epic reference form, which its API
+// returns verbatim as references.full: "acme/platform&12", or "&12" when the
+// group is left for a Profile to supply.
+//
+// The resulting Ref carries no Host on purpose. A reference names a group, not
+// an instance, exactly as a Jira key names a project and not a site; the CLI
+// completes it from the Profile that serves it.
+func parseGitLabReference(s, raw string) (Ref, bool) {
+	amp := strings.LastIndex(s, "&")
+	if amp < 0 {
+		return Ref{}, false
+	}
+	n, ok := parseNumber(s[amp+1:])
+	if !ok {
+		return Ref{}, false
+	}
+	group := strings.Trim(s[:amp], "/")
+	if strings.Contains(group, "&") {
+		return Ref{}, false
+	}
+
+	r := Ref{Tracker: TrackerGitLab, Number: n, Key: group + "&" + s[amp+1:], Raw: raw}
+	if group != "" {
+		segments := strings.Split(group, "/")
+		r.Owner, r.Repo = segments[0], strings.Join(segments[1:], "/")
+	}
+	return r, true
 }
 
 // parseOwnerRepoNumber reads the "acme/widgets#111" and "acme/widgets/111"

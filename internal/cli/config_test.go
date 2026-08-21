@@ -154,47 +154,11 @@ func TestJiraProfileWithAnUnsetTokenEnv(t *testing.T) {
 	}
 }
 
-// A Ref that resolves onto a driver that does not exist yet still ends in "not
-// supported yet" — now able to say which Profile it would have used — and the
-// credential it resolved on the way never reaches stdout or stderr.
-//
-// GitLab is the remaining unwritten driver; the Jira half of this promise moved
-// to jira_test.go when #13 wrote that driver, because a Jira Profile now
-// constructs one and a test that constructs one has to serve it too.
-func TestResolvedProfileNeverPrintsItsToken(t *testing.T) {
-	const secret = "s3cret-token-value"
-
-	cfg := parseConfig(t, `
-profiles:
-  acme-gitlab:
-    provider: gitlab
-    host: gitlab.com
-    auth:
-      token_env: GITLAB_TOKEN
-`)
-
-	got := runWith([]string{"https://gitlab.com/acme/widgets/-/issues/7", "--json"}, cli.Deps{
-		Config: cfg,
-		Env: func(name string) string {
-			if name == "GITLAB_TOKEN" {
-				return secret
-			}
-			return ""
-		},
-	})
-
-	if got.code != 1 {
-		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
-	}
-	for _, want := range []string{"gitlab is not supported yet", `profile "acme-gitlab"`} {
-		if !strings.Contains(got.stderr, want) {
-			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
-		}
-	}
-	if strings.Contains(got.stdout, secret) || strings.Contains(got.stderr, secret) {
-		t.Error("the token reached the program's output; a credential is never printed")
-	}
-}
+// TestResolvedProfileNeverPrintsItsToken lived here while GitLab was the
+// unwritten seam it used to stay hermetic. #14 wrote that driver, so the
+// promise moved to gitlab_test.go and is now kept against a replay server: a
+// Profile whose token actually reaches a Provider and a fetch that actually
+// succeeds is a stronger statement than one that failed before connecting.
 
 func TestUnknownProfileNameListsTheRealOnes(t *testing.T) {
 	got := runWith([]string{"--profile", "nope", "ABC-123", "--json"}, cli.Deps{

@@ -26,6 +26,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/provider/jira"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
@@ -55,6 +56,8 @@ Arguments:
             ABC-123                                    a Jira-style key, matched
                                                        to a Profile by its key
                                                        prefix
+            acme&12                                    a GitLab epic reference
+            https://gitlab.com/groups/acme/-/epics/12  a GitLab group epic URL
           A bare number is resolved through the origin remote of the current
           directory's git clone; the other forms work anywhere.
           A Ref with sub-tickets is an Epic; one without is a Ticket, which
@@ -70,8 +73,8 @@ Flags:
                           ref)
       --provider <name>   Provider to read from: "auto" (the default) picks one
                           from the Epic Ref, "github" forces the GitHub driver,
-                          "jira" forces the Jira driver, "fake" serves a
-                          built-in fixture epic
+                          "gitlab" the GitLab driver, "jira" the Jira driver,
+                          "fake" serves a built-in fixture epic
       --version           show version information and exit
 `
 
@@ -93,6 +96,9 @@ type Deps struct {
 	// TokenSource discovers the GitHub API token. When nil it is
 	// github.DefaultTokenSource.
 	TokenSource github.TokenSource
+	// GitLabTokenSource discovers the GitLab API token. When nil it is
+	// gitlab.DefaultTokenSource.
+	GitLabTokenSource gitlab.TokenSource
 	// Stdin is the monitor's input. When nil it is os.Stdin.
 	Stdin io.Reader
 	// Config is the loaded global config. When non-nil it wins outright and no
@@ -253,6 +259,11 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runtimeError(stderr, err)
 	}
 
+	// A Profile claiming the Ref's host names that host's Tracker, which is the
+	// only way a bare number inside a self-managed GitLab clone can be told
+	// apart from a GitHub Enterprise one.
+	r = retagProfileClaimedHost(cfg, r)
+
 	// A Profile is resolved once, here, between the Epic Ref and the Provider,
 	// and is consumed entirely at Provider-construction time. Nothing
 	// downstream — not the pre-flight fetch, not the renderers, not the TUI —
@@ -405,7 +416,73 @@ func selectProfile(cfg config.Config, r ref.Ref, name string) (*config.Profile, 
 	if prefix := ref.KeyPrefix(r.Key); prefix != "" && r.Host == "" {
 		return nil, unmatchedKeyPrefix(cfg, prefix)
 	}
+	if r.Tracker == ref.TrackerGitLab && r.Host == "" {
+		return gitLabProfileForHostlessRef(cfg, r)
+	}
 	return nil, nil
+}
+
+// gitLabProfileForHostlessRef serves the "&12" reference form, which names a
+// group and no instance. config.Select matches a non-Jira Ref on (provider,
+// host), so a hostless GitLab Ref matches nothing there — this is the mirror of
+// the unmatched-key-prefix rule above: a single gitlab Profile serves it,
+// several are an ambiguity worth asking about, and none is fatal because there
+// is no instance to read.
+func gitLabProfileForHostlessRef(cfg config.Config, r ref.Ref) (*config.Profile, error) {
+	var matches []config.Profile
+	for _, name := range cfg.Names() {
+		if p := cfg.Profiles[name]; p.Provider == string(ref.TrackerGitLab) {
+			matches = append(matches, p)
+		}
+	}
+
+	switch len(matches) {
+	case 1:
+		return &matches[0], nil
+	case 0:
+		return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on — "+
+			"add a gitlab profile to %s, or pass the epic's full URL",
+			r.Raw, configLocation(cfg.Path))
+	default:
+		names := make([]string, len(matches))
+		for i, p := range matches {
+			names[i] = p.Name
+		}
+		return nil, fmt.Errorf("profiles %s could all serve %q — pass --profile to choose",
+			quoteJoin(names), r.Raw)
+	}
+}
+
+// quoteJoin renders a list of names the way an ask-the-user error does.
+func quoteJoin(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = fmt.Sprintf("%q", v)
+	}
+	return strings.Join(quoted, " and ")
+}
+
+// retagProfileClaimedHost fixes the one Ref the grammar has to guess at.
+// ref.ParseRemoteURL deliberately treats an unrecognized host as GitHub
+// Enterprise, so a bare number inside a clone of a self-managed GitLab resolves
+// to a GitHub Ref. A Profile that claims a host names that host's Tracker, and
+// that is better evidence than the guess.
+//
+// Only a guessed Ref is retagged — Tracker GitHub on a host that is not
+// github.com — so a URL that named its own Tracker is never overridden.
+// gitlab.com needs none of this: the grammar already knows it.
+func retagProfileClaimedHost(cfg config.Config, r ref.Ref) ref.Ref {
+	if r.Tracker != ref.TrackerGitHub || r.Host == "" || strings.EqualFold(r.Host, "github.com") {
+		return r
+	}
+	for _, name := range cfg.Names() {
+		p := cfg.Profiles[name]
+		if p.Provider == string(ref.TrackerGitLab) && strings.EqualFold(p.Host, r.Host) {
+			r.Tracker = ref.TrackerGitLab
+			return r
+		}
+	}
+	return r
 }
 
 // configLocation names the config file an error tells the user to edit: the
@@ -497,6 +574,7 @@ func (d Deps) stdin() io.Reader {
 const (
 	providerAuto   = "auto"
 	providerGitHub = "github"
+	providerGitLab = "gitlab"
 	providerJira   = "jira"
 	providerFake   = "fake"
 )
@@ -507,7 +585,7 @@ const defaultProviderName = providerAuto
 
 func knownProviderName(name string) bool {
 	switch name {
-	case providerAuto, providerGitHub, providerJira, providerFake:
+	case providerAuto, providerGitHub, providerGitLab, providerJira, providerFake:
 		return true
 	default:
 		return false
@@ -549,6 +627,11 @@ func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPa
 			return nil, fmt.Errorf("%q is not a Jira Epic Ref", r.Raw)
 		}
 		return d.newJira(r, prof, configPath)
+	case providerGitLab:
+		if r.Tracker != ref.TrackerGitLab {
+			return nil, fmt.Errorf("%q is not a GitLab Epic Ref", r.Raw)
+		}
+		return d.newGitLab(r, prof)
 	}
 
 	switch r.Tracker {
@@ -557,7 +640,7 @@ func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPa
 	case ref.TrackerJira:
 		return d.newJira(r, prof, configPath)
 	case ref.TrackerGitLab:
-		return nil, notSupportedYet(r.Tracker, prof, d.env())
+		return d.newGitLab(r, prof)
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
 	}
@@ -588,22 +671,53 @@ func (d Deps) newJira(r ref.Ref, prof *config.Profile, configPath string) (provi
 	})), nil
 }
 
-// notSupportedYet is the seam #14 (GitLab) plugs into: it replaces this error
-// with a driver constructed from the Profile's Host, Project and Credential,
-// the way newJira does. Everything it needs is already resolved here.
+// newGitLab constructs the GitLab driver from the Profile that matched this
+// Ref, when there is one.
 //
-// The credential is resolved first, so a Profile that names an unset variable
-// reports that instead of the generic message: the fix for "I wrote a Profile
-// and nothing happened" is more useful than the fact that the driver is not
-// written yet.
-func notSupportedYet(tracker ref.Tracker, prof *config.Profile, env func(string) string) error {
+// Unlike Jira, a GitLab Ref needs no Profile: a user with `glab auth login`
+// done is a supported zero-config setup, exactly as on GitHub. What a Profile
+// adds is the instance's default group or project path — which is what makes
+// the bare "&12" reference form typeable — and a named token variable.
+//
+// Translating a config.Credential into the driver's own token happens here,
+// deliberately: it is what keeps internal/provider/gitlab free of any knowledge
+// of the config file.
+func (d Deps) newGitLab(r ref.Ref, prof *config.Profile) (provider.Provider, error) {
+	// The Profile's credential is resolved first so that a Profile naming a
+	// variable nobody set reports *that* rather than a vaguer failure later.
+	//
+	// An unset auth.token_env is not one of those cases on GitLab: it falls
+	// through to glab (see gitLabTokenSource), so demanding it here would break
+	// the very setup this driver supports. Blanking token_env is how this asks
+	// config for exactly the other half — auth.user_env — whose absence is a
+	// real error whichever way the token arrives.
+	if prof != nil {
+		identityOnly := *prof
+		identityOnly.Auth.TokenEnv = ""
+		if _, err := identityOnly.Credential(d.env()); err != nil {
+			return nil, err
+		}
+	}
+	return gitlab.New(r.Host,
+		gitlab.WithPath(profileProject(prof)),
+		gitlab.WithTokenSource(d.gitLabTokenSource(prof))), nil
+}
+
+// gitLabTokenSource layers a Profile's auth reference on top of the GitLab
+// driver's own token discovery, the same way gitHubTokenSource does. An unset
+// named variable falls through to gitlab.DefaultTokenSource rather than being
+// fatal, because a user with `glab auth login` done is a supported
+// zero-token-variable setup.
+func (d Deps) gitLabTokenSource(prof *config.Profile) gitlab.TokenSource {
+	return profileTokenSource(d.GitLabTokenSource, prof, d.env(), gitlab.DefaultTokenSource)
+}
+
+// profileProject is a Profile's project path, or "" when there is no Profile.
+func profileProject(prof *config.Profile) string {
 	if prof == nil {
-		return fmt.Errorf("%s is not supported yet", tracker)
+		return ""
 	}
-	if _, err := prof.Credential(env); err != nil {
-		return err
-	}
-	return fmt.Errorf("%s is not supported yet (profile %q)", tracker, prof.Name)
+	return prof.Project
 }
 
 func (d Deps) newGitHub(r ref.Ref, prof *config.Profile) provider.Provider {
@@ -620,11 +734,17 @@ func (d Deps) gitHubTokenSource(prof *config.Profile) github.TokenSource {
 	return profileTokenSource(d.TokenSource, prof, d.env(), github.DefaultTokenSource)
 }
 
-// profileTokenSource is gitHubTokenSource with its fallback named, so a test can
-// prove the fallback is reached without shelling out to `gh`. A nil result means
-// "the driver's own default", which is the zero-config path unchanged.
-func profileTokenSource(injected github.TokenSource, prof *config.Profile,
-	env func(string) string, fallback github.TokenSource) github.TokenSource {
+// profileTokenSource is gitHubTokenSource and gitLabTokenSource with their
+// fallback named, so a test can prove the fallback is reached without shelling
+// out to `gh` or `glab`. A nil result means "the driver's own default", which is
+// the zero-config path unchanged.
+//
+// It is generic over the two drivers' token source types, which are the same
+// function shape under two names, because the layering rule is one rule: an
+// injected source wins, then a Profile's named variable, then the driver's own
+// discovery.
+func profileTokenSource[T ~func(context.Context, string) (string, error)](injected T,
+	prof *config.Profile, env func(string) string, fallback T) T {
 	if injected != nil {
 		return injected
 	}
@@ -633,10 +753,10 @@ func profileTokenSource(injected github.TokenSource, prof *config.Profile,
 	}
 
 	name := prof.Auth.TokenEnv
-	return func(ctx context.Context, host string) (string, error) {
+	return T(func(ctx context.Context, host string) (string, error) {
 		if token := strings.TrimSpace(env(name)); token != "" {
 			return token, nil
 		}
 		return fallback(ctx, host)
-	}
+	})
 }

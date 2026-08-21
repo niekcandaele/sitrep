@@ -1,0 +1,99 @@
+{
+  "id": 198148855,
+  "iid": 8509,
+  "project_id": 34675721,
+  "title": "Telemetry: record root-command invocations as 'glab' instead of null",
+  "description": "## Plan & scope\n\nWire the « éclair » decoder through `--json`.\n\n```go\nfmt.Println(\"a & b\")\n```\n\nSee gitlab-org/cli#8510.",
+  "state": "opened",
+  "created_at": "2026-08-21T07:21:56.022Z",
+  "updated_at": "2026-08-21T07:40:05.298Z",
+  "closed_at": null,
+  "closed_by": null,
+  "labels": [
+    "backend",
+    "category:gitlab cli",
+    "devops::ai coding",
+    "group::code review",
+    "section::ai",
+    "type::maintenance"
+  ],
+  "milestone": null,
+  "assignees": [
+    {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "public_email": "",
+      "name": "Jay McCure",
+      "state": "active",
+      "locked": false,
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    }
+  ],
+  "author": {
+    "id": 11809982,
+    "username": "jay_mccure",
+    "public_email": "",
+    "name": "Jay McCure",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://avatar.example/redacted",
+    "web_url": "https://gitlab.com/jay_mccure"
+  },
+  "type": "ISSUE",
+  "assignee": {
+    "id": 11809982,
+    "username": "jay_mccure",
+    "public_email": "",
+    "name": "Jay McCure",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://avatar.example/redacted",
+    "web_url": "https://gitlab.com/jay_mccure"
+  },
+  "user_notes_count": 1,
+  "merge_requests_count": 0,
+  "upvotes": 0,
+  "downvotes": 0,
+  "start_date": null,
+  "due_date": null,
+  "confidential": false,
+  "discussion_locked": null,
+  "issue_type": "issue",
+  "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/8509",
+  "time_stats": {
+    "time_estimate": 0,
+    "total_time_spent": 0,
+    "human_time_estimate": null,
+    "human_total_time_spent": null
+  },
+  "task_completion_status": {
+    "count": 0,
+    "completed_count": 0
+  },
+  "weight": null,
+  "blocking_issues_count": 0,
+  "has_tasks": true,
+  "task_status": "0 of 0 checklist items completed",
+  "_links": {
+    "self": "https://gitlab.com/api/v4/projects/34675721/issues/8509",
+    "notes": "https://gitlab.com/api/v4/projects/34675721/issues/8509/notes",
+    "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/8509/award_emoji",
+    "project": "https://gitlab.com/api/v4/projects/34675721",
+    "closed_as_duplicate_of": null
+  },
+  "references": {
+    "short": "#8509",
+    "relative": "#8509",
+    "full": "gitlab-org/cli#8509"
+  },
+  "severity": "UNKNOWN",
+  "moved_to_id": null,
+  "imported": false,
+  "imported_from": "none",
+  "service_desk_reply_to": null,
+  "epic_iid": null,
+  "epic": null,
+  "iteration": null,
+  "health_status": null
+}

@@ -1,0 +1,87 @@
+[
+  {
+    "id": 4004,
+    "type": null,
+    "body": "Last word: shipping it.",
+    "attachment": null,
+    "author": {
+      "id": 29048827,
+      "username": "aelhusseiny",
+      "name": "Amr Elhusseiny",
+      "state": "active",
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/aelhusseiny"
+    },
+    "created_at": "2026-08-21T07:24:11.500Z",
+    "updated_at": "2026-08-21T07:24:11.500Z",
+    "system": false,
+    "internal": false,
+    "noteable_id": 198148855,
+    "noteable_iid": 8509,
+    "noteable_type": "Issue",
+    "resolvable": false,
+    "confidential": false
+  },
+  {
+    "id": 4003,
+    "type": null,
+    "body": "changed title from **Old title** to **New title**",
+    "attachment": null,
+    "author": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "name": "Jay McCure",
+      "state": "active",
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "created_at": "2026-08-21T07:23:00.000Z",
+    "updated_at": "2026-08-21T07:23:00.000Z",
+    "system": true,
+    "internal": false,
+    "noteable_id": 198148855,
+    "noteable_iid": 8509,
+    "noteable_type": "Issue",
+    "resolvable": false,
+    "confidential": false
+  },
+  {
+    "id": 4002,
+    "type": null,
+    "body": "An internal note from someone whose account is gone.",
+    "attachment": null,
+    "author": null,
+    "created_at": "2026-08-21T07:22:30.250Z",
+    "updated_at": "2026-08-21T07:22:30.250Z",
+    "system": false,
+    "internal": true,
+    "noteable_id": 198148855,
+    "noteable_iid": 8509,
+    "noteable_type": "Issue",
+    "resolvable": false,
+    "confidential": true
+  },
+  {
+    "id": 4001,
+    "type": null,
+    "body": "First word: a & b, « éclair ».",
+    "attachment": null,
+    "author": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "name": "Jay McCure",
+      "state": "active",
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "created_at": "2026-08-21T07:21:56.022Z",
+    "updated_at": "2026-08-21T07:21:56.022Z",
+    "system": false,
+    "internal": false,
+    "noteable_id": 198148855,
+    "noteable_iid": 8509,
+    "noteable_type": "Issue",
+    "resolvable": false,
+    "confidential": false
+  }
+]

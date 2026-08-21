@@ -1,0 +1,105 @@
+{
+  "id": 198148855,
+  "iid": 8509,
+  "project_id": 34675721,
+  "title": "Telemetry: record root-command invocations as 'glab' instead of null",
+  "description": "## Summary\n\n`gitlab_cli_command_used` emits `label`, `property`, and `command_and_subcommand` all empty for any invocation that resolves to the root command. In the Tableau sheet these surface as a `Null`/`Null` row, which is indistinguishable from \"no data recorded\".\n\nProposal: record a single-element command path as `glab` rather than three empty strings, so a root invocation reads as a real command instead of a hole in the data.\n\n## Current behaviour\n\n[`parseCommand`](https://gitlab.com/gitlab-org/cli/-/blob/main/cmd/glab/telemetry.go#L40-43) collapses a one-element path:\n\n```go\nfunc parseCommand(parts []string) (string, string, string) {\n\tif len(parts) < 2 {\n\t\treturn \"\", \"\", \"\"\n\t}\n```\n\n`cmd.CommandPath()` for the root command is `\"glab\"`, so `parts` is `[\"glab\"]` and every field comes back empty.\n\nAfter !3761, telemetry binds to the command cobra actually executes, so the remaining root-resolving invocations are the ones that genuinely *are* the root command:\n\n| Invocation | Recorded today |\n|---|---|\n| bare `glab` | Null / Null |\n| `glab --help` | Null / Null |\n| `glab --version` | Null / Null |\n| `glab mrr` (typo) | Null / Null |\n\nNote this is a different null from `api`/Null. A base command like `glab api` records `label=api`, `property=\"\"` because there is no subcommand — that is legitimate and not in scope here.\n\n## Why it matters\n\nAn empty `label` conflates two states that should be distinguishable: \"the root command ran\" and \"we recorded nothing\". Anyone reading the sheet has to already know which one the row means. Recording `glab` makes root just another base command, consistent with how `api`/Null already reads.\n\nThe volume is small — #8499 measured the `Null`/`Null` row at 5–22 events/day across Jul–Aug 2026, and !3761 removes the alias share of that — so this is a legibility fix, not a recovery of lost signal.\n\n## Proposal\n\nFor a single-element path, return `label=\"glab\"`, `property=\"\"`, `command_and_subcommand=\"glab\"`.\n\n## Open questions\n\n1. **Value.** `glab` reads naturally and matches `CommandPath()`. Alternatives such as `root` or `_none_` are more explicit that no subcommand was named, but do not match anything a user typed.\n2. **Typos.** `glab mrr` falls back to the root command, so it would be recorded as `glab` alongside deliberate root invocations. `resolveCommand` in `cmd/glab/main.go` currently discards the `Find` error that distinguishes the two. Is separating them worth the extra field, or is the conflation acceptable?\n3. **Historical continuity.** The `Null`/`Null` row stops growing and a new `glab`/Null row starts, splitting the time series at the release boundary. Worth a note wherever the dashboard is documented.\n4. **Event definition.** `config/events/gitlab_cli_command_used.yml` in `gitlab-org/gitlab` describes these fields. Does the description need updating alongside, and does this warrant a heads-up to whoever consumes the Snowflake table?\n\n## Relationship to #8499\n\n#8499 covered telemetry binding to the *wrong* command — aliases and flag-before-subcommand invocations. That is fixed by !3761. This issue is the leftover reporting choice for invocations where the resolution is already correct.\n\nRelated: #8500 (removed commands persist as permanent zero rows).",
+  "state": "opened",
+  "created_at": "2026-08-21T07:21:56.022Z",
+  "updated_at": "2026-08-21T07:40:05.298Z",
+  "closed_at": null,
+  "closed_by": null,
+  "labels": [
+    "backend",
+    "category:gitlab cli",
+    "devops::ai coding",
+    "group::code review",
+    "section::ai",
+    "type::maintenance"
+  ],
+  "milestone": null,
+  "assignees": [
+    {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "public_email": "",
+      "name": "Jay McCure",
+      "state": "active",
+      "locked": false,
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    }
+  ],
+  "author": {
+    "id": 11809982,
+    "username": "jay_mccure",
+    "public_email": "",
+    "name": "Jay McCure",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://avatar.example/redacted",
+    "web_url": "https://gitlab.com/jay_mccure"
+  },
+  "type": "ISSUE",
+  "assignee": {
+    "id": 11809982,
+    "username": "jay_mccure",
+    "public_email": "",
+    "name": "Jay McCure",
+    "state": "active",
+    "locked": false,
+    "avatar_url": "https://avatar.example/redacted",
+    "web_url": "https://gitlab.com/jay_mccure"
+  },
+  "user_notes_count": 1,
+  "merge_requests_count": 0,
+  "upvotes": 0,
+  "downvotes": 0,
+  "start_date": null,
+  "due_date": null,
+  "confidential": false,
+  "discussion_locked": null,
+  "issue_type": "issue",
+  "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/8509",
+  "time_stats": {
+    "time_estimate": 0,
+    "total_time_spent": 0,
+    "human_time_estimate": null,
+    "human_total_time_spent": null
+  },
+  "task_completion_status": {
+    "count": 0,
+    "completed_count": 0
+  },
+  "weight": null,
+  "blocking_issues_count": 0,
+  "has_tasks": true,
+  "task_status": "0 of 0 checklist items completed",
+  "_links": {
+    "self": "https://gitlab.com/api/v4/projects/34675721/issues/8509",
+    "notes": "https://gitlab.com/api/v4/projects/34675721/issues/8509/notes",
+    "award_emoji": "https://gitlab.com/api/v4/projects/34675721/issues/8509/award_emoji",
+    "project": "https://gitlab.com/api/v4/projects/34675721",
+    "closed_as_duplicate_of": null
+  },
+  "references": {
+    "short": "#8509",
+    "relative": "#8509",
+    "full": "gitlab-org/cli#8509"
+  },
+  "severity": "UNKNOWN",
+  "moved_to_id": null,
+  "imported": false,
+  "imported_from": "none",
+  "service_desk_reply_to": null,
+  "epic_iid": 23356,
+  "epic": {
+    "id": 5270098,
+    "iid": 23356,
+    "group_id": 9970,
+    "title": "AI Clients surfaces feature parity ledger (Web Chat, IDEs, Duo CLI)",
+    "url": "https://gitlab.com/groups/gitlab-org/-/epics/23356"
+  },
+  "iteration": null,
+  "health_status": null
+}
