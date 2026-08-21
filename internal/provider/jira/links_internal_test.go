@@ -39,6 +39,24 @@ func TestClassify(t *testing.T) {
 			wantInward: model.LinkBlockedBy, wantOutward: model.LinkBlocks,
 		},
 		{
+			// An administrator may swap the two directions. Reading them as a
+			// pair rather than each in its own voice would show a blocked
+			// ticket as blocking, which is the opposite of the truth.
+			name:       "an inverted blocking type is not read backwards",
+			linkType:   linkTypeWire{ID: "10000", Name: "Blocks", Inward: "blocks", Outward: "is blocked by"},
+			wantInward: model.LinkBlocks, wantOutward: model.LinkBlockedBy,
+		},
+		{
+			name:       "an inverted type whose wording avoids the stock phrases",
+			linkType:   linkTypeWire{ID: "10011", Name: "Gating", Inward: "is a blocker for", Outward: "is waiting on"},
+			wantInward: model.LinkBlocks, wantOutward: model.LinkBlockedBy,
+		},
+		{
+			name:       "only the outward phrase speaks",
+			linkType:   linkTypeWire{ID: "10013", Name: "Dependency", Inward: "precedes", Outward: "is blocked by"},
+			wantInward: model.LinkBlocks, wantOutward: model.LinkBlockedBy,
+		},
+		{
 			name:       "relates",
 			linkType:   linkTypeWire{ID: "10003", Name: "Relates", Inward: "relates to", Outward: "relates to"},
 			wantInward: model.LinkRelates, wantOutward: model.LinkRelates,

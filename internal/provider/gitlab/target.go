@@ -241,9 +241,19 @@ func (t target) milestoneIssuesPath(id int) string {
 	return t.milestonesPath() + "/" + itoa(id) + "/issues"
 }
 
-// relatedMergeRequestsPath is the one endpoint that carries a merge request's
-// head_pipeline alongside its state and merge status; see the package doc for
-// the two that were considered and rejected.
+// closedByPath names the merge requests that will close this issue, which is
+// what "the merge requests moving this ticket" means: /related_merge_requests
+// answers a wider question — it includes every merge request that merely
+// mentions the issue — and an open mention would flip a Todo ticket to In
+// Progress. This is the same linkage the GitHub driver reads through
+// closedByPullRequestsReferences, so the two drivers agree about what they are
+// reporting.
+func (t target) closedByPath() string {
+	return t.issuePath() + "/closed_by"
+}
+
+// relatedMergeRequestsPath is the wider list, read only for the head_pipeline
+// closed_by omits; see mergeRequestsFor.
 func (t target) relatedMergeRequestsPath() string {
 	return t.issuePath() + "/related_merge_requests"
 }

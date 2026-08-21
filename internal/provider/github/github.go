@@ -276,6 +276,15 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 		return issueNode{}, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
+		// GitHub shares one number namespace between issues and pull requests,
+		// so pasting a pull request link is a common mistake — and answering it
+		// with "not found" is a false claim about a page the user is looking at.
+		// The aliased issueOrPullRequest selection is what tells the two apart.
+		if kind := resp.Data.Repository; kind != nil && kind.Kind != nil &&
+			kind.Kind.TypeName == "PullRequest" {
+			return issueNode{}, provider.Errorf(provider.KindBadRef,
+				"github: %s is a pull request, not a Ticket", refKey(r))
+		}
 		return issueNode{}, provider.Errorf(provider.KindBadRef,
 			"github: %s not found (or you lack access)", refKey(r))
 	}

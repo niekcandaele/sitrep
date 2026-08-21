@@ -14,9 +14,18 @@ package github
 // closedByPullRequestsReferences is GitHub's own "this pull request will close
 // this issue" linkage, which is what a `Closes #N` body produces;
 // includeClosedPrs keeps a rejected pull request visible, because "the agent's
-// work was turned down" must not look like "no work started". The cap of five
-// per Ticket and the head-commit statusCheckRollup — rather than per-check
-// detail — keep the polled path cheap.
+// work was turned down" must not look like "no work started". The head-commit
+// statusCheckRollup — rather than per-check detail — keeps the polled path
+// cheap.
+//
+// closedByPullRequestsReferences is capped at twenty per Ticket and does not
+// paginate. It is a cap rather than a page because ADR-0003 makes the epic
+// document one request for the whole polled path, and paginating a nested
+// connection per Ticket is exactly the N-request fan-out that split exists to
+// prevent. Twenty is far past what a readable Ticket has, and totalCount is
+// selected so the driver knows when it truncated: a Ticket with more closing
+// pull requests than the cap can be reported honestly rather than silently
+// losing the one that matters.
 //
 // The root issue carries three selections its children already had — parent,
 // assignees and closedByPullRequestsReferences — because an Epic Ref may name a
@@ -28,12 +37,14 @@ package github
 // GraphQL-Features header the driver already sends.
 const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
+    kind: issueOrPullRequest(number:$number) { __typename }
     issue(number:$number) {
       id number title url state stateReason
       repository { nameWithOwner }
       parent { id number title url repository { nameWithOwner } }
       assignees(first:10) { nodes { login name avatarUrl } }
-      closedByPullRequestsReferences(first:5, includeClosedPrs:true) {
+      closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
+        totalCount
         nodes {
           number title url state isDraft reviewDecision
           repository { nameWithOwner }
@@ -47,7 +58,8 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
           id number title url state stateReason
           repository { nameWithOwner }
           assignees(first:10) { nodes { login name avatarUrl } }
-          closedByPullRequestsReferences(first:5, includeClosedPrs:true) {
+          closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
+            totalCount
             nodes {
               number title url state isDraft reviewDecision
               repository { nameWithOwner }

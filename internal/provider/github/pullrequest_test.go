@@ -99,8 +99,15 @@ func TestLeadPullRequest(t *testing.T) {
 		{"empty", []model.PullRequest{}, 0},
 		{"a single open one", []model.PullRequest{pr(3, model.PROpen)}, 3},
 		{
-			"merged wins over a newer open one",
+			// Work in flight is the Ticket's current situation, and it is the
+			// same evidence statusWithPullRequests reads.
+			"an open one wins over a merged one",
 			[]model.PullRequest{pr(1, model.PRClosed), pr(2, model.PRMerged), pr(9, model.PROpen)},
+			9,
+		},
+		{
+			"merged wins when nothing is in flight",
+			[]model.PullRequest{pr(1, model.PRClosed), pr(2, model.PRMerged)},
 			2,
 		},
 		{
@@ -168,7 +175,7 @@ func TestLeadFirstMovesTheLeadAndKeepsTheRest(t *testing.T) {
 
 	got := leadFirst(prs)
 
-	want := []int{2, 1, 9}
+	want := []int{9, 1, 2}
 	if len(got) != len(want) {
 		t.Fatalf("leadFirst returned %d pull requests, want %d: none may be dropped", len(got), len(want))
 	}

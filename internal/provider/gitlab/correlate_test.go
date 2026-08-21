@@ -42,6 +42,60 @@ func firstTicket(t *testing.T, s *replayServer) model.Ticket {
 	return snap.Tickets[0]
 }
 
+// GitLab's related_merge_requests includes merge requests that merely mention
+// an issue. Treating one of those as work moving the Ticket flips Todo to In
+// Progress and skews grouping and progress, so membership comes from the
+// closing linkage instead.
+func TestOnlyClosingMergeRequestsMoveATicket(t *testing.T) {
+	const closing = `[{"id": 11, "iid": 1, "state": "opened", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/1",
+		"detailed_merge_status": "mergeable"}]`
+	const relatedIncludingAMention = `[
+		{"id": 11, "iid": 1, "state": "opened", "draft": false,
+		 "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/1",
+		 "detailed_merge_status": "mergeable",
+		 "head_pipeline": {"status": "success"}},
+		{"id": 22, "iid": 2, "state": "opened", "draft": false,
+		 "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/2",
+		 "detailed_merge_status": "mergeable",
+		 "head_pipeline": {"status": "failed"}}]`
+
+	s := oneChildEpic(t, response{body: closing})
+	s.responses[relatedMergeRequestsPath("gitlab-org/cli", 101)] =
+		[]response{{body: relatedIncludingAMention}}
+
+	ticket := firstTicket(t, s)
+
+	if len(ticket.PullRequests) != 1 {
+		t.Fatalf("got %d merge requests, want only the closing one: %+v",
+			len(ticket.PullRequests), ticket.PullRequests)
+	}
+	if got := ticket.PullRequests[0].Number; got != 1 {
+		t.Errorf("merge request = !%d, want !1", got)
+	}
+	// closed_by does not serialize head_pipeline, so the CI colour comes from
+	// the wider list — and from the row for this merge request, not the mention.
+	if got := ticket.PullRequests[0].Checks; got != model.ChecksPassing {
+		t.Errorf("Checks = %v, want Passing from the matching head_pipeline", got)
+	}
+}
+
+// An issue nothing is closing costs one request: there is nothing to look up a
+// pipeline for.
+func TestNoClosingMergeRequestsMakesNoSecondRequest(t *testing.T) {
+	s := oneChildEpic(t, response{file: "closed_by_empty.json"})
+
+	ticket := firstTicket(t, s)
+	if ticket.PullRequests != nil {
+		t.Errorf("PullRequests = %+v, want nil", ticket.PullRequests)
+	}
+	for _, r := range s.recorded() {
+		if strings.HasSuffix(r.path, relatedSuffix) {
+			t.Errorf("the driver requested %s for an issue nothing closes", r.path)
+		}
+	}
+}
+
 // byNumber indexes a Ticket's merge requests, because leadFirst reorders them
 // and a table asserting one row per situation should not care where it landed.
 func byNumber(prs []model.PullRequest) map[int]model.PullRequest {
@@ -55,7 +109,7 @@ func byNumber(prs []model.PullRequest) map[int]model.PullRequest {
 // One assertion per mapping row, on State, Review and Checks together: the
 // review direction and the CI colour are what a human acts on.
 func TestMergeRequestMapping(t *testing.T) {
-	ticket := firstTicket(t, oneChildEpic(t, response{file: "related_merge_requests_states.json"}))
+	ticket := firstTicket(t, oneChildEpic(t, response{file: "closed_by_states.json"}))
 	prs := byNumber(ticket.PullRequests)
 
 	if len(ticket.PullRequests) != 11 {
@@ -79,7 +133,10 @@ func TestMergeRequestMapping(t *testing.T) {
 		{107, "an unmapped pipeline status is never green", model.PROpen, model.ReviewNone, model.ChecksPending},
 		{108, "requested changes is a hard block", model.PROpen, model.ReviewChangesRequested, model.ChecksPassing},
 		{109, "another project entirely", model.PROpen, model.ReviewPending, model.ChecksPassing},
-		{110, "no references object", model.PROpen, model.ReviewNone, model.ChecksNone},
+		// !110 is the newest live merge request, so it leads — and the lead is
+		// the one correlate pays for approvals on, which is why its review
+		// posture is Pending here where the others' is None.
+		{110, "no references object", model.PROpen, model.ReviewPending, model.ChecksNone},
 	}
 
 	for _, tt := range tests {
@@ -104,26 +161,26 @@ func TestMergeRequestMapping(t *testing.T) {
 	if got := prs[110].Repository; got != "gitlab-org/cli" {
 		t.Errorf("!110.Repository = %q, want it derived from web_url", got)
 	}
-	// A merged merge request leads, and it is index 0.
-	if ticket.PullRequests[0].Number != 100 {
-		t.Errorf("PullRequests[0] = !%d, want the merged one to lead", ticket.PullRequests[0].Number)
+	// The newest live merge request leads, and it is index 0.
+	if ticket.PullRequests[0].Number != 110 {
+		t.Errorf("PullRequests[0] = !%d, want the newest live one to lead", ticket.PullRequests[0].Number)
 	}
 }
 
 // Lead selection, at the seam: three merge requests on one issue still read as
 // one situation, and nothing is dropped.
 func TestLeadMergeRequestIsFirst(t *testing.T) {
-	ticket := firstTicket(t, oneChildEpic(t, response{file: "related_merge_requests_lead.json"}))
+	ticket := firstTicket(t, oneChildEpic(t, response{file: "closed_by_lead.json"}))
 
 	if len(ticket.PullRequests) != 3 {
 		t.Fatalf("got %d merge requests, want all 3", len(ticket.PullRequests))
 	}
-	if got := ticket.PullRequests[0].Number; got != 201 {
-		t.Errorf("PullRequests[0] = !%d, want the merged !201 to lead", got)
+	if got := ticket.PullRequests[0].Number; got != 202 {
+		t.Errorf("PullRequests[0] = !%d, want the open !202 to lead", got)
 	}
-	// The Status Category reads every merge request, not only the lead: the
-	// merged one leads because it is the headline, but the newer open follow-up
-	// is somebody coding right now.
+	// The lead and the Status Category read the same evidence: !202 is somebody
+	// coding right now, so it is both what the row shows and why the Ticket is
+	// grouped as in progress.
 	if ticket.Status != model.StatusInProgress {
 		t.Errorf("Status = %v, want InProgress: !202 is still open", ticket.Status)
 	}
@@ -152,6 +209,9 @@ func TestApprovals(t *testing.T) {
 	}{
 		{"somebody clicked Approve", "approvals_approved.json", model.ReviewApproved},
 		{"an approval is still owed", "approvals_pending.json", model.ReviewPending},
+		// One of two approvals in is not approval: it is still waiting, and
+		// reporting Approved would tell a human the merge request can land.
+		{"one approval of two is still pending", "approvals_partial.json", model.ReviewPending},
 		// The trap: `approved` is true because the requirement is zero, and
 		// nobody has approved anything.
 		{"zero approvals required is not approved", "approvals_zero_required.json", model.ReviewPending},
@@ -159,7 +219,7 @@ func TestApprovals(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := oneChildEpic(t, response{file: "related_merge_requests.json"})
+			s := oneChildEpic(t, response{file: "closed_by.json"})
 			s.responses[mergeRequestApprovalsPath] = []response{{file: tt.file}}
 
 			ticket := firstTicket(t, s)
@@ -195,7 +255,11 @@ func TestRequestedChangesSkipsTheApprovalsRequest(t *testing.T) {
 
 // A merged or closed lead is history: its review posture is not worth a request.
 func TestNoApprovalsRequestForADeadLead(t *testing.T) {
-	s := oneChildEpic(t, response{file: "related_merge_requests_lead.json"})
+	s := oneChildEpic(t, response{body: `[{
+		"id": 900, "iid": 900, "state": "merged", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/900",
+		"references": {"full": "gitlab-org/cli!900"}
+	}]`})
 
 	firstTicket(t, s)
 	for _, r := range s.recorded() {
@@ -205,19 +269,37 @@ func TestNoApprovalsRequestForADeadLead(t *testing.T) {
 	}
 }
 
-// An approvals failure of any status is never fatal: the report is one nuance
-// poorer rather than absent.
-func TestApprovalsFailureIsNeverFatal(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden,
-		http.StatusNotFound, http.StatusTooManyRequests, http.StatusInternalServerError} {
+// A 403 or 404 on approvals is one project's visibility, which is the case the
+// Free tier produces: the report is one nuance poorer rather than absent.
+func TestApprovalsVisibilityFailureIsNotFatal(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusNotFound} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			s := oneChildEpic(t, response{file: "related_merge_requests.json"})
+			s := oneChildEpic(t, response{file: "closed_by.json"})
 			s.responses[mergeRequestApprovalsPath] = []response{{status: status, body: `{}`}}
 
 			ticket := firstTicket(t, s)
 			// detailed_merge_status is not_approved, so the fallback is Pending.
 			if got := ticket.PullRequests[0].Review; got != model.ReviewPending {
 				t.Errorf("Review = %v, want Pending from detailed_merge_status alone", got)
+			}
+		})
+	}
+}
+
+// Anything else will hit every Ticket the same way, so it fails the fetch
+// rather than being laundered into a review state — a snapshot reporting
+// "pending review" when the approvals endpoint was simply down is a confident
+// lie, and the worker pool keeps hammering it.
+func TestSystemicApprovalsFailureFailsTheFetch(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests,
+		http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			s := oneChildEpic(t, response{file: "closed_by.json"})
+			s.responses[mergeRequestApprovalsPath] = []response{{status: status, body: `{}`}}
+
+			p := newProvider(s)
+			if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
+				t.Fatalf("FetchEpic succeeded; want the %d to fail the fetch", status)
 			}
 		})
 	}
@@ -320,11 +402,11 @@ func TestFinishedTicketsAreNeverReopened(t *testing.T) {
 	}
 }
 
-// One related_merge_requests request per Ticket, at most one approvals request
+// One closed_by request per Ticket, at most one approvals request
 // per Ticket, and every one of them a GET carrying sitrep's headers.
 func TestCorrelationSendsExactlyWhatItNeeds(t *testing.T) {
 	s := fullEpic(t)
-	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "related_merge_requests.json"}}
+	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
 	s.responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 
 	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
@@ -334,7 +416,7 @@ func TestCorrelationSendsExactlyWhatItNeeds(t *testing.T) {
 	var correlations, approvals int
 	for _, r := range s.recorded() {
 		switch {
-		case strings.HasSuffix(r.path, "/related_merge_requests"):
+		case strings.HasSuffix(r.path, "/closed_by"):
 			correlations++
 			if got := r.query["per_page"]; len(got) != 1 || got[0] != "100" {
 				t.Errorf("a correlation request carried per_page=%v, want GitLab's maximum", got)
@@ -369,7 +451,7 @@ func TestCorrelationDegradesPerTicket(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			s := fullEpic(t)
 			s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{status: status, body: `{}`}}
-			s.responses[mergeRequestsPath("gitlab-org/cli", 102)] = []response{{file: "related_merge_requests_lead.json"}}
+			s.responses[mergeRequestsPath("gitlab-org/cli", 102)] = []response{{file: "closed_by_lead.json"}}
 
 			snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
 			if err != nil {
@@ -428,7 +510,7 @@ func TestCorrelationIsCancellable(t *testing.T) {
 	// Cancel as soon as the first correlation request arrives, so the rest of the
 	// fan-out sees a dead context. No sleep and no timing assumption.
 	s.onRequest = func(path string) {
-		if strings.HasSuffix(path, "/related_merge_requests") {
+		if strings.HasSuffix(path, "/closed_by") {
 			cancel()
 		}
 	}
@@ -444,7 +526,7 @@ func TestCorrelationIsCancellable(t *testing.T) {
 func TestDecodedIssueCarriesItsMergeRequests(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:                 {{file: "issue.json"}},
-		issueMRsPath:              {{file: "related_merge_requests.json"}},
+		issueMRsPath:              {{file: "closed_by.json"}},
 		mergeRequestApprovalsPath: {{file: "approvals_approved.json"}},
 	})
 

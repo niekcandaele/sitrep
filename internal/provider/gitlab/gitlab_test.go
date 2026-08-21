@@ -42,7 +42,7 @@ const (
 	issuePath      = "/api/v4/projects/gitlab-org%2Fcli/issues/8509"
 	issueNotesPath = "/api/v4/projects/gitlab-org%2Fcli/issues/8509/notes"
 	issueLinksPath = "/api/v4/projects/gitlab-org%2Fcli/issues/8509/links"
-	issueMRsPath   = issuePath + "/related_merge_requests"
+	issueMRsPath   = issuePath + "/closed_by"
 
 	// The milestone endpoints, in both scopes. The lookup is the *list* path
 	// with an iids[] filter; the issues path carries the resolved database id,
@@ -54,17 +54,51 @@ const (
 	mergeRequestApprovalsPath = "/api/v4/projects/gitlab-org%2Fcli/merge_requests/3761/approvals"
 )
 
-// mergeRequestsPath is the related-merge-requests endpoint for one issue.
+// mergeRequestsPath is the closing-linkage endpoint for one issue: the one that
+// decides which merge requests are moving a Ticket.
 func mergeRequestsPath(project string, iid int) string {
-	return fmt.Sprintf("/api/v4/projects/%s/issues/%d/related_merge_requests",
+	return fmt.Sprintf("/api/v4/projects/%s/issues/%d/closed_by",
 		url.PathEscape(project), iid)
+}
+
+// relatedSuffix is the wider list correlate reads for head_pipeline alone. The
+// replay server answers it from the closed_by queue for the same issue, because
+// the fixtures are one payload in one shape and configuring both by hand would
+// be two copies to drift.
+const relatedSuffix = "/related_merge_requests"
+
+// relatedMergeRequestsPath is that wider list's path for one issue, for the
+// tests that configure the two endpoints separately.
+func relatedMergeRequestsPath(project string, iid int) string {
+	return fmt.Sprintf("/api/v4/projects/%s/issues/%d%s",
+		url.PathEscape(project), iid, relatedSuffix)
+}
+
+// closedBySibling maps a related_merge_requests path onto the closed_by path
+// for the same issue, or "" for any other path.
+func closedBySibling(path string) string {
+	if !strings.HasSuffix(path, relatedSuffix) {
+		return ""
+	}
+	return strings.TrimSuffix(path, relatedSuffix) + "/closed_by"
+}
+
+// approvalsFallback maps any merge request's approvals path onto the one a test
+// configured. Which merge request leads is the lead rule's business and several
+// fixtures hold three of them, so a test about approvals says what the answer is
+// and not which iid it hangs off.
+func approvalsFallback(path string) string {
+	if !strings.HasSuffix(path, "/approvals") {
+		return ""
+	}
+	return mergeRequestApprovalsPath
 }
 
 // noMergeRequests answers every listed issue's correlation request with an empty
 // array, which is what a test about something other than merge requests wants.
 func noMergeRequests(responses map[string][]response, project string, iids ...int) map[string][]response {
 	for _, iid := range iids {
-		responses[mergeRequestsPath(project, iid)] = []response{{file: "related_merge_requests_empty.json"}}
+		responses[mergeRequestsPath(project, iid)] = []response{{file: "closed_by_empty.json"}}
 	}
 	return responses
 }
@@ -146,9 +180,21 @@ func newReplayServer(t *testing.T, responses map[string][]response) *replayServe
 			query:   r.URL.Query(),
 			headers: r.Header.Clone(),
 		})
-		queue, ok := s.responses[r.URL.EscapedPath()]
-		n := s.served[r.URL.EscapedPath()]
-		s.served[r.URL.EscapedPath()]++
+		path := r.URL.EscapedPath()
+		if _, configured := s.responses[path]; !configured {
+			for _, fallback := range []string{closedBySibling(path), approvalsFallback(path)} {
+				if fallback == "" {
+					continue
+				}
+				if _, ok := s.responses[fallback]; ok {
+					path = fallback
+					break
+				}
+			}
+		}
+		queue, ok := s.responses[path]
+		n := s.served[path]
+		s.served[path]++
 		hook := s.onRequest
 		s.mu.Unlock()
 
@@ -233,6 +279,9 @@ func fullEpic(t *testing.T) *replayServer {
 	}
 	noMergeRequests(responses, "gitlab-org/cli", 101, 102, 103, 104, 105, 106, 107, 108, 109)
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
+	// Whichever merge request a test's fixture makes the lead, its approvals
+	// come from here; approvalsFallback routes every iid to this one path.
+	responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	return newReplayServer(t, responses)
 }
 
@@ -321,8 +370,11 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 				i, got.Key, got.Status, got.NativeStatus, got.Repository,
 				w.key, w.status, w.native, w.repository)
 		}
-		if got.ParentID != epicTicketID {
-			t.Errorf("Tickets[%d].ParentID = %q, want %q", i, got.ParentID, epicTicketID)
+		// A child reached through the epic-issues endpoint hangs directly off
+		// the Epic, which model.Ticket documents as an empty ParentID — the same
+		// shape the GitHub driver produces for the same situation.
+		if got.ParentID != "" {
+			t.Errorf("Tickets[%d].ParentID = %q, want it empty for a direct child", i, got.ParentID)
 		}
 		if !strings.HasPrefix(string(got.ID), "issue:") {
 			t.Errorf("Tickets[%d].ID = %q, want an issue TicketID", i, got.ID)
@@ -374,7 +426,7 @@ func TestFetchEpicPutsNoDescriptionOnTheHotPath(t *testing.T) {
 // children, a milestone, its children, related merge requests and approvals.
 func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 	epic := fullEpic(t)
-	epic.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "related_merge_requests.json"}}
+	epic.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
 	epic.responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	milestone := fullProjectMilestone(t)
 
@@ -398,7 +450,7 @@ func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 		t.Fatal("no requests were recorded")
 	}
 	// The endpoints this ticket added are among the ones just proven read-only.
-	for _, want := range []string{"/milestones", "/related_merge_requests", "/approvals"} {
+	for _, want := range []string{"/milestones", "/closed_by", "/approvals"} {
 		var found bool
 		for _, s := range []*replayServer{epic, milestone} {
 			for _, r := range s.recorded() {
@@ -523,7 +575,7 @@ func TestFetchEpicReportsItsOwnParent(t *testing.T) {
 func TestFetchEpicOnAnIssueRef(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue_with_epic.json"}},
-		issueMRsPath: {{file: "related_merge_requests_empty.json"}},
+		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
 	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
@@ -567,7 +619,7 @@ func TestFetchEpicOnAnIssueRef(t *testing.T) {
 func TestFetchEpicOnAnIssueWithNoEpic(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue.json"}},
-		issueMRsPath: {{file: "related_merge_requests_empty.json"}},
+		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
 	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
@@ -589,7 +641,7 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	}
 	noMergeRequests(responses, "gitlab-org/cli", 102, 103, 104)
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
-	responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "related_merge_requests.json"}}
+	responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
 	responses[mergeRequestApprovalsPath] = []response{{file: "approvals_approved.json"}}
 	s := newReplayServer(t, responses)
 	p := newProvider(s)
@@ -894,7 +946,8 @@ func TestPollingIsStableAndResolvesTheTokenOnce(t *testing.T) {
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
 	// One Ticket really does correlate, so the determinism this asserts covers
 	// the fan-out's ordering and not just an empty one.
-	responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "related_merge_requests_lead.json"}}
+	responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by_lead.json"}}
+	responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	s := newReplayServer(t, responses)
 
 	var tokens int
@@ -981,6 +1034,9 @@ func fullProjectMilestone(t *testing.T) *replayServer {
 	}
 	noMergeRequests(responses, "gitlab-org/cli", 201, 202, 203, 204, 205, 206)
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
+	// Whichever merge request a test's fixture makes the lead, its approvals
+	// come from here; approvalsFallback routes every iid to this one path.
+	responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	return newReplayServer(t, responses)
 }
 
@@ -1047,8 +1103,8 @@ func TestFetchEpicOnAProjectMilestone(t *testing.T) {
 				i, got.Key, got.Status, got.NativeStatus, got.Repository,
 				w.key, w.status, w.native, w.repository)
 		}
-		if got.ParentID != snap.Epic.ID {
-			t.Errorf("Tickets[%d].ParentID = %q, want the milestone Epic's %q", i, got.ParentID, snap.Epic.ID)
+		if got.ParentID != "" {
+			t.Errorf("Tickets[%d].ParentID = %q, want it empty for a direct child", i, got.ParentID)
 		}
 	}
 	if got := snap.Tickets[1].Title; got != "Filtering & fuzzy find, « éclair » included" {
@@ -1360,7 +1416,7 @@ func TestChildIssueBreadcrumb(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{
 				issuePath:    {{file: tt.file}},
-				issueMRsPath: {{file: "related_merge_requests_empty.json"}},
+				issueMRsPath: {{file: "closed_by_empty.json"}},
 			})
 
 			snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)

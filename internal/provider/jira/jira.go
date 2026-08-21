@@ -352,11 +352,18 @@ func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticke
 			return nil, err
 		}
 		for _, issue := range resp.Issues {
-			tickets = append(tickets, newTicket(issue, p.host))
+			tickets = append(tickets, newTicket(issue, p.host, key))
 		}
 
-		if resp.IsLast || resp.NextPageToken == "" {
+		if resp.IsLast {
 			return tickets, nil
+		}
+		if resp.NextPageToken == "" {
+			// Jira says there is more and hands over no way to ask for it. The
+			// GitHub and GitLab drivers both refuse an inconsistent cursor rather
+			// than returning a partial epic that looks complete, and a situation
+			// report silently missing children is worse than one that failed.
+			return nil, fmt.Errorf("jira: %s reports more children but returned no page cursor", key)
 		}
 		if resp.NextPageToken == token {
 			return nil, fmt.Errorf("jira: %s reports more children but returned no new page cursor", key)

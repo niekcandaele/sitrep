@@ -67,25 +67,30 @@
 // with an open or draft merge request is the only way this driver produces
 // StatusInProgress.
 //
-// They come from GET /projects/:id/issues/:iid/related_merge_requests. Two
-// alternatives were considered and rejected, and this is written down so nobody
-// re-litigates it: /issues/:iid/closed_by is the closer semantic match to
-// GitHub's closed-by references but returns the merge-request *list* shape,
-// which carries no head_pipeline; and /projects/:id/merge_requests (including
-// the milestone-scoped form) is the list shape too, and milestone assignment is
-// not issue correlation anyway. Only related_merge_requests carries
-// head_pipeline, so only it answers "is CI green" without a second request per
-// merge request. The cost is breadth: a merge request that merely *mentions* an
-// issue is included, which lead selection then keeps readable.
+// Which merge requests those are comes from GET
+// /projects/:id/issues/:iid/closed_by — GitLab's own closing linkage, the same
+// question the GitHub driver asks through closedByPullRequestsReferences.
+// /related_merge_requests answers a wider one: it includes every merge request
+// that merely *mentions* the issue, and an open mention would flip a Todo
+// Ticket to In Progress and skew both grouping and progress.
+//
+// The wider list is still read, for one field. The two endpoints serialize a
+// merge request differently and only related_merge_requests carries
+// head_pipeline, which is the whole of "is CI green"; closed_by therefore
+// decides membership and the related payload supplies the pipeline for the
+// merge requests it named. /projects/:id/merge_requests (including the
+// milestone-scoped form) was considered and rejected: it is the list shape too,
+// and milestone assignment is not issue correlation anyway.
 //
 // # The request budget
 //
-// One polled refresh costs 1 + ceil(N/100) + N + A requests, where N is the
-// Ticket count and A ≤ N is the number of Tickets whose lead merge request is
-// still live. For a thirty-Ticket Epic that is roughly forty to sixty requests a
-// refresh. Correlation is bounded to mergeRequestWorkers concurrent requests and
-// is fully context-cancellable; a reader deciding whether to raise --interval
-// deserves the number.
+// One polled refresh costs 1 + ceil(N/100) + N + C + A requests, where N is the
+// Ticket count, C ≤ N is the number of Tickets something is actually closing —
+// only those pay the second correlation request — and A ≤ C is the number whose
+// lead merge request is still live. For a thirty-Ticket Epic that is roughly
+// forty to ninety requests a refresh. Correlation is bounded to
+// mergeRequestWorkers concurrent requests and is fully context-cancellable; a
+// reader deciding whether to raise --interval deserves the number.
 package gitlab
 
 import (
@@ -301,7 +306,7 @@ func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.
 	snap.Epic = newEpicFromEpic(epic, p.host, t.path)
 	snap.Parent = newParentFromEpic(epic, p.host, t.path)
 
-	tickets, err := p.fetchChildren(ctx, t, t.epicIssuesPath(), snap.Epic.ID)
+	tickets, err := p.fetchChildren(ctx, t, t.epicIssuesPath())
 	if err != nil {
 		return err
 	}
@@ -328,7 +333,7 @@ func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *m
 	}
 	snap.Epic = newEpicFromMilestone(milestone, p.host, t)
 
-	tickets, err := p.fetchChildren(ctx, t, t.milestoneIssuesPath(milestone.ID), snap.Epic.ID)
+	tickets, err := p.fetchChildren(ctx, t, t.milestoneIssuesPath(milestone.ID))
 	if err != nil {
 		return err
 	}
@@ -339,7 +344,7 @@ func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *m
 // fetchChildren pages a collection's issues to the last page, in GitLab's own
 // order. path is the children endpoint — an epic's or a milestone's — because
 // everything after the addressing is identical.
-func (p *Provider) fetchChildren(ctx context.Context, t target, path string, parentID model.TicketID) ([]model.Ticket, error) {
+func (p *Provider) fetchChildren(ctx context.Context, t target, path string) ([]model.Ticket, error) {
 	var tickets []model.Ticket
 
 	page := 1
@@ -359,7 +364,7 @@ func (p *Provider) fetchChildren(ctx context.Context, t target, path string, par
 			return nil, err
 		}
 		for _, issue := range issues {
-			tickets = append(tickets, newTicketFromIssue(issue, parentID))
+			tickets = append(tickets, newTicketFromIssue(issue))
 		}
 
 		next := strings.TrimSpace(header.Get("x-next-page"))

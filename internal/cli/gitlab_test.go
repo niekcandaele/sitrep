@@ -85,11 +85,16 @@ func replayGitLab(t *testing.T) *httptest.Server {
 			file = "milestone_issues_empty.json"
 		// The first Ticket of each collection carries a real merge request, so
 		// the whole-program assertion has something to find; the rest carry none.
-		case strings.HasSuffix(path, "/issues/101/related_merge_requests"),
+		case strings.HasSuffix(path, "/issues/101/closed_by"),
+			strings.HasSuffix(path, "/issues/201/closed_by"),
+			// The wider list is read for head_pipeline alone, and the recorded
+			// payload is the same merge-request shape, so it answers both.
+			strings.HasSuffix(path, "/issues/101/related_merge_requests"),
 			strings.HasSuffix(path, "/issues/201/related_merge_requests"):
-			file = "related_merge_requests.json"
-		case strings.HasSuffix(path, "/related_merge_requests"):
-			file = "related_merge_requests_empty.json"
+			file = "closed_by.json"
+		case strings.HasSuffix(path, "/closed_by"),
+			strings.HasSuffix(path, "/related_merge_requests"):
+			file = "closed_by_empty.json"
 		case strings.HasSuffix(path, "/merge_requests/3761/approvals"):
 			file = "approvals_approved.json"
 		default:

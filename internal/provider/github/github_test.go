@@ -506,8 +506,9 @@ func TestTheLeadPullRequestComesFirst(t *testing.T) {
 
 	tests := map[string][]int{
 		// A closed attempt, the merged one that landed, and a newer open
-		// follow-up: merged leads, the rest keep GitHub's order.
-		"#90": {102, 101, 103},
+		// follow-up: the open one leads — it is what the Ticket's In Progress
+		// grouping is reading — and the rest keep GitHub's order.
+		"#90": {103, 101, 102},
 		// Two open ones: the newest leads.
 		"#98": {109, 107},
 		// Neither has a rollup; the newest still leads.
@@ -813,6 +814,19 @@ func epicFailures() []epicFailure {
 			want: providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{"niekcandaele/sitrep#2", "not found"},
+				Secret:   fixtureToken,
+			},
+		},
+		{
+			// GitHub shares one number namespace between issues and pull
+			// requests, so pasting a pull request link is a common mistake —
+			// and "not found" is a false claim about a page the user is looking
+			// at.
+			name:     "the number names a pull request",
+			response: response{file: "issue_is_a_pull_request.json"},
+			want: providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{"niekcandaele/sitrep#2", "is a pull request, not a Ticket"},
 				Secret:   fixtureToken,
 			},
 		},

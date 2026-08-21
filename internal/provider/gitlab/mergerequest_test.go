@@ -111,16 +111,28 @@ func TestLeadFirst(t *testing.T) {
 		want []int
 	}{
 		{
-			name: "a merged one leads however old it is",
+			// Work in flight is the Ticket's current situation, and it is what
+			// statusWithMergeRequests already reads: a merged merge request
+			// beside an open one would otherwise show a landed row on a Ticket
+			// grouped as In Progress.
+			name: "the newest live one leads, even beside a merged one",
 			prs: []model.PullRequest{
 				{Number: 3, State: model.PROpen},
 				{Number: 1, State: model.PRMerged},
 				{Number: 2, State: model.PRClosed},
 			},
-			want: []int{1, 3, 2},
+			want: []int{3, 1, 2},
 		},
 		{
-			name: "otherwise the newest live one leads",
+			name: "a merged one leads when nothing is in flight",
+			prs: []model.PullRequest{
+				{Number: 3, State: model.PRClosed},
+				{Number: 1, State: model.PRMerged},
+			},
+			want: []int{1, 3},
+		},
+		{
+			name: "the newest live one leads",
 			prs: []model.PullRequest{
 				{Number: 1, State: model.PROpen},
 				{Number: 9, State: model.PRClosed},
@@ -146,7 +158,7 @@ func TestLeadFirst(t *testing.T) {
 		},
 		{
 			name: "the lead is already first",
-			prs:  []model.PullRequest{{Number: 2, State: model.PRMerged}, {Number: 1, State: model.PROpen}},
+			prs:  []model.PullRequest{{Number: 2, State: model.PROpen}, {Number: 1, State: model.PRMerged}},
 			want: []int{2, 1},
 		},
 	}
@@ -234,7 +246,7 @@ func TestMergeRequestProjectPath(t *testing.T) {
 	}
 }
 
-// An empty related_merge_requests list is nil, the model's documented "none".
+// An empty closed_by list is nil, the model's documented "none".
 func TestNewPullRequestsOnNothing(t *testing.T) {
 	if got := newPullRequests(nil); got != nil {
 		t.Errorf("newPullRequests(nil) = %+v, want nil", got)

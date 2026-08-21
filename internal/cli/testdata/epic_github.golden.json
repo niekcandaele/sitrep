@@ -144,11 +144,11 @@
       ],
       "pull_requests": [
         {
-          "number": 102,
-          "title": "Résumé importer, second time lucky",
-          "url": "https://github.com/niekcandaele/sitrep/pull/102",
+          "number": 103,
+          "title": "Follow-up: CV parsing edge cases",
+          "url": "https://github.com/niekcandaele/sitrep/pull/103",
           "repository": "niekcandaele/sitrep",
-          "state": "merged",
+          "state": "open",
           "review": "approved",
           "checks": "passing"
         },
@@ -162,11 +162,11 @@
           "checks": "failing"
         },
         {
-          "number": 103,
-          "title": "Follow-up: CV parsing edge cases",
-          "url": "https://github.com/niekcandaele/sitrep/pull/103",
+          "number": 102,
+          "title": "Résumé importer, second time lucky",
+          "url": "https://github.com/niekcandaele/sitrep/pull/102",
           "repository": "niekcandaele/sitrep",
-          "state": "open",
+          "state": "merged",
           "review": "approved",
           "checks": "passing"
         }
