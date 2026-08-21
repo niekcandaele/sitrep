@@ -4,8 +4,23 @@ A read-only terminal situation report on the work you delegated: one screen show
 Epic's Tickets, their status, and the code moving them — across GitHub, Jira, and GitLab.
 Agents write; sitrep watches. It never writes to a Tracker ([ADR-0002](docs/adr/0002-read-only-by-design.md)).
 
-sitrep is early: today the binary reports its own version and usage. The Providers, the
-Epic view, and the TUI land in later work.
+sitrep is early: today it reads an Epic from GitHub and prints it once, as text or as JSON.
+The TUI lands in later work.
+
+## Usage
+
+```sh
+sitrep <ref> --plain   # a one-shot text report, for humans, dumb terminals and pipes
+sitrep <ref> --json    # the same epic as a JSON document, for scripts and agents
+```
+
+`<ref>` is the Epic Ref: a bare number (`111`, resolved through the current clone's
+`origin` remote), `owner/repo#111`, or the issue's full URL.
+
+`--plain` prints the Epic's Tickets grouped by status with a progress bar, assignees and
+the pull request moving each Ticket. It emits no ANSI escape sequences and never takes over
+the screen, so it is safe over SSH, in a log file, or piped into something else. `--json`
+prints the same snapshot as a stable, documented wire format.
 
 ## Install
 
