@@ -294,7 +294,6 @@ func ParseRemoteURL(raw string) (Ref, error) {
 		return Ref{}, fmt.Errorf("cannot parse %q as a git remote URL: %w", raw, err)
 	}
 
-	host = strings.ToLower(host)
 	tracker := trackerForHost(host)
 	if tracker == TrackerUnknown {
 		// An unrecognized host serving a clone is treated as GitHub Enterprise:
@@ -306,7 +305,11 @@ func ParseRemoteURL(raw string) (Ref, error) {
 
 // splitRemoteURL separates a git remote URL into host and path, handling both
 // the scp-like "git@host:owner/repo.git" form and every scheme form (https,
-// ssh, git) a real clone produces. Userinfo is dropped.
+// ssh, git) a real clone produces. Userinfo is dropped; an explicit port is
+// kept, because a self-hosted instance is unreachable without it.
+//
+// The scp-like form's colon separates host from path rather than host from
+// port, so "ssh://git@host:2222/owner/repo" is the only shape that carries one.
 func splitRemoteURL(s string) (host, path string, err error) {
 	if !strings.Contains(s, "://") {
 		at := strings.Index(s, "@")
@@ -318,7 +321,7 @@ func splitRemoteURL(s string) (host, path string, err error) {
 		if host == "" || strings.Contains(host, "/") {
 			return "", "", fmt.Errorf("cannot parse %q as a git remote URL", s)
 		}
-		return host, s[colon+1:], nil
+		return canonicalHost(host), s[colon+1:], nil
 	}
 
 	u, parseErr := url.Parse(s)
@@ -328,7 +331,7 @@ func splitRemoteURL(s string) (host, path string, err error) {
 	if u.Hostname() == "" {
 		return "", "", fmt.Errorf("cannot parse %q as a git remote URL", s)
 	}
-	return u.Hostname(), u.Path, nil
+	return canonicalHost(u.Host), u.Path, nil
 }
 
 // splitOwnerRepo splits a repository path into its owner and its repository
@@ -349,11 +352,29 @@ func splitOwnerRepo(path string) (owner, repo string, err error) {
 	return segments[0], strings.Join(segments[1:], "/"), nil
 }
 
+// HostTracker maps a host onto the Tracker serving it, or TrackerUnknown for a
+// host sitrep does not recognize. It is exported so the CLI can ask whether a
+// Ref's Tracker was read off a known host or guessed: an explicit --provider is
+// authoritative for a guess and must not override a host that named itself.
+//
+// The host may carry a port; the port plays no part in which Tracker serves it.
+func HostTracker(host string) Tracker {
+	return trackerForHost(host)
+}
+
 // trackerForHost maps a host onto the Tracker serving it. An unrecognized host
 // is deliberately unknown here; callers decide whether the surrounding context
 // justifies assuming GitHub Enterprise.
+//
+// It classifies on the host alone, with any port removed. A leading "www." is
+// not stripped here: canonicalHost already did that, and only for the hosts
+// below, so that "www.ghe.example" stays a distinct host — and therefore a
+// distinct credential scope — from "ghe.example".
 func trackerForHost(host string) Tracker {
-	host = strings.ToLower(strings.TrimPrefix(host, "www."))
+	return trackerForBareHost(hostWithoutPort(strings.ToLower(strings.TrimSpace(host))))
+}
+
+func trackerForBareHost(host string) Tracker {
 	switch {
 	case host == "github.com":
 		return TrackerGitHub
@@ -364,6 +385,37 @@ func trackerForHost(host string) Tracker {
 	default:
 		return TrackerUnknown
 	}
+}
+
+// canonicalHost is the one spelling of a host a Ref carries. It lower-cases,
+// keeps an explicit port — a self-hosted instance on git.acme.test:8443 is
+// unreachable without one — and strips a leading "www." only when the
+// remainder is a host sitrep recognizes, so www.github.com becomes the
+// canonical API host while www.ghe.example stays itself.
+func canonicalHost(hostport string) string {
+	host := strings.ToLower(strings.TrimSpace(hostport))
+	if !strings.HasPrefix(host, "www.") {
+		return host
+	}
+	stripped := strings.TrimPrefix(host, "www.")
+	if trackerForBareHost(hostWithoutPort(stripped)) == TrackerUnknown {
+		return host
+	}
+	return stripped
+}
+
+// hostWithoutPort drops a ":<port>" suffix, leaving an IPv6 literal's own
+// colons alone.
+func hostWithoutPort(host string) string {
+	if strings.HasSuffix(host, "]") {
+		return host
+	}
+	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i+1:], "]") {
+		if _, ok := parseNumber(host[i+1:]); ok {
+			return host[:i]
+		}
+	}
+	return host
 }
 
 // parseURL reads a full tracker URL. A GitHub-shaped path
@@ -377,7 +429,7 @@ func parseURL(s, raw string) (Ref, error) {
 		return Ref{}, unparseable(raw)
 	}
 
-	host := strings.ToLower(u.Hostname())
+	host := canonicalHost(u.Host)
 	tracker := trackerForHost(host)
 	segments := pathSegments(u.Path)
 
@@ -588,6 +640,14 @@ func parseGitLabMilestoneReference(s, raw string) (Ref, bool) {
 	}
 	path := strings.Trim(s[:pct], "/")
 	if strings.Contains(path, "%") {
+		return Ref{}, false
+	}
+
+	// "groups/" is a scope marker, not a path: with nothing after it the
+	// reference names no group at all. Accepting it would silently resolve
+	// against the Profile's default project — a different milestone than the one
+	// asked for — so it is declined and Parse reports it as unparseable.
+	if path == strings.TrimSuffix(groupScopePrefix, "/") {
 		return Ref{}, false
 	}
 

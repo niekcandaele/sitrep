@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -678,9 +679,32 @@ func TestMissingCredentials(t *testing.T) {
 // Credentials never render, however they are printed.
 func TestCredentialsNeverRenderTheirToken(t *testing.T) {
 	c := jira.Credentials{Email: fixtureEmail, Token: fixtureToken}
-	for _, rendered := range []string{fmt.Sprint(c), fmt.Sprintf("%v", c), c.String()} {
+
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	// %#v and encoding/json both read the exported Token field and would walk
+	// straight past String.
+	renderings := []string{
+		fmt.Sprint(c),
+		fmt.Sprintf("%v", c),
+		fmt.Sprintf("%+v", c),
+		fmt.Sprintf("%#v", c),
+		fmt.Sprintf("%s", c),
+		c.String(),
+		string(encoded),
+	}
+	for _, rendered := range renderings {
 		if strings.Contains(rendered, fixtureToken) {
 			t.Errorf("Credentials rendered as %q, which contains the token", rendered)
+		}
+		// A substring is a leak too: half a token still narrows the search.
+		if half := fixtureToken[:len(fixtureToken)/2]; strings.Contains(rendered, half) {
+			t.Errorf("Credentials rendered as %q, which contains part of the token", rendered)
+		}
+		if !strings.Contains(rendered, "REDACTED") {
+			t.Errorf("Credentials rendered as %q, want it to say REDACTED", rendered)
 		}
 	}
 }

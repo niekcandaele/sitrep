@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -27,6 +28,25 @@ func (c Credentials) String() string {
 		token = ""
 	}
 	return fmt.Sprintf("jira.Credentials{Email:%s, Token:%s}", c.Email, token)
+}
+
+// GoString renders the same redacted form for %#v, which formats struct fields
+// directly and would otherwise walk straight past String.
+func (c Credentials) GoString() string { return c.String() }
+
+// MarshalJSON renders the same redacted form for encoding/json, which reads the
+// exported Token field rather than String. Token stays exported because the
+// constructor in internal/cli sets it, and because the point is that the type
+// is safe however it is printed rather than safe if everybody remembers.
+func (c Credentials) MarshalJSON() ([]byte, error) {
+	token := ""
+	if c.Token != "" {
+		token = "REDACTED"
+	}
+	return json.Marshal(struct {
+		User  string `json:"user"`
+		Token string `json:"token"`
+	}{User: c.Email, Token: token})
 }
 
 // header renders the Authorization header value Jira Cloud expects.

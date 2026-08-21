@@ -3,11 +3,15 @@ package gitlab
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// defaultHost is gitlab.com; anything else is a self-managed GitLab host.
+const defaultHost = "gitlab.com"
 
 // glabTimeout bounds the `glab auth status` call. Unlike `gh auth token` that
 // command makes a live API call to validate the token before printing it, so
@@ -47,9 +51,25 @@ var getenv = os.Getenv
 // precedence is the environment too, so "reuse glab auth the same way" is
 // honoured rather than bent.
 //
+// That order only holds for a host the ambient variables can be assumed to
+// belong to: gitlab.com, or the host $GITLAB_HOST names, which is glab's own
+// way of pointing them at a self-managed instance. For any other host the
+// environment carries no host at all, so offering it would be sitrep handing a
+// gitlab.com credential to whoever named that host; glab's own per-host login
+// is then the only source.
+//
 // A token is a credential: it is never logged, printed, or wrapped into an
 // error.
 func DefaultTokenSource(ctx context.Context, host string) (string, error) {
+	if !ambientTokenBelongsTo(host) {
+		if token := glabAuthToken(ctx, host); token != "" {
+			return token, nil
+		}
+		return "", fmt.Errorf("no GitLab token for %s: sitrep only sends $GITLAB_TOKEN to %s — "+
+			`run "glab auth login --hostname %s", or add a profile naming that host and its token variable`,
+			host, defaultHost, host)
+	}
+
 	for _, name := range tokenEnvNames {
 		if token := strings.TrimSpace(getenv(name)); token != "" {
 			return token, nil
@@ -61,6 +81,19 @@ func DefaultTokenSource(ctx context.Context, host string) (string, error) {
 	return "", errNoToken
 }
 
+// ambientTokenBelongsTo reports whether the GITLAB_TOKEN family can be assumed
+// to be a credential for host. An empty host is the caller not having said, in
+// which case the driver is talking to gitlab.com.
+func ambientTokenBelongsTo(host string) bool {
+	switch {
+	case host == "", strings.EqualFold(host, defaultHost):
+		return true
+	default:
+		glabHost := strings.TrimSpace(getenv("GITLAB_HOST"))
+		return glabHost != "" && strings.EqualFold(host, glabHost)
+	}
+}
+
 // glabAuthToken asks the glab CLI for a stored token, returning "" whenever
 // glab is absent, unauthenticated, or slow. Not being logged in is not an error
 // here: it is the ordinary case where the environment serves the token instead.
@@ -70,7 +103,9 @@ func DefaultTokenSource(ctx context.Context, host string) (string, error) {
 // is what is parsed. Second, --hostname is passed always, unlike gh where the
 // flag is conditional: glab has no implicit default host and falls back to
 // $GITLAB_HOST, which would silently answer for the wrong instance.
-func glabAuthToken(ctx context.Context, host string) string {
+// It is a package variable so that a test can exercise the precedence chain
+// without depending on whether glab is installed on the machine running it.
+var glabAuthToken = func(ctx context.Context, host string) string {
 	host = strings.TrimSpace(host)
 	if host == "" {
 		return ""
