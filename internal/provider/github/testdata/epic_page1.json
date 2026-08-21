@@ -12,7 +12,7 @@
           "nameWithOwner": "niekcandaele/sitrep"
         },
         "subIssues": {
-          "totalCount": 10,
+          "totalCount": 17,
           "pageInfo": {
             "hasNextPage": true,
             "endCursor": "Y3Vyc29yOjEwMA=="
@@ -30,6 +30,32 @@
               },
               "assignees": {
                 "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 17,
+                    "title": "Add engineering rails: build, CI gates, release pipeline",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/17",
+                    "state": "MERGED",
+                    "isDraft": false,
+                    "reviewDecision": "APPROVED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
               }
             },
             {
@@ -44,6 +70,32 @@
               },
               "assignees": {
                 "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 18,
+                    "title": "Walking skeleton: domain model, Provider, fake Provider, --json",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/18",
+                    "state": "MERGED",
+                    "isDraft": false,
+                    "reviewDecision": "APPROVED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
               }
             },
             {
@@ -58,6 +110,32 @@
               },
               "assignees": {
                 "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 19,
+                    "title": "GitHub driver: epic fetch, Epic Ref grammar, auth",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/19",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
               }
             },
             {
@@ -72,6 +150,32 @@
               },
               "assignees": {
                 "nodes": []
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 20,
+                    "title": "GitHub PR correlation",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/20",
+                    "state": "OPEN",
+                    "isDraft": true,
+                    "reviewDecision": null,
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "PENDING"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
               }
             },
             {
@@ -85,6 +189,9 @@
                 "nameWithOwner": "niekcandaele/sitrep"
               },
               "assignees": {
+                "nodes": []
+              },
+              "closedByPullRequestsReferences": {
                 "nodes": []
               }
             },
@@ -114,6 +221,76 @@
                     "login": "carol",
                     "name": "Carol Chen",
                     "avatarUrl": "https://avatars.githubusercontent.com/u/3?v=4"
+                  }
+                ]
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "number": 101,
+                    "title": "First attempt at the résumé importer",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/101",
+                    "state": "CLOSED",
+                    "isDraft": false,
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "FAILURE"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "number": 102,
+                    "title": "Résumé importer, second time lucky",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/102",
+                    "state": "MERGED",
+                    "isDraft": false,
+                    "reviewDecision": "APPROVED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "number": 103,
+                    "title": "Follow-up: CV parsing edge cases",
+                    "url": "https://github.com/niekcandaele/sitrep/pull/103",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "reviewDecision": "APPROVED",
+                    "repository": {
+                      "nameWithOwner": "niekcandaele/sitrep"
+                    },
+                    "commits": {
+                      "nodes": [
+                        {
+                          "commit": {
+                            "statusCheckRollup": {
+                              "state": "SUCCESS"
+                            }
+                          }
+                        }
+                      ]
+                    }
                   }
                 ]
               }
