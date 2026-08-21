@@ -1,0 +1,41 @@
+[
+  {
+    "id": 402910200,
+    "iid": 200,
+    "project_id": 34675721,
+    "title": "The first attempt, abandoned",
+    "state": "closed",
+    "draft": false,
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/200",
+    "references": { "short": "!200", "relative": "!200", "full": "gitlab-org/cli!200" },
+    "detailed_merge_status": "not_open",
+    "reviewers": [],
+    "head_pipeline": null
+  },
+  {
+    "id": 402910201,
+    "iid": 201,
+    "project_id": 34675721,
+    "title": "The one that landed",
+    "state": "merged",
+    "draft": false,
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/201",
+    "references": { "short": "!201", "relative": "!201", "full": "gitlab-org/cli!201" },
+    "detailed_merge_status": "not_open",
+    "reviewers": [],
+    "head_pipeline": { "id": 8, "project_id": 34675721, "status": "success" }
+  },
+  {
+    "id": 402910202,
+    "iid": 202,
+    "project_id": 34675721,
+    "title": "A newer follow-up, still open",
+    "state": "opened",
+    "draft": false,
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/202",
+    "references": { "short": "!202", "relative": "!202", "full": "gitlab-org/cli!202" },
+    "detailed_merge_status": "mergeable",
+    "reviewers": [],
+    "head_pipeline": { "id": 9, "project_id": 34675721, "status": "success" }
+  }
+]

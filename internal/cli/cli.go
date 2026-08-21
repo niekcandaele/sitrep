@@ -58,6 +58,12 @@ Arguments:
                                                        prefix
             acme&12                                    a GitLab epic reference
             https://gitlab.com/groups/acme/-/epics/12  a GitLab group epic URL
+            acme/widgets%3                             a GitLab milestone
+                                                       reference — a milestone is
+                                                       how GitLab Free spells an
+                                                       Epic
+            https://gitlab.com/acme/widgets/-/milestones/3
+                                                       a GitLab milestone URL
           A bare number is resolved through the origin remote of the current
           directory's git clone; the other forms work anywhere.
           A Ref with sub-tickets is an Epic; one without is a Ticket, which

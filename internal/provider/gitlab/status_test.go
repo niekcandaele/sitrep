@@ -82,8 +82,9 @@ func TestNormalizeStatus(t *testing.T) {
 	}
 }
 
-// The absence that #15 fills: nothing this driver can be handed produces
-// InProgress, because REST tells it nothing that would justify one.
+// Nothing normalizeStatus can be handed produces InProgress: GitLab issues are
+// opened or closed in REST and a scoped label is a plan, not an outcome. The
+// in-progress half of the report comes from statusWithMergeRequests instead.
 func TestNormalizeStatusNeverReportsInProgress(t *testing.T) {
 	states := []string{"opened", "closed", "locked", "merged", ""}
 	labels := [][]string{nil, {"workflow::in dev"}, {"in progress"}, {"status::doing"}, {"wontfix"}}
@@ -92,7 +93,7 @@ func TestNormalizeStatusNeverReportsInProgress(t *testing.T) {
 		for _, ls := range labels {
 			for _, dup := range []bool{false, true} {
 				if status, _ := normalizeStatus(state, ls, dup); status == model.StatusInProgress {
-					t.Fatalf("normalizeStatus(%q, %v, %v) reported InProgress; that is #15's to add",
+					t.Fatalf("normalizeStatus(%q, %v, %v) reported InProgress; only merge requests may",
 						state, ls, dup)
 				}
 			}

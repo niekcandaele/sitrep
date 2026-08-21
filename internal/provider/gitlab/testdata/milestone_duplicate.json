@@ -1,0 +1,22 @@
+[
+  {
+    "id": 6239395,
+    "iid": 3,
+    "project_id": 34675721,
+    "title": "v1.4 — CLI polish",
+    "description": "",
+    "state": "active",
+    "expired": false,
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+  },
+  {
+    "id": 6239396,
+    "iid": 3,
+    "project_id": 34675721,
+    "title": "An impossible second answer to a unique iid",
+    "description": "",
+    "state": "active",
+    "expired": false,
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+  }
+]

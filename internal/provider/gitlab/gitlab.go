@@ -1,6 +1,6 @@
 // Package gitlab is sitrep's GitLab Tracker driver: it turns a GitLab group
-// epic and its child issues — or a single project issue — into a normalized
-// Epic with its Tickets.
+// epic, a project or group milestone, and their child issues — or a single
+// project issue — into a normalized Epic with its Tickets.
 //
 // The driver speaks REST/JSON over plain net/http and encoding/json. There is
 // no GitLab SDK and there will not be one (ADR-0001): hand-rolling a handful of
@@ -35,17 +35,57 @@
 //
 // # TicketID
 //
-// model.TicketID here encodes the addressed node: "issue:{project path}#{iid}"
-// or "epic:{group path}&{iid}". A GitLab issue iid is meaningless without its
-// project — iids restart at 1 in every project — and FetchDetail receives
-// nothing else. It is Provider-scoped and opaque by contract; nothing outside
-// this package may parse it.
+// model.TicketID here encodes the addressed node: "issue:{project path}#{iid}",
+// "epic:{group path}&{iid}", "project-milestone:{project path}%{iid}" or
+// "group-milestone:{group path}%{iid}". A GitLab issue iid is meaningless
+// without its project — iids restart at 1 in every project — and FetchDetail
+// receives nothing else. It is Provider-scoped and opaque by contract; nothing
+// outside this package may parse it.
+//
+// # Milestone as Epic
+//
+// Native epics are a Premium/Ultimate feature. On GitLab Free the collection a
+// team actually delegates work into is a milestone, so sitrep reports a
+// milestone as an Epic: a milestone Ref renders a full Epic view, with the same
+// children, the same progress and the same drill-in as an epic. It is a Ref and
+// not a probe — sitrep never fetches two APIs to find out which tier this is —
+// and the human-facing half of the fallback is the 403 message on the epic path,
+// which now names the milestone route.
+//
+// A milestone is addressed by its iid, which is the number its web URL and its
+// "%3" reference carry, but GitLab's milestone endpoints take the milestone's
+// database *id*. The list endpoint's iids[] filter bridges the two and returns
+// the whole milestone in the same request, which is why this driver never reads
+// /milestones/:milestone_id. (Verified against gitlab.com on 2026-08-21; the
+// milestone endpoints answer 401 even for public projects, so the milestone
+// fixtures are hand-written — testdata/README.md says so per file.)
 //
 // # Merge requests
 //
-// This driver correlates none. Capabilities().PullRequests is false, so the
-// section is silently absent rather than empty, and no Status Category is ever
-// InProgress. #15 turns all of that on together.
+// Every Ticket carries the merge requests moving it, with their state, their
+// review and approval posture and their CI pipeline status, and an open Ticket
+// with an open or draft merge request is the only way this driver produces
+// StatusInProgress.
+//
+// They come from GET /projects/:id/issues/:iid/related_merge_requests. Two
+// alternatives were considered and rejected, and this is written down so nobody
+// re-litigates it: /issues/:iid/closed_by is the closer semantic match to
+// GitHub's closed-by references but returns the merge-request *list* shape,
+// which carries no head_pipeline; and /projects/:id/merge_requests (including
+// the milestone-scoped form) is the list shape too, and milestone assignment is
+// not issue correlation anyway. Only related_merge_requests carries
+// head_pipeline, so only it answers "is CI green" without a second request per
+// merge request. The cost is breadth: a merge request that merely *mentions* an
+// issue is included, which lead selection then keeps readable.
+//
+// # The request budget
+//
+// One polled refresh costs 1 + ceil(N/100) + N + A requests, where N is the
+// Ticket count and A ≤ N is the number of Tickets whose lead merge request is
+// still live. For a thirty-Ticket Epic that is roughly forty to sixty requests a
+// refresh. Correlation is bounded to mergeRequestWorkers concurrent requests and
+// is fully context-cancellable; a reader deciding whether to raise --interval
+// deserves the number.
 package gitlab
 
 import (
@@ -174,64 +214,133 @@ func (p *Provider) Name() string { return "gitlab" }
 // Capabilities declares what this driver actually returns today.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true,  // an epic's child issues are how an Epic is assembled
-		BlockingLinks: true,  // the issue links endpoint, with its own link_type
-		Comments:      true,  // notes, minus GitLab's system notes
-		PullRequests:  false, // #15 correlates merge requests; until it does, the section is silently absent
+		Hierarchy:     true, // an epic's or milestone's child issues are how an Epic is assembled
+		BlockingLinks: true, // the issue links endpoint, with its own link_type
+		Comments:      true, // notes, minus GitLab's system notes
+		PullRequests:  true, // related merge requests, with review posture and pipeline status
 	}
 }
 
-// FetchEpic returns the Epic named by r and, for a group epic, every child
-// issue GitLab lists under it.
+// FetchEpic returns the Epic named by r and, for a group epic or a milestone,
+// every child issue GitLab lists under it.
+//
+// A milestone is an Epic that GitLab addresses differently, and nothing after
+// the mapping knows the difference: the same children, the same pagination, the
+// same correlation, the same Detail screen.
 //
 // A project issue Ref comes back with no Tickets, the issue's own identity on
-// Epic and its epic on Parent: GitLab's hierarchy in v1 is epic → issues, and
-// an issue's own child work items (tasks) are not expanded. internal/cli decodes
-// that into a Detail screen; the driver never decides which screen opens
-// (ADR-0003).
+// Epic and its epic — or, failing that, its milestone — on Parent: GitLab's
+// hierarchy in v1 is collection → issues, and an issue's own child work items
+// (tasks) are not expanded. internal/cli decodes that into a Detail screen; the
+// driver never decides which screen opens (ADR-0003).
 //
-// Child epics are not expanded either — whatever the epic-issues endpoint
-// returns is exactly what sitrep shows.
+// Child epics are not expanded either — whatever the children endpoint returns
+// is exactly what sitrep shows.
 func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
 	t, err := targetFor(r, p.path)
 	if err != nil {
 		return model.EpicSnapshot{}, err
 	}
 
-	// Tickets starts non-nil so an epic with no children renders as "no
+	// Tickets starts non-nil so an Epic with no children renders as "no
 	// Tickets" rather than as null.
 	snap := model.EpicSnapshot{Tickets: []model.Ticket{}, Capabilities: p.Capabilities()}
 
-	if t.kind == kindIssue {
-		var issue issueWire
-		if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
+	switch {
+	case t.kind == kindIssue:
+		if err := p.fetchIssueSnapshot(ctx, t, &snap); err != nil {
 			return model.EpicSnapshot{}, err
 		}
-		snap.Epic = newEpicFromIssue(issue)
-		snap.Parent = newParentFromIssue(issue.Epic, p.host)
+		// FetchedAt is left zero for the caller to stamp.
 		return snap, nil
+
+	case t.isMilestone():
+		if err := p.fetchMilestoneSnapshot(ctx, t, &snap); err != nil {
+			return model.EpicSnapshot{}, err
+		}
+
+	default:
+		if err := p.fetchEpicSnapshot(ctx, t, &snap); err != nil {
+			return model.EpicSnapshot{}, err
+		}
 	}
 
+	if err := p.correlate(ctx, snap.Tickets); err != nil {
+		return model.EpicSnapshot{}, err
+	}
+	return snap, nil
+}
+
+// fetchIssueSnapshot reads the single issue an Epic Ref turned out to name,
+// including the merge requests moving it: model.Epic.PullRequests exists for
+// exactly this decoded Detail header, and cli.decodedTicket copies it onto the
+// Ticket it renders. One extra request, on a path that is a drill-in by
+// definition.
+func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+	var issue issueWire
+	if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
+		return err
+	}
+	snap.Epic = newEpicFromIssue(issue)
+	snap.Parent = newParentFromIssue(issue, p.host)
+
+	prs, err := p.mergeRequestsFor(ctx, t)
+	if err != nil {
+		return err
+	}
+	snap.Epic.PullRequests = prs
+	snap.Epic.Status = statusWithMergeRequests(snap.Epic.Status, prs)
+	return nil
+}
+
+// fetchEpicSnapshot reads a group epic and its children.
+func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
 	var epic epicWire
 	if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
-		return model.EpicSnapshot{}, err
+		return err
 	}
 	snap.Epic = newEpicFromEpic(epic, p.host, t.path)
 	snap.Parent = newParentFromEpic(epic, p.host, t.path)
 
-	tickets, err := p.fetchChildren(ctx, t, snap.Epic.ID)
+	tickets, err := p.fetchChildren(ctx, t, t.epicIssuesPath(), snap.Epic.ID)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return err
 	}
 	snap.Tickets = append(snap.Tickets, tickets...)
-
-	// FetchedAt is left zero for the caller to stamp.
-	return snap, nil
+	return nil
 }
 
-// fetchChildren pages the epic's issues to the last page, in GitLab's own
-// order.
-func (p *Provider) fetchChildren(ctx context.Context, t target, parentID model.TicketID) ([]model.Ticket, error) {
+// fetchMilestoneSnapshot reads a milestone and its issues. One function serves
+// both scopes: a project milestone and a group milestone differ only in the
+// segment target builds their paths from, and writing the branch twice is how
+// the two drift.
+//
+// Parent stays the zero model.Parent. A milestone belongs to nothing sitrep
+// models — a project milestone's group is not its parent — and a zero Parent is
+// an ordinary state, not an error.
+//
+// A group milestone's issues span projects, so each Ticket's Repository and
+// project-qualified Key differ; newTicketFromIssue already derives both from the
+// issue's own references.full, so this needs no code of its own.
+func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+	milestone, err := p.fetchMilestone(ctx, t)
+	if err != nil {
+		return err
+	}
+	snap.Epic = newEpicFromMilestone(milestone, p.host, t)
+
+	tickets, err := p.fetchChildren(ctx, t, t.milestoneIssuesPath(milestone.ID), snap.Epic.ID)
+	if err != nil {
+		return err
+	}
+	snap.Tickets = append(snap.Tickets, tickets...)
+	return nil
+}
+
+// fetchChildren pages a collection's issues to the last page, in GitLab's own
+// order. path is the children endpoint — an epic's or a milestone's — because
+// everything after the addressing is identical.
+func (p *Provider) fetchChildren(ctx context.Context, t target, path string, parentID model.TicketID) ([]model.Ticket, error) {
 	var tickets []model.Ticket
 
 	page := 1
@@ -246,7 +355,7 @@ func (p *Provider) fetchChildren(ctx context.Context, t target, parentID model.T
 			"page":     {strconv.Itoa(page)},
 		}
 		var issues []issueWire
-		header, err := p.do(ctx, t.epicIssuesPath(), query, t.String(), &issues)
+		header, err := p.do(ctx, path, query, t.String(), &issues)
 		if err != nil {
 			return nil, err
 		}
@@ -286,6 +395,9 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	}
 	if t.kind == kindEpic {
 		return p.fetchEpicDetail(ctx, t, id)
+	}
+	if t.isMilestone() {
+		return p.fetchMilestoneDetail(ctx, t, id)
 	}
 
 	var issue issueWire
@@ -339,6 +451,29 @@ func (p *Provider) fetchEpicDetail(ctx context.Context, t target, id model.Ticke
 	}, nil
 }
 
+// fetchMilestoneDetail reads a milestone's Detail, which a Ref naming a
+// milestone with no issues decodes to. It is one request: the same iids[] lookup
+// FetchEpic makes, which is what the iid-carrying TicketID trades for.
+//
+// Comments stays nil because GitLab has no milestone notes endpoint at all —
+// not because the Comments Capability is a lie. A Capability is a Provider-level
+// declaration about the Tracker, and a node that happens to carry no comments is
+// the same ordinary state as an issue nobody has replied to. Do not "fix" this
+// by inventing a request.
+//
+// Links stays nil for the reason an epic's does: there is no milestone links
+// endpoint either.
+func (p *Provider) fetchMilestoneDetail(ctx context.Context, t target, id model.TicketID) (model.Detail, error) {
+	milestone, err := p.fetchMilestone(ctx, t)
+	if err != nil {
+		return model.Detail{}, err
+	}
+	return model.Detail{
+		TicketID:    id,
+		Description: milestone.Description,
+	}, nil
+}
+
 // fetchNotes reads one page of notes, newest first. Nothing paginates; see
 // notePageSize.
 func (p *Provider) fetchNotes(ctx context.Context, path, resource string) ([]noteWire, error) {
@@ -389,7 +524,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 	}
 	defer res.Body.Close()
 
-	if err := checkStatus(res, resource, apiBase+path); err != nil {
+	if err := checkStatus(res, resource, apiBase+path, p.host); err != nil {
 		return nil, err
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
@@ -403,28 +538,56 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 // megabyte of either says nothing more than the first kilobyte.
 const errorBodyLimit = 64 << 10
 
+// statusError is a checkStatus error that still remembers which status produced
+// it. The message is unchanged and is what every caller prints; the code exists
+// for the one caller that has to *branch* on it — correlate, which degrades a
+// Ticket on a 403 or 404 and fails the whole snapshot on anything else.
+type statusError struct {
+	status int
+	err    error
+}
+
+func (e *statusError) Error() string { return e.err.Error() }
+func (e *statusError) Unwrap() error { return e.err }
+
 // checkStatus turns a non-2xx response into the clearest one-line explanation
 // the status, the headers and the body support. No retries and no backoff: the
 // TUI polls anyway, so a failed refresh is retried by the next tick with the
 // user watching, which is better than a driver that silently takes four times
 // as long to fail.
 //
+// host names the instance, which the Premium-403 message needs to spell out a
+// milestone URL the user can actually paste.
+//
 // No message here ever contains a credential.
-func checkStatus(res *http.Response, resource, path string) error {
+func checkStatus(res *http.Response, resource, path, host string) error {
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		return nil
 	}
 
+	return &statusError{status: res.StatusCode, err: statusMessage(res, resource, path, host)}
+}
+
+func statusMessage(res *http.Response, resource, path, host string) error {
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
 		return errors.New(`gitlab: authentication failed (401) — ` +
 			`check "glab auth status" or $GITLAB_TOKEN`)
 	case http.StatusForbidden:
+		if isMilestonePath(path) {
+			// Milestones are Free tier, so a 403 here is an access problem rather
+			// than a tier one, and saying "Premium" would send the user shopping.
+			return fmt.Errorf("gitlab: access denied (403) to the milestone %s — "+
+				"milestones need at least Reporter access", resource)
+		}
 		if isEpicPath(path) {
 			// Epics are a Premium/Ultimate feature and a Free instance answers 403
 			// on exactly these paths, so the tier is the overwhelmingly likely
-			// cause and the one a user can act on.
-			return fmt.Errorf("gitlab: epics on %s need GitLab Premium or Ultimate (403)", resource)
+			// cause and the one a user can act on. It is also actionable now that
+			// sitrep reports a milestone as an Epic, so the message says how.
+			return fmt.Errorf("gitlab: epics on %s need GitLab Premium or Ultimate (403) — "+
+				"point sitrep at a milestone instead, e.g. https://%s/groups/<group>/-/milestones/<n>",
+				resource, host)
 		}
 		return fmt.Errorf("gitlab: access denied (403) to %s", resource)
 	case http.StatusNotFound:
@@ -443,6 +606,12 @@ func checkStatus(res *http.Response, resource, path string) error {
 // is what makes a 403 there a tier problem rather than a permission problem.
 func isEpicPath(path string) bool {
 	return strings.Contains(path, "/epics/")
+}
+
+// isMilestonePath reports whether a request was for one of the milestone
+// endpoints. They are Free tier, so a 403 there is the mirror image of an epic's.
+func isMilestonePath(path string) bool {
+	return strings.Contains(path, "/milestones")
 }
 
 // errorPayload reads GitLab's own error document, or "" when the body is not

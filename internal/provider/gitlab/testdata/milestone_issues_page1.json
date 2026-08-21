@@ -1,0 +1,217 @@
+[
+  {
+    "id": 198200001,
+    "iid": 201,
+    "project_id": 34675721,
+    "title": "Resolve a milestone by its iid",
+    "description": "A description GitLab sends on the polled path whether or not sitrep wants it.",
+    "state": "opened",
+    "created_at": "2026-07-02T09:00:00.000Z",
+    "closed_at": null,
+    "labels": [],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "name": "Jay McCure",
+      "state": "active",
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/201",
+    "references": {
+      "short": "#201",
+      "relative": "#201",
+      "full": "gitlab-org/cli#201"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/201",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/201/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198200002,
+    "iid": 202,
+    "project_id": 34675721,
+    "title": "Filtering & fuzzy find, « éclair » included",
+    "description": "Another description the polled path must drop.",
+    "state": "opened",
+    "created_at": "2026-07-03T09:00:00.000Z",
+    "closed_at": null,
+    "labels": ["frontend"],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [
+      {
+        "id": 11809982,
+        "username": "jay_mccure",
+        "name": "Jay McCure",
+        "state": "active",
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/jay_mccure"
+      },
+      {
+        "id": 12345678,
+        "username": "aelhusseiny",
+        "name": "Ahmed Elhusseiny",
+        "state": "active",
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/aelhusseiny"
+      }
+    ],
+    "author": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "name": "Jay McCure",
+      "state": "active",
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/202",
+    "references": {
+      "short": "#202",
+      "relative": "#202",
+      "full": "gitlab-org/cli#202"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/202",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/202/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198200003,
+    "iid": 203,
+    "project_id": 34675721,
+    "title": "Draft the pipeline mapping",
+    "description": "",
+    "state": "opened",
+    "created_at": "2026-07-04T09:00:00.000Z",
+    "closed_at": null,
+    "labels": [],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/203",
+    "references": {
+      "short": "#203",
+      "relative": "#203",
+      "full": "gitlab-org/cli#203"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/203",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/203/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198200004,
+    "iid": 7,
+    "project_id": 44444444,
+    "title": "A child in another project entirely",
+    "description": "",
+    "state": "opened",
+    "created_at": "2026-07-05T09:00:00.000Z",
+    "closed_at": null,
+    "labels": [],
+    "milestone": {
+      "id": 6239400,
+      "iid": 3,
+      "group_id": 9970,
+      "title": "19.4",
+      "state": "closed",
+      "web_url": "https://gitlab.com/groups/gitlab-org/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/platform/core/-/work_items/7",
+    "references": {
+      "short": "#7",
+      "relative": "gitlab-org/platform/core#7",
+      "full": "gitlab-org/platform/core#7"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/44444444/issues/7",
+      "notes": "https://gitlab.com/api/v4/projects/44444444/issues/7/notes",
+      "project": "https://gitlab.com/api/v4/projects/44444444",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198200005,
+    "iid": 204,
+    "project_id": 34675721,
+    "title": "Bound the correlation fan-out",
+    "description": "",
+    "state": "opened",
+    "created_at": "2026-07-06T09:00:00.000Z",
+    "closed_at": null,
+    "labels": [],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/204",
+    "references": {
+      "short": "#204",
+      "relative": "#204",
+      "full": "gitlab-org/cli#204"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/204",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/204/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  }
+]

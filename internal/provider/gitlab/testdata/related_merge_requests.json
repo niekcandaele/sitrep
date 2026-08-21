@@ -1,0 +1,184 @@
+[
+  {
+    "id": 522090275,
+    "iid": 3761,
+    "project_id": 34675721,
+    "title": "fix(telemetry): attribute events to the executed command",
+    "description": "Closes #8499.\n\n## What\n\nThe `gitlab_cli_command_used` hook bound to the command returned by `rootCmd.Traverse`, before alias expansion and before cobra resolved the invocation. Two classes of invocation were mis-recorded:\n\n1. **Recorded as null** — anything resolving to the root command (aliases, bare `glab`, `--help`, `--version`, typos) fired an event with `label`, `property`, and `command_and_subcommand` all empty.\n2. **Not recorded at all** — anything where `Traverse` returned `nil`, such as a subcommand flag placed before the subcommand (`glab --output json mr list`), fired no event, because `sendTelemetryData` returns early on a nil command. Those invocations succeed normally, so the loss is invisible in the data rather than showing up as a Null row.\n\n## How\n\n`main`'s argument handling moves into `resolveExecution`, which expands aliases first and then resolves the expanded arguments through `rootCmd.Find` — the same lookup cobra itself uses in `ExecuteC`, since glab does not set `TraverseChildren`. Telemetry binds to that result, so events follow what actually ran regardless of argument order or alias expansion.\n\nThe issue suggested recording the resolved command from a root `PersistentPreRun`. That does not work here: cobra runs only the *nearest* ancestor's persistent pre-run hook and then breaks out of the loop, and `EnableRepoOverride` sets `PersistentPreRunE` on nouns like `mr`, so a root hook would never fire for the common case. `Find` is cobra's own resolution, so it cannot drift from what executes.\n\n## Test evidence\n\n`TestMain_resolveExecution` covers the pipeline end to end, including both bug classes. To confirm the tests actually pin the fix, I temporarily reintroduced the old binding inside `resolveExecution` and reran them:\n\n```\n--- FAIL: TestMain_resolveExecution/subcommand_flag_before_the_subcommand   (nil cmd — class 2, event dropped)\n--- FAIL: TestMain_resolveExecution/alias      expected: \"glab mr checkout\"  actual: \"glab\"   (class 1)\n--- FAIL: TestMain_resolveExecution/shell_alias                             (bound root instead of nil)\n```\n\nAll nine subtests pass against the fix.\n\n## Notes for reviewers\n\nThe `GLAB_DEBUG` `args -> expandedArgs` line is now gated on `aliasExpanded`, preserving the previous \"only when the alias branch ran\" behaviour. It is deliberately not printed unconditionally, since it goes to stdout and would corrupt piped output for debug users.\n\nThe issue also suggested a comment on `AddGlobalRepoOverride`, since the hidden global `-R` was load-bearing for telemetry under `Traverse`. It no longer is — cobra's `stripFlags` consumes `-R`'s value whether or not the shorthand is registered — but that is out of scope here and left untouched.\n\nPer #7885, the fire-and-forget `go sendTelemetryData(f, cmd)` is untouched.",
+    "state": "opened",
+    "created_at": "2026-08-21T06:18:57.803Z",
+    "updated_at": "2026-08-21T07:13:51.585Z",
+    "merged_by": null,
+    "merge_user": null,
+    "merged_at": null,
+    "closed_by": null,
+    "closed_at": null,
+    "target_branch": "main",
+    "source_branch": "jmc-8499",
+    "user_notes_count": 3,
+    "upvotes": 0,
+    "downvotes": 0,
+    "author": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "public_email": "",
+      "name": "Jay McCure",
+      "state": "active",
+      "locked": false,
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "assignees": [
+      {
+        "id": 11809982,
+        "username": "jay_mccure",
+        "public_email": "",
+        "name": "Jay McCure",
+        "state": "active",
+        "locked": false,
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/jay_mccure"
+      }
+    ],
+    "assignee": {
+      "id": 11809982,
+      "username": "jay_mccure",
+      "public_email": "",
+      "name": "Jay McCure",
+      "state": "active",
+      "locked": false,
+      "avatar_url": "https://avatar.example/redacted",
+      "web_url": "https://gitlab.com/jay_mccure"
+    },
+    "reviewers": [
+      {
+        "id": 21826781,
+        "username": "GitLabDuo",
+        "public_email": null,
+        "name": "GitLab Duo",
+        "state": "active",
+        "locked": false,
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/GitLabDuo"
+      }
+    ],
+    "source_project_id": 34675721,
+    "target_project_id": 34675721,
+    "labels": [
+      "automation:ml",
+      "backend",
+      "bug::functional",
+      "category:gitlab cli",
+      "devops::ai coding",
+      "group::code review",
+      "section::ai",
+      "type::bug"
+    ],
+    "draft": false,
+    "imported": false,
+    "imported_from": "none",
+    "work_in_progress": false,
+    "milestone": null,
+    "merge_when_pipeline_succeeds": false,
+    "merge_status": "can_be_merged",
+    "detailed_merge_status": "not_approved",
+    "merge_after": null,
+    "sha": "08d49a7faf33d83f09af84c30e3ddd848727dce8",
+    "merge_commit_sha": null,
+    "squash_commit_sha": null,
+    "discussion_locked": null,
+    "should_remove_source_branch": null,
+    "force_remove_source_branch": true,
+    "prepared_at": "2026-08-21T06:19:02.645Z",
+    "reference": "!3761",
+    "references": {
+      "short": "!3761",
+      "relative": "!3761",
+      "full": "gitlab-org/cli!3761"
+    },
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/3761",
+    "time_stats": {
+      "time_estimate": 0,
+      "total_time_spent": 0,
+      "human_time_estimate": null,
+      "human_total_time_spent": null
+    },
+    "squash": true,
+    "squash_on_merge": true,
+    "task_completion_status": {
+      "count": 0,
+      "completed_count": 0
+    },
+    "has_conflicts": false,
+    "blocking_discussions_resolved": true,
+    "approvals_before_merge": null,
+    "changes_count": "2",
+    "latest_build_started_at": "2026-08-21T07:07:29.998Z",
+    "latest_build_finished_at": "2026-08-21T07:19:08.951Z",
+    "first_deployed_to_production_at": null,
+    "pipeline": {
+      "id": 2778734089,
+      "iid": 13163,
+      "project_id": 34675721,
+      "sha": "9b308b3564cd3cf814f457a8a5597febda161444",
+      "ref": "refs/merge-requests/3761/merge",
+      "status": "success",
+      "source": "merge_request_event",
+      "created_at": "2026-08-21T07:07:28.435Z",
+      "updated_at": "2026-08-21T07:19:08.965Z",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/pipelines/2778734089"
+    },
+    "head_pipeline": {
+      "id": 2778734089,
+      "iid": 13163,
+      "project_id": 34675721,
+      "sha": "9b308b3564cd3cf814f457a8a5597febda161444",
+      "ref": "refs/merge-requests/3761/merge",
+      "status": "success",
+      "source": "merge_request_event",
+      "created_at": "2026-08-21T07:07:28.435Z",
+      "updated_at": "2026-08-21T07:19:08.965Z",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/pipelines/2778734089",
+      "before_sha": "9b308b3564cd3cf814f457a8a5597febda161444",
+      "tag": false,
+      "yaml_errors": null,
+      "user": {
+        "id": 11809982,
+        "username": "jay_mccure",
+        "public_email": "",
+        "name": "Jay McCure",
+        "state": "active",
+        "locked": false,
+        "avatar_url": "https://avatar.example/redacted",
+        "web_url": "https://gitlab.com/jay_mccure"
+      },
+      "started_at": "2026-08-21T07:07:29.998Z",
+      "finished_at": "2026-08-21T07:19:08.951Z",
+      "committed_at": null,
+      "duration": 696,
+      "queued_duration": 1,
+      "coverage": "66.80",
+      "detailed_status": {
+        "icon": "status_success",
+        "text": "Passed",
+        "label": "passed",
+        "group": "success",
+        "tooltip": "passed",
+        "has_details": true,
+        "details_path": "/gitlab-org/cli/-/pipelines/2778734089",
+        "illustration": null,
+        "favicon": "/assets/ci_favicons/favicon_status_success-8451333011eee8ce9f2ab25dc487fe24a8758c694827a582f17f42b0a90446a2.png"
+      },
+      "archived": false
+    },
+    "diff_refs": {
+      "base_sha": "7b59a97873c3619c1362c8ddb8a2c72e8ccf9f38",
+      "head_sha": "08d49a7faf33d83f09af84c30e3ddd848727dce8",
+      "start_sha": "7b59a97873c3619c1362c8ddb8a2c72e8ccf9f38"
+    },
+    "merge_error": null,
+    "user": {
+      "can_merge": false
+    }
+  }
+]

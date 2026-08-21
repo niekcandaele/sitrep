@@ -47,26 +47,53 @@ profiles:
 `
 
 // replayGitLab serves the two-page fixture epic, routed by path the way the
-// driver's own replay server does.
+// driver's own replay server does. It answers the epic's routes and the
+// milestone's, so one server serves every GitLab case in this file.
 func replayGitLab(t *testing.T) *httptest.Server {
 	t.Helper()
 
-	pages := 0
+	var epicPages, milestonePages int
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+
 		var file string
-		switch r.URL.EscapedPath() {
-		case "/api/v4/groups/gitlab-org/epics/23356":
+		switch {
+		case path == "/api/v4/groups/gitlab-org/epics/23356":
 			file = "epic.json"
-		case "/api/v4/groups/gitlab-org/epics/23356/issues":
+		case path == "/api/v4/groups/gitlab-org/epics/23356/issues":
 			file = "epic_children_page1.json"
-			if pages == 0 {
+			if epicPages == 0 {
 				w.Header().Set("x-next-page", "2")
 			} else {
 				file = "epic_children_page2.json"
 			}
-			pages++
+			epicPages++
+		// The milestone routes are matched by suffix so that one server answers a
+		// milestone addressed through a project path, a group path, or the
+		// Profile's default project.
+		case strings.HasSuffix(path, "/milestones"):
+			file = milestoneFixture(path, r)
+		case strings.HasSuffix(path, "/milestones/6239395/issues"):
+			file = "milestone_issues_page1.json"
+			if milestonePages == 0 {
+				w.Header().Set("x-next-page", "2")
+			} else {
+				file = "milestone_issues_page2.json"
+			}
+			milestonePages++
+		case strings.HasSuffix(path, "/issues") && strings.Contains(path, "/milestones/"):
+			file = "milestone_issues_empty.json"
+		// The first Ticket of each collection carries a real merge request, so
+		// the whole-program assertion has something to find; the rest carry none.
+		case strings.HasSuffix(path, "/issues/101/related_merge_requests"),
+			strings.HasSuffix(path, "/issues/201/related_merge_requests"):
+			file = "related_merge_requests.json"
+		case strings.HasSuffix(path, "/related_merge_requests"):
+			file = "related_merge_requests_empty.json"
+		case strings.HasSuffix(path, "/merge_requests/3761/approvals"):
+			file = "approvals_approved.json"
 		default:
-			t.Errorf("the driver requested %s, which this test serves no fixture for", r.URL.EscapedPath())
+			t.Errorf("the driver requested %s, which this test serves no fixture for", path)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -82,6 +109,20 @@ func replayGitLab(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(s.Close)
 	return s
+}
+
+// milestoneFixture picks which milestone the lookup resolves to: the group one
+// when the path says so, the populated project one by default, and the empty
+// project one — which also carries no web_url — for iid 4.
+func milestoneFixture(path string, r *http.Request) string {
+	switch {
+	case strings.Contains(path, "/groups/"):
+		return "milestone_group.json"
+	case r.URL.Query().Get("iids[]") == "4":
+		return "milestone_project_no_web_url.json"
+	default:
+		return "milestone_project.json"
+	}
 }
 
 // gitlabProvider is the driver a GitLab Profile would construct, pointed at the
@@ -135,25 +176,136 @@ func TestJSONGitLabEpicDocument(t *testing.T) {
 	if doc.Provider.Name != "gitlab" {
 		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
 	}
-	if doc.Provider.Capabilities["pull_requests"] {
-		t.Error("provider.capabilities.pull_requests = true, want false: that is #15's")
+	if !doc.Provider.Capabilities["pull_requests"] {
+		t.Error("provider.capabilities.pull_requests = false; this driver correlates merge requests")
 	}
 	if len(doc.Tickets) != 10 {
 		t.Errorf("got %d tickets, want the fixture epic's 10", len(doc.Tickets))
 	}
 
-	// The capability-differences acceptance criterion, end to end: GitLab
-	// declares no merge request correlation, so no Ticket carries a section and
-	// nothing errors.
-	for _, ticket := range doc.Tickets {
-		if _, ok := ticket["pull_requests"]; ok {
-			t.Error("a ticket carries pull_requests, which the GitLab driver does not serve")
-		}
+	// The capability acceptance criterion, end to end: the declared Capability
+	// is backed by data that survives the whole way to stdout.
+	if _, ok := doc.Tickets[0]["pull_requests"]; !ok {
+		t.Errorf("the first ticket carries no pull_requests:\n%s", got.stdout)
+	}
+	if !strings.Contains(got.stdout, `"number": 3761`) {
+		t.Errorf("the document does not carry the merge request's number:\n%s", got.stdout)
 	}
 }
 
-// The same run in text: a GitLab epic renders through the shared path, with no
-// merge request section and no error about its absence.
+// The milestone-as-Epic acceptance criterion, executable: a milestone URL on a
+// Free-tier-shaped instance renders a full Epic document with merge requests.
+func TestJSONGitLabMilestoneDocument(t *testing.T) {
+	got := runWith([]string{"https://gitlab.com/gitlab-org/cli/-/milestones/3", "--json"}, cli.Deps{
+		Provider: gitlabProvider(t),
+		Config:   parseConfig(t, gitlabConfig),
+		Env:      gitlabEnv,
+	})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+
+	var doc struct {
+		Provider struct {
+			Name         string          `json:"name"`
+			Capabilities map[string]bool `json:"capabilities"`
+		} `json:"provider"`
+		Epic    map[string]json.RawMessage   `json:"epic"`
+		Tickets []map[string]json.RawMessage `json:"tickets"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshalling the epic document: %v\n%s", err, got.stdout)
+	}
+	if doc.Provider.Name != "gitlab" {
+		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
+	}
+	if !doc.Provider.Capabilities["pull_requests"] {
+		t.Error("provider.capabilities.pull_requests = false, want true")
+	}
+	if len(doc.Tickets) != 7 {
+		t.Errorf("got %d tickets, want the fixture milestone's 7", len(doc.Tickets))
+	}
+	if got := string(doc.Epic["key"]); got != `"gitlab-org/cli%3"` {
+		t.Errorf("epic.key = %s, want GitLab's own milestone reference", got)
+	}
+	if _, ok := doc.Tickets[0]["pull_requests"]; !ok {
+		t.Errorf("the first ticket carries no pull_requests:\n%s", got.stdout)
+	}
+}
+
+// A milestone with no issues decodes to a Ticket exactly as an empty epic does,
+// carrying the milestone's own Detail.
+func TestGitLabEmptyMilestoneDecodesToATicket(t *testing.T) {
+	got := runWith([]string{"gitlab-org/cli%4", "--json"}, cli.Deps{
+		Provider: gitlabProvider(t),
+		Config:   parseConfig(t, gitlabConfig),
+		Env:      gitlabEnv,
+	})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+
+	var doc struct {
+		Ticket map[string]json.RawMessage `json:"ticket"`
+		Parent map[string]json.RawMessage `json:"parent"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshalling the ticket document: %v\n%s", err, got.stdout)
+	}
+	if len(doc.Ticket) == 0 {
+		t.Fatalf("the document carries no ticket; a milestone with no issues decodes to one:\n%s", got.stdout)
+	}
+	if got := string(doc.Ticket["key"]); got != `"gitlab-org/cli%4"` {
+		t.Errorf("ticket.key = %s, want the milestone reference", got)
+	}
+	// A milestone belongs to nothing sitrep models.
+	if len(doc.Parent) != 0 {
+		t.Errorf("parent = %v, want none", doc.Parent)
+	}
+	// The built URL, for a milestone whose payload carries no web_url.
+	if !strings.Contains(got.stdout, "https://gitlab.com/gitlab-org/cli/-/milestones/4") {
+		t.Errorf("the document does not carry the built milestone URL:\n%s", got.stdout)
+	}
+}
+
+// The milestone reference forms, through a Profile — the group one included,
+// which is where sitrep's "groups/" spelling earns its keep.
+func TestGitLabMilestoneReferenceFormsResolve(t *testing.T) {
+	tests := []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{"a qualified project milestone", "gitlab-org/cli%3", `"gitlab-org/cli%3"`},
+		{"a group milestone", "groups/gitlab-org%3", `"groups/gitlab-org%3"`},
+		// The Profile's project is gitlab-org, which a bare reference resolves
+		// against as a *project* path.
+		{"a bare milestone reference", "%3", `"gitlab-org%3"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runWith([]string{tt.arg, "--json"}, cli.Deps{
+				Provider: gitlabProvider(t),
+				Config:   parseConfig(t, gitlabConfig),
+				Env:      gitlabEnv,
+			})
+
+			if got.code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+			}
+			if !strings.Contains(got.stdout, tt.want) {
+				t.Errorf("the document does not carry %s:\n%s", tt.want, got.stdout)
+			}
+		})
+	}
+}
+
+// The same run in text: a GitLab epic renders through the shared path, merge
+// request summary included. The assertions are substrings rather than a golden
+// because the line's shape is #7's to own, not this driver's.
 func TestPlainGitLabEpicReport(t *testing.T) {
 	got := runWith([]string{"https://gitlab.com/groups/gitlab-org/-/epics/23356", "--plain"}, cli.Deps{
 		Provider: gitlabProvider(t),
@@ -164,15 +316,19 @@ func TestPlainGitLabEpicReport(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"gitlab-org&23356", "gitlab-org/cli#101", "workflow::wontfix", "« éclair »"} {
+	for _, want := range []string{
+		"gitlab-org&23356", "gitlab-org/cli#101", "workflow::wontfix", "« éclair »",
+		// The merge request moving the first Ticket: its number, its state, its
+		// CI result and its review posture.
+		"#3761", "open", "ci ok", "approved",
+	} {
 		if !strings.Contains(got.stdout, want) {
 			t.Errorf("stdout = %q, want it to mention %q", got.stdout, want)
 		}
 	}
-	for _, unwanted := range []string{"pull request", "merge request"} {
-		if strings.Contains(strings.ToLower(got.stdout), unwanted) {
-			t.Errorf("the report mentions %q, which the GitLab driver does not serve", unwanted)
-		}
+	// The merge request is open, so the Ticket moved out of TODO.
+	if !strings.Contains(got.stdout, "IN PROGRESS") {
+		t.Errorf("stdout = %q, want an In Progress group: an open merge request is work happening", got.stdout)
 	}
 }
 

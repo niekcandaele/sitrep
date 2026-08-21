@@ -226,7 +226,7 @@ func TestFetchDetailRejectsABadTicketID(t *testing.T) {
 			if err == nil {
 				t.Fatal("FetchDetail succeeded, want an error")
 			}
-			if !strings.Contains(err.Error(), "does not name a GitLab epic or issue") {
+			if !strings.Contains(err.Error(), "does not name a GitLab epic, issue or milestone") {
 				t.Errorf("error %q, want the addressing wording", err)
 			}
 			if n := len(s.recorded()); n != 0 {
