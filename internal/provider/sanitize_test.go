@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -161,15 +163,43 @@ func checkClean(t *testing.T, path string, v reflect.Value, multiline bool) {
 
 // A driver's own prose may quote a server-supplied message, so the one funnel
 // every classified error passes through cleans it.
+//
+// The verb is %s, not %q: %q escapes a control character into printable text
+// before SanitizeLine ever sees it, which leaves the sanitization branch
+// unexercised and the test green with the sanitization deleted.
 func TestErrorfSanitizesTheMessage(t *testing.T) {
-	err := provider.Errorf(provider.KindUnavailable, "gitlab: %s said %q", "git.acme.test", "boom\x1b[2J\nnext")
+	const dirty = "boom\x1b[2J\nnext"
+	const format = "gitlab: %s said %s"
+
+	err := provider.Errorf(provider.KindUnavailable, format, "git.acme.test", dirty)
 	if strings.ContainsRune(err.Error(), 0x1b) {
 		t.Errorf("error = %q, want no escape character", err)
 	}
 	if strings.Contains(err.Error(), "\n") {
 		t.Errorf("error = %q, want one line", err)
 	}
+	// Deleting the sanitization from Errorf has to fail this test, so assert
+	// the message is not what fmt alone would have produced.
+	if raw := fmt.Sprintf(format, "git.acme.test", dirty); err.Error() == raw {
+		t.Errorf("error = %q, want it to differ from the raw formatted string", err)
+	}
 	if provider.KindOf(err) != provider.KindUnavailable {
 		t.Errorf("KindOf = %v, want KindUnavailable", provider.KindOf(err))
+	}
+}
+
+// Replacing an error's rendered text must not sever what it wrapped: that is
+// sanitizedMessage.Unwrap's whole reason to exist.
+func TestErrorfKeepsWrappingThroughASanitizedMessage(t *testing.T) {
+	err := provider.Errorf(provider.KindUnavailable, "gitlab: %s: %w", "boom\x1b[2J", context.Canceled)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(%q, context.Canceled) = false, want true", err)
+	}
+	if got := provider.KindOf(err); got != provider.KindUnavailable {
+		t.Errorf("KindOf = %v, want KindUnavailable", got)
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) || strings.Contains(err.Error(), "\n") {
+		t.Errorf("error = %q, want one clean line", err)
 	}
 }

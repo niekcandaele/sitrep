@@ -339,13 +339,13 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 			// worse way to read one sentence than stderr is. Note the asymmetry:
 			// this is the *pre-flight* only. A monitor that is already open
 			// keeps its last good reading and its footer message on any failed
-			// refresh, retryable or not — that is #8's contract and users depend
-			// on it.
+			// refresh, retryable or not — that asymmetry is the monitor's
+			// contract and users depend on it.
 			return runtimeError(stderr, err)
 		}
 		// An otherwise-failed pre-flight opens the monitor anyway, unseeded, and
-		// lets the TUI's own first fetch fail and draw its retry body: #8 decided
-		// that a monitor must not exit on one bad DNS lookup, and one wasted
+		// lets the TUI's own first fetch fail and draw its retry body: a monitor
+		// must not exit on one bad DNS lookup, and one wasted
 		// request in an already-failing situation is the right price for keeping
 		// that.
 		return runMonitor(ctx, stdout, stderr, deps, tui.Options{

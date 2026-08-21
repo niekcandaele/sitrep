@@ -215,8 +215,9 @@ func TestRefResolutionFailures(t *testing.T) {
 			wantStderr: []string{"111", "bare number", "origin remote", "URL"},
 		},
 		{
-			// #14 turned both of these from "not supported yet" into a real
-			// driver, so what they now prove is that the *GitLab* driver was
+			// Both of these reach a real GitLab driver rather than a
+			// "not supported yet" stub, so what they prove is that the
+			// *GitLab* driver was
 			// chosen: no token means no fetch, and the failure names the driver
 			// that produced it, exactly as TestGitHubIsChosenFromTheRef does for
 			// GitHub.
@@ -236,7 +237,7 @@ func TestRefResolutionFailures(t *testing.T) {
 		},
 		{
 			// A Jira URL names its own site, but not the credential to read it
-			// with: that only comes from a Profile, so #13 asks for one.
+			// with: that only comes from a Profile, so the driver asks for one.
 			name:       "a Jira URL with no Profile",
 			args:       []string{"https://acme.atlassian.net/browse/PROJ-12", "--json"},
 			wantStderr: []string{"needs a Profile", "acme.atlassian.net"},

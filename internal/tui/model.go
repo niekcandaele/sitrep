@@ -47,8 +47,7 @@ type Model struct {
 	offset     int
 
 	// filter is the session's view filter. It is applied on the way to the
-	// screen and never persisted: #12 owns configuration, and this is a
-	// keystroke, not a setting.
+	// screen: it is a keystroke, not a setting, so nothing here is persisted.
 	filter Filter
 	// searching is true while the find box owns the keyboard.
 	searching bool
@@ -70,7 +69,7 @@ type Model struct {
 	detail detailState
 	// details caches the Details read this session, per Ticket. It holds Detail
 	// and nothing else: no list data migrates in here, and nothing here migrates
-	// onto a Ticket (ADR-0003). It is never persisted — #12 owns configuration.
+	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
 	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
@@ -424,14 +423,26 @@ func (m Model) Interrupted() bool { return m.interrupted }
 // ClearFilter is matched before Quit because both answer to esc: the ladder is
 // escape the box, then escape the filter, then escape the program. q and ctrl+c
 // still quit unconditionally, so nobody is trapped by a filter.
+// repaint forces the next frame to be drawn whole rather than diffed against
+// the one before it.
+//
+// The rule: every keystroke that changes whether the filter line is drawn, or
+// what it is, returns this. The footer grows and shrinks a row on those
+// transitions, and the incremental renderer must not diff across a frame of a
+// different shape — the result on a real terminal is stale rows left standing
+// under fresh ones, up to and including a Ticket wearing another Ticket's
+// status. Movement, typing inside the box and refreshes leave the frame's
+// shape alone and are diffed as usual, which is what keeps a 60s poll cheap.
+var repaint tea.Cmd = tea.ClearScreen
+
 func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.ClearFilter):
-		return m.setFilter(Filter{}), nil
+		return m.setFilter(Filter{}), repaint
 
 	case key.Matches(msg, m.keys.HideFinished):
 		m.filter.HideFinished = !m.filter.HideFinished
-		return m.setFilter(m.filter), nil
+		return m.setFilter(m.filter), repaint
 
 	case key.Matches(msg, m.keys.Find):
 		m.searching = true
@@ -442,7 +453,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.search.Focus()
 		// Opening the box adds a footer line, which takes one from the body.
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
-		return m, cmd
+		return m, tea.Batch(cmd, repaint)
 
 	case key.Matches(msg, m.keys.Quit):
 		return m.quit(msg), tea.Quit
@@ -491,7 +502,7 @@ func (m Model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// survives — it was not part of this interaction.
 		m.searching = false
 		m.search.Blur()
-		return m.setFilter(Filter{HideFinished: m.filter.HideFinished}), nil
+		return m.setFilter(Filter{HideFinished: m.filter.HideFinished}), repaint
 
 	case key.Matches(msg, m.searchKeys.Apply):
 		// Commit: the box closes and the list stays narrowed. The query is
@@ -499,7 +510,7 @@ func (m Model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// so this only hands the keyboard back.
 		m.searching = false
 		m.search.Blur()
-		return m.setFilter(m.filter), nil
+		return m.setFilter(m.filter), repaint
 
 	case key.Matches(msg, m.searchKeys.Move):
 		return m.moveList(msg), nil

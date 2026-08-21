@@ -47,9 +47,8 @@ type Provider struct {
 	tokenSource TokenSource
 	userAgent   string
 
-	tokenOnce sync.Once
-	token     string
-	tokenErr  error
+	tokenMu sync.Mutex
+	token   string
 }
 
 // Option configures a Provider.
@@ -163,7 +162,10 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 
 	for page := 0; ; page++ {
 		if page >= maxPages {
-			return model.EpicSnapshot{}, fmt.Errorf(
+			// A collection larger than sitrep's cap is a stable property of the
+			// ref: it will be exactly as large on the next tick, so retrying
+			// buys nothing.
+			return model.EpicSnapshot{}, provider.Errorf(provider.KindBadRef,
 				"github: %s has more than %d sub-issues; refusing to keep paging",
 				refKey(r), maxPages*100)
 		}
@@ -194,7 +196,10 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			break
 		}
 		if next.EndCursor == "" || next.EndCursor == cursor {
-			return model.EpicSnapshot{}, fmt.Errorf(
+			// A server that reports a next page and hands over no usable cursor
+			// is misbehaving, not a ref the user got wrong — so it stays
+			// retryable, on the same terms as a 500.
+			return model.EpicSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"github: %s reports more sub-issues but returned no new page cursor", refKey(r))
 		}
 		cursor = next.EndCursor
@@ -446,23 +451,29 @@ func retryAfter(header http.Header) string {
 	return (time.Duration(secs) * time.Second).String()
 }
 
-// resolveToken fetches the token once per Provider. A 60s poll must not fork a
-// gh subprocess forever, and a token that could not be found once will not be
-// found on the next tick either.
+// resolveToken resolves the token once and then reuses it for the process
+// lifetime: a 60s poll must not fork a gh subprocess forever. A *failure* is
+// not cached, because discovery can involve a live call — `gh auth token` reads
+// a keyring that may be locked — and a transient failure cached for the
+// process lifetime survives only a restart. The mutex also gives the retry
+// single-flight: concurrent fetches still cost at most one gh invocation.
 func (p *Provider) resolveToken(ctx context.Context) (string, error) {
-	p.tokenOnce.Do(func() {
-		token, err := p.tokenSource(ctx, p.host)
-		if err != nil {
-			p.tokenErr = provider.Errorf(provider.KindAuth, "github: %w", err)
-			return
-		}
-		if strings.TrimSpace(token) == "" {
-			p.tokenErr = provider.Errorf(provider.KindAuth, "github: %w", errNoToken)
-			return
-		}
-		p.token = strings.TrimSpace(token)
-	})
-	return p.token, p.tokenErr
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+
+	if p.token != "" {
+		return p.token, nil
+	}
+	token, err := p.tokenSource(ctx, p.host)
+	if err != nil {
+		return "", provider.Errorf(provider.KindAuth, "github: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", provider.Errorf(provider.KindAuth, "github: %w", errNoToken)
+	}
+	p.token = token
+	return token, nil
 }
 
 // The GitHub driver must always satisfy the interface it implements.

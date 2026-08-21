@@ -53,7 +53,7 @@ func TestNonRetryablePreflightFailureNeverOpensTheMonitor(t *testing.T) {
 	}
 }
 
-// The mirror image, and #8's rule intact: a failure the next tick could recover
+// The mirror image, and the monitor's rule intact: a failure the next tick could recover
 // from still opens the monitor unseeded. Off a TTY that shows up as the
 // monitor's own complaint, which is proof enough that tui.Run was reached.
 func TestRetryablePreflightFailureStillOpensTheMonitor(t *testing.T) {
@@ -172,7 +172,7 @@ func TestConfigErrorsNameTheFileSitrepLookedFor(t *testing.T) {
 	}
 
 	t.Run("an unmatched key prefix", func(t *testing.T) {
-		// A Jira-style key with no Profile to serve it is fatal (#12), and the
+		// A Jira-style key with no Profile to serve it is fatal, and the
 		// error is where the user is told which file to write.
 		got := envOnly([]string{"PROJ-12", "--json"})
 

@@ -103,7 +103,8 @@ func TestDecodedFrameWithNoParent(t *testing.T) {
 }
 
 // The walk-up lands in the full monitor: the grouped list, the progress bar and
-// the staleness indicator, all of #8's behaviour with nothing special about it.
+// the staleness indicator, all of the monitor's ordinary behaviour with nothing
+// special about it.
 func TestWalkUpOpensTheCollection(t *testing.T) {
 	p := fake.New()
 	c := newClock()
@@ -126,7 +127,8 @@ func TestWalkUpOpensTheCollection(t *testing.T) {
 }
 
 // From the collection the walk-up landed in, the heartbeat refreshes exactly as
-// #8 built it: the list is armed now, and nothing about it is special.
+// it does in a monitor opened directly: the list is armed now, and nothing
+// about it is special.
 func TestWalkUpArmsTheHeartbeat(t *testing.T) {
 	p := fake.New()
 	c := newClock()

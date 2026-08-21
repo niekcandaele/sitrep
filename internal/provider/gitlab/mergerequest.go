@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"strings"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -28,6 +29,11 @@ type mergeRequestWire struct {
 	Draft     bool           `json:"draft"`
 	WebURL    string         `json:"web_url"`
 	Reference referencesWire `json:"references"`
+
+	// CreatedAt orders the lead merge request. It is not mapped onto
+	// model.PullRequest: nothing renders a timestamp, and it is only ever read
+	// as "which of these is newer".
+	CreatedAt time.Time `json:"created_at"`
 
 	// DetailedMergeStatus is GitLab's own summary of what stands between this
 	// merge request and merging. It replaced the deprecated merge_status in 15.6,
@@ -235,8 +241,8 @@ func normalizeChecks(pipelineStatus string) model.CheckState {
 // driver's, not a shared helper: a Provider owns its own translation layer, and
 // hoisting the lead rule into internal/model would couple two drivers' mappings
 // through a package neither of them owns.
-func leadFirst(prs []model.PullRequest) []model.PullRequest {
-	lead, ok := leadIndex(prs)
+func leadFirst(prs []model.PullRequest, created []time.Time) []model.PullRequest {
+	lead, ok := leadIndex(prs, created)
 	if !ok || lead == 0 {
 		return prs
 	}
@@ -257,14 +263,18 @@ func leadFirst(prs []model.PullRequest) []model.PullRequest {
 // request is grouped as In Progress, so the merge request its row shows has to
 // be the open one. Two answers about one Ticket is worse than either answer.
 //
-// "Newest" is the highest merge request number. Numbers are unique per project,
-// so a tie is only possible across projects; it is broken by keeping the earlier
-// element in GitLab's order, so the answer never depends on iteration luck.
+// "Newest" is the most recently created merge request. A merge request iid is
+// unique only within its project, so ordering by number puts a cross-project
+// merge request with a larger iid first even when it is the older one; created
+// (positionally aligned with prs) is what settles it. Where a timestamp is
+// missing — an older fixture, a payload that omitted it — the number is the
+// fallback, and an exact tie keeps the earlier element in GitLab's order, so
+// the answer never depends on iteration luck.
 //
 // The index rather than the value is what the callers need: two merge requests
 // in different projects can share a number, so a value is not an identity here.
-func leadIndex(prs []model.PullRequest) (int, bool) {
-	if i, ok := newestWhere(prs, func(pr model.PullRequest) bool {
+func leadIndex(prs []model.PullRequest, created []time.Time) (int, bool) {
+	if i, ok := newestWhere(prs, created, func(pr model.PullRequest) bool {
 		return pr.State == model.PROpen || pr.State == model.PRDraft
 	}); ok {
 		return i, true
@@ -276,22 +286,31 @@ func leadIndex(prs []model.PullRequest) (int, bool) {
 		}
 	}
 
-	return newestWhere(prs, func(model.PullRequest) bool { return true })
+	return newestWhere(prs, created, func(model.PullRequest) bool { return true })
 }
 
-// newestWhere returns the index of the highest-numbered merge request satisfying
-// keep, or false when none does. A tie keeps the earlier element.
-func newestWhere(prs []model.PullRequest, keep func(model.PullRequest) bool) (int, bool) {
+// newestWhere returns the index of the newest merge request satisfying keep, or
+// false when none does. A tie keeps the earlier element.
+func newestWhere(prs []model.PullRequest, created []time.Time, keep func(model.PullRequest) bool) (int, bool) {
 	best, found := 0, false
 	for i, pr := range prs {
 		if !keep(pr) {
 			continue
 		}
-		if !found || pr.Number > prs[best].Number {
+		if !found || newerThan(i, best, prs, created) {
 			best, found = i, true
 		}
 	}
 	return best, found
+}
+
+// newerThan reports whether prs[i] is newer than prs[best], by creation time
+// when both are known and by number otherwise.
+func newerThan(i, best int, prs []model.PullRequest, created []time.Time) bool {
+	if i < len(created) && best < len(created) && !created[i].IsZero() && !created[best].IsZero() {
+		return created[i].After(created[best])
+	}
+	return prs[i].Number > prs[best].Number
 }
 
 // statusWithMergeRequests refines a Ticket's Status Category using the merge

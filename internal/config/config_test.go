@@ -192,6 +192,29 @@ func TestParseValidation(t *testing.T) {
 			want: []string{`profile "x"`, "auth.user_env must be the upper-case NAME of an environment variable"},
 		},
 		{
+			// The env-name check has to run whether or not a token_env is
+			// present: a Profile that needs no token_env still reaches
+			// Profile.Credential, which prints the name it was given.
+			name: "user_env is a token on a gitlab profile with no token_env",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.test\n    auth:\n      user_env: glpat-Ab3cdEf\n",
+			want: []string{`profile "x"`, "auth.user_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "user_env is a token on a github profile with no token_env",
+			doc:  "profiles:\n  x:\n    provider: github\n    auth:\n      user_env: ghp_16CabcdefGHI\n",
+			want: []string{`profile "x"`, "auth.user_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "token_env is a token on a github profile",
+			doc:  "profiles:\n  x:\n    provider: github\n    auth:\n      token_env: ghp_16CabcdefGHI\n",
+			want: []string{`profile "x"`, "auth.token_env must be the upper-case NAME of an environment variable"},
+		},
+		{
+			name: "project on a github profile",
+			doc:  "profiles:\n  x:\n    provider: github\n    project: acme/widgets\n",
+			want: []string{`profile "x"`, "project is not used by a github profile", "owner/repo"},
+		},
+		{
 			name: "a second YAML document",
 			doc:  "profiles:\n  x:\n    provider: github\n---\nprofiles:\n  y:\n    provider: github\n",
 			want: []string{testPath, "more than one YAML document"},
@@ -256,6 +279,100 @@ func TestParseValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The whole point of rejecting a token-shaped env name is that the token never
+// reaches a terminal, a log or a scrollback buffer — so the rejection must not
+// print the value it rejected.
+func TestParseNeverEchoesARejectedCredential(t *testing.T) {
+	const secret = "glpat-Ab3cdEfGhIjKlMnOpQr"
+	docs := map[string]string{
+		"gitlab user_env": "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.test\n    auth:\n      user_env: " + secret + "\n",
+		"github user_env": "profiles:\n  x:\n    provider: github\n    auth:\n      user_env: " + secret + "\n",
+		"jira token_env":  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n    auth:\n      token_env: " + secret + "\n",
+	}
+	for name, doc := range docs {
+		t.Run(name, func(t *testing.T) {
+			_, err := config.Parse(strings.NewReader(doc), testPath)
+			if err == nil {
+				t.Fatal("a token-shaped env name must be rejected")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error = %q, want it never to quote the rejected value", err)
+			}
+		})
+	}
+}
+
+// yaml.v3's own strict-decode prose names a Go type the user has never heard
+// of and no key that would have worked. sitrep answers in its own vocabulary.
+func TestParseRewritesStrictDecodeErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []string
+	}{
+		{
+			name: "a key that belongs under auth",
+			doc:  "profiles:\n  x:\n    provider: github\n    token_env: GH_TOKEN\n",
+			want: []string{
+				`unknown key "token_env" in a profile`,
+				"valid keys are provider, host, project, auth, refresh_interval",
+				"token_env belongs under auth:",
+			},
+		},
+		{
+			name: "an unknown key under auth",
+			doc:  "profiles:\n  x:\n    provider: github\n    auth:\n      tokenenv: GH_TOKEN\n",
+			want: []string{`unknown key "tokenenv" in auth`, "valid keys are token_env, user, user_env"},
+		},
+		{
+			name: "an unknown top-level key",
+			doc:  "default_profile: x\n",
+			want: []string{`unknown key "default_profile" in the top level`, "valid keys are profiles"},
+		},
+		{
+			// The decoder accumulates every unknown key in one error, so all of
+			// them are reported rather than one per run of the tool.
+			name: "two unknown keys",
+			doc:  "profiles:\n  x:\n    provider: github\n    porject: ABC\n    user: me\n",
+			want: []string{`unknown key "porject"`, `unknown key "user"`, "user belongs under auth:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := config.Parse(strings.NewReader(tt.doc), testPath)
+			if err == nil {
+				t.Fatal("an unknown key must be an error")
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to mention %q", err, want)
+				}
+			}
+			for _, leak := range []string{"config.Profile", "config.Auth", "config.Config", "unmarshal errors"} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("error = %q, want it never to leak %q", err, leak)
+				}
+			}
+		})
+	}
+}
+
+// A genuine syntax error is the library's business and its message is fine, so
+// it keeps its pass-through.
+func TestParseSyntaxErrorsStillSurface(t *testing.T) {
+	_, err := config.Parse(strings.NewReader("profiles:\n  x:\n   provider: github\n    host: nope\n"), testPath)
+	if err == nil {
+		t.Fatal("malformed YAML must be an error")
+	}
+	if !strings.Contains(err.Error(), testPath) {
+		t.Errorf("error = %q, want it to name the config file", err)
+	}
+	if !strings.Contains(err.Error(), "yaml") && !strings.Contains(err.Error(), "line") {
+		t.Errorf("error = %q, want the library's own diagnosis to survive", err)
 	}
 }
 

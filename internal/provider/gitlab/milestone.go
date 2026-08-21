@@ -2,7 +2,6 @@ package gitlab
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -75,9 +74,12 @@ func (p *Provider) fetchMilestone(ctx context.Context, t target) (milestoneWire,
 	default:
 		// iids[] is documented to filter on a number unique within its scope, so
 		// two answers mean sitrep's addressing assumption is wrong. Saying so
-		// loudly is cheaper than a report about the wrong milestone.
-		return milestoneWire{}, fmt.Errorf("gitlab: %s matched %d milestones; "+
-			"an iid names at most one, so sitrep will not guess which", t, len(milestones))
+		// loudly is cheaper than a report about the wrong milestone. An iid that
+		// does not name one milestone will be exactly as ambiguous on the next
+		// tick, so this is a property of the ref rather than a transient.
+		return milestoneWire{}, provider.Errorf(provider.KindBadRef,
+			"gitlab: %s matched %d milestones; "+
+				"an iid names at most one, so sitrep will not guess which", t, len(milestones))
 	}
 }
 
@@ -93,7 +95,7 @@ func (p *Provider) fetchMilestone(ctx context.Context, t target) (milestoneWire,
 // late work, not finished or cancelled work, and folding a date into a Status
 // Category would put "we missed the date" into the progress bar.
 //
-// There is no Cancelled milestone state, and #14's won't-do label inference does
+// There is no Cancelled milestone state, and the won't-do label inference does
 // not apply: a milestone carries no labels.
 func milestoneStatus(state string) (model.StatusCategory, string) {
 	switch strings.ToLower(strings.TrimSpace(state)) {

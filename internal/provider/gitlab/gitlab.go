@@ -96,7 +96,6 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -139,9 +138,8 @@ type Provider struct {
 	tokenSource TokenSource
 	userAgent   string
 
-	tokenOnce sync.Once
-	token     string
-	tokenErr  error
+	tokenMu sync.Mutex
+	token   string
 }
 
 // Option configures a Provider.
@@ -345,38 +343,64 @@ func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *m
 // order. path is the children endpoint — an epic's or a milestone's — because
 // everything after the addressing is identical.
 func (p *Provider) fetchChildren(ctx context.Context, t target, path string) ([]model.Ticket, error) {
+	issues, err := pagedGet[issueWire](ctx, p, t, path, "children")
+	if err != nil {
+		return nil, err
+	}
 	var tickets []model.Ticket
+	for _, issue := range issues {
+		tickets = append(tickets, newTicketFromIssue(issue))
+	}
+	return tickets, nil
+}
+
+// pagedGet reads every page of one GitLab list endpoint into a single slice.
+// It is the package's one paging loop: every list this driver reads is subject
+// to the same maxPages cap and the same refusal to follow a next-page header
+// that does not point forwards, so the rule lives in one place rather than
+// being re-derived per endpoint.
+//
+// noun names the collection in the two errors, in the user's vocabulary rather
+// than the endpoint's.
+func pagedGet[T any](ctx context.Context, p *Provider, t target, path, noun string) ([]T, error) {
+	var all []T
 
 	page := 1
 	for i := 0; ; i++ {
 		if i >= maxPages {
-			return nil, fmt.Errorf("gitlab: %s has more than %d children; refusing to keep paging",
-				t, maxPages*pageSize)
+			// A collection larger than sitrep's cap is a stable property of the
+			// ref: it will be exactly as large on the next tick, so retrying
+			// buys nothing.
+			return nil, provider.Errorf(provider.KindBadRef,
+				"gitlab: %s has more than %d %s; refusing to keep paging",
+				t, maxPages*pageSize, noun)
 		}
 
 		query := url.Values{
 			"per_page": {strconv.Itoa(pageSize)},
 			"page":     {strconv.Itoa(page)},
 		}
-		var issues []issueWire
-		header, err := p.do(ctx, path, query, t.String(), &issues)
+		var batch []T
+		header, err := p.do(ctx, path, query, t.String(), &batch)
 		if err != nil {
 			return nil, err
 		}
-		for _, issue := range issues {
-			tickets = append(tickets, newTicketFromIssue(issue))
-		}
+		all = append(all, batch...)
 
 		next := strings.TrimSpace(header.Get("x-next-page"))
 		if next == "" {
-			return tickets, nil
+			return all, nil
 		}
 		n, err := strconv.Atoi(next)
 		if err != nil || n <= page {
 			// A next page that is not a later page is a paging API contradicting
-			// itself; following it is how a polling tool spins forever.
-			return nil, fmt.Errorf("gitlab: %s reports its next page of children as %q, "+
-				"which is not after page %d", t, next, page)
+			// itself; following it is how a polling tool spins forever. That is
+			// a server fault, so it stays retryable on the same terms as a 500 —
+			// and the header is tracker-supplied text, which provider.Errorf's
+			// funnel strips of escapes on its way to a terminal.
+			return nil, provider.Errorf(provider.KindUnavailable,
+				"gitlab: %s reports its next page of %s as %q, "+
+					"which is not after page %d", t, noun, next, page)
 		}
 		page = n
 	}
@@ -673,24 +697,32 @@ func retryAfter(res *http.Response) string {
 	return "an unknown time"
 }
 
-// resolveToken fetches the token once per Provider. A 60s poll must not
-// re-resolve forever, and a token that could not be found once will not be
-// found on the next tick either.
+// resolveToken resolves the token once and then reuses it for the process
+// lifetime: a 60s poll must not re-resolve forever. A *failure* is not cached,
+// because discovery can involve a live call — glabAuthToken shells out to
+// `glab auth status --show-token`, which a locked keyring or a slow network
+// can fail transiently — and a transient failure cached for the process
+// lifetime survives only a restart. The mutex also gives the retry
+// single-flight: the correlation workers still cost at most one glab
+// invocation between them.
 func (p *Provider) resolveToken(ctx context.Context) (string, error) {
-	p.tokenOnce.Do(func() {
-		token, err := p.tokenSource(ctx, p.host)
-		if err != nil {
-			// The error is wrapped, never the token.
-			p.tokenErr = provider.Errorf(provider.KindAuth, "gitlab: %w", err)
-			return
-		}
-		if strings.TrimSpace(token) == "" {
-			p.tokenErr = provider.Errorf(provider.KindAuth, "gitlab: %w", errNoToken)
-			return
-		}
-		p.token = strings.TrimSpace(token)
-	})
-	return p.token, p.tokenErr
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+
+	if p.token != "" {
+		return p.token, nil
+	}
+	token, err := p.tokenSource(ctx, p.host)
+	if err != nil {
+		// The error is wrapped, never the token.
+		return "", provider.Errorf(provider.KindAuth, "gitlab: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", provider.Errorf(provider.KindAuth, "gitlab: %w", errNoToken)
+	}
+	p.token = token
+	return token, nil
 }
 
 // The GitLab driver must always satisfy the interface it implements.

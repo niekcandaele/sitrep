@@ -2,6 +2,7 @@ package gitlab_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -899,9 +900,43 @@ func TestPaginationRefusesToLoop(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchEpic succeeded, want an error")
 	}
-	if !strings.Contains(err.Error(), "which is not after page 1") {
-		t.Errorf("error %q, want it to name the contradiction", err)
+	// A paging API contradicting itself is a server fault, which is what
+	// KindUnavailable means — and it stays retryable, on the same terms as a
+	// 500.
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"which is not after page 1"},
+		Secret:   fixtureToken,
+	})
+	if !provider.KindOf(err).Retryable() {
+		t.Error("a server fault must stay retryable; the monitor recovers when the server does")
 	}
+}
+
+// x-next-page is tracker-supplied text quoted into an error on its way to a
+// terminal, so it goes through provider.Errorf's sanitization funnel like every
+// other driver sentence.
+func TestPaginationSanitizesTheNextPageHeader(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		epicPath: {{file: "epic.json"}},
+		epicIssuesPath: {{
+			file:    "epic_children_empty.json",
+			headers: map[string]string{"x-next-page": "0\x1b[2Jgotcha"},
+		}},
+	})
+
+	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	if err == nil {
+		t.Fatal("FetchEpic succeeded, want an error")
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') {
+		t.Errorf("error %q carries a terminal escape", err)
+	}
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"gotcha"},
+		Secret:   fixtureToken,
+	})
 }
 
 func TestPaginationIsBounded(t *testing.T) {
@@ -928,13 +963,48 @@ func TestPaginationIsBounded(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchEpic succeeded, want an error")
 	}
-	if !strings.Contains(err.Error(), "refusing to keep paging") {
-		t.Errorf("error %q, want the bound to name itself", err)
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"refusing to keep paging"},
+		Secret:   fixtureToken,
+	})
+	if provider.KindOf(err).Retryable() {
+		t.Error("an over-cap collection is as large on the next tick; retrying buys nothing")
 	}
 }
 
 // The polled path: two consecutive fetches are equal, re-issue the same
 // requests, and resolve the token exactly once.
+// Token discovery shells out to glab, which a locked keyring or a slow network
+// can fail transiently. Caching that failure for the process lifetime means an
+// open monitor never recovers, however healthy the machine gets.
+func TestATransientTokenFailureIsNotCached(t *testing.T) {
+	responses := map[string][]response{
+		epicPath:       {{file: "epic.json"}},
+		epicIssuesPath: {{file: "epic_children_empty.json"}},
+	}
+	s := newReplayServer(t, responses)
+
+	var calls int
+	p := newProvider(s, gitlab.WithTokenSource(func(context.Context, string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("the keyring is locked")
+		}
+		return fixtureToken, nil
+	}))
+
+	if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
+		t.Fatal("the first FetchEpic succeeded, want the token failure")
+	}
+	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
+		t.Fatalf("the second FetchEpic: %v; a transient token failure must not be cached", err)
+	}
+	if calls != 2 {
+		t.Errorf("the token source was called %d times, want 2: the failure must be retried", calls)
+	}
+}
+
 func TestPollingIsStableAndResolvesTheTokenOnce(t *testing.T) {
 	// One page, so that the replay server's "the last response repeats" rule
 	// serves the same epic to both fetches rather than advancing through pages.
@@ -1223,18 +1293,23 @@ func TestMilestoneLookupFailures(t *testing.T) {
 	tests := []struct {
 		name string
 		resp response
+		kind provider.Kind
 		want []string
 	}{
 		{
 			name: "an iid that resolves to nothing",
 			resp: response{file: "milestone_empty.json"},
+			kind: provider.KindBadRef,
 			want: []string{"gitlab:", "gitlab-org/cli%3", "not found (or you lack access)"},
 		},
 		{
 			// An iid is documented to be unique within its scope, so two answers
-			// mean sitrep's assumption is wrong.
+			// mean sitrep's assumption is wrong — and an iid that names two
+			// milestones names two on the next tick as well, so it is the ref
+			// that is wrong rather than the moment.
 			name: "two answers to a unique iid",
 			resp: response{file: "milestone_duplicate.json"},
+			kind: provider.KindBadRef,
 			want: []string{"gitlab:", "matched 2 milestones", "will not guess"},
 		},
 		{
@@ -1242,6 +1317,7 @@ func TestMilestoneLookupFailures(t *testing.T) {
 			// "Premium" would send the user shopping.
 			name: "a 403 on a milestone path",
 			resp: response{status: http.StatusForbidden, file: "error_forbidden.json"},
+			kind: provider.KindAuth,
 			want: []string{"gitlab:", "access denied (403) to the milestone", "Reporter access"},
 		},
 	}
@@ -1254,11 +1330,11 @@ func TestMilestoneLookupFailures(t *testing.T) {
 			if err == nil {
 				t.Fatal("FetchEpic succeeded, want an error")
 			}
-			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q, want it to mention %q", err, want)
-				}
-			}
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     tt.kind,
+				Contains: tt.want[1:],
+				Secret:   fixtureToken,
+			})
 			if strings.Contains(err.Error(), "Premium") {
 				t.Errorf("error %q, want no tier claim about a Free-tier endpoint", err)
 			}
@@ -1266,8 +1342,8 @@ func TestMilestoneLookupFailures(t *testing.T) {
 	}
 }
 
-// #14's Premium-403 now says what to do instead, because there finally is
-// something to do instead.
+// The Premium-403 on the epic path says what to do instead, because the
+// milestone route finally gives the user something to do instead.
 func TestPremiumForbiddenPointsAtMilestones(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		epicPath: {{status: http.StatusForbidden, file: "error_forbidden.json"}},

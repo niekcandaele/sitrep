@@ -96,6 +96,89 @@ func TestNoClosingMergeRequestsMakesNoSecondRequest(t *testing.T) {
 	}
 }
 
+// Both correlation endpoints ask for a hundred per page and both can answer
+// with more, exactly as the children endpoint does. Discarding x-next-page here
+// would silently lose the merge request that matters.
+func TestCorrelationPagesClosedBy(t *testing.T) {
+	const page1 = `[{"id": 11, "iid": 1, "state": "opened", "draft": false,
+		"created_at": "2026-01-01T00:00:00Z",
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/1",
+		"detailed_merge_status": "mergeable"}]`
+	const page2 = `[{"id": 22, "iid": 2, "state": "opened", "draft": false,
+		"created_at": "2026-06-01T00:00:00Z",
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/2",
+		"detailed_merge_status": "mergeable"}]`
+
+	s := oneChildEpic(t)
+	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{
+		{body: page1, headers: map[string]string{"x-next-page": "2", "x-total-pages": "2"}},
+		{body: page2},
+	}
+	s.responses[relatedMergeRequestsPath("gitlab-org/cli", 101)] = []response{{body: `[]`}}
+
+	ticket := firstTicket(t, s)
+	if len(ticket.PullRequests) != 2 {
+		t.Fatalf("got %d merge requests, want both pages: %+v",
+			len(ticket.PullRequests), ticket.PullRequests)
+	}
+	// The lead is picked across the whole set, not within the first page.
+	if got := ticket.PullRequests[0].Number; got != 2 {
+		t.Errorf("lead = !%d, want !2: the newest is on the second page", got)
+	}
+}
+
+// The wider list is paged too, or a pipeline that lives on its second page
+// reads as a project running no CI.
+func TestCorrelationPagesRelatedMergeRequests(t *testing.T) {
+	const closing = `[{"id": 22, "iid": 2, "state": "opened", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/2",
+		"detailed_merge_status": "mergeable"}]`
+	const relatedPage1 = `[{"id": 11, "iid": 1, "state": "opened", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/1",
+		"detailed_merge_status": "mergeable",
+		"head_pipeline": {"status": "failed"}}]`
+	const relatedPage2 = `[{"id": 22, "iid": 2, "state": "opened", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/2",
+		"detailed_merge_status": "mergeable",
+		"head_pipeline": {"status": "success"}}]`
+
+	s := oneChildEpic(t, response{body: closing})
+	s.responses[relatedMergeRequestsPath("gitlab-org/cli", 101)] = []response{
+		{body: relatedPage1, headers: map[string]string{"x-next-page": "2", "x-total-pages": "2"}},
+		{body: relatedPage2},
+	}
+
+	ticket := firstTicket(t, s)
+	if len(ticket.PullRequests) != 1 {
+		t.Fatalf("got %d merge requests, want the one closing: %+v",
+			len(ticket.PullRequests), ticket.PullRequests)
+	}
+	if got := ticket.PullRequests[0].Checks; got != model.ChecksPassing {
+		t.Errorf("Checks = %v, want Passing from the pipeline on the second page", got)
+	}
+}
+
+// A next page that is not a later page is a paging API contradicting itself.
+// Following it is how a polling tool spins forever, so it fails the fetch.
+func TestCorrelationRefusesANextPageThatGoesBackwards(t *testing.T) {
+	const page1 = `[{"id": 11, "iid": 1, "state": "opened", "draft": false,
+		"web_url": "https://gitlab.com/gitlab-org/cli/-/merge_requests/1",
+		"detailed_merge_status": "mergeable"}]`
+
+	s := oneChildEpic(t)
+	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{
+		{body: page1, headers: map[string]string{"x-next-page": "1"}},
+	}
+
+	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	if err == nil {
+		t.Fatal("FetchEpic succeeded on a next page that is not after this one")
+	}
+	if !strings.Contains(err.Error(), "not after page 1") {
+		t.Errorf("error %q, want it to name the contradiction", err)
+	}
+}
+
 // byNumber indexes a Ticket's merge requests, because leadFirst reorders them
 // and a table asserting one row per situation should not care where it landed.
 func byNumber(prs []model.PullRequest) map[int]model.PullRequest {
@@ -445,27 +528,55 @@ func TestCorrelationSendsExactlyWhatItNeeds(t *testing.T) {
 	}
 }
 
-// Degrade per Ticket, fail as a whole only for systemic problems.
-func TestCorrelationDegradesPerTicket(t *testing.T) {
-	for _, status := range []int{http.StatusForbidden, http.StatusNotFound} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			s := fullEpic(t)
-			s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{status: status, body: `{}`}}
-			s.responses[mergeRequestsPath("gitlab-org/cli", 102)] = []response{{file: "closed_by_lead.json"}}
+// Degrade per Ticket, fail as a whole only for systemic problems. A 404 on
+// closed_by is "there is nothing here for this token", which reads the same as
+// an issue with no merge requests, so the report carries on.
+func TestCorrelationDegradesPerTicketOnNotFound(t *testing.T) {
+	s := fullEpic(t)
+	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{status: http.StatusNotFound, body: `{}`}}
+	s.responses[mergeRequestsPath("gitlab-org/cli", 102)] = []response{{file: "closed_by_lead.json"}}
 
-			snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
-			if err != nil {
-				t.Fatalf("FetchEpic: %v; one invisible project must not sink the report", err)
+	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	if err != nil {
+		t.Fatalf("FetchEpic: %v; one invisible project must not sink the report", err)
+	}
+	if len(snap.Tickets) != 10 {
+		t.Errorf("got %d Tickets, want the whole epic intact", len(snap.Tickets))
+	}
+	if snap.Tickets[0].PullRequests != nil {
+		t.Errorf("Tickets[0].PullRequests = %+v, want none", snap.Tickets[0].PullRequests)
+	}
+	if len(snap.Tickets[1].PullRequests) != 3 {
+		t.Errorf("Tickets[1].PullRequests = %+v, want the rest of the snapshot intact",
+			snap.Tickets[1].PullRequests)
+	}
+}
+
+// A 403 is the server refusing a request sitrep had reason to believe it could
+// make — a scope problem the user has to be told about, not a Ticket with no
+// merge requests.
+func TestCorrelationFailsOnForbidden(t *testing.T) {
+	for _, path := range []string{
+		mergeRequestsPath("gitlab-org/cli", 101),
+		relatedMergeRequestsPath("gitlab-org/cli", 101),
+	} {
+		t.Run(path, func(t *testing.T) {
+			s := fullEpic(t)
+			s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
+			s.responses[path] = []response{{status: http.StatusForbidden, body: `{}`}}
+
+			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			if err == nil {
+				t.Fatal("FetchEpic succeeded; a refused request must not read as an absent one")
 			}
-			if len(snap.Tickets) != 10 {
-				t.Errorf("got %d Tickets, want the whole epic intact", len(snap.Tickets))
+			if !strings.HasPrefix(err.Error(), "gitlab: ") {
+				t.Errorf("error %q, want the driver's own attributed prose", err)
 			}
-			if snap.Tickets[0].PullRequests != nil {
-				t.Errorf("Tickets[0].PullRequests = %+v, want none", snap.Tickets[0].PullRequests)
+			if !strings.Contains(err.Error(), "gitlab-org/cli") {
+				t.Errorf("error %q, want it to name the project", err)
 			}
-			if len(snap.Tickets[1].PullRequests) != 3 {
-				t.Errorf("Tickets[1].PullRequests = %+v, want the rest of the snapshot intact",
-					snap.Tickets[1].PullRequests)
+			if strings.Contains(err.Error(), fixtureToken) {
+				t.Error("the token reached an error message")
 			}
 		})
 	}

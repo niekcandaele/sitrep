@@ -2,6 +2,7 @@ package github
 
 import (
 	"strings"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -16,9 +17,11 @@ import (
 
 type pullRequestConnection struct {
 	// TotalCount is how many closing pull requests the Ticket has, which can be
-	// more than Nodes holds: the query caps the connection rather than
-	// paginating it (see query.go). Nothing renders it yet; it is selected so
-	// the driver knows when it truncated instead of quietly reporting a subset.
+	// more than Nodes holds: the query caps the connection at twenty and does
+	// not paginate it (see query.go), so a Ticket with more than twenty shows
+	// twenty of them and loses the rest silently. TotalCount is decoded so that
+	// a renderer could say "showing 20 of 34" — and **nothing renders it
+	// today**. Reporting the truncation to the user is separate work.
 	TotalCount int               `json:"totalCount"`
 	Nodes      []pullRequestNode `json:"nodes"`
 }
@@ -31,7 +34,11 @@ type pullRequestNode struct {
 	IsDraft        bool           `json:"isDraft"`
 	ReviewDecision string         `json:"reviewDecision"`
 	Repository     *repositoryRef `json:"repository"`
-	Commits        struct {
+	// CreatedAt orders the lead pull request. It is not mapped onto
+	// model.PullRequest: nothing renders a timestamp, and it is only ever read
+	// as "which of these is newer".
+	CreatedAt time.Time `json:"createdAt"`
+	Commits   struct {
 		Nodes []struct {
 			Commit *struct {
 				StatusCheckRollup *struct {
@@ -55,10 +62,12 @@ func newPullRequests(conn *pullRequestConnection) []model.PullRequest {
 	}
 
 	prs := make([]model.PullRequest, 0, len(conn.Nodes))
+	created := make([]time.Time, 0, len(conn.Nodes))
 	for _, n := range conn.Nodes {
 		prs = append(prs, newPullRequest(n))
+		created = append(created, n.CreatedAt)
 	}
-	return leadFirst(prs)
+	return leadFirst(prs, created)
 }
 
 // newPullRequest maps one pull request node. Every pull request is reported as
@@ -159,9 +168,10 @@ func normalizeChecks(rollup string) model.CheckState {
 }
 
 // leadFirst returns prs with the lead pull request moved to the front, leaving
-// every other element in GitHub's order. Nothing is dropped.
-func leadFirst(prs []model.PullRequest) []model.PullRequest {
-	lead, ok := leadIndex(prs)
+// every other element in GitHub's order. Nothing is dropped. created is each
+// pull request's creation time, positionally aligned with prs; see leadIndex.
+func leadFirst(prs []model.PullRequest, created []time.Time) []model.PullRequest {
+	lead, ok := leadIndex(prs, created)
 	if !ok || lead == 0 {
 		return prs
 	}
@@ -182,12 +192,15 @@ func leadFirst(prs []model.PullRequest) []model.PullRequest {
 // request is grouped as In Progress, so the pull request its row shows has to
 // be the open one. Two answers about one Ticket is worse than either answer.
 //
-// "Newest" is the highest pull request number. Numbers are unique per
-// repository, so a tie is only possible across repositories; it is broken by
-// keeping the earlier element in GitHub's order, so the answer is
-// deterministic.
-func leadPullRequest(prs []model.PullRequest) (model.PullRequest, bool) {
-	i, ok := leadIndex(prs)
+// "Newest" is the most recently created pull request. A pull request number is
+// unique only within its repository, so ordering by number puts a cross-repo
+// pull request with a larger number first even when it is the older one;
+// created (positionally aligned with prs) is what settles it. Where a timestamp
+// is missing — an older fixture, a payload that omitted it — the number is the
+// fallback, and an exact tie keeps the earlier element in GitHub's order, so
+// the answer is always deterministic.
+func leadPullRequest(prs []model.PullRequest, created []time.Time) (model.PullRequest, bool) {
+	i, ok := leadIndex(prs, created)
 	if !ok {
 		return model.PullRequest{}, false
 	}
@@ -197,8 +210,8 @@ func leadPullRequest(prs []model.PullRequest) (model.PullRequest, bool) {
 // leadIndex is leadPullRequest by position, which is what moving the lead to
 // the front needs: two pull requests in different repositories can share a
 // number, so a value is not an identity here.
-func leadIndex(prs []model.PullRequest) (int, bool) {
-	if i, ok := newestWhere(prs, func(pr model.PullRequest) bool {
+func leadIndex(prs []model.PullRequest, created []time.Time) (int, bool) {
+	if i, ok := newestWhere(prs, created, func(pr model.PullRequest) bool {
 		return pr.State == model.PROpen || pr.State == model.PRDraft
 	}); ok {
 		return i, true
@@ -210,23 +223,32 @@ func leadIndex(prs []model.PullRequest) (int, bool) {
 		}
 	}
 
-	return newestWhere(prs, func(model.PullRequest) bool { return true })
+	return newestWhere(prs, created, func(model.PullRequest) bool { return true })
 }
 
-// newestWhere returns the index of the highest-numbered pull request satisfying
-// keep, or false when none does. A tie keeps the earlier element, so the answer
-// never depends on iteration luck.
-func newestWhere(prs []model.PullRequest, keep func(model.PullRequest) bool) (int, bool) {
+// newestWhere returns the index of the newest pull request satisfying keep, or
+// false when none does. A tie keeps the earlier element, so the answer never
+// depends on iteration luck.
+func newestWhere(prs []model.PullRequest, created []time.Time, keep func(model.PullRequest) bool) (int, bool) {
 	best, found := 0, false
 	for i, pr := range prs {
 		if !keep(pr) {
 			continue
 		}
-		if !found || pr.Number > prs[best].Number {
+		if !found || newerThan(i, best, prs, created) {
 			best, found = i, true
 		}
 	}
 	return best, found
+}
+
+// newerThan reports whether prs[i] is newer than prs[best], by creation time
+// when both are known and by number otherwise.
+func newerThan(i, best int, prs []model.PullRequest, created []time.Time) bool {
+	if i < len(created) && best < len(created) && !created[i].IsZero() && !created[best].IsZero() {
+		return created[i].After(created[best])
+	}
+	return prs[i].Number > prs[best].Number
 }
 
 // statusWithPullRequests refines a Ticket's Status Category using the pull

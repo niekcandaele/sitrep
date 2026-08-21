@@ -310,7 +310,7 @@ func TestGitLabMilestoneReferenceFormsResolve(t *testing.T) {
 
 // The same run in text: a GitLab epic renders through the shared path, merge
 // request summary included. The assertions are substrings rather than a golden
-// because the line's shape is #7's to own, not this driver's.
+// because the line's shape is the plain renderer's to own, not this driver's.
 func TestPlainGitLabEpicReport(t *testing.T) {
 	got := runWith([]string{"https://gitlab.com/groups/gitlab-org/-/epics/23356", "--plain"}, cli.Deps{
 		Provider: gitlabProvider(t),
@@ -337,7 +337,7 @@ func TestPlainGitLabEpicReport(t *testing.T) {
 	}
 }
 
-// A run that resolves a real token prints it nowhere (#12). The token reaches a
+// A run that resolves a real token prints it nowhere. The token reaches a
 // real Provider and a real fetch, against a replay server.
 func TestResolvedProfileNeverPrintsItsToken(t *testing.T) {
 	got := runWith([]string{"https://gitlab.com/groups/gitlab-org/-/epics/23356", "--json"}, cli.Deps{
@@ -649,7 +649,7 @@ func TestProviderGitLabForcesAGuessedHost(t *testing.T) {
 }
 
 // A GitLab Profile naming an identity variable nobody set is reported at
-// construction time, before any request — the same promise #12 made for Jira.
+// construction time, before any request — the same promise the Jira path makes.
 func TestGitLabProfileWithAnUnsetUserEnv(t *testing.T) {
 	cfg := parseConfig(t, `
 profiles:

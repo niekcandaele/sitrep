@@ -4,9 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
-	"strconv"
 	"sync"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -32,13 +31,15 @@ const mergeRequestWorkers = 8
 //
 // # Degrade per Ticket, fail as a whole only for systemic problems
 //
-// A 403 or 404 from one Ticket's closed_by means that one issue's
-// project is not fully visible to this token, or has merge requests disabled:
-// that Ticket records no merge requests and the snapshot carries on. Anything
-// else — 401, 429, 5xx, a transport failure, a decode failure — will hit every
-// Ticket in the same way, so it fails the whole FetchEpic with the message
-// checkStatus already wrote. Half a situation report about a visibility gap is
-// worth having; half a report about an expired token is not.
+// A 404 from one Ticket's closed_by means that one issue's project is not
+// visible to this token, or has merge requests disabled: that Ticket records no
+// merge requests and the snapshot carries on. Anything else — a 403, 401, 429,
+// 5xx, a transport failure, a decode failure — either hits every Ticket in the
+// same way or is a credential problem the user has to be told about, so it
+// fails the whole FetchEpic with the message checkStatus already wrote. Half a
+// situation report about a visibility gap is worth having; half a report about
+// an expired token is not. See isTicketScopedFailure for the per-endpoint
+// split.
 //
 // The fan-out is deterministic. Each worker writes only tickets[i], so
 // FetchEpic's Ticket order is untouched and two consecutive fetches return equal
@@ -117,11 +118,9 @@ func (p *Provider) correlateTicket(ctx context.Context, ticket *model.Ticket) er
 // An issue nothing is closing — the common case on a Todo ticket — costs one
 // request: the second is skipped when closed_by is empty.
 func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.PullRequest, error) {
-	query := url.Values{"per_page": {strconv.Itoa(pageSize)}}
-
-	var mrs []mergeRequestWire
-	if _, err := p.do(ctx, t.closedByPath(), query, t.String(), &mrs); err != nil {
-		if isTicketScopedFailure(err) {
+	mrs, err := pagedGet[mergeRequestWire](ctx, p, t, t.closedByPath(), "closing merge requests")
+	if err != nil {
+		if isTicketScopedFailure(err, http.StatusNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -129,12 +128,16 @@ func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.Pull
 	if len(mrs) == 0 {
 		return nil, nil
 	}
-	if err := p.attachPipelines(ctx, t, query, mrs); err != nil {
+	if err := p.attachPipelines(ctx, t, mrs); err != nil {
 		return nil, err
 	}
 
 	prs := newPullRequests(mrs)
-	if lead, ok := leadIndex(prs); ok {
+	created := make([]time.Time, len(mrs))
+	for i, m := range mrs {
+		created[i] = m.CreatedAt
+	}
+	if lead, ok := leadIndex(prs, created); ok {
 		approvals, err := p.approvalsFor(ctx, mrs[lead], prs[lead])
 		if err != nil {
 			return nil, err
@@ -144,7 +147,7 @@ func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.Pull
 				mrs[lead].DetailedMergeStatus, len(mrs[lead].Reviewers), approvals)
 		}
 	}
-	return leadFirst(prs), nil
+	return leadFirst(prs, created), nil
 }
 
 // attachPipelines fills in the head pipeline closed_by does not serialize,
@@ -152,10 +155,10 @@ func (p *Provider) mergeRequestsFor(ctx context.Context, t target) ([]model.Pull
 // merge request's own id. A merge request the wider list does not mention keeps
 // no pipeline, which reads as ChecksNone — the same answer as a project running
 // no CI, and the honest one when nothing said otherwise.
-func (p *Provider) attachPipelines(ctx context.Context, t target, query url.Values, mrs []mergeRequestWire) error {
-	var related []mergeRequestWire
-	if _, err := p.do(ctx, t.relatedMergeRequestsPath(), query, t.String(), &related); err != nil {
-		if isTicketScopedFailure(err) {
+func (p *Provider) attachPipelines(ctx context.Context, t target, mrs []mergeRequestWire) error {
+	related, err := pagedGet[mergeRequestWire](ctx, p, t, t.relatedMergeRequestsPath(), "related merge requests")
+	if err != nil {
+		if isTicketScopedFailure(err, http.StatusNotFound) {
 			return nil
 		}
 		return err
@@ -211,7 +214,7 @@ func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr mode
 	t := target{kind: kindIssue, path: project, iid: m.IID}
 	var approvals approvalsWire
 	if _, err := p.do(ctx, t.mergeRequestApprovalsPath(m.IID), nil, t.String(), &approvals); err != nil {
-		if isTicketScopedFailure(err) {
+		if isTicketScopedFailure(err, http.StatusForbidden, http.StatusNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -219,13 +222,33 @@ func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr mode
 	return &approvals, nil
 }
 
-// isTicketScopedFailure reports whether an error is one Ticket's problem rather
-// than the whole fetch's: a project this token cannot fully see, or one with
-// merge requests disabled.
-func isTicketScopedFailure(err error) bool {
+// isTicketScopedFailure reports whether err is one of the HTTP statuses the
+// caller has decided is one Ticket's problem rather than the whole fetch's.
+//
+// The callers pass different statuses, deliberately:
+//
+//   - closed_by and related_merge_requests swallow 404 only. A 404 is "there is
+//     nothing here for this token" — the project is invisible, or has merge
+//     requests disabled — and reporting no merge requests is then honest. A 403
+//     is the server refusing a request sitrep had reason to believe it could
+//     make, which is a credential or scope problem the user has to be told
+//     about, so it fails the fetch.
+//   - approvals swallows both. That endpoint is legitimately unreadable on the
+//     Free tier, and normalizeReview falls through to a weaker but not wrong
+//     answer rather than to an absent one.
+//
+// A swallowed 404 is still indistinguishable from a Ticket that genuinely has
+// no merge requests. Closing that gap needs vocabulary for partial data that
+// neither model.Ticket nor model.EpicSnapshot has today, and is separate work.
+func isTicketScopedFailure(err error, swallow ...int) bool {
 	var status *statusError
 	if !errors.As(err, &status) {
 		return false
 	}
-	return status.status == http.StatusForbidden || status.status == http.StatusNotFound
+	for _, code := range swallow {
+		if status.status == code {
+			return true
+		}
+	}
+	return false
 }

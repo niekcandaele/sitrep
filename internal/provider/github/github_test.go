@@ -646,8 +646,16 @@ func TestPaginationSafety(t *testing.T) {
 		if err == nil {
 			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
 		}
-		if !strings.Contains(err.Error(), "no new page cursor") {
-			t.Errorf("error = %q, want it to name the cursor problem", err)
+		// A server that reports a next page and hands over no usable cursor is
+		// misbehaving, which is what KindUnavailable means — and it stays
+		// retryable, on the same terms as a 500.
+		providertest.CheckError(t, "github", err, providertest.Want{
+			Kind:     provider.KindUnavailable,
+			Contains: []string{"no new page cursor"},
+			Secret:   fixtureToken,
+		})
+		if !provider.KindOf(err).Retryable() {
+			t.Error("a server fault must stay retryable; the monitor recovers when the server does")
 		}
 	})
 
@@ -672,8 +680,15 @@ func TestPaginationSafety(t *testing.T) {
 		if err == nil {
 			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
 		}
-		if !strings.Contains(err.Error(), "refusing to keep paging") {
-			t.Errorf("error = %q, want it to say the fetch was bounded", err)
+		// A collection past the cap is a stable property of the ref, so the
+		// monitor prints one line and exits rather than retrying forever.
+		providertest.CheckError(t, "github", err, providertest.Want{
+			Kind:     provider.KindBadRef,
+			Contains: []string{"refusing to keep paging"},
+			Secret:   fixtureToken,
+		})
+		if provider.KindOf(err).Retryable() {
+			t.Error("an over-cap collection is as large on the next tick; retrying buys nothing")
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -1012,6 +1027,34 @@ func TestTheTokenIsResolvedOnce(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("the token source was consulted %d times, want 1", calls)
+	}
+}
+
+// `gh auth token` reads a keyring that can be locked, so token discovery can
+// fail transiently. Caching that failure for the process lifetime means an open
+// monitor never recovers, however healthy the machine gets.
+func TestATransientTokenFailureIsNotCached(t *testing.T) {
+	var calls int
+	s := newReplayServer(t, response{file: "epic_empty.json"})
+	p := github.New("github.com",
+		github.WithEndpoint(s.URL),
+		github.WithTokenSource(func(context.Context, string) (string, error) {
+			calls++
+			if calls == 1 {
+				return "", errors.New("the keyring is locked")
+			}
+			return fixtureToken, nil
+		}),
+	)
+
+	if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
+		t.Fatal("the first FetchEpic succeeded, want the token failure")
+	}
+	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
+		t.Fatalf("the second FetchEpic: %v; a transient token failure must not be cached", err)
+	}
+	if calls != 2 {
+		t.Errorf("the token source was called %d times, want 2: the failure must be retried", calls)
 	}
 }
 
