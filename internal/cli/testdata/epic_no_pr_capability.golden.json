@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "fake",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": false,
+      "comments": false,
+      "pull_requests": false
+    }
+  },
+  "epic": {
+    "id": "acme/widgets#111",
+    "key": "#111",
+    "title": "Widget sync v2: shards, retries & telemetry",
+    "url": "https://tracker.example.test/acme/widgets/111",
+    "status": "in_progress",
+    "native_status": "open"
+  },
+  "progress": {
+    "todo": 3,
+    "in_progress": 3,
+    "done": 3,
+    "cancelled": 1,
+    "unknown": 0,
+    "total": 10,
+    "denominator": 9,
+    "percent_done": 33
+  },
+  "tickets": [
+    {
+      "id": "acme/widgets#112",
+      "key": "#112",
+      "title": "Draft the shard sync protocol",
+      "url": "https://tracker.example.test/acme/widgets/112",
+      "status": "in_progress",
+      "native_status": "In Review",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "mara-vos",
+          "display_name": "Mara Vos",
+          "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+        }
+      ]
+    },
+    {
+      "id": "acme/widgets#113",
+      "key": "#113",
+      "title": "Retry & backoff for the sync worker",
+      "url": "https://tracker.example.test/acme/widgets/113",
+      "status": "in_progress",
+      "native_status": "In Progress",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "mara-vos",
+          "display_name": "Mara Vos",
+          "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+        },
+        {
+          "login": "tobias"
+        }
+      ]
+    },
+    {
+      "id": "acme/gadgets#7",
+      "key": "#7",
+      "title": "Teach the gadget agent to speak sync v2",
+      "url": "https://tracker.example.test/acme/gadgets/7",
+      "status": "in_progress",
+      "native_status": "In Progress",
+      "repository": "acme/gadgets"
+    },
+    {
+      "id": "acme/widgets#115",
+      "key": "#115",
+      "title": "Reconcile widget IDs across shards",
+      "url": "https://tracker.example.test/acme/widgets/115",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#116",
+      "key": "#116",
+      "title": "Protocol conformance tests",
+      "url": "https://tracker.example.test/acme/widgets/116",
+      "status": "todo",
+      "native_status": "Selected for Development",
+      "repository": "acme/widgets",
+      "parent_id": "acme/widgets#112",
+      "assignees": [
+        {
+          "login": "tobias"
+        }
+      ]
+    },
+    {
+      "id": "acme/widgets#117",
+      "key": "#117",
+      "title": "Renseigner la métrique « éclair » du tableau de bord",
+      "url": "https://tracker.example.test/acme/widgets/117",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#118",
+      "key": "#118",
+      "title": "Cache shard lookups",
+      "url": "https://tracker.example.test/acme/widgets/118",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "mara-vos",
+          "display_name": "Mara Vos",
+          "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+        }
+      ]
+    },
+    {
+      "id": "acme/widgets#119",
+      "key": "#119",
+      "title": "Emit sync telemetry",
+      "url": "https://tracker.example.test/acme/widgets/119",
+      "status": "done",
+      "native_status": "Done",
+      "repository": "acme/widgets",
+      "assignees": [
+        {
+          "login": "tobias"
+        }
+      ]
+    },
+    {
+      "id": "acme/widgets#120",
+      "key": "#120",
+      "title": "Write the sync v2 runbook",
+      "url": "https://tracker.example.test/acme/widgets/120",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#121",
+      "key": "#121",
+      "title": "Mirror shards to the legacy feed",
+      "url": "https://tracker.example.test/acme/widgets/121",
+      "status": "cancelled",
+      "native_status": "not planned",
+      "repository": "acme/widgets"
+    }
+  ]
+}
