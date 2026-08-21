@@ -129,17 +129,15 @@ func endpointFor(host string) string {
 func (p *Provider) Name() string { return "github" }
 
 // Capabilities declares what this driver actually returns today, not what
-// GitHub is theoretically capable of. Comments and blocking links are fetchable
-// from GitHub but neither is served yet, and a capability declared ahead of its
-// data renders an empty section.
-//
-// Flip a flag in the same change that ships the data behind it.
+// GitHub is theoretically capable of. A capability declared ahead of its data
+// renders an empty section, so flip a flag in the same change that ships the
+// data behind it.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true,  // sub-issues are how an Epic is assembled
-		BlockingLinks: false, // Detail links are not served yet
-		Comments:      false, // Detail comments are not served yet
-		PullRequests:  true,  // closedByPullRequestsReferences on the epic query
+		Hierarchy:     true, // sub-issues are how an Epic is assembled
+		BlockingLinks: true, // blockedBy / blocking on the detail query
+		Comments:      true, // comments on the detail query
+		PullRequests:  true, // closedByPullRequestsReferences on the epic query
 	}
 }
 
@@ -203,11 +201,33 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 	return snap, nil
 }
 
-// FetchDetail is not implemented yet: the GitHub Detail fetch (description,
-// comments, blocked-by/blocks links) lands with the Detail drill-in, and the
-// Comments and BlockingLinks capabilities stay false until it does.
-func (p *Provider) FetchDetail(_ context.Context, _ model.TicketID) (model.Detail, error) {
-	return model.Detail{}, errors.New("github: ticket detail is not available yet")
+// FetchDetail returns one Ticket's description, comments and blocked-by/blocks
+// links in a single request, sending detailQuery rather than widening the polled
+// epic document (ADR-0003). id is GitHub's GraphQL node ID, which is what
+// FetchEpic put on every Ticket.
+//
+// Nothing here paginates: one drill-in is one request, and the caps in
+// detailQuery say what a very long discussion or dependency list gives up.
+func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error) {
+	if id == "" {
+		return model.Detail{}, errors.New("github: a ticket id is required to read its detail")
+	}
+
+	var resp detailResponse
+	if err := p.do(ctx, detailQuery, map[string]any{"id": string(id)}, &resp); err != nil {
+		return model.Detail{}, err
+	}
+
+	if err := resp.err(id, p.endpoint); err != nil {
+		return model.Detail{}, err
+	}
+	// A null node and a node that is not an Issue are the same thing to the
+	// reader: nothing came back. The inline fragment means a non-Issue node
+	// decodes to a struct with no id at all.
+	if resp.Data.Node == nil || resp.Data.Node.ID == "" {
+		return model.Detail{}, errors.New(detailNotFound(id))
+	}
+	return newDetail(*resp.Data.Node), nil
 }
 
 // checkRef rejects a Ref this driver cannot serve before any network call.
@@ -239,7 +259,7 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 	}
 
 	var resp graphQLResponse
-	if err := p.do(ctx, variables, &resp); err != nil {
+	if err := p.do(ctx, epicQuery, variables, &resp); err != nil {
 		return issueNode{}, err
 	}
 
@@ -255,8 +275,12 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 	return *resp.Data.Repository.Issue, nil
 }
 
-// do performs one GraphQL POST and decodes the response into out.
-func (p *Provider) do(ctx context.Context, variables map[string]any, out *graphQLResponse) error {
+// do performs one GraphQL POST of document and decodes the response into out.
+//
+// The document is a parameter so that every query this driver sends — the
+// polled epic one and the Detail one — shares exactly one place that knows about
+// auth, headers, status handling and decoding.
+func (p *Provider) do(ctx context.Context, document string, variables map[string]any, out any) error {
 	token, err := p.resolveToken(ctx)
 	if err != nil {
 		return err
@@ -265,7 +289,7 @@ func (p *Provider) do(ctx context.Context, variables map[string]any, out *graphQ
 	body, err := json.Marshal(struct {
 		Query     string         `json:"query"`
 		Variables map[string]any `json:"variables"`
-	}{Query: epicQuery, Variables: variables})
+	}{Query: document, Variables: variables})
 	if err != nil {
 		return fmt.Errorf("github: encoding the query: %w", err)
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -47,11 +48,30 @@ type Model struct {
 	// separate so that esc can drop both in one move.
 	search textinput.Model
 
+	// mode is which screen owns the terminal. Opening and closing Detail
+	// touches nothing above this line — which is why the selection, the scroll
+	// offset and the filters survive it without any code restoring them.
+	//
+	// A later caller may start the program in modeDetail by seating a
+	// DetailInput before the first frame — a bare Ticket Ref decoded straight
+	// into Detail — which is why detailState is a struct and why the Detail
+	// screen takes its breadcrumb as a Header field rather than reading the
+	// list's.
+	mode   mode
+	detail detailState
+	// details caches the Details read this session, per Ticket. It holds Detail
+	// and nothing else: no list data migrates in here, and nothing here migrates
+	// onto a Ticket (ADR-0003). It is never persisted — #12 owns configuration.
+	details          map[model.TicketID]detailEntry
+	detailGeneration int
+	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
+
 	width, height int
 	ready         bool
 
 	keys       KeyMap
 	searchKeys SearchKeyMap
+	detailKeys DetailKeyMap
 	help       help.Model
 	styles     Styles
 	quitting   bool
@@ -71,6 +91,19 @@ func New(ctx context.Context, opts Options) Model {
 	}
 	src := opts.Source
 
+	// The Detail seam is bound to the same lifetime as the refresh, and for the
+	// same reason: quitting while a Detail read is in flight cancels it instead
+	// of holding the process open for the Tracker's HTTP timeout. A Provider
+	// that cannot serve Detail leaves this nil, and enter says so rather than
+	// panicking.
+	detailSrc := opts.DetailSource
+	fetchDetail := func(id model.TicketID) (model.Detail, model.Capabilities, error) {
+		if detailSrc == nil {
+			return model.Detail{}, model.Capabilities{}, errNoDetailSource
+		}
+		return detailSrc(ctx, id)
+	}
+
 	// The box draws no cursor of its own: the real terminal cursor is placed
 	// on it from View, which keeps the frame free of a blinking glyph that a
 	// golden would have to guess the phase of.
@@ -88,12 +121,19 @@ func New(ctx context.Context, opts Options) Model {
 		refreshing:  true,
 		lastAttempt: now(),
 		search:      search,
+		fetchDetail: fetchDetail,
+		details:     make(map[model.TicketID]detailEntry),
 		keys:        DefaultKeyMap(),
 		searchKeys:  DefaultSearchKeyMap(),
+		detailKeys:  DefaultDetailKeyMap(),
 		help:        help.New(),
 		styles:      DefaultStyles(true),
 	}
 }
+
+// errNoDetailSource explains a monitor opened without a way to read Detail. It
+// is a wiring mistake rather than a Tracker failure, so it says which.
+var errNoDetailSource = errors.New("this monitor was opened without a Detail source")
 
 // Init starts the first refresh, the heartbeat, and the background-colour
 // query that decides the palette.
@@ -110,6 +150,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+		// The Detail body is a function of width, so a resize re-wraps it and
+		// the offset has to come back inside the re-wrapped document. A resize
+		// that scrolls the reader into the void is the bug this clamp exists
+		// for.
+		m.detail.offset = m.clampDetail(m.detail.offset)
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -122,11 +167,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshedMsg:
 		return m.onRefreshed(msg), nil
 
+	case detailFetchedMsg:
+		return m.onDetailFetched(msg), nil
+
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
-		// consulted: while the box is open every list command is text.
-		if m.searching {
+		// consulted: while the box is open every list command is text, and while
+		// Detail is open the list's commands are not on this screen at all.
+		switch {
+		case m.searching:
 			return m.onSearchKey(msg)
+		case m.mode == modeDetail:
+			return m.onDetailKey(msg)
 		}
 		return m.onKey(msg)
 
@@ -149,6 +201,11 @@ func (m Model) View() tea.View {
 		// Before the terminal has reported its size there is nothing honest to
 		// draw: a frame guessed at 80x24 flashes the wrong layout for one
 		// repaint, which reads worse than a blank one.
+		return v
+	}
+
+	if m.mode == modeDetail {
+		v.SetContent(m.detailFrame())
 		return v
 	}
 
@@ -307,10 +364,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return next, cmd
 
 	case key.Matches(msg, m.keys.Open):
-		// Reserved for the Ticket Detail drill-in: the binding is declared and
-		// shown in help so the key is not claimed by anything else, and does
-		// nothing until Detail exists.
-		return m, nil
+		return m.openDetail()
 
 	case key.Matches(msg, m.keys.Up):
 		return m.move(-1), nil
@@ -561,9 +615,15 @@ func (m Model) filterLineIndex() int {
 	return 1
 }
 
-// helpKeys is the keyboard surface the help line describes, which is the one
-// the keyboard is actually on. A footer offering list commands while the find
-// box holds the keyboard would be describing a program the user is not in.
+// helpKeys is the keyboard surface the *list's* footer describes, which is the
+// one the keyboard is on whenever that footer is drawn. A footer offering list
+// commands while the find box holds the keyboard would be describing a program
+// the user is not in.
+//
+// The Detail screen's footer names m.detailKeys directly rather than going
+// through here: the list's body height is measured against this footer, and a
+// list whose window silently re-measured itself because another screen is open
+// would not come back the way it left.
 func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
 		return m.searchKeys

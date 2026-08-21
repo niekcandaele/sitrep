@@ -25,7 +25,8 @@ type KeyMap struct {
 	End key.Binding
 	// Refresh forces a refresh now.
 	Refresh key.Binding
-	// Open is reserved for the Ticket Detail drill-in and does nothing today.
+	// Open opens the selected Ticket's Detail. With nothing selectable — an
+	// empty collection, or a filter matching nothing — it does nothing.
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
@@ -115,6 +116,75 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Home, k.End, k.Open},
 		{k.HideFinished, k.Find, k.ClearFilter},
 		{k.Refresh, k.Help, k.Quit},
+	}
+}
+
+// DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses the
+// list's bindings wherever the key and the meaning are the same, so the two
+// screens cannot come to disagree about what pgdn does, and adds exactly one of
+// its own: Back.
+//
+// Quit is deliberately not the list's: there esc is the last rung of the filter
+// ladder, and here esc means "one level up" — back to the list. q and ctrl+c
+// still quit outright from both, so a Detail can never trap anyone.
+type DetailKeyMap struct {
+	// Up scrolls the body up one line.
+	Up key.Binding
+	// Down scrolls the body down one line.
+	Down key.Binding
+	// PageUp scrolls the body back one page.
+	PageUp key.Binding
+	// PageDown scrolls the body forward one page.
+	PageDown key.Binding
+	// Home scrolls to the top of the Detail.
+	Home key.Binding
+	// End scrolls to the bottom of the Detail.
+	End key.Binding
+	// Refresh re-reads this Ticket's Detail, and only this Ticket's.
+	Refresh key.Binding
+	// Back returns to the list, leaving it exactly as it was.
+	Back key.Binding
+	// Help toggles the full help listing.
+	Help key.Binding
+	// Quit ends the program.
+	Quit key.Binding
+}
+
+// DefaultDetailKeyMap returns the Detail screen's bindings.
+func DefaultDetailKeyMap() DetailKeyMap {
+	list := DefaultKeyMap()
+	return DetailKeyMap{
+		Up:       list.Up,
+		Down:     list.Down,
+		PageUp:   list.PageUp,
+		PageDown: list.PageDown,
+		Home:     list.Home,
+		End:      list.End,
+		Refresh:  list.Refresh,
+		Back: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("esc", "back"),
+		),
+		Help: list.Help,
+		Quit: key.NewBinding(
+			key.WithKeys("q", "ctrl+c"),
+			key.WithHelp("q", "quit"),
+		),
+	}
+}
+
+// ShortHelp returns the bindings the Detail screen's one-line footer shows.
+func (k DetailKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Up, k.Down, k.Back, k.Refresh, k.Help, k.Quit}
+}
+
+// FullHelp returns every binding, grouped into the columns "?" expands to.
+func (k DetailKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Up, k.Down, k.PageUp, k.PageDown},
+		{k.Home, k.End},
+		{k.Back, k.Refresh},
+		{k.Help, k.Quit},
 	}
 }
 

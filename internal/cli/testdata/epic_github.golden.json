@@ -5,8 +5,8 @@
     "name": "github",
     "capabilities": {
       "hierarchy": true,
-      "blocking_links": false,
-      "comments": false,
+      "blocking_links": true,
+      "comments": true,
       "pull_requests": true
     }
   },

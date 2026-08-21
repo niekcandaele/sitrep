@@ -197,11 +197,12 @@ func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 	defer stop()
 
 	err := tui.Run(ctx, tui.Options{
-		Source:   tui.EpicSource(p, r, deps.clock()),
-		Interval: interval,
-		Now:      deps.clock(),
-		Input:    deps.stdin(),
-		Output:   stdout,
+		Source:       tui.EpicSource(p, r, deps.clock()),
+		DetailSource: tui.TicketDetailSource(p),
+		Interval:     interval,
+		Now:          deps.clock(),
+		Input:        deps.stdin(),
+		Output:       stdout,
 	})
 	if err != nil {
 		// Bubble Tea is the one thing here that knows whether it has a

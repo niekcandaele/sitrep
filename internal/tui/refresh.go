@@ -58,13 +58,20 @@ func Staleness(fetchedAt, now time.Time, refreshing bool) string {
 	if age < time.Second {
 		return "just now"
 	}
+	return "updated " + humanAge(age) + " ago"
+}
+
+// humanAge renders a duration at the coarsest useful precision: "12s", "3m",
+// "1h 4m". It is shared by every age this package puts on screen, so the list's
+// reading and a Detail's reading cannot come to describe time differently.
+func humanAge(age time.Duration) string {
 	switch {
 	case age < time.Minute:
-		return fmt.Sprintf("updated %ds ago", int(age.Seconds()))
+		return fmt.Sprintf("%ds", int(age.Seconds()))
 	case age < time.Hour:
-		return fmt.Sprintf("updated %dm ago", int(age.Minutes()))
+		return fmt.Sprintf("%dm", int(age.Minutes()))
 	default:
-		return fmt.Sprintf("updated %dh %dm ago", int(age.Hours()), int(age.Minutes())%60)
+		return fmt.Sprintf("%dh %dm", int(age.Hours()), int(age.Minutes())%60)
 	}
 }
 

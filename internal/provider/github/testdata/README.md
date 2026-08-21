@@ -65,7 +65,48 @@ shapes GitHub's GraphQL API documents: a 200 with a null issue, a 200 carrying a
 `NOT_FOUND` error entry, and a 200 carrying ordinary errors. The 401, rate-limit, 500 and
 malformed-JSON cases need no file — the test server produces them directly.
 
+## Ticket detail
+
+The Detail fixtures answer `detailQuery`, which is a **second** GraphQL document rather than
+a widening of the epic one (ADR-0003: the epic query is polled, the detail query is opened).
+That is why they are separate files: they are a different response shape, not more of the
+same one.
+
+`detail_full.json` starts from a **real recording** of `niekcandaele/sitrep#9`, captured with:
+
+```
+gh api graphql -H 'GraphQL-Features: sub_issues' \
+  -F id=I_kwDOT_WhQ88AAAABNqYEOA \
+  -f query='<the detailQuery in query.go>'
+```
+
+The `id`, `number`, `url`, `repository`, the first comment and the real `blockedBy` /
+`blocking` entries are that recording byte for byte. The dependency probe is worth recording
+here: `Issue.blockedBy` and `Issue.blocking` are ordinary `IssueConnection` fields on the
+public schema and need **no** extra `GraphQL-Features` header — the driver's existing
+`sub_issues` header is enough.
+
+Grafted onto it by hand, because one healthy issue does not contain everything the driver has
+to survive:
+
+| Graft | proves |
+|---|---|
+| an `&` and `« éclair »` in the body | the description survives verbatim, unrendered and unescaped |
+| a second comment from `sitrep-bot` with no `name` | an Actor that is not a User has no display name, and that is not an error |
+| a third comment with `author: null` | a deleted account maps to the zero `model.User`, never a panic and never a dropped comment |
+| a cross-repo `blockedBy` target in `acme/widgets`, closed `NOT_PLANNED` | the target key is qualified `owner/repo#N`, and not-planned is Cancelled |
+
+`detail_bare.json` is a hand-written empty issue — no body, `comments.nodes: []`, both
+dependency connections empty — because a freshly filed Ticket is the ordinary case and must
+not read as an error.
+
+`detail_node_null.json` and `detail_not_an_issue.json` are hand-written to the two shapes a
+`node(id:)` lookup answers with when nothing came back: a null node, and a node that matched
+no inline fragment and so decodes with no fields at all. The NOT_FOUND, 401, rate-limit and
+malformed-JSON paths reuse the epic query's files and the test server, because `FetchDetail`
+goes through exactly the same handling.
+
 ## Extending
 
-Ticket detail will widen the query. Extend **these** files rather than starting new ones,
-and keep this note honest about which bytes are recorded and which are grafted.
+Extend **these** files rather than starting new ones, and keep this note honest about which
+bytes are recorded and which are grafted.

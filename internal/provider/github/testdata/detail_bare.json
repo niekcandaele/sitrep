@@ -1,0 +1,23 @@
+{
+  "data": {
+    "node": {
+      "id": "I_kwDOT_WhQ88AAAABNqYFHw",
+      "number": 10,
+      "url": "https://github.com/niekcandaele/sitrep/issues/10",
+      "body": "",
+      "repository": {
+        "nameWithOwner": "niekcandaele/sitrep"
+      },
+      "comments": {
+        "totalCount": 0,
+        "nodes": []
+      },
+      "blockedBy": {
+        "nodes": []
+      },
+      "blocking": {
+        "nodes": []
+      }
+    }
+  }
+}
