@@ -1,0 +1,85 @@
+{
+  "id": "10012",
+  "key": "ABC-12",
+  "self": "https://acme.atlassian.net/rest/api/2/issue/10012",
+  "fields": {
+    "summary": "Ticket decoder mode",
+    "status": {
+      "name": "In Progress",
+      "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+    },
+    "resolution": null,
+    "project": { "key": "ABC", "name": "Acme Backlog" },
+    "description": "h2. Decoding a Ref\n\nA Ref with children is an Epic & one without is a Ticket.\n\n{code:go}\nfunc decodesToTicket(snap model.EpicSnapshot) bool { return len(snap.Tickets) == 0 }\n{code}\n\nSee « éclair » for the naming discussion.",
+    "issuelinks": [
+      {
+        "id": "20001",
+        "type": { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+        "inwardIssue": {
+          "id": "10003",
+          "key": "ABC-3",
+          "fields": {
+            "summary": "Walking skeleton",
+            "status": {
+              "name": "In Review",
+              "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+            },
+            "resolution": null
+          }
+        }
+      },
+      {
+        "id": "20002",
+        "type": { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+        "outwardIssue": {
+          "id": "10009",
+          "key": "ABC-9",
+          "fields": {
+            "summary": "Finished without a resolution recorded",
+            "status": {
+              "name": "Done",
+              "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+            },
+            "resolution": null
+          }
+        }
+      },
+      {
+        "id": "20003",
+        "type": { "id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to" },
+        "outwardIssue": {
+          "id": "10006",
+          "key": "ABC-6",
+          "fields": {
+            "summary": "Filtering & fuzzy find, « éclair » included",
+            "status": {
+              "name": "In Progress",
+              "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+            },
+            "resolution": null
+          }
+        }
+      },
+      {
+        "id": "20004",
+        "type": { "id": "10007", "name": "Causes", "inward": "is caused by", "outward": "causes" },
+        "outwardIssue": {
+          "id": "10011",
+          "key": "DEF-4",
+          "fields": {
+            "summary": "A child living in another project",
+            "status": {
+              "name": "Closed",
+              "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+            },
+            "resolution": { "id": "10001", "name": "Won't Do" }
+          }
+        }
+      },
+      {
+        "id": "20005",
+        "type": { "id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to" }
+      }
+    ]
+  }
+}

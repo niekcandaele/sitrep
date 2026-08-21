@@ -157,13 +157,26 @@ func TestJiraProfileWithAnUnsetTokenEnv(t *testing.T) {
 // A Ref that resolves onto a driver that does not exist yet still ends in "not
 // supported yet" — now able to say which Profile it would have used — and the
 // credential it resolved on the way never reaches stdout or stderr.
+//
+// GitLab is the remaining unwritten driver; the Jira half of this promise moved
+// to jira_test.go when #13 wrote that driver, because a Jira Profile now
+// constructs one and a test that constructs one has to serve it too.
 func TestResolvedProfileNeverPrintsItsToken(t *testing.T) {
 	const secret = "s3cret-token-value"
 
-	got := runWith([]string{"ABC-123", "--json"}, cli.Deps{
-		Config: parseConfig(t, jiraConfig),
+	cfg := parseConfig(t, `
+profiles:
+  acme-gitlab:
+    provider: gitlab
+    host: gitlab.com
+    auth:
+      token_env: GITLAB_TOKEN
+`)
+
+	got := runWith([]string{"https://gitlab.com/acme/widgets/-/issues/7", "--json"}, cli.Deps{
+		Config: cfg,
 		Env: func(name string) string {
-			if name == "JIRA_API_TOKEN" {
+			if name == "GITLAB_TOKEN" {
 				return secret
 			}
 			return ""
@@ -173,7 +186,7 @@ func TestResolvedProfileNeverPrintsItsToken(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"jira is not supported yet", `profile "acme-jira"`} {
+	for _, want := range []string{"gitlab is not supported yet", `profile "acme-gitlab"`} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}

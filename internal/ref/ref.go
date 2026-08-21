@@ -173,7 +173,13 @@ func parentFromURL(raw string, child Ref) (Ref, bool) {
 		return Ref{}, false
 	}
 	r, err := parseURL(s, s)
-	if err != nil || r.Number <= 0 {
+	if err != nil {
+		return Ref{}, false
+	}
+	// A parent has to name something a Provider can fetch. On GitHub that is an
+	// issue number; on Jira it is a key, and a /browse/ URL carries no number at
+	// all — so either identity is enough and neither implies the other.
+	if r.Number <= 0 && r.Key == "" {
 		return Ref{}, false
 	}
 	return inherit(r, child), true
@@ -192,6 +198,17 @@ func parentFromKey(raw string, child Ref) (Ref, bool) {
 			return Ref{}, false
 		}
 		return inherit(r, child), true
+	}
+
+	// A Jira-style key names a project and no site, so the host is inherited from
+	// the child — the same rule inherit already encodes. It is read only for a
+	// child that came from Jira: "PROJ-111" is not a key a GitHub parent can
+	// have, and reading it as one there would turn an unresolvable parent into a
+	// confident pointer at the wrong Tracker.
+	if child.Tracker == TrackerJira {
+		if key, ok := normalizeKey(s); ok {
+			return Ref{Tracker: TrackerJira, Host: child.Host, Key: key, Raw: s}, true
+		}
 	}
 
 	n, ok := parseNumber(strings.TrimPrefix(s, "#"))

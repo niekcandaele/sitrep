@@ -4,8 +4,8 @@ A read-only terminal situation report on the work you delegated: one screen show
 Epic's Tickets, their status, and the code moving them — across GitHub, Jira, and GitLab.
 Agents write; sitrep watches. It never writes to a Tracker ([ADR-0002](docs/adr/0002-read-only-by-design.md)).
 
-sitrep is early: today it reads an Epic from GitHub, either as a live monitor you leave
-open or as a one-shot report. Jira and GitLab land in later work.
+sitrep is early: today it reads an Epic from GitHub or Jira, either as a live monitor you
+leave open or as a one-shot report. GitLab lands in later work.
 
 ## Usage
 
@@ -94,8 +94,41 @@ serve one ref, sitrep says so instead of guessing — pass `--profile <name>` to
 `refresh_interval` is that Profile's monitor cadence, subject to the same 5-second floor as
 `--interval`, which overrides it when you actually type it.
 
-*Jira and GitLab Profiles validate today but their drivers are not written yet: such a run
-ends in "not supported yet".*
+*GitLab Profiles validate today but the GitLab driver is not written yet: such a run ends in
+"not supported yet".*
+
+### Jira
+
+A Jira Profile is what turns `sitrep PROJ-123` into a situation report. It needs the site,
+the project key, your Atlassian account email, and the name of the variable holding an API
+token:
+
+```yaml
+profiles:
+  acme-jira:
+    provider: jira
+    host: acme.atlassian.net    # the site, not a URL
+    project: PROJ               # the project key — also the Epic Ref key prefix
+    auth:
+      user: me@acme.test        # your Atlassian account email
+      token_env: JIRA_API_TOKEN # the NAME of the variable holding the token
+```
+
+Create the token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens),
+put it in `$JIRA_API_TOKEN`, and `sitrep PROJ-123` reads that Epic — the monitor, the
+filters, and `enter` for a Ticket's description, comments and links, each with your
+instance's own wording for the link ("is blocked by", or whatever your admin renamed it to).
+An epic's children are the issues whose **parent** is that epic; sitrep does not read the
+deprecated Epic Link field. Your own Atlassian email can also come from a variable, with
+`auth.user_env` instead of `auth.user`.
+
+Descriptions and comments come back as Jira wiki markup rather than markdown, because that
+is what the REST API returns as text, and sitrep displays what the Tracker gave it without
+rendering it.
+
+**Jira shows no pull request information, by design.** That data lives behind an
+undocumented internal endpoint and a per-instance application link, and sitrep will not
+guess: the section is simply absent from a Jira report rather than empty or wrong.
 
 ## Install
 

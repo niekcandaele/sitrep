@@ -1,0 +1,36 @@
+{
+  "startAt": 0,
+  "maxResults": 100,
+  "total": 3,
+  "comments": [
+    {
+      "id": "30003",
+      "author": {
+        "accountId": "dddd4444eeee5555ffff6666",
+        "displayName": "Grace Hopper",
+        "avatarUrls": { "48x48": "https://avatar.example/grace/48" }
+      },
+      "body": "Rebased and pushed.",
+      "created": "2026-01-14T17:02:10.000+0000",
+      "updated": "2026-01-14T17:02:10.000+0000"
+    },
+    {
+      "id": "30002",
+      "author": null,
+      "body": "Whoever wrote this has left the company; the comment has not.",
+      "created": "2026-01-13T11:30:00.000+0000",
+      "updated": "2026-01-13T11:30:00.000+0000"
+    },
+    {
+      "id": "30001",
+      "author": {
+        "accountId": "aaaa1111bbbb2222cccc3333",
+        "displayName": "Ada Lovelace",
+        "avatarUrls": { "48x48": "https://avatar.example/ada/48" }
+      },
+      "body": "Starting on this — the & in the title is deliberate.",
+      "created": "2026-01-12T09:14:33.123+0100",
+      "updated": "2026-01-12T09:14:33.123+0100"
+    }
+  ]
+}

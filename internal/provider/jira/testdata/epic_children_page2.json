@@ -1,0 +1,84 @@
+{
+  "isLast": true,
+  "issues": [
+    {
+      "id": "10007",
+      "key": "ABC-7",
+      "fields": {
+        "summary": "An approach nobody took",
+        "status": {
+          "name": "Closed",
+          "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+        },
+        "resolution": { "id": "10001", "name": "Won't Do" },
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10008",
+      "key": "ABC-8",
+      "fields": {
+        "summary": "Filed twice",
+        "status": {
+          "name": "Closed",
+          "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+        },
+        "resolution": { "id": "10002", "name": "Duplicate" },
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10009",
+      "key": "ABC-9",
+      "fields": {
+        "summary": "Finished without a resolution recorded",
+        "status": {
+          "name": "Done",
+          "statusCategory": { "id": 3, "key": "done", "name": "Done" }
+        },
+        "resolution": null,
+        "assignee": {
+          "accountId": "aaaa1111bbbb2222cccc3333",
+          "displayName": "Ada Lovelace",
+          "avatarUrls": { "48x48": "https://avatar.example/ada/48" }
+        },
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10010",
+      "key": "ABC-10",
+      "fields": {
+        "summary": "A status category sitrep has never heard of",
+        "status": {
+          "name": "Icebox",
+          "statusCategory": { "id": 9, "key": "backlogged", "name": "Icebox" }
+        },
+        "resolution": null,
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10011",
+      "key": "DEF-4",
+      "fields": {
+        "summary": "A child living in another project",
+        "status": {
+          "name": "In Progress",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "resolution": null,
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "DEF", "name": "Platform" }
+      }
+    }
+  ]
+}

@@ -26,6 +26,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/jira"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
@@ -69,7 +70,8 @@ Flags:
                           ref)
       --provider <name>   Provider to read from: "auto" (the default) picks one
                           from the Epic Ref, "github" forces the GitHub driver,
-                          "fake" serves a built-in fixture epic
+                          "jira" forces the Jira driver, "fake" serves a
+                          built-in fixture epic
       --version           show version information and exit
 `
 
@@ -267,7 +269,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	p := deps.Provider
 	if p == nil {
-		if p, err = deps.newProvider(*providerName, r, prof); err != nil {
+		if p, err = deps.newProvider(*providerName, r, prof, cfg.Path); err != nil {
 			return runtimeError(stderr, err)
 		}
 	}
@@ -406,12 +408,19 @@ func selectProfile(cfg config.Config, r ref.Ref, name string) (*config.Profile, 
 	return nil, nil
 }
 
-func unmatchedKeyPrefix(cfg config.Config, prefix string) error {
-	where := cfg.Path
-	if where == "" {
-		where = "~/.config/sitrep/config.yml"
+// configLocation names the config file an error tells the user to edit: the
+// real path when one was resolved, and the documented default when the run read
+// no file at all.
+func configLocation(path string) string {
+	if path == "" {
+		return "~/.config/sitrep/config.yml"
 	}
-	msg := fmt.Sprintf("no Profile matches the key prefix %q — add one to %s", prefix, where)
+	return path
+}
+
+func unmatchedKeyPrefix(cfg config.Config, prefix string) error {
+	msg := fmt.Sprintf("no Profile matches the key prefix %q — add one to %s",
+		prefix, configLocation(cfg.Path))
 	if known := cfg.KeyPrefixes(); len(known) > 0 {
 		msg += " (known prefixes: " + strings.Join(known, ", ") + ")"
 	}
@@ -488,6 +497,7 @@ func (d Deps) stdin() io.Reader {
 const (
 	providerAuto   = "auto"
 	providerGitHub = "github"
+	providerJira   = "jira"
 	providerFake   = "fake"
 )
 
@@ -497,7 +507,7 @@ const defaultProviderName = providerAuto
 
 func knownProviderName(name string) bool {
 	switch name {
-	case providerAuto, providerGitHub, providerFake:
+	case providerAuto, providerGitHub, providerJira, providerFake:
 		return true
 	default:
 		return false
@@ -525,7 +535,7 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 //
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
-func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile) (provider.Provider, error) {
+func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPath string) (provider.Provider, error) {
 	switch name {
 	case providerFake:
 		return fake.New(), nil
@@ -534,22 +544,53 @@ func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile) (provide
 			return nil, fmt.Errorf("%q is not a GitHub Epic Ref", r.Raw)
 		}
 		return d.newGitHub(r, prof), nil
+	case providerJira:
+		if r.Tracker != ref.TrackerJira {
+			return nil, fmt.Errorf("%q is not a Jira Epic Ref", r.Raw)
+		}
+		return d.newJira(r, prof, configPath)
 	}
 
 	switch r.Tracker {
 	case ref.TrackerGitHub:
 		return d.newGitHub(r, prof), nil
-	case ref.TrackerGitLab, ref.TrackerJira:
+	case ref.TrackerJira:
+		return d.newJira(r, prof, configPath)
+	case ref.TrackerGitLab:
 		return nil, notSupportedYet(r.Tracker, prof, d.env())
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
 	}
 }
 
-// notSupportedYet is the seam #13 (Jira) and #14 (GitLab) plug into: each
-// replaces its own branch of this error with a driver constructed from the
-// Profile's Host, Project and Credential — jira.New(prof.Host, prof.Project,
-// cred, …) and its GitLab twin. Everything they need is already resolved here.
+// newJira constructs the Jira driver from the Profile that matched this Ref.
+//
+// A Jira Ref always needs a Profile, including the /browse/ URL form that names
+// its own site: the site is not the problem, the credential is, and a Profile is
+// the only place an Atlassian email and a token reference come from. Saying so
+// here is more useful than letting the driver fail at its first request.
+func (d Deps) newJira(r ref.Ref, prof *config.Profile, configPath string) (provider.Provider, error) {
+	if prof == nil {
+		return nil, fmt.Errorf("jira: reading %s needs a Profile — add one to %s with your "+
+			"Atlassian email and the environment variable holding your API token",
+			r.Host, configLocation(configPath))
+	}
+	cred, err := prof.Credential(d.env())
+	if err != nil {
+		return nil, err
+	}
+	// Translating a config.Credential into the driver's own Credentials happens
+	// here, deliberately: it is what keeps internal/provider/jira free of any
+	// knowledge of the config file.
+	return jira.New(r.Host, jira.WithCredentials(jira.Credentials{
+		Email: cred.User,
+		Token: cred.Token,
+	})), nil
+}
+
+// notSupportedYet is the seam #14 (GitLab) plugs into: it replaces this error
+// with a driver constructed from the Profile's Host, Project and Credential,
+// the way newJira does. Everything it needs is already resolved here.
 //
 // The credential is resolved first, so a Profile that names an unset variable
 // reports that instead of the generic message: the fix for "I wrote a Profile
