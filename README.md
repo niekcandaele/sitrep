@@ -17,8 +17,8 @@ sitrep <ref> --json    # the same epic as a JSON document, for scripts and agent
 
 `<ref>` is the Epic Ref: a bare number (`111`, resolved through the current clone's
 `origin` remote), `owner/repo#111`, a Jira-style key (`ABC-123`, matched to a Profile by
-its key prefix — see [Configuration](#configuration)), a GitLab epic reference (`acme&12`),
-or the issue's full URL.
+its key prefix — see [Configuration](#configuration)), a GitLab epic or milestone reference
+(`acme&12`, `acme/widgets%3`), or the issue's full URL.
 
 With no mode flag, sitrep opens the **monitor**: the Epic's Tickets grouped by status with
 a progress bar, assignees and the pull request moving each Ticket, refreshed every 60
@@ -155,11 +155,24 @@ now serves), landing straight in that Ticket's Detail with its epic as the bread
 Inside a clone, a bare number resolves against the `origin` remote; on a self-managed host,
 a `gitlab` Profile claiming that host is what tells sitrep it is not GitHub Enterprise.
 
-**Native epics need GitLab Premium or Ultimate.** On a Free instance the epic endpoints
-answer `403`, and sitrep says so in those words rather than reporting an empty epic.
+**On GitLab Free, a milestone is what sitrep reports as an Epic.** Native epics need
+Premium or Ultimate, but a milestone is Free tier and is the collection most teams actually
+delegate into — so a milestone ref renders a full Epic view, with the same progress bar,
+the same grouped Tickets, the same filters and the same drill-in. Three forms reach one:
+its project URL `https://gitlab.com/acme/widgets/-/milestones/3`, its group URL
+`https://gitlab.com/groups/acme/-/milestones/3`, and GitLab's own reference `acme/widgets%3`
+— or `groups/acme%3` for a group milestone, or just `%3` when a Profile's `project` names
+the project. A child issue's milestone becomes its breadcrumb when it has no epic.
 
-**GitLab shows no merge request information yet.** The section is silently absent, and no
-Ticket is reported as in progress, until that lands.
+sitrep does not guess which of the two you meant: an epic ref fetches an epic and a
+milestone ref fetches a milestone. If you point it at an epic on a Free instance, the epic
+endpoints answer `403` and sitrep says so — and points you at the milestone route.
+
+**Merge requests show per Ticket.** Every Ticket carries the merge requests moving it, with
+their state, their review and approval posture, and their CI pipeline status; an open
+Ticket with an open or draft merge request is reported as in progress. Note that this costs
+roughly one extra request per Ticket per refresh, so raise `--interval` on a large Epic
+against a rate-limited instance.
 
 ## Install
 

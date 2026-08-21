@@ -1,0 +1,76 @@
+[
+  {
+    "id": 198200006,
+    "iid": 205,
+    "project_id": 34675721,
+    "title": "Ship the milestone-as-Epic fallback",
+    "description": "",
+    "state": "closed",
+    "created_at": "2026-07-07T09:00:00.000Z",
+    "closed_at": "2026-08-01T09:00:00.000Z",
+    "labels": ["backend"],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/205",
+    "references": {
+      "short": "#205",
+      "relative": "#205",
+      "full": "gitlab-org/cli#205"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/205",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/205/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  },
+  {
+    "id": 198200007,
+    "iid": 206,
+    "project_id": 34675721,
+    "title": "Probe the tier on every refresh",
+    "description": "",
+    "state": "closed",
+    "created_at": "2026-07-08T09:00:00.000Z",
+    "closed_at": "2026-08-02T09:00:00.000Z",
+    "labels": ["workflow::wontfix"],
+    "milestone": {
+      "id": 6239395,
+      "iid": 3,
+      "project_id": 34675721,
+      "title": "v1.4 — CLI polish",
+      "state": "active",
+      "web_url": "https://gitlab.com/gitlab-org/cli/-/milestones/3"
+    },
+    "assignees": [],
+    "assignee": null,
+    "author": null,
+    "type": "ISSUE",
+    "issue_type": "issue",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/206",
+    "references": {
+      "short": "#206",
+      "relative": "#206",
+      "full": "gitlab-org/cli#206"
+    },
+    "epic": null,
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/206",
+      "notes": "https://gitlab.com/api/v4/projects/34675721/issues/206/notes",
+      "project": "https://gitlab.com/api/v4/projects/34675721",
+      "closed_as_duplicate_of": null
+    }
+  }
+]

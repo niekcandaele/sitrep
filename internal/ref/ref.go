@@ -52,8 +52,9 @@ type Ref struct {
 	// Number is the tracker-native issue number. Zero when the Ref names no
 	// single Epic, as ParseRemoteURL returns.
 	Number int
-	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased, or GitLab's
-	// own native epic reference, e.g. "acme/platform&12" — always the form a
+	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased, GitLab's
+	// own native epic reference, e.g. "acme/platform&12", or GitLab's milestone
+	// reference, e.g. "acme/widgets%3" and "groups/acme%3" — always the form a
 	// human can type back. It is empty for GitHub and for a GitLab project
 	// issue. A Ref that carries only a Key carries no Host: only a Profile knows
 	// which site or instance the key names.
@@ -143,6 +144,14 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	if r, ok := parseGitLabReference(trimmed, raw); ok {
 		return r, nil
 	}
+	// GitLab's milestone reference, "%3" or "acme/widgets%3", is tried here for
+	// the same reason and one more: the order is load-bearing. Left to
+	// parseOwnerRepoNumber, "acme/platform/core%3" would be split on its last
+	// "/", found to have a head containing "/", and returned as a hard "cannot
+	// parse" error rather than declined. No other Epic Ref form contains a "%".
+	if r, ok := parseGitLabMilestoneReference(trimmed, raw); ok {
+		return r, nil
+	}
 	if r, ok, err := parseOwnerRepoNumber(trimmed, raw); ok {
 		return r, err
 	}
@@ -207,6 +216,12 @@ func parentFromKey(raw string, child Ref) (Ref, bool) {
 	// read before the owner/repo forms for the same reason Parse tries it first:
 	// no other form contains an "&".
 	if r, ok := parseGitLabReference(s, s); ok {
+		return inherit(r, child), true
+	}
+	// A GitLab milestone reference names no instance either, so the same
+	// inheritance applies. It is read before the owner/repo forms for the reason
+	// Parse gives: a nested path would otherwise be a hard parse error.
+	if r, ok := parseGitLabMilestoneReference(s, s); ok {
 		return inherit(r, child), true
 	}
 
@@ -443,14 +458,16 @@ func foreignRef(tracker Tracker, host string, segments []string, raw string) Ref
 	return gitLabRef(host, segments, raw)
 }
 
-// gitLabRef reads GitLab's four Epic-Ref-bearing URL shapes, all of which hang
-// off the "/-/" separator:
+// gitLabRef reads GitLab's Epic-Ref-bearing URL shapes, all of which hang off
+// the "/-/" separator:
 //
 //	/{namespace…}/{project}/-/issues/{n}      a project issue
 //	/{namespace…}/{project}/-/work_items/{n}  the same issue, in the form
 //	                                          GitLab's API now returns as web_url
 //	/groups/{group path}/-/epics/{n}          a group epic
 //	/groups/{group path}/-/work_items/{n}     the same epic
+//	/{namespace…}/{project}/-/milestones/{n}  a project milestone
+//	/groups/{group path}/-/milestones/{n}     a group milestone
 //
 // The leading "groups" segment is what distinguishes a group epic from a
 // project issue, and the "&" it puts in Key is what the GitLab driver reads to
@@ -507,6 +524,15 @@ func gitLabRef(host string, segments []string, raw string) Ref {
 		if group {
 			r.Key = strings.Join(head, "/") + "&" + segments[sep+2]
 		}
+	case "milestones":
+		// A milestone is how GitLab Free spells an Epic. The "%" it puts in Key
+		// is what the GitLab driver reads to recognize one, and the "groups/"
+		// prefix is what tells it which scope to address.
+		r.Number = n
+		r.Key = strings.Join(head, "/") + "%" + segments[sep+2]
+		if group {
+			r.Key = groupScopePrefix + r.Key
+		}
 	}
 	return r
 }
@@ -539,6 +565,45 @@ func parseGitLabReference(s, raw string) (Ref, bool) {
 	}
 	return r, true
 }
+
+// parseGitLabMilestoneReference reads GitLab's own milestone reference form:
+// "acme/widgets%3" for a project milestone, "groups/acme/platform%3" for a group
+// one, and "%3" when the path is left for a Profile to supply.
+//
+// The "groups/" prefix is sitrep's spelling rather than GitLab's, and it is
+// unambiguous because GitLab reserves "groups" as a top-level route — no user or
+// group namespace can be named that. A bare "%3" therefore means a *project*
+// milestone, which is what GitLab's own "%" syntax means too.
+//
+// The resulting Ref carries no Host on purpose, exactly as the epic reference
+// form does not: a reference names a project or a group, not an instance.
+func parseGitLabMilestoneReference(s, raw string) (Ref, bool) {
+	pct := strings.LastIndex(s, "%")
+	if pct < 0 {
+		return Ref{}, false
+	}
+	n, ok := parseNumber(s[pct+1:])
+	if !ok {
+		return Ref{}, false
+	}
+	path := strings.Trim(s[:pct], "/")
+	if strings.Contains(path, "%") {
+		return Ref{}, false
+	}
+
+	r := Ref{Tracker: TrackerGitLab, Number: n, Key: path + "%" + s[pct+1:], Raw: raw}
+	// Owner and Repo carry the path GitLab addresses, without sitrep's scope
+	// marker; Key stays authoritative about which scope it is.
+	if scoped := strings.TrimPrefix(path, groupScopePrefix); scoped != "" {
+		segments := strings.Split(scoped, "/")
+		r.Owner, r.Repo = segments[0], strings.Join(segments[1:], "/")
+	}
+	return r, true
+}
+
+// groupScopePrefix marks a group-scoped GitLab milestone Key. See
+// parseGitLabMilestoneReference for why it cannot collide with a namespace.
+const groupScopePrefix = "groups/"
 
 // parseOwnerRepoNumber reads the "acme/widgets#111" and "acme/widgets/111"
 // forms. The first is what a cross-repo child's Key renders as, so a human can

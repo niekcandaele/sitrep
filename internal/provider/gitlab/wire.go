@@ -93,6 +93,10 @@ type issueWire struct {
 	Epic      *issueEpicWire `json:"epic"`
 	Links     linksWire      `json:"_links"`
 
+	// Milestone is the breadcrumb an issue has on every tier, where Epic is
+	// Premium-only. See newParentFromIssue for which of the two wins.
+	Milestone *issueMilestoneWire `json:"milestone"`
+
 	// Description is what GitLab sends whether or not sitrep wants it: the
 	// epic-issues payload carries every child's full description. It is read only
 	// by FetchDetail. Putting it on a model.Ticket would violate ADR-0003 — the
@@ -300,14 +304,27 @@ func newTicketFromIssue(i issueWire, parentID model.TicketID) model.Ticket {
 	}
 }
 
-// newParentFromIssue maps a child issue's embedded epic object onto sitrep's
-// Parent — a complete breadcrumb, with Title and URL, for no extra request. A
-// missing epic is the zero Parent: an ordinary state, never an error.
-func newParentFromIssue(e *issueEpicWire, host string) model.Parent {
+// newParentFromIssue maps a child issue's breadcrumb onto sitrep's Parent — a
+// complete one, with Title and URL, for no extra request.
+//
+// An epic wins; a milestone is the fallback. A Premium instance gives an issue
+// both, and the epic is the collection a human means. On Free there is no epic,
+// so the milestone is the Epic. A missing epic and a missing milestone together
+// are the zero Parent: an ordinary state, never an error.
+func newParentFromIssue(i issueWire, host string) model.Parent {
+	if parent := newParentFromEpicObject(i.Epic, host); !parent.IsZero() {
+		return parent
+	}
+	return newParentFromMilestone(i.Milestone, host)
+}
+
+// newParentFromEpicObject maps the epic object a Premium instance embeds on
+// every issue.
+func newParentFromEpicObject(e *issueEpicWire, host string) model.Parent {
 	if e == nil || e.IID <= 0 {
 		return model.Parent{}
 	}
-	group := groupFromEpicURL(e.URL)
+	group := groupFromWebURL(e.URL)
 	return model.Parent{
 		ID:    target{kind: kindEpic, path: group, iid: e.IID}.ticketID(),
 		Key:   group + "&" + strconv.Itoa(e.IID),
@@ -334,9 +351,10 @@ func newParentFromEpic(e epicWire, host, group string) model.Parent {
 	}
 }
 
-// groupFromEpicURL reads the group path out of a group epic URL,
-// "https://host/groups/{group path}/-/epics/{n}".
-func groupFromEpicURL(rawurl string) string {
+// groupFromWebURL reads the group path out of a group-scoped GitLab web URL,
+// "https://host/groups/{group path}/-/{noun}/{n}" — a group epic or a group
+// milestone. A URL that is not group-scoped yields "".
+func groupFromWebURL(rawurl string) string {
 	const marker = "/groups/"
 	at := strings.Index(rawurl, marker)
 	if at < 0 {

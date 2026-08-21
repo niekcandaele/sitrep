@@ -7,7 +7,8 @@ GitLab instance, executes `glab` or `git`, reads an environment variable, or nee
 credential.
 
 The instance these fixtures describe is `gitlab.com`, the group is `gitlab-org`, the epic is
-`gitlab-org&23356` and the project is `gitlab-org/cli`.
+`gitlab-org&23356`, the project is `gitlab-org/cli`, and the milestones are
+`gitlab-org/cli%3` (project) and `groups/gitlab-org%3` (group).
 
 ## Provenance
 
@@ -49,6 +50,45 @@ contain no real credential and no personal data. Then say so here, per file.
 | `epic_children_page1.json` | hand-written | five children, served with `x-next-page: 2`; `opened` and `closed`; one unassigned; **two assignees** on `#102`, whose title carries an `&` and `« éclair »` verbatim; a child in **another project** (`gitlab-org/platform/core#7`), so `Repository` differs; every child carries a description, which must not reach a `model.Ticket` |
 | `epic_children_page2.json` | hand-written | the last page: `#105` closed with a **scoped** `workflow::wontfix` label → Cancelled; `#106` closed with `_links.closed_as_duplicate_of` set → Cancelled, Native Status `duplicate`; `#107` closed plainly → Done; `#108` with an **unknown `state`** → Unknown, so a broken instance is visible; `#109` with **no `references` object**, proving the `#iid` fallback |
 | `epic_children_empty.json` | hand-written | `[]` — an epic with no children is a Ticket someone pointed sitrep at, not an error |
+| `epic_children_one.json` | hand-written | one child, `gitlab-org/cli#101` — so a test about merge request correlation talks about exactly one Ticket |
+
+## Milestones
+
+**None of these is recorded, and that is not laziness.** GitLab's milestone endpoints
+require authentication even for public projects — verified on **2026-08-21**, where
+`GET /projects/gitlab-org%2Fcli/milestones` and
+`GET /groups/gitlab-org/milestones?iids[]=138` both answer `401` while the same projects'
+issue endpoints answer `200`. Every file below is therefore **hand-written to the shape
+GitLab's documentation specifies**, with the field set grafted from a real milestone object
+embedded in a recorded `gitlab-org/gitlab` issue payload
+(`{"id": 6239395, "iid": 138, "group_id": 9970, "title": "19.4", "state": "active",
+"web_url": "https://gitlab.com/groups/gitlab-org/-/milestones/138"}`), so the shapes stay
+honest.
+
+| File | Provenance | What it proves |
+|---|---|---|
+| `milestone_project.json` | hand-written | the `iids[]` **array** response for a project milestone — the id/iid bridge (`id: 6239395`, `iid: 3`) that is the whole reason this driver never reads `/milestones/:milestone_id`; a `web_url` present; and a description with an `&` and non-ASCII that `FetchDetail` carries verbatim |
+| `milestone_project_no_web_url.json` | hand-written | the same shape with **no `web_url`** — the URL sitrep builds instead, which the project-milestone example in GitLab's own docs shows is a real case; also `description: null` and `expired: true`, neither of which may become a Status |
+| `milestone_group.json` | hand-written | a **group** milestone: `group_id` set, `project_id` absent, `state: "closed"` → Done, `web_url` under `/groups/…/-/milestones/…` |
+| `milestone_empty.json` | hand-written | `[]` — an iid that resolves to nothing, so the not-found wording is proven |
+| `milestone_duplicate.json` | hand-written | two objects — the impossible answer to a filter documented to be unique, which must error rather than first-wins |
+| `milestone_issues_page1.json` | hand-written | five children with `x-next-page: 2`, **from two projects** (so a group milestone's cross-project `Repository` and project-qualified `Key` are proven), one unassigned, one with two assignees whose title carries an `&` and `« éclair »` verbatim |
+| `milestone_issues_page2.json` | hand-written | the last page: `#205` closed plainly → Done; `#206` closed with a **scoped** `workflow::wontfix` label → Cancelled, out of the denominator |
+| `milestone_issues_empty.json` | hand-written | `[]` — a milestone with no issues decodes to a Ticket, not an error |
+| `issue_with_milestone.json` | recorded issue + a `milestone` object grafted on | the milestone breadcrumb, with `epic: null` — a complete Parent for no extra request |
+| `issue_with_epic_and_milestone.json` | recorded issue + both objects grafted on | the win order: an epic beats a milestone |
+
+## Merge requests
+
+| File | Provenance | What it proves |
+|---|---|---|
+| `related_merge_requests.json` | **recorded** — `curl -s "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/issues/8509/related_merge_requests"`, 2026-08-21, avatar URLs redacted | the endpoint's *single*-merge-request shape, which is the only one carrying `head_pipeline`: `state: "opened"`, `draft: false`, `detailed_merge_status: "not_approved"`, `references.full`, `head_pipeline.status: "success"`, one reviewer |
+| `related_merge_requests_states.json` | hand-written to the recorded file's shape, trimmed to the fields under test | one row per mapping rule, because one healthy issue cannot hold them at once: `merged`; `closed`; an open `draft`; a **`locked`** one; an **unknown state**; `head_pipeline: null`; `failed`; `canceled`; `skipped`; an **unknown pipeline status**; `requested_changes`; one in **another project** (`references.full` differs → `Repository` differs); and one with **no `references` object** (the `web_url` fallback) |
+| `related_merge_requests_lead.json` | hand-written to the recorded file's shape | three merge requests on one issue — a `closed`, a `merged`, then a newer `opened` — proving the merged one leads and that nothing is dropped |
+| `related_merge_requests_empty.json` | hand-written | `[]` — nil `PullRequests`, and the Ticket stays where it was |
+| `approvals_pending.json` | **recorded** — `curl -s "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/merge_requests/3761/approvals"`, 2026-08-21, avatar URLs redacted, otherwise verbatim | `approved_by: []`, `approvals_left: 1`, `approved: false` — an approval is still owed |
+| `approvals_approved.json` | the recorded file with `approved_by` grafted non-empty and `approvals_required: 0` | somebody clicked Approve **while the requirement is zero** — the `approved_by`-not-`approved` rule made visible |
+| `approvals_zero_required.json` | the recorded file with `approved: true`, `approvals_required: 0` | the trap: `approved` is true because nothing is required and nobody has approved anything, so it must **not** read as Approved |
 
 ## The issue
 

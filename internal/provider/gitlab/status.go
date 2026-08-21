@@ -48,9 +48,9 @@ var wontDoLabels = map[string]bool{
 // GitLab issues and epics are opened or closed in REST and nothing else, so
 // this function never returns StatusInProgress, and that is intentional: the
 // in-progress half of a GitLab situation report comes from the merge requests
-// moving a Ticket, which is #15's work. Do not guess it from a scoped label —
-// a "workflow::in dev" label is a plan, and GitLab sites spell it a hundred
-// ways.
+// moving a Ticket, which statusWithMergeRequests infers afterwards. Do not guess
+// it from a scoped label — a "workflow::in dev" label is a plan, and GitLab
+// sites spell it a hundred ways.
 //
 // Won't-do work is Cancelled rather than Done. REST exposes no resolution
 // field, so the two available signals are checked in order of how much they are
