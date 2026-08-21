@@ -30,7 +30,7 @@ func TestSanitizeLine(t *testing.T) {
 		{name: "a newline becomes a space", in: "one\ntwo", want: "one two"},
 		{name: "a tab becomes a space", in: "one\ttwo", want: "one two"},
 		{name: "DEL", in: "a\x7fb", want: "ab"},
-		{name: "a C1 control", in: "ab", want: "ab"},
+		{name: "a C1 control", in: "a\u009bb", want: "ab"},
 		{name: "a NUL", in: "a\x00b", want: "ab"},
 		{name: "multi-byte UTF-8 survives", in: "héllo — 世界 ✓", want: "héllo — 世界 ✓"},
 	}
@@ -65,7 +65,7 @@ func TestSanitizedKeepsTheStructureOfMultiLineText(t *testing.T) {
 
 // hostile is the string every tracker-controlled field of the fake below
 // carries: an escape sequence, a bare CR, a C1 byte and a DEL.
-const hostile = "x\x1b[2J\x1b]0;pwned\ay\rz\x7f"
+const hostile = "x\x1b[2J\x1b]0;pwned\ay\rz\u009b\x7f"
 
 // hostileProvider answers with hostile text in every field of an EpicSnapshot
 // and a Detail. Asserting field by field is the point: a field added later and

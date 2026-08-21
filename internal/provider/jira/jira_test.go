@@ -689,14 +689,12 @@ func TestCredentialsNeverRenderTheirToken(t *testing.T) {
 	}
 	// %#v and encoding/json both read the exported Token field and would walk
 	// straight past String.
-	renderings := []string{
-		fmt.Sprint(c),
-		fmt.Sprintf("%v", c),
-		fmt.Sprintf("%+v", c),
-		fmt.Sprintf("%#v", c),
-		fmt.Sprintf("%s", c),
-		c.String(),
-		string(encoded),
+	renderings := []string{fmt.Sprint(c), c.String(), string(encoded)}
+	// The verbs are formatted through a variable so that this stays a test of
+	// what each one prints rather than of what a linter thinks it should be
+	// rewritten to.
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		renderings = append(renderings, fmt.Sprintf(verb, c))
 	}
 	for _, rendered := range renderings {
 		if strings.Contains(rendered, fixtureToken) {

@@ -667,10 +667,13 @@ func TestCredentialIsRedactedHoweverItIsPrinted(t *testing.T) {
 	}
 	renderings := map[string]string{
 		"json.Marshal": string(encoded),
-		"%v":           fmt.Sprintf("%v", c),
-		"%+v":          fmt.Sprintf("%+v", c),
-		"%#v":          fmt.Sprintf("%#v", c),
-		"%s":           fmt.Sprintf("%s", c),
+		"String":       c.String(),
+	}
+	// The verbs are formatted through a variable so that this stays a test of
+	// what each one prints rather than of what a linter thinks it should be
+	// rewritten to.
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		renderings[verb] = fmt.Sprintf(verb, c)
 	}
 
 	for how, got := range renderings {
