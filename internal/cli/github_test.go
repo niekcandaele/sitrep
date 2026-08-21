@@ -68,9 +68,21 @@ func githubProvider(t *testing.T) provider.Provider {
 	)
 }
 
+// noConfig points a run at a config file that does not exist, which Load reads
+// as the empty Config. It is how a run with no injected Provider stays
+// hermetic: no test in this package may read — or be broken by — whatever is in
+// the developer's home directory.
+const noConfig = "testdata/there-is-no-config-here.yml"
+
 func runWith(args []string, deps cli.Deps) result {
 	var stdout, stderr bytes.Buffer
 	deps.Now = fixedClock
+	if deps.Config == nil && deps.ConfigPath == "" {
+		deps.ConfigPath = noConfig
+	}
+	if deps.Env == nil {
+		deps.Env = func(string) string { return "" }
+	}
 	code := cli.RunWith(args, &stdout, &stderr, deps)
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
