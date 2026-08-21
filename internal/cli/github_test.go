@@ -17,6 +17,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -196,10 +197,14 @@ func TestOwnerRepoNumberForm(t *testing.T) {
 
 func TestRefResolutionFailures(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		lookup     ref.RemoteLookup
-		wantStderr []string
+		name string
+		args []string
+		// gitLabToken is injected for the cases that now reach a real GitLab
+		// driver, so that no case in this table executes glab or touches a
+		// network.
+		gitLabToken gitlab.TokenSource
+		lookup      ref.RemoteLookup
+		wantStderr  []string
 	}{
 		{
 			name: "a bare number outside a clone",
@@ -210,17 +215,24 @@ func TestRefResolutionFailures(t *testing.T) {
 			wantStderr: []string{"111", "bare number", "origin remote", "URL"},
 		},
 		{
-			name: "a GitLab clone",
+			// #14 turned both of these from "not supported yet" into a real
+			// driver, so what they now prove is that the *GitLab* driver was
+			// chosen: no token means no fetch, and the failure names the driver
+			// that produced it, exactly as TestGitHubIsChosenFromTheRef does for
+			// GitHub.
+			name: "a GitLab clone reaches the GitLab driver",
 			args: []string{"111", "--json"},
 			lookup: func(context.Context, string, string) (string, error) {
 				return "git@gitlab.com:acme/widgets.git", nil
 			},
-			wantStderr: []string{"gitlab is not supported yet"},
+			gitLabToken: noGitLabToken,
+			wantStderr:  []string{"gitlab:", "glab auth login", "GITLAB_TOKEN"},
 		},
 		{
-			name:       "a GitLab URL",
-			args:       []string{"https://gitlab.com/acme/widgets/-/issues/7", "--json"},
-			wantStderr: []string{"gitlab is not supported yet"},
+			name:        "a GitLab URL reaches the GitLab driver",
+			args:        []string{"https://gitlab.com/acme/widgets/-/issues/7", "--json"},
+			gitLabToken: noGitLabToken,
+			wantStderr:  []string{"gitlab:", "glab auth login", "GITLAB_TOKEN"},
 		},
 		{
 			// A Jira URL names its own site, but not the credential to read it
@@ -243,7 +255,10 @@ func TestRefResolutionFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := runWith(tt.args, cli.Deps{RemoteLookup: tt.lookup})
+			got := runWith(tt.args, cli.Deps{
+				RemoteLookup:      tt.lookup,
+				GitLabTokenSource: tt.gitLabToken,
+			})
 
 			if got.code != 1 {
 				t.Errorf("exit code = %d, want 1", got.code)

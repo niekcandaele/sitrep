@@ -1,0 +1,117 @@
+[
+  {
+    "id": 198100011,
+    "iid": 201,
+    "project_id": 34675721,
+    "title": "Publish the wire format",
+    "state": "opened",
+    "labels": [],
+    "assignees": [],
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/201",
+    "references": {
+      "short": "#201",
+      "relative": "#201",
+      "full": "gitlab-org/cli#201"
+    },
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/201",
+      "closed_as_duplicate_of": null
+    },
+    "issue_link_id": 9001,
+    "link_type": "is_blocked_by",
+    "link_created_at": "2026-08-10T10:00:00.000Z",
+    "link_updated_at": "2026-08-10T10:00:00.000Z"
+  },
+  {
+    "id": 198100012,
+    "iid": 202,
+    "project_id": 34675721,
+    "title": "Cut the v0.1 release",
+    "state": "opened",
+    "labels": [],
+    "assignees": [],
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/202",
+    "references": {
+      "short": "#202",
+      "relative": "#202",
+      "full": "gitlab-org/cli#202"
+    },
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/202",
+      "closed_as_duplicate_of": null
+    },
+    "issue_link_id": 9002,
+    "link_type": "blocks",
+    "link_created_at": "2026-08-11T10:00:00.000Z",
+    "link_updated_at": "2026-08-11T10:00:00.000Z"
+  },
+  {
+    "id": 198100013,
+    "iid": 203,
+    "project_id": 51000123,
+    "title": "A neighbour in another project",
+    "state": "opened",
+    "labels": [],
+    "assignees": [],
+    "web_url": "https://gitlab.com/gitlab-org/platform/core/-/work_items/203",
+    "references": {
+      "short": "#203",
+      "relative": "gitlab-org/platform/core#203",
+      "full": "gitlab-org/platform/core#203"
+    },
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/51000123/issues/203",
+      "closed_as_duplicate_of": null
+    },
+    "issue_link_id": 9003,
+    "link_type": "relates_to",
+    "link_created_at": "2026-08-12T10:00:00.000Z",
+    "link_updated_at": "2026-08-12T10:00:00.000Z"
+  },
+  {
+    "id": 198100014,
+    "iid": 204,
+    "project_id": 34675721,
+    "title": "A link type sitrep has never heard of",
+    "state": "opened",
+    "labels": [],
+    "assignees": [],
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/204",
+    "references": {
+      "short": "#204",
+      "relative": "#204",
+      "full": "gitlab-org/cli#204"
+    },
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/204",
+      "closed_as_duplicate_of": null
+    },
+    "issue_link_id": 9004,
+    "link_type": "is_caused_by",
+    "link_created_at": "2026-08-13T10:00:00.000Z",
+    "link_updated_at": "2026-08-13T10:00:00.000Z"
+  },
+  {
+    "id": 198100015,
+    "iid": 205,
+    "project_id": 34675721,
+    "title": "A target closed as a duplicate",
+    "state": "closed",
+    "labels": [],
+    "assignees": [],
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/205",
+    "references": {
+      "short": "#205",
+      "relative": "#205",
+      "full": "gitlab-org/cli#205"
+    },
+    "_links": {
+      "self": "https://gitlab.com/api/v4/projects/34675721/issues/205",
+      "closed_as_duplicate_of": "https://gitlab.com/api/v4/projects/34675721/issues/201"
+    },
+    "issue_link_id": 9005,
+    "link_type": "relates_to",
+    "link_created_at": "2026-08-14T10:00:00.000Z",
+    "link_updated_at": "2026-08-14T10:00:00.000Z"
+  }
+]

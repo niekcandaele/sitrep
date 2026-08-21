@@ -4,8 +4,8 @@ A read-only terminal situation report on the work you delegated: one screen show
 Epic's Tickets, their status, and the code moving them — across GitHub, Jira, and GitLab.
 Agents write; sitrep watches. It never writes to a Tracker ([ADR-0002](docs/adr/0002-read-only-by-design.md)).
 
-sitrep is early: today it reads an Epic from GitHub or Jira, either as a live monitor you
-leave open or as a one-shot report. GitLab lands in later work.
+sitrep is early: today it reads an Epic from GitHub, Jira or GitLab, either as a live
+monitor you leave open or as a one-shot report.
 
 ## Usage
 
@@ -17,7 +17,8 @@ sitrep <ref> --json    # the same epic as a JSON document, for scripts and agent
 
 `<ref>` is the Epic Ref: a bare number (`111`, resolved through the current clone's
 `origin` remote), `owner/repo#111`, a Jira-style key (`ABC-123`, matched to a Profile by
-its key prefix — see [Configuration](#configuration)), or the issue's full URL.
+its key prefix — see [Configuration](#configuration)), a GitLab epic reference (`acme&12`),
+or the issue's full URL.
 
 With no mode flag, sitrep opens the **monitor**: the Epic's Tickets grouped by status with
 a progress bar, assignees and the pull request moving each Ticket, refreshed every 60
@@ -94,9 +95,6 @@ serve one ref, sitrep says so instead of guessing — pass `--profile <name>` to
 `refresh_interval` is that Profile's monitor cadence, subject to the same 5-second floor as
 `--interval`, which overrides it when you actually type it.
 
-*GitLab Profiles validate today but the GitLab driver is not written yet: such a run ends in
-"not supported yet".*
-
 ### Jira
 
 A Jira Profile is what turns `sitrep PROJ-123` into a situation report. It needs the site,
@@ -129,6 +127,39 @@ rendering it.
 **Jira shows no pull request information, by design.** That data lives behind an
 undocumented internal endpoint and a per-instance application link, and sitrep will not
 guess: the section is simply absent from a Jira report rather than empty or wrong.
+
+### GitLab
+
+**`glab auth login` alone is enough** on gitlab.com — no Profile and no config file. sitrep
+reads `$GITLAB_TOKEN` (or `$GITLAB_ACCESS_TOKEN`, or `$OAUTH_TOKEN`) first and falls back to
+`glab`'s stored login, which is `glab`'s own documented order.
+
+A Profile is what pins a self-managed instance, names a default group or project, or points
+at a different token variable:
+
+```yaml
+profiles:
+  acme-gitlab:
+    provider: gitlab
+    host: git.acme.test    # the instance host, not a URL; gitlab.com for SaaS
+    project: acme/platform # the group or project path
+    auth:
+      token_env: GITLAB_TOKEN
+```
+
+Two ref forms reach a GitLab epic: its URL,
+`https://gitlab.com/groups/acme/-/epics/12`, and GitLab's own reference, `acme&12` — or
+just `&12` when a Profile's `project` names the group. A project issue works the same way
+by URL (`https://gitlab.com/acme/widgets/-/issues/7`, and the `/-/work_items/7` form GitLab
+now serves), landing straight in that Ticket's Detail with its epic as the breadcrumb.
+Inside a clone, a bare number resolves against the `origin` remote; on a self-managed host,
+a `gitlab` Profile claiming that host is what tells sitrep it is not GitHub Enterprise.
+
+**Native epics need GitLab Premium or Ultimate.** On a Free instance the epic endpoints
+answer `403`, and sitrep says so in those words rather than reporting an empty epic.
+
+**GitLab shows no merge request information yet.** The section is silently absent, and no
+Ticket is reported as in progress, until that lands.
 
 ## Install
 
