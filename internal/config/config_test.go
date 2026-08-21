@@ -259,7 +259,7 @@ func TestParseValidation(t *testing.T) {
 	}
 }
 
-// Documents that used to be rejected and are legitimate.
+// Legitimate documents the validator has to accept.
 func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 	tests := []struct {
 		name string

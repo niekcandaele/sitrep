@@ -760,9 +760,9 @@ func TestPaginationSafety(t *testing.T) {
 		}
 	})
 
-	// "there is more" with no cursor used to return a partial epic that looked
-	// complete. A situation report silently missing children is worse than one
-	// that failed.
+	// "there is more" with no cursor is an inconsistent answer, and the GitHub
+	// and GitLab drivers both refuse one. A situation report silently missing
+	// children is worse than one that failed.
 	t.Run("a truncated child list is an error, not a short epic", func(t *testing.T) {
 		s := newReplayServer(t, map[string][]response{
 			epicPath:   {{file: "epic_issue.json"}},

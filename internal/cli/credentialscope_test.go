@@ -25,14 +25,14 @@ func countingServer(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	return s, &requests
 }
 
-// A clone whose origin points at an attacker-named host used to make sitrep
-// POST the ambient $GITHUB_TOKEN to that host. An ambient token belongs to
-// github.com; an unrecognized host has to be logged in to, or named by a
-// Profile, and until it is sitrep sends nothing at all.
+// An ambient token belongs to github.com. An unrecognized host — one an
+// attacker can put in a pasted URL or a git origin remote — has to be logged in
+// to, or named by a Profile, and until it is sitrep sends nothing at all: the
+// request count, not the error text, is what proves that.
 func TestAmbientTokenIsNotSentToAnUnknownHost(t *testing.T) {
-	// The real environment is what the defect read, so this is the one place a
-	// test in this package sets it. GH_HOST is blanked so the machine running
-	// the test cannot opt the ambient token in.
+	// The ambient variables are read from the real environment, so this is the
+	// one place a test in this package sets it. GH_HOST is blanked so the
+	// machine running the test cannot opt the ambient token in.
 	t.Setenv("GITHUB_TOKEN", "ambient-token-not-a-real-secret")
 	t.Setenv("GH_TOKEN", "ambient-token-not-a-real-secret")
 	t.Setenv("GH_HOST", "")

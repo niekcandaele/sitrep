@@ -15,9 +15,10 @@ import (
 // return and a DEL. On a public tracker anyone who can comment can write one.
 const hostileText = "hi\x1b[2J\x1b]0;pwned\aback\rgone\x7f"
 
-// hostileProvider serves tracker text with escape sequences in every field. The
-// epic it returns has children; hostileTicketProvider below has none, which is
-// how the decoder path — descriptions, comments and links — is reached.
+// hostileProvider serves tracker text with escape sequences in every field.
+// children decides whether the Ref reads as a collection or decodes to a
+// Ticket, which is how the decoder path — descriptions, comments and links —
+// is reached.
 type hostileProvider struct{ children bool }
 
 func (*hostileProvider) Name() string { return "hostile" }
@@ -71,8 +72,9 @@ func (*hostileProvider) FetchDetail(context.Context, model.TicketID) (model.Deta
 }
 
 // internal/render/plain's package doc and README both promise that a --plain
-// report contains no ANSI escape sequence of any kind. Tracker text used to
-// reach it verbatim, so the promise was only true of text nobody had attacked.
+// report contains no ANSI escape sequence of any kind. The promise has to hold
+// for text an attacker wrote, not only for text nobody attacked, which is what
+// this asserts.
 func TestPlainNeverCarriesTrackerEscapeSequences(t *testing.T) {
 	tests := []struct {
 		name string
