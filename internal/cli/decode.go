@@ -93,17 +93,7 @@ func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider
 // simply not offered.
 func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 	p provider.Provider, r ref.Ref, snap model.EpicSnapshot, interval time.Duration) int {
-	open := tui.OpenTicket{
-		Ticket:       decodedTicket(snap),
-		Capabilities: snap.Capabilities,
-	}
-	var source tui.Source
-	if !snap.Parent.IsZero() {
-		open.Parent = tui.Header{Key: snap.Parent.Key, Title: snap.Parent.Title, URL: snap.Parent.URL}
-		if parent, err := ref.ParseParent(snap.Parent.Key, snap.Parent.URL, r); err == nil {
-			source = tui.EpicSource(p, parent, deps.clock())
-		}
-	}
+	open, source := decodedMonitorOptions(p, r, snap, deps.clock())
 
 	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
 		Source:       source,
@@ -111,4 +101,31 @@ func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 		Open:         &open,
 		Interval:     interval,
 	})
+}
+
+// decodedMonitorOptions builds what the decoded monitor opens on: the Ticket
+// itself, its breadcrumb, and the Source the walk-up key reads.
+//
+// It is separate from runDecodedMonitor because everything above is a pure
+// function of the snapshot and the Ref, while runMonitor needs a terminal — so
+// this half can be tested and that half is one call.
+func decodedMonitorOptions(p provider.Provider, r ref.Ref, snap model.EpicSnapshot,
+	clock func() time.Time) (tui.OpenTicket, tui.Source) {
+	open := tui.OpenTicket{
+		Ticket:       decodedTicket(snap),
+		Capabilities: snap.Capabilities,
+	}
+	if snap.Parent.IsZero() {
+		return open, nil
+	}
+
+	open.Parent = tui.Header{Key: snap.Parent.Key, Title: snap.Parent.Title, URL: snap.Parent.URL}
+	parent, err := ref.ParseParent(snap.Parent.Key, snap.Parent.URL, r)
+	if err != nil {
+		// The breadcrumb still shows what the Ticket belongs to; there is just
+		// nothing to walk up into, so the key is not offered rather than
+		// offered and broken.
+		return open, nil
+	}
+	return open, tui.EpicSource(p, parent, clock)
 }

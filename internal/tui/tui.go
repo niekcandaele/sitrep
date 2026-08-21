@@ -147,10 +147,18 @@ type Options struct {
 // is a one-shot mode, which works in a pipe.
 var ErrNoTerminal = errors.New("standard input and output must both be a terminal")
 
+// ErrInterrupted reports that the user ended the session with ctrl+c. It is not
+// a failure and carries no message a caller should print: the user knows what
+// they did. It exists because raw mode delivers ctrl+c as an ordinary key press
+// rather than a signal, so the exit code sitrep documents for it — 130 — has to
+// be carried out of the program by hand.
+var ErrInterrupted = errors.New("interrupted")
+
 // Run opens the monitor and blocks until the user quits or ctx is cancelled.
 //
 // A cancelled context is a clean exit, not a failure: it is how a SIGINT
-// reaches the program.
+// reaches the program. A ctrl+c typed at the monitor is the same event arriving
+// as a key press, and is reported as ErrInterrupted.
 func Run(ctx context.Context, opts Options) error {
 	// Bubble Tea does not refuse a pipe: it starts, draws escape sequences
 	// into whatever it was given, and waits forever for a keystroke that can
@@ -167,8 +175,12 @@ func Run(ctx context.Context, opts Options) error {
 		tea.WithInput(opts.Input),
 		tea.WithOutput(opts.Output),
 	)
-	if _, err := p.Run(); err != nil && ctx.Err() == nil {
+	final, err := p.Run()
+	if err != nil && ctx.Err() == nil {
 		return err
+	}
+	if m, ok := final.(Model); ok && m.Interrupted() {
+		return ErrInterrupted
 	}
 	return nil
 }

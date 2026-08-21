@@ -271,26 +271,13 @@ func applyEpicCapabilities(e *model.Epic, caps model.Capabilities) {
 }
 
 // applyDetailCapabilities strips Detail data the declared Capabilities say the
-// Tracker cannot supply. Relates links survive without the BlockingLinks
-// capability; only the directed blocking ones go.
+// Tracker cannot supply, so the fake behaves like a real driver whose Tracker
+// cannot answer those questions.
 func applyDetailCapabilities(d *model.Detail, caps model.Capabilities) {
 	if !caps.Comments {
 		d.Comments = nil
 	}
-	if caps.BlockingLinks {
-		return
-	}
-	kept := make([]model.Link, 0, len(d.Links))
-	for _, l := range d.Links {
-		if l.Kind == model.LinkRelates {
-			kept = append(kept, l)
-		}
-	}
-	if len(kept) == 0 {
-		d.Links = nil
-		return
-	}
-	d.Links = kept
+	d.Links = model.VisibleLinks(d.Links, caps)
 }
 
 // cloneSnapshot deep-copies a snapshot so a caller mutating what it got cannot

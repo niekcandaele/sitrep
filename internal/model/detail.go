@@ -88,3 +88,30 @@ type Detail struct {
 	// Capability.
 	Links []Link
 }
+
+// VisibleLinks returns the Links caps allow onto a screen or into a document.
+// Relates links survive without the BlockingLinks Capability; only the directed
+// blocking ones go, because a Tracker that cannot express "blocks" has nothing
+// to say about direction while its ordinary relationships are still real.
+//
+// It lives here because nothing about the rule is renderer-specific: the TUI's
+// Detail screen, both one-shot renderers and the fake Provider all ask the same
+// question, and four copies of one rule is four places for it to drift.
+//
+// An empty result is nil, the model's documented "none", so a caller that
+// distinguishes nil from empty sees the same answer as one that does not.
+func VisibleLinks(links []Link, caps Capabilities) []Link {
+	if caps.BlockingLinks {
+		return links
+	}
+	kept := make([]Link, 0, len(links))
+	for _, l := range links {
+		if l.Kind == LinkRelates {
+			kept = append(kept, l)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}

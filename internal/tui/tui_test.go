@@ -384,20 +384,52 @@ func TestFullHelpKeepsTheFrameOnScreen(t *testing.T) {
 	}
 }
 
-// Both quit keys end the program.
+// Both quit keys end the program, and only ctrl+c is an interrupt. README
+// states ctrl+c prints nothing and exits 130; raw mode delivers it as a key
+// press rather than a signal, so the fact has to be carried out of the program
+// on the final model.
 func TestQuitKeys(t *testing.T) {
-	for _, k := range []tea.KeyPressMsg{keyPress("q"), {Code: 'c', Mod: tea.ModCtrl}} {
-		p := fake.New()
-		c := newClock()
-		s := start(t, c, epicSource(p, c), time.Minute)
-		s.waitFor(t, "Widget sync v2")
+	tests := []struct {
+		name            string
+		key             tea.KeyPressMsg
+		wantInterrupted bool
+	}{
+		{name: "q", key: keyPress("q")},
+		{name: "ctrl+c", key: tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}, wantInterrupted: true},
+	}
 
-		s.tm.Send(k)
-		s.tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New()
+			c := newClock()
+			s := start(t, c, epicSource(p, c), time.Minute)
+			s.waitFor(t, "Widget sync v2")
 
-		m, ok := s.tm.FinalModel(t).(Model)
-		if !ok || !m.quitting {
-			t.Errorf("%v did not quit the program", k)
-		}
+			s.tm.Send(tt.key)
+			s.tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+
+			m, ok := s.tm.FinalModel(t).(Model)
+			if !ok || !m.quitting {
+				t.Fatalf("%v did not quit the program", tt.key)
+			}
+			if m.Interrupted() != tt.wantInterrupted {
+				t.Errorf("Interrupted() = %v, want %v", m.Interrupted(), tt.wantInterrupted)
+			}
+		})
+	}
+}
+
+// esc from the list quits too, and it is not an interrupt: only ctrl+c is.
+func TestEscapeIsNotAnInterrupt(t *testing.T) {
+	m := Model{}
+
+	quit := m.quit(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if !quit.quitting || quit.Interrupted() {
+		t.Errorf("esc: quitting=%v interrupted=%v, want true/false", quit.quitting, quit.Interrupted())
+	}
+
+	quit = m.quit(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if !quit.quitting || !quit.Interrupted() {
+		t.Errorf("ctrl+c: quitting=%v interrupted=%v, want true/true", quit.quitting, quit.Interrupted())
 	}
 }
