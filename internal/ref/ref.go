@@ -52,9 +52,9 @@ type Ref struct {
 	// Number is the tracker-native issue number. Zero when the Ref names no
 	// single Epic, as ParseRemoteURL returns.
 	Number int
-	// Key is the Jira-style key, e.g. "PROJ-12". It is empty for GitHub and
-	// nothing populates it yet: it exists now so the Config & Profiles and Jira
-	// tickets can fill it in without widening this type.
+	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased. It is empty
+	// for GitHub. A Ref that carries only a Key carries no Host: only a Profile
+	// knows which site the key's project lives on.
 	Key string
 	// Raw is exactly what the user typed, kept for error messages.
 	Raw string
@@ -109,9 +109,15 @@ func WithDir(dir string) Option {
 const originRemote = "origin"
 
 // Parse resolves a user-supplied Epic Ref string. It accepts, in this order, a
-// full issue URL, "owner/repo#111" (or "owner/repo/111"), and a bare number
-// such as "111" or "#111", which is resolved through the working directory's
-// git origin remote.
+// full issue URL, "owner/repo#111" (or "owner/repo/111"), a Jira-style key such
+// as "ABC-123", and a bare number such as "111" or "#111", which is resolved
+// through the working directory's git origin remote.
+//
+// The order is not arbitrary. A URL is unambiguous and goes first. The
+// owner/repo forms contain a "/" and a key never does, so those two cannot
+// collide and either could come first; the key form is tried before the bare
+// number because a bare number is the only form that does I/O, and no form that
+// can be decided from the text alone should sit behind a git subprocess.
 //
 // Parse never touches the network.
 func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
@@ -130,6 +136,9 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	}
 	if r, ok, err := parseOwnerRepoNumber(trimmed, raw); ok {
 		return r, err
+	}
+	if r, ok := parseKey(trimmed, raw); ok {
+		return r, nil
 	}
 	if n, ok := parseNumber(strings.TrimPrefix(trimmed, "#")); ok {
 		return resolveBareNumber(ctx, o, n, raw)
@@ -367,8 +376,14 @@ func githubIssuePath(segments []string) (owner, repo string, number int, ok bool
 func foreignRef(tracker Tracker, host string, segments []string, raw string) Ref {
 	r := Ref{Tracker: tracker, Host: host, Raw: raw}
 	if tracker == TrackerJira {
+		// Upper-cased so a /browse/ URL and the bare key form produce the same
+		// Key, which is what Profile prefix matching compares.
 		if len(segments) == 2 && segments[0] == "browse" {
-			r.Key = segments[1]
+			if key, ok := normalizeKey(segments[1]); ok {
+				r.Key = key
+			} else {
+				r.Key = strings.ToUpper(segments[1])
+			}
 		}
 		return r
 	}
@@ -420,6 +435,66 @@ func parseOwnerRepoNumber(s, raw string) (Ref, bool, error) {
 		Number:  n,
 		Raw:     raw,
 	}, true, nil
+}
+
+// parseKey reads the Jira-style key form, "ABC-123": a project key, a hyphen,
+// and a positive decimal.
+//
+// The resulting Ref carries no Host on purpose. A key names a project, and only
+// a Profile knows which Jira site that project lives on; the CLI completes the
+// Ref from the Profile it matches by key prefix. Number stays zero too — a Jira
+// key is not a number, and the Jira driver reads Key.
+func parseKey(s, raw string) (Ref, bool) {
+	key, ok := normalizeKey(s)
+	if !ok {
+		return Ref{}, false
+	}
+	return Ref{Tracker: TrackerJira, Key: key, Raw: raw}, true
+}
+
+// normalizeKey validates a Jira-style key and upper-cases it, so that the two
+// roads to a key — the bare form and a /browse/ URL — produce the same value.
+func normalizeKey(s string) (string, bool) {
+	hyphen := strings.LastIndex(s, "-")
+	if hyphen <= 0 {
+		return "", false
+	}
+	if _, ok := parseNumber(s[hyphen+1:]); !ok {
+		return "", false
+	}
+	if !isKeyPrefix(s[:hyphen]) {
+		return "", false
+	}
+	return strings.ToUpper(s), true
+}
+
+// isKeyPrefix reports whether s is a Jira project key: a letter followed by
+// letters, digits or underscores.
+func isKeyPrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		case (c >= '0' && c <= '9' || c == '_') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// KeyPrefix returns the project part of a Jira-style key: "ABC" for "ABC-123",
+// and "" for anything that is not one. It lives here because the shape of a key
+// is the Epic Ref grammar's business, which makes Profile prefix matching this
+// function plus a comparison.
+func KeyPrefix(key string) string {
+	normalized, ok := normalizeKey(strings.TrimSpace(key))
+	if !ok {
+		return ""
+	}
+	return normalized[:strings.LastIndex(normalized, "-")]
 }
 
 // resolveBareNumber turns "111" into a full Ref by reading where this clone

@@ -17,10 +17,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
+	"github.com/niekcandaele/sitrep/internal/config"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -49,6 +51,9 @@ Arguments:
             111                                        a bare issue number
             acme/widgets#111                           owner, repository, number
             https://github.com/acme/widgets/issues/111  a full issue URL
+            ABC-123                                    a Jira-style key, matched
+                                                       to a Profile by its key
+                                                       prefix
           A bare number is resolved through the origin remote of the current
           directory's git clone; the other forms work anywhere.
           A Ref with sub-tickets is an Epic; one without is a Ticket, which
@@ -59,6 +64,9 @@ Flags:
       --interval <dur>    how often the monitor refreshes (default 60s)
       --json              print the epic as a JSON document and exit
       --plain             print a one-shot text snapshot of the epic and exit
+      --profile <name>    the Profile to connect with, from
+                          ~/.config/sitrep/config.yml (default: matched from the
+                          ref)
       --provider <name>   Provider to read from: "auto" (the default) picks one
                           from the Epic Ref, "github" forces the GitHub driver,
                           "fake" serves a built-in fixture epic
@@ -85,15 +93,77 @@ type Deps struct {
 	TokenSource github.TokenSource
 	// Stdin is the monitor's input. When nil it is os.Stdin.
 	Stdin io.Reader
+	// Config is the loaded global config. When non-nil it wins outright and no
+	// file is read: tests inject it, and so does any caller that has already
+	// read one.
+	Config *config.Config
+	// ConfigPath overrides the config file location. When empty it is
+	// config.DefaultPath.
+	ConfigPath string
+	// Env reads environment variables when resolving a Profile's credential and
+	// when locating the config file. When nil it is os.Getenv. Tests inject a
+	// map so no test mutates — or reads — the process environment.
+	Env func(string) string
+}
+
+// loadConfig reads the run's global config, or decides not to read one at all.
+//
+// When Config and ConfigPath are both zero AND the run serves itself — an
+// injected Provider, or --provider fake — no config file is read. Both are a
+// test or a development run, neither can be served by a Profile, and such a run
+// must never depend on — or be broken by — whatever happens to be in the
+// developer's home directory. Do not delete this branch: without it every
+// golden in this package becomes a function of the machine it runs on.
+func (d Deps) loadConfig(providerName string) (config.Config, error) {
+	switch {
+	case d.Config != nil:
+		return *d.Config, nil
+	case d.ConfigPath != "":
+		return config.Load(d.ConfigPath)
+	case d.Provider != nil, providerName == providerFake:
+		return config.Config{}, nil
+	}
+
+	path, err := config.DefaultPath(d.Env)
+	if err != nil {
+		return config.Config{}, err
+	}
+	return config.Load(path)
+}
+
+// env returns the run's environment reader, which is what a Profile's
+// credential is resolved through.
+func (d Deps) env() func(string) string {
+	if d.Env == nil {
+		return os.Getenv
+	}
+	return d.Env
 }
 
 // The monitor's refresh cadence. The default is one named constant rather than
 // a literal in the flag call so a config Profile has a single thing to
-// override; the floor is a separate one so raising it is a one-line decision.
+// override; the floor lives in internal/config, because a Profile's
+// refresh_interval is held to the same one and a floor with two definitions is
+// a floor with two values.
 const (
 	defaultRefreshInterval = 60 * time.Second
-	minRefreshInterval     = 5 * time.Second
+	minRefreshInterval     = config.MinRefreshInterval
 )
+
+// effectiveInterval picks the monitor's cadence: an explicit --interval beats a
+// Profile's refresh_interval, which beats sitrep's default. A flag the user did
+// not type must not silently outrank the Profile they wrote down, which is why
+// this takes "was it set" rather than the value alone.
+func effectiveInterval(flagSet bool, flagValue, profileValue time.Duration) time.Duration {
+	switch {
+	case flagSet:
+		return flagValue
+	case profileValue > 0:
+		return profileValue
+	default:
+		return defaultRefreshInterval
+	}
+}
 
 // Run executes sitrep with the given command-line arguments (excluding argv[0])
 // and returns the process exit code.
@@ -114,6 +184,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	asJSON := fs.Bool("json", false, "print the epic as a JSON document and exit")
 	asPlain := fs.Bool("plain", false, "print a one-shot text snapshot of the epic and exit")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
+	profileName := fs.String("profile", "", "the Profile to connect with")
 	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
 
 	positional, err := parseArgs(fs, args)
@@ -158,6 +229,14 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
 	}
 
+	// The command line was fine, so everything from here on is a runtime
+	// failure rather than a usage error — starting with a config file that does
+	// not parse.
+	cfg, err := deps.loadConfig(*providerName)
+	if err != nil {
+		return runtimeError(stderr, err)
+	}
+
 	// The run's context is cancelled on SIGINT and SIGTERM from here on, so a
 	// slow pre-flight fetch — and any in-flight fetch after it — goes with a
 	// ctrl+c instead of holding the process open for the Tracker's HTTP timeout.
@@ -172,9 +251,23 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runtimeError(stderr, err)
 	}
 
+	// A Profile is resolved once, here, between the Epic Ref and the Provider,
+	// and is consumed entirely at Provider-construction time. Nothing
+	// downstream — not the pre-flight fetch, not the renderers, not the TUI —
+	// knows a Profile exists.
+	prof, err := selectProfile(cfg, r, *profileName)
+	if err != nil {
+		return runtimeError(stderr, err)
+	}
+	if prof != nil {
+		r = prof.Complete(r)
+	}
+
+	refresh := effectiveInterval(isFlagSet(fs, "interval"), *interval, profileInterval(prof))
+
 	p := deps.Provider
 	if p == nil {
-		if p, err = deps.newProvider(*providerName, r); err != nil {
+		if p, err = deps.newProvider(*providerName, r, prof); err != nil {
 			return runtimeError(stderr, err)
 		}
 	}
@@ -194,7 +287,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
 			Source:       tui.EpicSource(p, r, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
-			Interval:     *interval,
+			Interval:     refresh,
 		})
 	}
 	snap = provider.StampSnapshot(p, snap, deps.now())
@@ -203,7 +296,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}
-		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, *interval)
+		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, refresh)
 	}
 
 	switch {
@@ -222,7 +315,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		Source:       tui.EpicSource(p, r, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
 		Initial:      &initial,
-		Interval:     *interval,
+		Interval:     refresh,
 	})
 }
 
@@ -274,6 +367,64 @@ func writeReport(stdout, stderr io.Writer, render func(io.Writer) error) int {
 		return runtimeError(stderr, err)
 	}
 	return exitOK
+}
+
+// isFlagSet reports whether the user actually typed the named flag, as opposed
+// to receiving its default. The flag package records every explicitly-set flag
+// and does not forget them across the repeated Parse calls parseArgs makes,
+// which is what makes this readable after parsing rather than during it.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	var set bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// selectProfile finds the Profile serving this Ref, returning nil when none
+// does. A Ref with no Profile is the GitHub zero-config path: `gh auth login`
+// and nothing else is a supported way to run sitrep.
+//
+// An Epic Ref that carries a Jira-style key and no host is the exception. Such
+// a Ref names a project and nothing more; without a Profile there is no site to
+// ask, so an unmatched key prefix is fatal and the error says exactly what to
+// add. A Jira URL is not that case — it names its own site, and its unserved
+// Tracker is reported downstream like any other.
+func selectProfile(cfg config.Config, r ref.Ref, name string) (*config.Profile, error) {
+	prof, ok, err := cfg.Select(r, name)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return &prof, nil
+	}
+	if prefix := ref.KeyPrefix(r.Key); prefix != "" && r.Host == "" {
+		return nil, unmatchedKeyPrefix(cfg, prefix)
+	}
+	return nil, nil
+}
+
+func unmatchedKeyPrefix(cfg config.Config, prefix string) error {
+	where := cfg.Path
+	if where == "" {
+		where = "~/.config/sitrep/config.yml"
+	}
+	msg := fmt.Sprintf("no Profile matches the key prefix %q — add one to %s", prefix, where)
+	if known := cfg.KeyPrefixes(); len(known) > 0 {
+		msg += " (known prefixes: " + strings.Join(known, ", ") + ")"
+	}
+	return errors.New(msg)
+}
+
+// profileInterval reads a Profile's refresh cadence, or zero when there is no
+// Profile.
+func profileInterval(prof *config.Profile) time.Duration {
+	if prof == nil {
+		return 0
+	}
+	return prof.RefreshInterval
 }
 
 // parseArgs parses flags and positional arguments in any order. The flag
@@ -368,9 +519,13 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 	return ref.Ref{}, err
 }
 
-// newProvider chooses the driver that serves this Ref. --provider is an
-// override, not the normal path.
-func (d Deps) newProvider(name string, r ref.Ref) (provider.Provider, error) {
+// newProvider chooses the driver that serves this Ref and constructs it from
+// the Profile, when there is one. --provider is an override, not the normal
+// path.
+//
+// This is where a Profile is consumed and where it stops existing: everything
+// past this call sees a Provider and a Ref.
+func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile) (provider.Provider, error) {
 	switch name {
 	case providerFake:
 		return fake.New(), nil
@@ -378,19 +533,69 @@ func (d Deps) newProvider(name string, r ref.Ref) (provider.Provider, error) {
 		if r.Tracker != ref.TrackerGitHub {
 			return nil, fmt.Errorf("%q is not a GitHub Epic Ref", r.Raw)
 		}
-		return d.newGitHub(r), nil
+		return d.newGitHub(r, prof), nil
 	}
 
 	switch r.Tracker {
 	case ref.TrackerGitHub:
-		return d.newGitHub(r), nil
+		return d.newGitHub(r, prof), nil
 	case ref.TrackerGitLab, ref.TrackerJira:
-		return nil, fmt.Errorf("%s is not supported yet", r.Tracker)
+		return nil, notSupportedYet(r.Tracker, prof, d.env())
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
 	}
 }
 
-func (d Deps) newGitHub(r ref.Ref) provider.Provider {
-	return github.New(r.Host, github.WithTokenSource(d.TokenSource))
+// notSupportedYet is the seam #13 (Jira) and #14 (GitLab) plug into: each
+// replaces its own branch of this error with a driver constructed from the
+// Profile's Host, Project and Credential — jira.New(prof.Host, prof.Project,
+// cred, …) and its GitLab twin. Everything they need is already resolved here.
+//
+// The credential is resolved first, so a Profile that names an unset variable
+// reports that instead of the generic message: the fix for "I wrote a Profile
+// and nothing happened" is more useful than the fact that the driver is not
+// written yet.
+func notSupportedYet(tracker ref.Tracker, prof *config.Profile, env func(string) string) error {
+	if prof == nil {
+		return fmt.Errorf("%s is not supported yet", tracker)
+	}
+	if _, err := prof.Credential(env); err != nil {
+		return err
+	}
+	return fmt.Errorf("%s is not supported yet (profile %q)", tracker, prof.Name)
+}
+
+func (d Deps) newGitHub(r ref.Ref, prof *config.Profile) provider.Provider {
+	return github.New(r.Host, github.WithTokenSource(d.gitHubTokenSource(prof)))
+}
+
+// gitHubTokenSource layers a Profile's auth reference on top of the GitHub
+// driver's own token discovery. Naming a variable is a preference, not a
+// demand: a GitHub user whose named variable happens to be unset still gets
+// `gh auth token`, so writing a Profile to set a host or a refresh interval can
+// never break a working GitHub setup. For Jira and GitLab an unset named
+// variable is an error, because there is no other way in.
+func (d Deps) gitHubTokenSource(prof *config.Profile) github.TokenSource {
+	return profileTokenSource(d.TokenSource, prof, d.env(), github.DefaultTokenSource)
+}
+
+// profileTokenSource is gitHubTokenSource with its fallback named, so a test can
+// prove the fallback is reached without shelling out to `gh`. A nil result means
+// "the driver's own default", which is the zero-config path unchanged.
+func profileTokenSource(injected github.TokenSource, prof *config.Profile,
+	env func(string) string, fallback github.TokenSource) github.TokenSource {
+	if injected != nil {
+		return injected
+	}
+	if prof == nil || prof.Auth.TokenEnv == "" {
+		return nil
+	}
+
+	name := prof.Auth.TokenEnv
+	return func(ctx context.Context, host string) (string, error) {
+		if token := strings.TrimSpace(env(name)); token != "" {
+			return token, nil
+		}
+		return fallback(ctx, host)
+	}
 }
