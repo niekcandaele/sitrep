@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
-	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -52,6 +51,8 @@ Arguments:
             https://github.com/acme/widgets/issues/111  a full issue URL
           A bare number is resolved through the origin remote of the current
           directory's git clone; the other forms work anywhere.
+          A Ref with sub-tickets is an Epic; one without is a Ticket, which
+          sitrep reports on directly — press u there to open its Epic.
 
 Flags:
   -h, --help              show this help and exit
@@ -157,10 +158,15 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
 	}
 
+	// The run's context is cancelled on SIGINT and SIGTERM from here on, so a
+	// slow pre-flight fetch — and any in-flight fetch after it — goes with a
+	// ctrl+c instead of holding the process open for the Tracker's HTTP timeout.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// The Epic Ref is resolved once, here, before a Provider exists: the
 	// Provider is chosen from what the Ref points at, and FetchEpic is polled,
 	// so re-resolving a bare number there would re-run git forever.
-	ctx := context.Background()
 	r, err := deps.resolveRef(ctx, rawRef, *providerName)
 	if err != nil {
 		return runtimeError(stderr, err)
@@ -173,38 +179,62 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		}
 	}
 
-	switch {
-	case *asJSON:
-		render := func(w io.Writer, snap model.EpicSnapshot) error {
-			return jsonout.RenderEpic(w, snap, p.Name())
+	// One batched fetch, before the mode switch, because every mode needs its
+	// result: it is what decides whether this Ref named an Epic or a Ticket, and
+	// the monitor is seeded with it rather than fetching it again.
+	snap, err := p.FetchEpic(ctx, r)
+	if err != nil {
+		if *asJSON || *asPlain {
+			return runtimeError(stderr, err)
 		}
-		return runOneShot(ctx, stdout, stderr, p, r, deps.now(), render)
-	case *asPlain:
-		return runOneShot(ctx, stdout, stderr, p, r, deps.now(), plain.RenderEpic)
+		// A failed pre-flight opens the monitor anyway, unseeded, and lets the
+		// TUI's own first fetch fail and draw its retry body: #8 decided that a
+		// monitor must not exit on one bad DNS lookup, and one wasted request in
+		// an already-failing situation is the right price for keeping that.
+		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
+			Source:       tui.EpicSource(p, r, deps.clock()),
+			DetailSource: tui.TicketDetailSource(p),
+			Interval:     *interval,
+		})
+	}
+	snap = provider.StampSnapshot(p, snap, deps.now())
+
+	if decodesToTicket(snap) {
+		if *asJSON || *asPlain {
+			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
+		}
+		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, *interval)
 	}
 
-	return runMonitor(ctx, stdout, stderr, deps, p, r, *interval)
-}
+	switch {
+	case *asJSON:
+		return writeReport(stdout, stderr, func(w io.Writer) error {
+			return jsonout.RenderEpic(w, snap, p.Name())
+		})
+	case *asPlain:
+		return writeReport(stdout, stderr, func(w io.Writer) error {
+			return plain.RenderEpic(w, snap)
+		})
+	}
 
-// runMonitor opens the live monitor and blocks until the user quits.
-//
-// The context is cancelled on SIGINT and SIGTERM so an in-flight FetchEpic
-// goes with it: without that, quitting a monitor that has just started a
-// refresh holds the process open for the Tracker's HTTP timeout.
-func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
-	p provider.Provider, r ref.Ref, interval time.Duration) int {
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	err := tui.Run(ctx, tui.Options{
+	initial := tui.ListFromEpicSnapshot(snap)
+	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
 		Source:       tui.EpicSource(p, r, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
-		Interval:     interval,
-		Now:          deps.clock(),
-		Input:        deps.stdin(),
-		Output:       stdout,
+		Initial:      &initial,
+		Interval:     *interval,
 	})
-	if err != nil {
+}
+
+// runMonitor opens the live monitor and blocks until the user quits. The
+// caller's Options carry the run's seams; the terminal and the clock are this
+// function's to fill in, so no call site can forget one.
+func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, opts tui.Options) int {
+	opts.Now = deps.clock()
+	opts.Input = deps.stdin()
+	opts.Output = stdout
+
+	if err := tui.Run(ctx, opts); err != nil {
 		// Bubble Tea is the one thing here that knows whether it has a
 		// terminal, so this is where "you are in a pipe" gets named — with the
 		// way out, since both one-shot modes work anywhere.
@@ -227,26 +257,17 @@ func checkInterval(stderr io.Writer, d time.Duration) (int, bool) {
 	}
 }
 
-// runOneShot fetches the Epic once and writes one rendered report to stdout.
-// render is the mode's renderer; everything before it — ref resolution,
-// Provider construction, the single batched fetch, the clock stamp — is shared,
-// which is what makes --plain and --json two views of one code path rather than
-// two programs.
+// writeReport writes one rendered report to stdout. render is the mode's
+// renderer; everything before it — ref resolution, Provider construction, the
+// single batched fetch, the clock stamp — is shared, which is what makes
+// --plain and --json two views of one code path rather than two programs.
 //
 // It renders into a buffer and only then copies to stdout: a half-written
 // report followed by an error would poison whatever is consuming it, whether
 // that is a script reading JSON or a human reading text.
-func runOneShot(ctx context.Context, stdout, stderr io.Writer, p provider.Provider, r ref.Ref,
-	now time.Time, render func(io.Writer, model.EpicSnapshot) error) int {
-	snap, err := p.FetchEpic(ctx, r)
-	if err != nil {
-		return runtimeError(stderr, err)
-	}
-
-	snap = provider.StampSnapshot(p, snap, now)
-
+func writeReport(stdout, stderr io.Writer, render func(io.Writer) error) int {
 	var buf bytes.Buffer
-	if err := render(&buf, snap); err != nil {
+	if err := render(&buf); err != nil {
 		return runtimeError(stderr, err)
 	}
 	if _, err := io.Copy(stdout, &buf); err != nil {

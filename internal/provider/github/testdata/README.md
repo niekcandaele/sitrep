@@ -60,6 +60,25 @@ The shapes and what each one proves:
 `epic_empty.json` is the same real epic node with an empty `subIssues` page: an issue with
 no sub-issues is not an error, it is a Ticket someone pointed sitrep at.
 
+## Refs that name a Ticket
+
+`ticket_with_parent.json`, `ticket_no_parent.json` and `ticket_cross_repo_parent.json` are
+**hand-written** to the same `epicQuery` response shape, for the case where the Epic Ref turns
+out to name a plain Ticket: no sub-issues, and the fetched issue's own `parent`. The schema
+probe behind them is worth recording — `Issue.parent` is a field on the public schema, and
+like `blockedBy` / `blocking` it needs no extra `GraphQL-Features` header beyond the
+`sub_issues` one the driver already sends:
+
+```
+gh api graphql -f query='{ __type(name:"Issue") { fields { name } } }' | grep -i -E 'parent|sub'
+```
+
+| Fixture | proves |
+|---|---|
+| `ticket_with_parent.json` | no Tickets, a same-repo parent keyed `#2`, and the root issue's own assignees and open pull request landing on the Epic |
+| `ticket_cross_repo_parent.json` | a parent in another repository keyed `owner/repo#N`, with a null `closedByPullRequestsReferences` and no assignees |
+| `ticket_no_parent.json` | `parent: null` — a Ticket that hangs off nothing, which is an ordinary state and not an error |
+
 `issue_null.json`, `errors_not_found.json` and `errors_query.json` are hand-written to the
 shapes GitHub's GraphQL API documents: a 200 with a null issue, a 200 carrying a
 `NOT_FOUND` error entry, and a 200 carrying ordinary errors. The 401, rate-limit, 500 and

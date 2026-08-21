@@ -137,6 +137,85 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	return Ref{}, unparseable(raw)
 }
 
+// ParseParent resolves a Ticket's parent into the Epic Ref that names it, so
+// navigating up is a re-parse of what the Provider already returned rather than
+// a second lookup. child is the Ref the parent was discovered through: an
+// Enterprise host, or a Tracker the URL form cannot betray, is inherited from
+// it. The parent's URL is preferred over its Key because a URL carries its own
+// host; the Key is the fallback for a Tracker whose parent has no URL.
+//
+// It never resolves a bare number and therefore touches no I/O: a Key with no
+// owner/repo takes them from child rather than reaching for a git remote.
+func ParseParent(key, url string, child Ref) (Ref, error) {
+	if r, ok := parentFromURL(url, child); ok {
+		return r, nil
+	}
+	if r, ok := parentFromKey(key, child); ok {
+		return r, nil
+	}
+	return Ref{}, fmt.Errorf("cannot tell which Epic %q belongs to", child.String())
+}
+
+// parentFromURL reads the parent's own URL, which is the preferred form because
+// it carries its own host.
+func parentFromURL(raw string, child Ref) (Ref, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" || !strings.Contains(s, "://") {
+		return Ref{}, false
+	}
+	r, err := parseURL(s, s)
+	if err != nil || r.Number <= 0 {
+		return Ref{}, false
+	}
+	return inherit(r, child), true
+}
+
+// parentFromKey reads the parent's display key: "acme/widgets#111" names its own
+// repository, and a bare "#111" is the child's own repository — which is exactly
+// what the qualified/unqualified distinction means everywhere else in sitrep.
+func parentFromKey(raw string, child Ref) (Ref, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return Ref{}, false
+	}
+	if r, ok, err := parseOwnerRepoNumber(s, s); ok {
+		if err != nil {
+			return Ref{}, false
+		}
+		return inherit(r, child), true
+	}
+
+	n, ok := parseNumber(strings.TrimPrefix(s, "#"))
+	if !ok || child.Owner == "" || child.Repo == "" {
+		return Ref{}, false
+	}
+	return inherit(Ref{
+		Tracker: child.Tracker,
+		Host:    child.Host,
+		Owner:   child.Owner,
+		Repo:    child.Repo,
+		Number:  n,
+		Raw:     s,
+	}, child), true
+}
+
+// inherit fills in what the parent's own text cannot say. parseOwnerRepoNumber
+// hard-codes github.com, and a URL on an unrecognized host names no Tracker at
+// all, so a GitHub Enterprise epic reached through an Enterprise child would
+// otherwise come back pointing at github.com.
+func inherit(r, child Ref) Ref {
+	if r.Tracker == TrackerUnknown {
+		r.Tracker = child.Tracker
+	}
+	if child.Host != "" && (r.Host == "" || (r.Host == defaultHost && child.Host != defaultHost)) {
+		r.Host = child.Host
+	}
+	return r
+}
+
+// defaultHost is the host the grammar assumes when the text it read named none.
+const defaultHost = "github.com"
+
 // ParseRemoteURL turns a git remote URL into a Ref naming its repository, with
 // Number left zero. It is exported because every Tracker driver has to
 // recognize its own clone URLs and they all arrive in the same handful of

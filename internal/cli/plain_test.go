@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
 // The headline test: the whole program, run against the fake Provider, emits a
@@ -77,6 +79,11 @@ func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
 
 // An epic with no Tickets renders its header without dividing by zero, and says
 // so rather than trailing off into an empty void.
+//
+// It is asserted against the renderer rather than through the CLI because a Ref
+// that answers with no Tickets is decoded as a Ticket now (decodesToTicket). The
+// body is still reachable — a collection whose Tickets have all gone renders it,
+// and the monitor's empty state is its twin — so it is still worth a golden.
 func TestPlainEmptyEpic(t *testing.T) {
 	empty := model.EpicSnapshot{
 		Epic: model.Epic{
@@ -88,14 +95,12 @@ func TestPlainEmptyEpic(t *testing.T) {
 			NativeStatus: "open",
 		},
 	}
-	p := fake.New(fake.WithSnapshot(empty))
 
-	got := run([]string{"900", "--plain"}, p)
-
-	if got.code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	var buf bytes.Buffer
+	if err := plain.RenderEpic(&buf, empty); err != nil {
+		t.Fatalf("RenderEpic: %v", err)
 	}
-	checkGolden(t, "epic_plain_empty.golden.txt", []byte(got.stdout))
+	checkGolden(t, "epic_plain_empty.golden.txt", buf.Bytes())
 }
 
 // A real recorded GitHub payload survives all the way to a text report,

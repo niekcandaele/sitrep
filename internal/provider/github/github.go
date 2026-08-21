@@ -179,6 +179,10 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// a title edited mid-fetch cannot produce a half-updated snapshot.
 			snap.Epic = newEpic(issue)
 			epicRepo = issue.Repository.NameWithOwner
+			// The fetched issue's own parent, for an Epic Ref that turns out to
+			// name a plain Ticket. Reporting it is all this driver does about it:
+			// which screen that opens is internal/cli's decision.
+			snap.Parent = newParent(issue.Parent, epicRepo)
 			haveEpic = true
 		}
 

@@ -1,5 +1,7 @@
 // Package jsonout renders sitrep's machine-readable output: the --json epic
-// document and the matching Ticket detail document.
+// document, the matching Ticket detail document, and the decoder's ticket
+// document — the detail document plus the Ticket's own identity and its parent,
+// which is what --json emits for an Epic Ref that named a Ticket.
 //
 // The wire format is a contract, so it lives here as its own layer of DTO
 // structs with json tags rather than tags scattered over the domain model.
@@ -126,14 +128,48 @@ type linkDoc struct {
 	Target      linkTargetDoc  `json:"target"`
 }
 
+type parentDoc struct {
+	ID    model.TicketID `json:"id"`
+	Key   string         `json:"key,omitempty"`
+	Title string         `json:"title,omitempty"`
+	URL   string         `json:"url,omitempty"`
+}
+
+// detailDocument is both the detail document and the decoder's ticket document:
+// the second is the first plus an optional ticket and parent. They are one
+// struct rather than two because they are one shape — RenderDetail simply leaves
+// the two optional objects nil, which is what keeps its output byte-identical
+// and schema_version at 1.
 type detailDocument struct {
 	SchemaVersion int            `json:"schema_version"`
 	GeneratedAt   time.Time      `json:"generated_at"`
 	Provider      providerDoc    `json:"provider"`
+	Ticket        *ticketDoc     `json:"ticket,omitempty"`
+	Parent        *parentDoc     `json:"parent,omitempty"`
 	TicketID      model.TicketID `json:"ticket_id"`
 	Description   string         `json:"description"`
 	Comments      []commentDoc   `json:"comments,omitempty"`
 	Links         []linkDoc      `json:"links,omitempty"`
+}
+
+// TicketDocument is the decoder's one-shot output: one Ticket's identity, the
+// Epic it belongs to, and its Detail.
+type TicketDocument struct {
+	// Ticket is the decoded Ticket in list-model form.
+	Ticket model.Ticket
+	// Parent is the collection it belongs to. The zero Parent emits no parent
+	// key at all.
+	Parent model.Parent
+	// Detail is the expensive per-ticket data, exactly as the Provider returned
+	// it.
+	Detail model.Detail
+	// Capabilities decide which optional sections appear at all.
+	Capabilities model.Capabilities
+	// ProviderName is the serving Provider's Name.
+	ProviderName string
+	// GeneratedAt is the caller's clock reading, matching generated_at in the
+	// epic document.
+	GeneratedAt time.Time
 }
 
 // RenderEpic writes the epic document for one snapshot to w. providerName is
@@ -165,6 +201,32 @@ func RenderEpic(w io.Writer, snap model.EpicSnapshot, providerName string) error
 // which optional sections appear at all, and generatedAt is the caller's clock
 // reading, matching generated_at in the epic document.
 func RenderDetail(w io.Writer, d model.Detail, caps model.Capabilities, providerName string, generatedAt time.Time) error {
+	return encode(w, newDetailDocument(d, caps, providerName, generatedAt))
+}
+
+// RenderTicket writes the decoder's document for one Ticket to w: the same
+// detail document with the Ticket's own identity and its parent added, so an
+// agent decoding a number it was handed gets the Ticket rather than an epic
+// document with an empty array.
+func RenderTicket(w io.Writer, doc TicketDocument) error {
+	out := newDetailDocument(doc.Detail, doc.Capabilities, doc.ProviderName, doc.GeneratedAt)
+
+	ticket := newTicketDoc(doc.Ticket, doc.Capabilities)
+	out.Ticket = &ticket
+	if !doc.Parent.IsZero() {
+		out.Parent = &parentDoc{
+			ID:    doc.Parent.ID,
+			Key:   doc.Parent.Key,
+			Title: doc.Parent.Title,
+			URL:   doc.Parent.URL,
+		}
+	}
+	return encode(w, out)
+}
+
+// newDetailDocument builds the document both RenderDetail and RenderTicket
+// emit, so the two cannot drift about capability gating or timestamps.
+func newDetailDocument(d model.Detail, caps model.Capabilities, providerName string, generatedAt time.Time) detailDocument {
 	doc := detailDocument{
 		SchemaVersion: schemaVersion,
 		GeneratedAt:   wireTime(generatedAt),
@@ -204,7 +266,7 @@ func RenderDetail(w io.Writer, d model.Detail, caps model.Capabilities, provider
 		})
 	}
 
-	return encode(w, doc)
+	return doc
 }
 
 // wireTime normalizes a timestamp for the wire: UTC, second precision. Sitrep

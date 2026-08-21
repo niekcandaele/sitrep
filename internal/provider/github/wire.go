@@ -40,6 +40,7 @@ type issueNode struct {
 	State       string        `json:"state"`
 	StateReason string        `json:"stateReason"`
 	Repository  repositoryRef `json:"repository"`
+	Parent      *parentNode   `json:"parent"`
 	Assignees   struct {
 		Nodes []assigneeNode `json:"nodes"`
 	} `json:"assignees"`
@@ -52,6 +53,16 @@ type issueNode struct {
 		} `json:"pageInfo"`
 		Nodes []issueNode `json:"nodes"`
 	} `json:"subIssues"`
+}
+
+// parentNode is the issue an issue is a sub-issue of. It is nullable: most
+// issues hang off nothing, which is an ordinary state and never an error.
+type parentNode struct {
+	ID         string        `json:"id"`
+	Number     int           `json:"number"`
+	Title      string        `json:"title"`
+	URL        string        `json:"url"`
+	Repository repositoryRef `json:"repository"`
 }
 
 type assigneeNode struct {
@@ -153,18 +164,50 @@ func graphQLErrors(errs []graphQLError, notFound, endpoint string) error {
 	return fmt.Errorf("github: API error: %s", strings.Join(messages, "; "))
 }
 
-// newEpic maps the parent issue onto sitrep's Epic. Its Key is repo-qualified
+// newEpic maps the fetched issue onto sitrep's Epic. Its Key is repo-qualified
 // because an Epic carries no repository field of its own and the qualified form
 // is what a human can paste straight back into sitrep.
+//
+// The assignees and pull requests are the same selections every child already
+// carries, read here because an Epic Ref may name a plain Ticket: the decoded
+// Ticket's Detail header is built from this Epic and has to read exactly the way
+// the same Ticket's row reads in a list. That is also why the pull-request rule
+// for in-progress runs here as it does in newTicket — one node must not describe
+// itself two different ways depending on which Ref reached it.
 func newEpic(n issueNode) model.Epic {
 	status, native := normalizeStatus(n.State, n.StateReason)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences)
 	return model.Epic{
 		ID:           model.TicketID(n.ID),
 		Key:          issueKey(n, ""),
 		Title:        n.Title,
 		URL:          n.URL,
-		Status:       status,
+		Status:       statusWithPullRequests(status, prs),
 		NativeStatus: native,
+		Assignees:    newAssignees(n.Assignees.Nodes),
+		Repository:   n.Repository.NameWithOwner,
+		PullRequests: prs,
+	}
+}
+
+// newParent maps the fetched issue's own parent onto sitrep's Parent. issueRepo
+// is the fetched issue's repository, which decides whether the parent's display
+// key needs qualifying — the same rule the children and the Detail link targets
+// use. A null parent is the zero Parent: most issues hang off nothing, and that
+// is an ordinary state.
+func newParent(p *parentNode, issueRepo string) model.Parent {
+	if p == nil || p.ID == "" {
+		return model.Parent{}
+	}
+	key := fmt.Sprintf("#%d", p.Number)
+	if repo := p.Repository.NameWithOwner; repo != "" && repo != issueRepo {
+		key = fmt.Sprintf("%s#%d", repo, p.Number)
+	}
+	return model.Parent{
+		ID:    model.TicketID(p.ID),
+		Key:   key,
+		Title: p.Title,
+		URL:   p.URL,
 	}
 }
 

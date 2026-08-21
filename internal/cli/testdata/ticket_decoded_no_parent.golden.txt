@@ -1,0 +1,13 @@
+
+Ticket #115  Reconcile widget IDs across shards
+[open]
+https://tracker.example.test/acme/widgets/115
+
+DESCRIPTION
+
+Two shards can hand out the same widget ID after a split. Pick a winner deterministically.
+
+COMMENTS
+
+No comments yet.
+

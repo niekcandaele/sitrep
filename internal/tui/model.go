@@ -31,6 +31,15 @@ type Model struct {
 	refreshing  bool
 	generation  int
 	lastAttempt time.Time
+	// listArmed reports whether the list holds a reading or has a fetch in
+	// flight. It starts false in decoder mode — a session opened straight on one
+	// Ticket's Detail — so the heartbeat never fetches a collection the user has
+	// not asked to see, and it is what the walk-up key turns on.
+	listArmed bool
+	// hasSource reports whether there is a collection to monitor at all. A
+	// decoded Ticket with no parent has none, and the walk-up key is then not
+	// offered rather than offered and broken.
+	hasSource bool
 
 	rows       []Row
 	selected   int
@@ -112,14 +121,21 @@ func New(ctx context.Context, opts Options) Model {
 	search.CharLimit = 0
 	search.SetVirtualCursor(false)
 
-	return Model{
-		fetch:    func() (ListInput, error) { return src(ctx) },
+	m := Model{
+		fetch: func() (ListInput, error) {
+			if src == nil {
+				return ListInput{}, errNoSource
+			}
+			return src(ctx)
+		},
 		now:      now,
 		interval: opts.Interval,
 		// The first refresh is already on its way out of Init.
 		generation:  1,
 		refreshing:  true,
 		lastAttempt: now(),
+		listArmed:   true,
+		hasSource:   src != nil,
 		search:      search,
 		fetchDetail: fetchDetail,
 		details:     make(map[model.TicketID]detailEntry),
@@ -129,16 +145,63 @@ func New(ctx context.Context, opts Options) Model {
 		help:        help.New(),
 		styles:      DefaultStyles(true),
 	}
+
+	if opts.Initial != nil {
+		// A reading the caller already took is folded in exactly the way a
+		// successful refresh is folded in, and nothing is in flight: the refresh
+		// clock runs from when the reading was *taken*, so the first auto-refresh
+		// lands one interval after that rather than one interval after startup.
+		m.input = *opts.Initial
+		m.hasData = true
+		m.refreshing = false
+		m.generation = 0
+		m.lastAttempt = opts.Initial.FetchedAt
+		m = m.rebuildRows()
+	}
+
+	if opts.Open != nil {
+		// Decoder mode: the screen is the Ticket's Detail from the first frame,
+		// and the read for it is already on its way out of Init the same way the
+		// list's first refresh normally is.
+		m.mode = modeDetail
+		m.detail = detailState{
+			ticket: opts.Open.Ticket,
+			input: DetailFromTicket(opts.Open.Ticket, model.Detail{}, opts.Open.Capabilities,
+				opts.Open.Parent, time.Time{}),
+			loading: true,
+		}
+		m.detailGeneration = 1
+		if opts.Initial == nil {
+			m.refreshing = false
+			m.generation = 0
+			m.listArmed = false
+		}
+		m = m.syncDetailKeys()
+	}
+	return m
 }
 
 // errNoDetailSource explains a monitor opened without a way to read Detail. It
 // is a wiring mistake rather than a Tracker failure, so it says which.
 var errNoDetailSource = errors.New("this monitor was opened without a Detail source")
 
-// Init starts the first refresh, the heartbeat, and the background-colour
-// query that decides the palette.
+// errNoSource explains a refresh attempted with no collection behind the
+// screen. A decoded Ticket with no parent has none, and the walk-up key is
+// disabled rather than offered — so reaching this is a wiring mistake.
+var errNoSource = errors.New("this monitor was opened without a collection to watch")
+
+// Init starts the heartbeat, the background-colour query that decides the
+// palette, and whichever first read this session is for: the list's, the
+// decoded Ticket's Detail, or — for a seeded monitor — neither.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchCmd(m.generation), heartbeat(), requestBackgroundColor)
+	cmds := []tea.Cmd{heartbeat(), requestBackgroundColor}
+	if m.mode == modeDetail {
+		cmds = append(cmds, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID))
+	}
+	if m.refreshing {
+		cmds = append(cmds, m.fetchCmd(m.generation))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update folds one message into the model.
@@ -244,7 +307,10 @@ func (m Model) visibleTickets() []model.Ticket { return m.filter.Apply(m.input.T
 // elapsed. The beat is also what makes the staleness indicator count up
 // without a data change.
 func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
-	if m.refreshing || m.now().Sub(m.lastAttempt) < m.interval {
+	// An unarmed list is a decoder session that has not walked up yet: the beat
+	// still drives the staleness indicator, but there is no collection anyone
+	// asked to see and FetchEpic must not be called at all.
+	if !m.listArmed || m.refreshing || m.now().Sub(m.lastAttempt) < m.interval {
 		return m, heartbeat()
 	}
 	next, cmd := m.startRefresh()
@@ -260,6 +326,7 @@ func (m Model) startRefresh() (Model, tea.Cmd) {
 	}
 	m.generation++
 	m.refreshing = true
+	m.listArmed = true
 	m.lastAttempt = m.now()
 	return m, m.fetchCmd(m.generation)
 }
@@ -319,7 +386,13 @@ func (m Model) rebuildRows() Model {
 		m.selected = nearestSelectable(m.rows, m.selected)
 	}
 	m.selectedID = selectedTicketID(m.rows, m.selected)
-	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+	if m.ready {
+		// Before the terminal has reported its size there is no window to fit the
+		// cursor into: measuring against the one-line floor would scroll the first
+		// group heading off a screen that has not been drawn yet. The size message
+		// re-measures, so nothing is lost by waiting for it.
+		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+	}
 	return m
 }
 

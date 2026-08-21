@@ -93,6 +93,18 @@ func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	}
 }
 
+// OpenTicket is the decoder's entry: the Ticket to open, and the collection it
+// was reached through. A zero Parent means no breadcrumb and no walk-up — a
+// Ticket with no parent opens in Detail like any other.
+type OpenTicket struct {
+	// Ticket is the Ticket being decoded, in list-model form.
+	Ticket model.Ticket
+	// Parent is the collection drawn as the breadcrumb above it.
+	Parent Header
+	// Capabilities decide which Detail sections may be drawn.
+	Capabilities model.Capabilities
+}
+
 // DetailSource fetches one Ticket's Detail. It is the seam between the Detail
 // screen and the Provider, held as a plain function so the screen knows nothing
 // about auth, GraphQL or Epic Refs. One call is exactly one FetchDetail and
@@ -201,13 +213,44 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 	if cached, hit := m.details[t.ID]; hit {
 		m.detail.input = DetailFromTicket(t, cached.detail, cached.caps, m.input.Header, cached.fetchedAt)
 		m.detail.loaded = true
-		return m, nil
+		return m.syncDetailKeys(), nil
 	}
 
 	// The header is drawn from the Ticket the list already had, so the loading
 	// screen can say which Ticket it is loading.
 	m.detail.input = DetailFromTicket(t, model.Detail{}, m.input.Capabilities, m.input.Header, time.Time{})
-	next, cmd := m.startDetailFetch()
+	next, cmd := m.syncDetailKeys().startDetailFetch()
+	return next, cmd
+}
+
+// syncDetailKeys keeps the Detail keyboard in step with what is actually behind
+// this screen. It is one place with one rule, so the help line and the matcher
+// can never disagree: u is offered when there is a collection to walk up into
+// and the caller named it, and esc says "back" only when there is a list to go
+// back to.
+func (m Model) syncDetailKeys() Model {
+	m.detailKeys.Parent.SetEnabled(m.hasSource && m.detail.input.Parent != (Header{}))
+	if m.listArmed {
+		m.detailKeys.Back.SetHelp("esc", "back")
+	} else {
+		m.detailKeys.Back.SetHelp("esc", "quit")
+	}
+	return m
+}
+
+// walkUp leaves the Detail for the collection the Ticket belongs to. In a
+// decoder session it is where the list is first fetched — nothing has read it
+// until now — and from a drill-in it is esc by another name, because both mean
+// "the collection this Ticket belongs to".
+func (m Model) walkUp() (tea.Model, tea.Cmd) {
+	m.mode = modeList
+	m.detail = detailState{}
+	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+
+	if m.listArmed {
+		return m, nil
+	}
+	next, cmd := m.startRefresh()
 	return next, cmd
 }
 
@@ -265,13 +308,27 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 // esc goes back rather than quitting: after the find box and the filter, "one
 // level up" is what esc means everywhere in this program. q and ctrl+c quit
 // outright, from here as from the list, so nobody is trapped in a Detail.
+//
+// u goes up to the collection this Ticket belongs to. From a drill-in that is
+// where esc already lands, which is coherent rather than surprising; from a
+// decoded Ticket it is the way into the full monitor.
 func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.detailKeys.Quit):
 		m.quitting = true
 		return m, tea.Quit
 
+	case key.Matches(msg, m.detailKeys.Parent):
+		return m.walkUp()
+
 	case key.Matches(msg, m.detailKeys.Back):
+		if !m.listArmed {
+			// The esc ladder's last rung: a decoded Ticket has no list behind it,
+			// so "one level up" is out of the program. q and ctrl+c still quit
+			// from everywhere, so nobody is trapped either way.
+			m.quitting = true
+			return m, tea.Quit
+		}
 		m.mode = modeList
 		m.detail = detailState{}
 		// The list's own state was never touched, but the help listing may have

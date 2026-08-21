@@ -1,0 +1,38 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqYEOC",
+        "number": 7,
+        "title": "Teach the gadget agent to speak sync v2",
+        "url": "https://github.com/acme/gadgets/issues/7",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "repository": {
+          "nameWithOwner": "acme/gadgets"
+        },
+        "parent": {
+          "id": "I_kwDOT_WhQ88AAAABNqX_5R",
+          "number": 111,
+          "title": "Widget sync v2: shards, retries & telemetry",
+          "url": "https://github.com/acme/widgets/issues/111",
+          "repository": {
+            "nameWithOwner": "acme/widgets"
+          }
+        },
+        "assignees": {
+          "nodes": []
+        },
+        "closedByPullRequestsReferences": null,
+        "subIssues": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,13 @@
 // along turns one request into N and is exactly what this split exists to
 // prevent. If a view seems to need Detail while listing, that is a FetchDetail
 // call, not a wider Ticket.
+//
+// A batched call answers what the Epic Ref points at, whatever that turns out to
+// be. A Ref naming a plain Ticket rather than a collection comes back as a
+// snapshot with no Tickets, carrying that Ticket's identity in Epic and the
+// collection it belongs to in Parent (model.EpicSnapshot). A Provider reports
+// that and stops there: which screen opens is the caller's decision, and no
+// third method exists to ask the question (ADR-0003).
 package provider
 
 import (
