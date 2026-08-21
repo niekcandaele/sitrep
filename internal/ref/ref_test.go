@@ -197,6 +197,48 @@ func TestParseBareNumberWithoutARemote(t *testing.T) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
+	// A bare number resolves in a GitLab clone too, so naming GitHub here
+	// sends a GitLab user hunting for a remote nobody expected.
+	if strings.Contains(err.Error(), "GitHub") {
+		t.Errorf("error %q names a tracker the failure has nothing to do with", err)
+	}
+}
+
+// The two ways this fails are different problems and get different sentences:
+// there is no remote at all, or there is one and it names no tracker sitrep
+// can address. A local path is the second: a bare clone of /srv/git has an
+// origin and no tracker behind it.
+func TestParseBareNumberInAnUnrecognisedClone(t *testing.T) {
+	_, err := ref.Parse(context.Background(), "111",
+		ref.WithRemoteLookup(stubLookup("/srv/git/widgets.git", nil)))
+	if err == nil {
+		t.Fatal("Parse succeeded against an unrecognised remote, want an error")
+	}
+	for _, want := range []string{"111", "bare number", "/srv/git/widgets.git", "recognises", "URL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "GitHub") {
+		t.Errorf("error %q names a tracker the failure has nothing to do with", err)
+	}
+}
+
+// Rule 4 of the prose contract: an error names the fix. "cannot parse this"
+// with no accepted form beside it is a dead end.
+func TestUnparseableRefNamesTheAcceptedForms(t *testing.T) {
+	_, err := ref.Parse(context.Background(), "not a ref at all")
+	if err == nil {
+		t.Fatal("Parse succeeded on nonsense, want an error")
+	}
+	for _, want := range []string{"not a ref at all", "owner/repo#123", "PROJ-123", "bare number", "--help"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("error %q spans more than one line", err)
+	}
 }
 
 func TestParseRemoteURL(t *testing.T) {

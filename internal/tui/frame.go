@@ -145,6 +145,12 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 	lines := []string{marker + s.TicketKey.Render(plain.PadKey(r.Ticket.Key, keyColumn)) + title}
 
 	if meta := ticketMeta(r.Ticket, caps, s); meta != "" {
+		// The meta line is clipped here, with an ellipsis, rather than left to
+		// truncateLine's last-resort empty tail: a "ci FAIL" cut to "ci FA"
+		// reads as a complete verdict about the wrong thing. ansi.Truncate is
+		// escape-aware, which this line needs — it carries styling. The budget
+		// is the title's, so the two lines end in the same column.
+		meta = ansi.Truncate(meta, titleWidth, "…")
 		lines = append(lines, unselectedMarker+strings.Repeat(" ", keyColumn)+meta)
 	}
 	return lines

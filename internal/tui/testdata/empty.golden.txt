@@ -37,4 +37,4 @@ This collection has no Tickets.
 
 
 
-↑/k up • ↓/j down • d hide finished • / find • r refresh • ? help • q quit
+↑/k up • ↓/j down • enter open • d hide finished • / find • ? help • q quit

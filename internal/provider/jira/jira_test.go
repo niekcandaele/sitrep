@@ -755,8 +755,16 @@ func TestPaginationSafety(t *testing.T) {
 		if err == nil {
 			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
 		}
-		if !strings.Contains(err.Error(), "no new page cursor") {
-			t.Errorf("error = %q, want it to name the cursor problem", err)
+		// A server that reports more and hands over the same cursor is
+		// misbehaving, which is what KindUnavailable means — and it stays
+		// retryable, on the same terms as a 500.
+		providertest.CheckError(t, "jira", err, providertest.Want{
+			Kind:     provider.KindUnavailable,
+			Contains: []string{"no new page cursor"},
+			Secret:   fixtureToken,
+		})
+		if !provider.KindOf(err).Retryable() {
+			t.Error("a server fault must stay retryable; the monitor recovers when the server does")
 		}
 	})
 
@@ -775,11 +783,11 @@ func TestPaginationSafety(t *testing.T) {
 			t.Fatalf("FetchEpic returned %d children and no error; want an error",
 				len(snap.Tickets))
 		}
-		for _, want := range []string{"jira: ", "ABC-1", "no page cursor"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error = %q, want it to mention %q", err, want)
-			}
-		}
+		providertest.CheckError(t, "jira", err, providertest.Want{
+			Kind:     provider.KindUnavailable,
+			Contains: []string{"ABC-1", "no page cursor"},
+			Secret:   fixtureToken,
+		})
 	})
 
 	t.Run("an endless epic stops paging", func(t *testing.T) {
@@ -810,8 +818,15 @@ func TestPaginationSafety(t *testing.T) {
 		if err == nil {
 			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
 		}
-		if !strings.Contains(err.Error(), "refusing to keep paging") {
-			t.Errorf("error = %q, want it to say it stopped paging", err)
+		// A collection past the cap is a stable property of the ref, so the
+		// monitor prints one line and exits rather than retrying forever.
+		providertest.CheckError(t, "jira", err, providertest.Want{
+			Kind:     provider.KindBadRef,
+			Contains: []string{"refusing to keep paging"},
+			Secret:   fixtureToken,
+		})
+		if provider.KindOf(err).Retryable() {
+			t.Error("an over-cap collection is as large on the next tick; retrying buys nothing")
 		}
 	})
 }

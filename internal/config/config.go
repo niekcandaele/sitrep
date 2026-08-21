@@ -84,9 +84,11 @@ type Profile struct {
 	// Host is the Tracker host, e.g. "acme.atlassian.net". Optional for GitHub,
 	// where it defaults to github.com; required otherwise.
 	Host string `yaml:"host"`
-	// Project is the Tracker's own project identity: a Jira project key (which
-	// is also the prefix of every Epic Ref key in it), a GitLab project or group
-	// path, or "owner/repo" on GitHub.
+	// Project is the Tracker's own project identity: a Jira project key
+	// (required, and also the prefix of every Epic Ref key in it) or a GitLab
+	// project or group path (optional). A github Profile must not set it — a
+	// GitHub Epic Ref carries its own owner/repo — and one that does is
+	// rejected rather than silently ignored.
 	Project string `yaml:"project"`
 	// Auth is how this Profile's credential is found. It holds references only:
 	// sitrep never stores a token in the config file.

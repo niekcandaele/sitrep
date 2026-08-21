@@ -80,7 +80,7 @@ func detailMetaTicket(h DetailHeader) model.Ticket {
 //
 // The body is wrapped here rather than handed to bubbles/viewport on purpose.
 // The wrapping and the height arithmetic have to exist in this package anyway —
-// #8 reached the same conclusion for the list — viewport carries its own KeyMap
+// the list renderer reaches the same conclusion — viewport carries its own KeyMap
 // and mutable state into a package whose renderers are pure, and a golden of a
 // viewport is a golden of somebody else's scrollbar.
 func detailLines(in DetailInput, width int, s Styles) []string {

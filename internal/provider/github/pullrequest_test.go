@@ -6,7 +6,11 @@ package github
 // through the replay server in github_test.go.
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -134,7 +138,7 @@ func TestLeadPullRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := leadPullRequest(tt.prs)
+			got, ok := leadPullRequest(tt.prs, nil)
 			if tt.want == 0 {
 				if ok {
 					t.Fatalf("leadPullRequest = %+v, want no lead", got)
@@ -161,10 +165,74 @@ func TestLeadPullRequestBreaksACrossRepoTieDeterministically(t *testing.T) {
 	}
 
 	for range 10 {
-		got, ok := leadPullRequest(prs)
+		got, ok := leadPullRequest(prs, nil)
 		if !ok || got.Repository != "acme/widgets" {
 			t.Fatalf("lead = %+v (ok=%v), want the first element in API order", got, ok)
 		}
+	}
+}
+
+// A pull request number is unique only within its repository, so the pull
+// request with the larger number can be the older one. Creation time is what
+// decides, not the number.
+func TestLeadPullRequestPrefersTheNewerAcrossRepositories(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	prs := []model.PullRequest{
+		{Number: 900, Repository: "acme/widgets", State: model.PROpen},
+		{Number: 4, Repository: "niekcandaele/sitrep", State: model.PROpen},
+	}
+	created := []time.Time{older, newer}
+
+	got, ok := leadPullRequest(prs, created)
+	if !ok {
+		t.Fatal("leadPullRequest found no lead, want one")
+	}
+	if got.Repository != "niekcandaele/sitrep" {
+		t.Errorf("lead = %+v, want the newer pull request despite its lower number", got)
+	}
+}
+
+// An old fixture, or a payload that omitted createdAt, still gets a
+// deterministic answer: the number is the fallback.
+func TestLeadPullRequestFallsBackToTheNumberWithoutTimestamps(t *testing.T) {
+	prs := []model.PullRequest{pr(9, model.PROpen), pr(3, model.PROpen)}
+
+	for _, created := range [][]time.Time{nil, {{}, {}}, {time.Now(), {}}} {
+		got, ok := leadPullRequest(prs, created)
+		if !ok || got.Number != 9 {
+			t.Errorf("lead = %+v (ok=%v) for created=%v, want #9 by number", got, ok, created)
+		}
+	}
+}
+
+// The connection is capped at twenty and does not paginate, so TotalCount is
+// the only thing that knows a Ticket lost pull requests. Nothing renders it
+// yet; this pins the shape a renderer would read, and the ordering that comes
+// off the wire with it.
+func TestPullRequestConnectionDecodesTotalCountAndCreatedAt(t *testing.T) {
+	var nodes []string
+	for i := range 20 {
+		nodes = append(nodes, fmt.Sprintf(
+			`{"number":%d,"title":"pr","url":"u","state":"OPEN","isDraft":false,`+
+				`"repository":{"nameWithOwner":"acme/widgets"},"createdAt":"2026-0%d-01T00:00:00Z"}`,
+			100+i, 1+i%9))
+	}
+	payload := `{"totalCount":25,"nodes":[` + strings.Join(nodes, ",") + `]}`
+
+	var conn pullRequestConnection
+	if err := json.Unmarshal([]byte(payload), &conn); err != nil {
+		t.Fatalf("decoding the connection: %v", err)
+	}
+	if conn.TotalCount != 25 {
+		t.Errorf("TotalCount = %d, want 25: the Ticket has more than the cap", conn.TotalCount)
+	}
+	if got := len(newPullRequests(&conn)); got != 20 {
+		t.Errorf("newPullRequests returned %d pull requests, want the 20 the cap allowed", got)
+	}
+	if conn.Nodes[0].CreatedAt.IsZero() {
+		t.Error("createdAt did not decode; lead selection would silently fall back to the number")
 	}
 }
 
@@ -173,7 +241,7 @@ func TestLeadPullRequestBreaksACrossRepoTieDeterministically(t *testing.T) {
 func TestLeadFirstMovesTheLeadAndKeepsTheRest(t *testing.T) {
 	prs := []model.PullRequest{pr(1, model.PRClosed), pr(2, model.PRMerged), pr(9, model.PROpen)}
 
-	got := leadFirst(prs)
+	got := leadFirst(prs, nil)
 
 	want := []int{9, 1, 2}
 	if len(got) != len(want) {

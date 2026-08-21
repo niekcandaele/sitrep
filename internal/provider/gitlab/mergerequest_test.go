@@ -1,7 +1,9 @@
 package gitlab
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -165,7 +167,7 @@ func TestLeadFirst(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := leadFirst(tt.prs)
+			got := leadFirst(tt.prs, nil)
 			if len(got) != len(tt.want) {
 				t.Fatalf("leadFirst dropped something: got %d, want %d", len(got), len(tt.want))
 			}
@@ -175,6 +177,35 @@ func TestLeadFirst(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A merge request iid is unique only within its project, so the merge request
+// with the larger iid can be the older one. Creation time is what decides.
+func TestLeadMergeRequestPrefersTheNewerAcrossProjects(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	prs := []model.PullRequest{
+		{Number: 900, Repository: "acme/one", State: model.PROpen},
+		{Number: 4, Repository: "acme/two", State: model.PROpen},
+	}
+
+	got := leadFirst(prs, []time.Time{older, newer})
+	if got[0].Repository != "acme/two" {
+		t.Errorf("lead = %+v, want the newer merge request despite its lower iid", got[0])
+	}
+}
+
+// created_at is decoded off the wire, or lead selection silently falls back to
+// the iid and the finding this test defends comes straight back.
+func TestMergeRequestDecodesCreatedAt(t *testing.T) {
+	var m mergeRequestWire
+	if err := json.Unmarshal([]byte(`{"iid":7,"created_at":"2026-06-01T10:11:12Z"}`), &m); err != nil {
+		t.Fatalf("decoding a merge request: %v", err)
+	}
+	if m.CreatedAt.IsZero() {
+		t.Error("created_at did not decode")
 	}
 }
 

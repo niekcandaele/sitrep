@@ -761,20 +761,32 @@ func KeyPrefix(key string) string {
 func resolveBareNumber(ctx context.Context, o options, number int, raw string) (Ref, error) {
 	remote, err := o.lookup(ctx, o.dir, originRemote)
 	if err != nil {
-		return Ref{}, bareNumberError(raw, err)
+		return Ref{}, noOriginError(raw, err)
 	}
 	r, err := ParseRemoteURL(remote)
 	if err != nil {
-		return Ref{}, bareNumberError(raw, err)
+		return Ref{}, unrecognisedOriginError(raw, remote, err)
 	}
 	r.Number = number
 	r.Raw = raw
 	return r, nil
 }
 
-func bareNumberError(raw string, err error) error {
-	return fmt.Errorf("%q is a bare number and this directory has no GitHub origin remote — "+
+// noOriginError is the failure when there is no origin remote to read at all.
+// It names no tracker: a bare number resolves against GitHub, GitLab and Jira
+// clones alike, and naming one sends users of the others hunting for a remote
+// nobody expected.
+func noOriginError(raw string, err error) error {
+	return fmt.Errorf("%q is a bare number and this directory has no origin remote — "+
 		"pass a full issue URL instead: %w", strings.TrimSpace(raw), err)
+}
+
+// unrecognisedOriginError is the failure when there is an origin remote and it
+// is not a tracker sitrep can address.
+func unrecognisedOriginError(raw, remote string, err error) error {
+	return fmt.Errorf("%q is a bare number and this directory's origin remote %q is not a "+
+		"tracker sitrep recognises — pass a full issue URL instead: %w",
+		strings.TrimSpace(raw), strings.TrimSpace(remote), err)
 }
 
 // parseNumber accepts a positive decimal issue number and nothing else: "0",
@@ -805,5 +817,7 @@ func pathSegments(p string) []string {
 }
 
 func unparseable(raw string) error {
-	return fmt.Errorf("cannot parse %q as an Epic Ref", strings.TrimSpace(raw))
+	return fmt.Errorf(`cannot parse %q as an Epic Ref — pass an issue URL, "owner/repo#123", `+
+		`"PROJ-123" or a bare number inside a clone (run "sitrep --help" for every accepted form)`,
+		strings.TrimSpace(raw))
 }

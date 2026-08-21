@@ -105,8 +105,17 @@ func DefaultKeyMap() KeyMap {
 // only when it is enabled, so the footer never offers to clear a filter that is
 // not there — and Quit is advertised as "q", never as "esc", because esc means
 // whichever rung of the ladder the session is on.
+//
+// Open is in the footer because drill-in is the monitor's headline feature and
+// nothing else advertises it: a key nobody knows about is a key nobody presses.
+//
+// Refresh is not, and that is the trade this line pays for it: all nine
+// bindings measure eighty-seven cells, which an eighty-column terminal clips.
+// Refresh is the one to lose — the monitor refreshes on its own interval
+// anyway, so the hint saves a wait; drill-in does not happen at all if nobody
+// knows the key. `?` still lists every binding, Refresh included.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Open, k.HideFinished, k.Find, k.ClearFilter, k.Help, k.Quit}
 }
 
 // FullHelp returns every binding, grouped into the columns "?" expands to.

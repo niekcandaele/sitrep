@@ -334,7 +334,11 @@ func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticke
 
 	for page := 0; ; page++ {
 		if page >= maxPages {
-			return nil, fmt.Errorf("jira: %s has more than %d children; refusing to keep paging",
+			// A collection larger than sitrep's cap is a stable property of the
+			// ref: it will be exactly as large on the next tick, so retrying
+			// buys nothing.
+			return nil, provider.Errorf(provider.KindBadRef,
+				"jira: %s has more than %d children; refusing to keep paging",
 				key, maxPages*pageSize)
 		}
 
@@ -363,10 +367,14 @@ func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticke
 			// GitHub and GitLab drivers both refuse an inconsistent cursor rather
 			// than returning a partial epic that looks complete, and a situation
 			// report silently missing children is worse than one that failed.
-			return nil, fmt.Errorf("jira: %s reports more children but returned no page cursor", key)
+			// A server contradicting itself is a server fault, so it stays
+			// retryable on the same terms as a 500.
+			return nil, provider.Errorf(provider.KindUnavailable,
+				"jira: %s reports more children but returned no page cursor", key)
 		}
 		if resp.NextPageToken == token {
-			return nil, fmt.Errorf("jira: %s reports more children but returned no new page cursor", key)
+			return nil, provider.Errorf(provider.KindUnavailable,
+				"jira: %s reports more children but returned no new page cursor", key)
 		}
 		token = resp.NextPageToken
 	}

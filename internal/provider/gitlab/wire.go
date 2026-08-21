@@ -257,8 +257,8 @@ func newEpicFromEpic(e epicWire, host, group string) model.Epic {
 		// rather than being invented from the author.
 		Repository: group,
 		// PullRequests stays nil: this driver does not declare the PullRequests
-		// Capability, so the section is silently absent. #15 turns both on
-		// together.
+		// Capability, so the section is silently absent. The Capability and
+		// this field are turned on together.
 	}
 }
 

@@ -383,7 +383,7 @@ func TestRenderBreadcrumb(t *testing.T) {
 }
 
 // The Detail screen consumes a DetailInput, not a list. This is the executable
-// form of that contract, and the shape #11 fills for a Ticket Ref decoded
+// form of that contract, and the shape the decoder fills for a Ticket Ref decoded
 // straight into Detail: a hand-built DetailInput with no list behind it renders,
 // breadcrumb seat and all.
 func TestDetailFrameFromAHandBuiltInput(t *testing.T) {

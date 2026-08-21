@@ -22,10 +22,14 @@ package github
 // paginate. It is a cap rather than a page because ADR-0003 makes the epic
 // document one request for the whole polled path, and paginating a nested
 // connection per Ticket is exactly the N-request fan-out that split exists to
-// prevent. Twenty is far past what a readable Ticket has, and totalCount is
-// selected so the driver knows when it truncated: a Ticket with more closing
-// pull requests than the cap can be reported honestly rather than silently
-// losing the one that matters.
+// prevent. Twenty is far past what a readable Ticket has, but the truncation is
+// silent: a Ticket with more than twenty closing pull requests shows twenty of
+// them and says nothing about the rest. totalCount is selected so that a
+// renderer could one day say "showing 20 of 34"; nothing renders it today.
+//
+// createdAt is selected because it is what orders the lead pull request. A
+// pull request number is unique only within its repository, so a cross-repo
+// pull request with a larger number can be the older one; see leadIndex.
 //
 // The root issue carries three selections its children already had — parent,
 // assignees and closedByPullRequestsReferences — because an Epic Ref may name a
@@ -46,7 +50,7 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
       closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
         totalCount
         nodes {
-          number title url state isDraft reviewDecision
+          number title url state isDraft reviewDecision createdAt
           repository { nameWithOwner }
           commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
         }
@@ -61,7 +65,7 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
           closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
             totalCount
             nodes {
-              number title url state isDraft reviewDecision
+              number title url state isDraft reviewDecision createdAt
               repository { nameWithOwner }
               commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
             }

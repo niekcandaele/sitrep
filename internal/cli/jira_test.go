@@ -65,7 +65,7 @@ func replayJira(t *testing.T) *httptest.Server {
 }
 
 // jiraProvider is the driver a Jira Profile would construct, pointed at the
-// replay server. #12 left no way to redirect a constructed driver's base URL
+// replay server. There is no way to redirect a constructed driver's base URL
 // from the command line, and there should not be one: injecting the constructed
 // Provider is the seam Deps already has, and widening Deps for a test would put
 // a test-only knob in the production path.

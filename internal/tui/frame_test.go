@@ -86,6 +86,39 @@ func TestEnsureVisible(t *testing.T) {
 	}
 }
 
+// A meta line cut mid-word reads as a complete answer about the wrong thing:
+// "ci FAIL" clipped to "ci FA" is a truncated CI verdict that looks whole. The
+// ellipsis is the difference between a short answer and a wrong one.
+func TestMetaLineTruncatesWithAnEllipsis(t *testing.T) {
+	t3 := ticket("#1", model.StatusTodo)
+	t3.NativeStatus = "Selected for Development"
+	t3.Assignees = []model.User{{Login: "mara-vos"}, {Login: "tobias"}}
+	t3.PullRequests = []model.PullRequest{{
+		Number: 501, State: model.PROpen,
+		Checks: model.ChecksFailing, Review: model.ReviewChangesRequested,
+	}}
+
+	const (
+		width     = 60
+		keyColumn = 6
+	)
+	budget := width - selectionGutter - keyColumn
+
+	lines := rowLines([]Row{{Kind: RowTicket, Ticket: t3}}, 0, keyColumn, width,
+		false, model.Capabilities{PullRequests: true}, Styles{})
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want a title and a meta line: %q", len(lines), lines)
+	}
+
+	meta := strings.TrimRight(lines[1], " ")
+	if !strings.HasSuffix(meta, "…") {
+		t.Errorf("meta line %q does not end in an ellipsis; a clipped verdict reads as a whole one", meta)
+	}
+	if w := lipgloss.Width(meta) - selectionGutter - keyColumn; w > budget {
+		t.Errorf("meta line is %d cells of content, want at most the title's budget of %d", w, budget)
+	}
+}
+
 // renderRows pads its output so the footer sits at the bottom of the screen
 // rather than floating under a short list, and never emits a line wider than
 // the terminal — a wrapped line would silently break the arithmetic above.

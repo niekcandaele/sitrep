@@ -184,7 +184,7 @@ func TestTicketIDEncoding(t *testing.T) {
 }
 
 // A milestone Epic's Key is exactly the reference form internal/ref reads back,
-// which is what makes it typeable — and what #11's walk-up relies on.
+// which is what makes it typeable — and what the decoder's walk-up relies on.
 func TestMilestoneStringIsAReferenceRefAccepts(t *testing.T) {
 	targets := []target{
 		{kind: kindProjectMilestone, path: "acme/widgets", iid: 3},
