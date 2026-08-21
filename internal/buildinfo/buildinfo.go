@@ -19,7 +19,10 @@ var (
 	Version = "dev"
 	// Commit is the short commit hash the binary was built from.
 	Commit = "none"
-	// Date is the RFC 3339 build timestamp.
+	// Date is the RFC 3339 timestamp of the commit the binary was built from.
+	// It is the commit's time rather than the build's so that two builds of one
+	// commit are identical; nothing here parses it, so a release pipeline may
+	// stamp any string a human can read.
 	Date = "unknown"
 )
 
