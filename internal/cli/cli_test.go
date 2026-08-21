@@ -54,10 +54,10 @@ func TestRun(t *testing.T) {
 			wantEmptyOut: true,
 		},
 		{
-			name:           "help documents the json and provider flags",
+			name:           "help documents the one-shot modes and the provider flag",
 			args:           []string{"--help"},
 			wantCode:       0,
-			wantStdout:     []string{"--json", "--provider"},
+			wantStdout:     []string{"--json", "--plain", "--provider"},
 			wantEmptyError: true,
 		},
 		{

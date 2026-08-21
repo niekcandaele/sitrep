@@ -24,6 +24,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider/github"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
+	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
 // Exit codes returned by Run. They are a contract: 0 means the report was
@@ -51,6 +52,7 @@ Arguments:
 Flags:
   -h, --help              show this help and exit
       --json              print the epic as a JSON document and exit
+      --plain             print a one-shot text snapshot of the epic and exit
       --provider <name>   Provider to read from: "auto" (the default) picks one
                           from the Epic Ref, "github" forces the GitHub driver,
                           "fake" serves a built-in fixture epic
@@ -94,6 +96,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	showVersion := fs.Bool("version", false, "show version information and exit")
 	asJSON := fs.Bool("json", false, "print the epic as a JSON document and exit")
+	asPlain := fs.Bool("plain", false, "print a one-shot text snapshot of the epic and exit")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 
 	positional, err := parseArgs(fs, args)
@@ -109,6 +112,12 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	if *showVersion {
 		fmt.Fprintln(stdout, buildinfo.String())
 		return exitOK
+	}
+
+	// Two one-shot renderers cannot both own stdout, and silently preferring
+	// one would hide a scripting mistake.
+	if *asJSON && *asPlain {
+		return usageError(stderr, "--json and --plain are mutually exclusive")
 	}
 
 	if len(positional) == 0 {
@@ -139,18 +148,31 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		}
 	}
 
-	if !*asJSON {
-		fmt.Fprintf(stderr, "%s: the terminal report is not implemented yet; use --json\n", buildinfo.Name)
-		return exitUsage
+	switch {
+	case *asJSON:
+		render := func(w io.Writer, snap model.EpicSnapshot) error {
+			return jsonout.RenderEpic(w, snap, p.Name())
+		}
+		return runOneShot(ctx, stdout, stderr, p, r, deps.now(), render)
+	case *asPlain:
+		return runOneShot(ctx, stdout, stderr, p, r, deps.now(), plain.RenderEpic)
 	}
 
-	return runJSON(ctx, stdout, stderr, p, r, deps.now())
+	fmt.Fprintf(stderr, "%s: the terminal report is not implemented yet; use --json or --plain\n", buildinfo.Name)
+	return exitUsage
 }
 
-// runJSON produces the epic document for one ref. It renders into a buffer and
-// only then copies to stdout: a half-written document followed by an error
-// would poison whatever is consuming it.
-func runJSON(ctx context.Context, stdout, stderr io.Writer, p provider.Provider, r ref.Ref, now time.Time) int {
+// runOneShot fetches the Epic once and writes one rendered report to stdout.
+// render is the mode's renderer; everything before it — ref resolution,
+// Provider construction, the single batched fetch, the clock stamp — is shared,
+// which is what makes --plain and --json two views of one code path rather than
+// two programs.
+//
+// It renders into a buffer and only then copies to stdout: a half-written
+// report followed by an error would poison whatever is consuming it, whether
+// that is a script reading JSON or a human reading text.
+func runOneShot(ctx context.Context, stdout, stderr io.Writer, p provider.Provider, r ref.Ref,
+	now time.Time, render func(io.Writer, model.EpicSnapshot) error) int {
 	snap, err := p.FetchEpic(ctx, r)
 	if err != nil {
 		return runtimeError(stderr, err)
@@ -162,7 +184,7 @@ func runJSON(ctx context.Context, stdout, stderr io.Writer, p provider.Provider,
 	}
 
 	var buf bytes.Buffer
-	if err := jsonout.RenderEpic(&buf, snap, p.Name()); err != nil {
+	if err := render(&buf, snap); err != nil {
 		return runtimeError(stderr, err)
 	}
 	if _, err := io.Copy(stdout, &buf); err != nil {

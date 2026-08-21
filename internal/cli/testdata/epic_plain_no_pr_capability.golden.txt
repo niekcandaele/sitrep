@@ -1,0 +1,33 @@
+
+Epic #111  Widget sync v2: shards, retries & telemetry
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done  1 cancelled  33%
+https://tracker.example.test/acme/widgets/111
+
+IN PROGRESS (3)
+  #112     Draft the shard sync protocol
+           [In Review]  @mara-vos
+  #113     Retry & backoff for the sync worker
+           [In Progress]  @mara-vos @tobias
+  #7       Teach the gadget agent to speak sync v2
+           [In Progress]
+
+TODO (3)
+  #115     Reconcile widget IDs across shards
+           [open]
+  #116     Protocol conformance tests
+           [Selected for Development]  @tobias
+  #117     Renseigner la métrique « éclair » du tableau de bord
+           [open]
+
+DONE (3)
+  #118     Cache shard lookups
+           [closed]  @mara-vos
+  #119     Emit sync telemetry
+           [Done]  @tobias
+  #120     Write the sync v2 runbook
+           [closed]
+
+CANCELLED (1)
+  #121     Mirror shards to the legacy feed
+           [not planned]
+
