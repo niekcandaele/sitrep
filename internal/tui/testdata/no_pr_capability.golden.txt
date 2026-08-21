@@ -37,4 +37,4 @@ CANCELLED (1)
 
 
 
-↑/k up • ↓/j down • r refresh • ? help • q quit
+↑/k up • ↓/j down • d hide finished • / find • r refresh • ? help • q quit

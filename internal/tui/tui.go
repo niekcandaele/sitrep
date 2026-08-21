@@ -20,6 +20,26 @@
 // per-group counts, by contrast, come from the rows actually built. The single
 // call site those rows are derived through is Model.visibleTickets.
 //
+// # Filtering is a pure function at one call site
+//
+// The hide-finished toggle and the fuzzy find are one Filter, applied by
+// Model.visibleTickets to Tickets already in memory. Nothing else in the row
+// pipeline knows a filter exists: BuildRows, renderRows and the Source are all
+// unchanged by it, and no filter change reaches a Provider — clearing a filter
+// restores every Ticket with no refetch, because m.input was never touched.
+//
+// The find matches a Ticket's key and title and nothing else. Native Status is
+// excluded deliberately: CONTEXT.md has it displayed as-is and never filtered
+// on, because every Tracker words it differently.
+//
+// # The esc ladder
+//
+// esc escapes one thing at a time: the find box, then the filter, then the
+// program. q and ctrl+c still quit unconditionally from the list, so a filter
+// can never trap anyone. Inside the find box every other key is text — q types
+// a q — because a find box that quits when you search for "queue" is worse
+// than no find box.
+//
 // # Why the list is hand-rolled
 //
 // ADR-0001 names bubbles/list and bubbles/viewport as available, not

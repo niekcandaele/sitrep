@@ -26,6 +26,12 @@ cadence — `sitrep 111 --interval 15s` — down to a floor of 5 seconds, becaus
 API is rate-limited. A refresh that fails leaves the last good reading on screen and says
 so in the footer rather than blanking or exiting.
 
+Two keys narrow what the list shows. `d` hides Done and Cancelled Tickets, and the progress
+bar keeps counting the whole Epic while they are hidden, so the header still says how far
+along the work really is. `/` opens a fuzzy find over Ticket titles and keys — type to
+narrow the list as you go, `enter` to keep the query and close the box. `esc` clears the
+filter, and clears the find box first if it is open.
+
 `--plain` prints the same information once. It emits no ANSI escape sequences and never
 takes over the screen, so it is safe over SSH, in a log file, or piped into something else.
 `--json` prints the same snapshot as a stable, documented wire format.

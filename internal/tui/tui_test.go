@@ -106,14 +106,30 @@ func (s *session) beat() {
 	s.tm.Send(heartbeatMsg(s.clock.now()))
 }
 
-// finish quits the program and returns the frame it settled on. The final
-// model's own View is the frame: the accumulated output of an alternate-screen
-// session is every repaint concatenated, and a golden of that asserts the
-// history of the screen rather than the screen.
+// typeText sends one key press per rune, the way a human types.
+func (s *session) typeText(text string) {
+	for _, r := range text {
+		s.tm.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+}
+
+// finish quits the program with q and returns the frame it settled on.
 func (s *session) finish(t *testing.T) (Model, []byte) {
 	t.Helper()
+	return s.finishWith(t, keyPress("q"))
+}
 
-	s.tm.Send(keyPress("q"))
+// finishWith quits the program with a specific key and returns the frame it
+// settled on. The final model's own View is the frame: the accumulated output
+// of an alternate-screen session is every repaint concatenated, and a golden of
+// that asserts the history of the screen rather than the screen.
+//
+// A session that ends inside the find box has to quit with ctrl+c, because
+// there a q is a q.
+func (s *session) finishWith(t *testing.T, quit tea.KeyPressMsg) (Model, []byte) {
+	t.Helper()
+
+	s.tm.Send(quit)
 	s.tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
 
 	m, ok := s.tm.FinalModel(t).(Model)

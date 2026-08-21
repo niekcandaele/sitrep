@@ -1,0 +1,40 @@
+#111  Widget sync v2: shards, retries & telemetry                          https://tracker.example.test/acme/widgets/111
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
+
+IN PROGRESS (1)
+▸ #112     Draft the shard sync protocol
+           [In Review]  @mara-vos  #501 open ci ok changes req
+
+TODO (1)
+  #115     Reconcile widget IDs across shards
+           [open]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+filter: done+cancelled hidden · "shard" · 2 of 10 Tickets                                                      esc clear
+↑/k up • ↓/j down • d hide finished • / find • esc clear filter • r refresh • ? help • q quit

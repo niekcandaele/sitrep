@@ -1,5 +1,5 @@
 #111  Widget sync v2: shards, retries & telemetry                          https://tracker.example.test/acme/widgets/111
-█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                               updated 45s ago
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
 
 IN PROGRESS (3)
 ▸ #112     Draft the shard sync protocol
@@ -17,17 +17,6 @@ TODO (3)
   #117     Renseigner la métrique « éclair » du tableau de bord
            [open]
 
-DONE (3)
-  #118     Cache shard lookups
-           [closed]  @mara-vos  #504 merged
-  #119     Emit sync telemetry
-           [Done]  @tobias
-  #120     Write the sync v2 runbook
-           [closed]
-
-CANCELLED (1)
-  #121     Mirror shards to the legacy feed
-           [not planned]
 
 
 
@@ -36,5 +25,16 @@ CANCELLED (1)
 
 
 
-refresh failed: dial tcp: lookup tracker.example.test: no such host · retrying in 60s
-↑/k up • ↓/j down • d hide finished • / find • r refresh • ? help • q quit
+
+
+
+
+
+
+
+
+
+
+
+filter: done+cancelled hidden · 6 of 10 Tickets                                                                esc clear
+↑/k up • ↓/j down • d hide finished • / find • esc clear filter • r refresh • ? help • q quit

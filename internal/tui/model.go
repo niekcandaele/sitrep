@@ -3,15 +3,18 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
 // Model is the monitor's state: the last good reading of the collection, the
@@ -33,13 +36,25 @@ type Model struct {
 	selectedID model.TicketID
 	offset     int
 
+	// filter is the session's view filter. It is applied on the way to the
+	// screen and never persisted: #12 owns configuration, and this is a
+	// keystroke, not a setting.
+	filter Filter
+	// searching is true while the find box owns the keyboard.
+	searching bool
+	// search holds the draft query; filter.Query holds what the list is
+	// actually narrowed by. They are kept in step on every keystroke, and are
+	// separate so that esc can drop both in one move.
+	search textinput.Model
+
 	width, height int
 	ready         bool
 
-	keys     KeyMap
-	help     help.Model
-	styles   Styles
-	quitting bool
+	keys       KeyMap
+	searchKeys SearchKeyMap
+	help       help.Model
+	styles     Styles
+	quitting   bool
 }
 
 // New returns the monitor's Model reading from opts.Source.
@@ -56,6 +71,14 @@ func New(ctx context.Context, opts Options) Model {
 	}
 	src := opts.Source
 
+	// The box draws no cursor of its own: the real terminal cursor is placed
+	// on it from View, which keeps the frame free of a blinking glyph that a
+	// golden would have to guess the phase of.
+	search := textinput.New()
+	search.Prompt = searchPrompt
+	search.CharLimit = 0
+	search.SetVirtualCursor(false)
+
 	return Model{
 		fetch:    func() (ListInput, error) { return src(ctx) },
 		now:      now,
@@ -64,7 +87,9 @@ func New(ctx context.Context, opts Options) Model {
 		generation:  1,
 		refreshing:  true,
 		lastAttempt: now(),
+		search:      search,
 		keys:        DefaultKeyMap(),
+		searchKeys:  DefaultSearchKeyMap(),
 		help:        help.New(),
 		styles:      DefaultStyles(true),
 	}
@@ -83,6 +108,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.help.SetWidth(msg.Width)
+		m.search.SetWidth(searchBoxWidth(msg.Width))
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 		return m, nil
 
@@ -97,7 +123,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onRefreshed(msg), nil
 
 	case tea.KeyPressMsg:
+		// The mode decides who owns the keyboard, before any binding is
+		// consulted: while the box is open every list command is text.
+		if m.searching {
+			return m.onSearchKey(msg)
+		}
 		return m.onKey(msg)
+
+	case tea.PasteMsg:
+		// A pasted Ticket key is the obvious way to use this box, and a paste
+		// arrives as its own message rather than as key presses.
+		if m.searching {
+			return m.updateSearch(msg)
+		}
 	}
 	return m, nil
 }
@@ -115,16 +153,35 @@ func (m Model) View() tea.View {
 	}
 
 	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
-	footer := m.renderFooter()
-	v.SetContent(strings.Join([]string{header, m.renderBody(), footer}, "\n"))
+	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
+	v.Cursor = m.cursor()
 	return v
 }
 
-// visibleTickets returns the Tickets the list is currently showing. Today that
-// is all of them; a hide-done toggle or a fuzzy find replaces the body of this
-// method and nothing else — which is why the header's progress is computed
-// from m.input.Tickets instead, and cannot be moved by a filter.
-func (m Model) visibleTickets() []model.Ticket { return m.input.Tickets }
+// cursor places the real terminal cursor inside the find box, and nowhere else:
+// the list marks its selection with "▸", and a second cursor parked in the
+// top-left corner only draws the eye away from it.
+func (m Model) cursor() *tea.Cursor {
+	if !m.searching {
+		return nil
+	}
+	c := m.search.Cursor()
+	if c == nil {
+		return nil
+	}
+	// The box is drawn at column 0 of the filter line, so only the row needs
+	// shifting: past the header, past the body, and past the footer's blank
+	// spacer and any refresh error above it.
+	c.Y += headerHeight + m.bodyHeight() + m.filterLineIndex()
+	return c
+}
+
+// visibleTickets returns the Tickets the list is currently showing: the last
+// good reading narrowed by the session's Filter. This is the single call site
+// filtering happens at — the rows, and only the rows, are built from it. The
+// header's progress is deliberately computed from m.input.Tickets instead, so
+// no filter can move the bar.
+func (m Model) visibleTickets() []model.Ticket { return m.filter.Apply(m.input.Tickets) }
 
 // onHeartbeat re-arms the timer and starts a refresh when the interval has
 // elapsed. The beat is also what makes the staleness indicator count up
@@ -187,7 +244,16 @@ func (m Model) onRefreshed(msg refreshedMsg) Model {
 // under a live cursor every interval: following the Ticket by its ID rather
 // than its position is what stops the selection sliding onto whatever moved
 // into that slot.
+// The same path runs after a filter change: a Filter narrows the list under a
+// live cursor exactly the way a refresh does, so the two share the clamp rather
+// than each keeping their own opinion of where the cursor should land.
 func (m Model) rebuildRows() Model {
+	// esc means "clear the filter" only while there is one to clear;
+	// otherwise it falls through to Quit. Keeping the binding's enabled state
+	// in step with the Filter is what makes both the matching and the help
+	// line say the same thing.
+	m.keys.ClearFilter.SetEnabled(m.filter.Active())
+
 	m.rows = BuildRows(m.visibleTickets())
 
 	if found, ok := rowOf(m.rows, m.selectedID); ok {
@@ -200,9 +266,31 @@ func (m Model) rebuildRows() Model {
 	return m
 }
 
-// onKey dispatches a key press.
+// onKey dispatches a key press in list mode.
+//
+// ClearFilter is matched before Quit because both answer to esc: the ladder is
+// escape the box, then escape the filter, then escape the program. q and ctrl+c
+// still quit unconditionally, so nobody is trapped by a filter.
 func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, m.keys.ClearFilter):
+		return m.setFilter(Filter{}), nil
+
+	case key.Matches(msg, m.keys.HideFinished):
+		m.filter.HideFinished = !m.filter.HideFinished
+		return m.setFilter(m.filter), nil
+
+	case key.Matches(msg, m.keys.Find):
+		m.searching = true
+		// The box re-opens holding the applied query, so / is how you edit
+		// what you last searched for rather than only how you start again.
+		m.search.SetValue(m.filter.Query)
+		m.search.CursorEnd()
+		cmd := m.search.Focus()
+		// Opening the box adds a footer line, which takes one from the body.
+		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+		return m, cmd
+
 	case key.Matches(msg, m.keys.Quit):
 		m.quitting = true
 		return m, tea.Quit
@@ -238,6 +326,75 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.jump(len(m.rows)-1, -1), nil
 	}
 	return m, nil
+}
+
+// onSearchKey dispatches a key press while the find box is open. Only the four
+// bindings SearchKeyMap declares are intercepted; everything else — including
+// q, d, r and ? — is text, because a find box that quits the program when you
+// search for "queue" is worse than no find box.
+func (m Model) onSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.searchKeys.Quit):
+		m.quitting = true
+		return m, tea.Quit
+
+	case key.Matches(msg, m.searchKeys.Cancel):
+		// Abandon: the draft and the applied query go together. HideFinished
+		// survives — it was not part of this interaction.
+		m.searching = false
+		m.search.Blur()
+		return m.setFilter(Filter{HideFinished: m.filter.HideFinished}), nil
+
+	case key.Matches(msg, m.searchKeys.Apply):
+		// Commit: the box closes and the list stays narrowed. The query is
+		// already applied — it has been narrowing live on every keystroke —
+		// so this only hands the keyboard back.
+		m.searching = false
+		m.search.Blur()
+		return m.setFilter(m.filter), nil
+
+	case key.Matches(msg, m.searchKeys.Move):
+		return m.moveList(msg), nil
+	}
+	return m.updateSearch(msg)
+}
+
+// moveList steps the list selection from inside the find box, so a query can be
+// narrowed and one of its hits picked without leaving the box.
+//
+// The list's own bindings answer to k and j as well as the arrows, and inside
+// the box a letter is text — so movement here is the arrow keys SearchKeyMap
+// names, and this only reads the direction off the one that matched.
+func (m Model) moveList(msg tea.KeyPressMsg) Model {
+	switch msg.String() {
+	case "up":
+		return m.move(-1)
+	case "down":
+		return m.move(1)
+	case "pgup":
+		return m.page(-1)
+	default:
+		return m.page(1)
+	}
+}
+
+// updateSearch feeds one message to the find box and re-applies the draft as
+// the live query, which is what narrows the list on every keystroke rather than
+// only on enter.
+func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.search, cmd = m.search.Update(msg)
+	m.filter.Query = m.search.Value()
+	return m.rebuildRows(), cmd
+}
+
+// setFilter applies f and rebuilds, keeping the find box's draft in step with
+// the query that is actually in force.
+func (m Model) setFilter(f Filter) Model {
+	m.filter = f
+	m.search.SetValue(f.Query)
+	m.search.CursorEnd()
+	return m.rebuildRows()
 }
 
 // move steps the selection by one selectable row in the given direction,
@@ -298,6 +455,13 @@ func (m Model) renderBody() string {
 	switch {
 	case m.hasData && len(m.rows) > 0:
 		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities, m.styles)
+	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
+		// Distinct from the empty collection below on purpose: "there is
+		// nothing here" and "you are hiding everything" look identical on
+		// screen, and a user who cannot tell them apart thinks sitrep is
+		// broken.
+		return pad(m.styles.EmptyFilter.Render(truncateLine(
+			"No Tickets match this filter.  Press esc to clear it.", m.width)), height)
 	case m.hasData:
 		return pad(m.styles.Muted.Render("This collection has no Tickets."), height)
 	case m.lastErr != nil:
@@ -313,18 +477,98 @@ func (m Model) renderBody() string {
 	}
 }
 
-// renderFooter draws the always-visible bottom block: the refresh error when
-// there is one, then the help line. The error is a single truncated line, not
-// a modal and not a stack trace — the list behind it is still the point.
-func (m Model) renderFooter() string {
+// footerLines is the always-visible bottom block, line by line: a blank
+// spacer, the refresh error when there is one, the filter state when there is
+// one, then the help line. The error is a single truncated line, not a modal
+// and not a stack trace — the list behind it is still the point.
+//
+// It is returned as lines rather than a block because the footer's height is
+// what the body is measured against, and because the find box needs to know
+// which row it was drawn on to put the cursor there.
+func (m Model) footerLines() []string {
 	lines := []string{""}
 	if m.lastErr != nil && m.hasData {
 		remaining := m.interval - m.now().Sub(m.lastAttempt)
 		lines = append(lines, m.styles.Error.Render(truncateLine(
 			fmt.Sprintf("refresh failed: %v%sretrying in %s", m.lastErr, separator, countdown(remaining)), m.width)))
 	}
+	if filter := m.renderFilterLine(); filter != "" {
+		lines = append(lines, filter)
+	}
 	// The expanded help is several lines, so it is clipped line by line.
-	return strings.Join(append(lines, truncateBlock(m.help.View(m.keys), m.width)), "\n")
+	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")...)
+}
+
+// renderFilterLine draws the footer's filter line: the find box while it is
+// open, the filter's state while one is on, and nothing at all otherwise — an
+// unfiltered screen is exactly the screen it was before this existed.
+//
+// Whichever it draws, it carries the "X of Y Tickets" count. That count is the
+// most important thing on the line: it is how a user reconciles a header that
+// says nine with a list showing six, and hidden work that looks like missing
+// work is this feature's whole failure mode.
+func (m Model) renderFilterLine() string {
+	if !m.searching && !m.filter.Active() {
+		return ""
+	}
+
+	count := fmt.Sprintf("%d of %d Tickets", len(m.visibleTickets()), len(m.input.Tickets))
+	if m.searching {
+		return pairLine(m.styles.SearchBox.Render(m.search.View()), m.styles.FilterLine.Render(count), m.width)
+	}
+
+	right := m.styles.FilterLine.Render("esc clear")
+	var parts []string
+	if m.filter.HideFinished {
+		// The key is labelled "hide finished"; the line spells out what
+		// actually left the screen, because Cancelled went with Done.
+		parts = append(parts, "done+cancelled hidden")
+	}
+	if query := m.filter.Query; query != "" {
+		// The query is what gets clipped when the line will not fit — the
+		// count is what carries the meaning, and the user typed the query and
+		// already knows it.
+		budget := m.width - lipgloss.Width(right) - len(filterPrefix) - len(count) - 3*len(separator)
+		parts = append(parts, strconv.Quote(plain.Truncate(query, max(budget, minQueryWidth))))
+	}
+	parts = append(parts, count)
+
+	return pairLine(m.styles.FilterLine.Render(filterPrefix+strings.Join(parts, separator)), right, m.width)
+}
+
+// filterPrefix labels the footer's filter line.
+const filterPrefix = "filter: "
+
+// minQueryWidth is how much of the query survives on a terminal too narrow for
+// the whole filter line. Below this the line says nothing useful at all.
+const minQueryWidth = 8
+
+// searchPrompt is the find box's prompt, matching the key that opens it.
+const searchPrompt = "/"
+
+// searchBoxWidth is how wide the find box may grow: enough to hold a real
+// query, never so much that it pushes the hit count off its own line.
+func searchBoxWidth(terminalWidth int) int {
+	return max(terminalWidth/2, minQueryWidth)
+}
+
+// filterLineIndex is which footer row the filter line occupies: after the blank
+// spacer and after the refresh error, when there is one.
+func (m Model) filterLineIndex() int {
+	if m.lastErr != nil && m.hasData {
+		return 2
+	}
+	return 1
+}
+
+// helpKeys is the keyboard surface the help line describes, which is the one
+// the keyboard is actually on. A footer offering list commands while the find
+// box holds the keyboard would be describing a program the user is not in.
+func (m Model) helpKeys() help.KeyMap {
+	if m.searching {
+		return m.searchKeys
+	}
+	return m.keys
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is
@@ -341,7 +585,7 @@ func (m Model) staleness() string {
 // would be a number to keep in step with a layout, and the frame that overflows
 // by one line is the frame that scrolls the alternate screen.
 func (m Model) bodyHeight() int {
-	return max(m.height-headerHeight-lipgloss.Height(m.renderFooter()), 1)
+	return max(m.height-headerHeight-len(m.footerLines()), 1)
 }
 
 // headerHeight is what renderHeader always draws: identity, progress, blank.

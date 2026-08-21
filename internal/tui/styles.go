@@ -49,6 +49,13 @@ type Styles struct {
 	PullRequestBad lipgloss.Style
 	// PullRequestBusy styles a fragment still waiting on checks or review.
 	PullRequestBusy lipgloss.Style
+	// FilterLine styles the footer's filter state and its Ticket count.
+	FilterLine lipgloss.Style
+	// SearchBox styles the find box while it holds the keyboard.
+	SearchBox lipgloss.Style
+	// EmptyFilter styles the notice that stands in for a list a filter has
+	// emptied.
+	EmptyFilter lipgloss.Style
 	// Error styles the refresh error line.
 	Error lipgloss.Style
 	// Muted styles secondary prose, such as the empty-collection notice.
@@ -98,6 +105,9 @@ func DefaultStyles(isDark bool) Styles {
 		PullRequestGood: base.Foreground(good),
 		PullRequestBad:  base.Foreground(bad),
 		PullRequestBusy: base.Foreground(busy),
+		FilterLine:      base.Foreground(dim),
+		SearchBox:       base.Foreground(accent).Bold(true),
+		EmptyFilter:     base.Foreground(dim),
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 	}
