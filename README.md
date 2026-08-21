@@ -4,12 +4,13 @@ A read-only terminal situation report on the work you delegated: one screen show
 Epic's Tickets, their status, and the code moving them — across GitHub, Jira, and GitLab.
 Agents write; sitrep watches. It never writes to a Tracker ([ADR-0002](docs/adr/0002-read-only-by-design.md)).
 
-sitrep is early: today it reads an Epic from GitHub and prints it once, as text or as JSON.
-The TUI lands in later work.
+sitrep is early: today it reads an Epic from GitHub, either as a live monitor you leave
+open or as a one-shot report. Jira and GitLab land in later work.
 
 ## Usage
 
 ```sh
+sitrep <ref>           # the live monitor: a full-screen, auto-refreshing epic view
 sitrep <ref> --plain   # a one-shot text report, for humans, dumb terminals and pipes
 sitrep <ref> --json    # the same epic as a JSON document, for scripts and agents
 ```
@@ -17,10 +18,17 @@ sitrep <ref> --json    # the same epic as a JSON document, for scripts and agent
 `<ref>` is the Epic Ref: a bare number (`111`, resolved through the current clone's
 `origin` remote), `owner/repo#111`, or the issue's full URL.
 
-`--plain` prints the Epic's Tickets grouped by status with a progress bar, assignees and
-the pull request moving each Ticket. It emits no ANSI escape sequences and never takes over
-the screen, so it is safe over SSH, in a log file, or piped into something else. `--json`
-prints the same snapshot as a stable, documented wire format.
+With no mode flag, sitrep opens the **monitor**: the Epic's Tickets grouped by status with
+a progress bar, assignees and the pull request moving each Ticket, refreshed every 60
+seconds with an indicator saying how old the reading is. Move with `↑`/`↓` (or `j`/`k`),
+refresh now with `r`, expand the key list with `?`, quit with `q`. `--interval` changes the
+cadence — `sitrep 111 --interval 15s` — down to a floor of 5 seconds, because a Tracker's
+API is rate-limited. A refresh that fails leaves the last good reading on screen and says
+so in the footer rather than blanking or exiting.
+
+`--plain` prints the same information once. It emits no ANSI escape sequences and never
+takes over the screen, so it is safe over SSH, in a log file, or piped into something else.
+`--json` prints the same snapshot as a stable, documented wire format.
 
 ## Install
 
@@ -65,6 +73,8 @@ cutting a release. Pushing a `v*` tag publishes the archives to GitHub Releases.
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
 ```
 
-Tests assert observable behaviour at seams — exit codes and terminal output — using the
-standard library only; there is no assertion dependency and `go.mod` carries no runtime
-dependencies.
+Tests assert observable behaviour at seams — exit codes, rendered reports and whole
+terminal frames — with no assertion library: the standard library, plus `teatest` to drive
+the monitor. The runtime dependencies are the Charm TUI stack the monitor is built on —
+Bubble Tea, Bubbles and Lip Gloss ([ADR-0001](docs/adr/0001-go-and-bubble-tea.md)) — and
+nothing else.

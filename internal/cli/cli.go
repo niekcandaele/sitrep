@@ -15,6 +15,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
@@ -25,6 +28,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/tui"
 )
 
 // Exit codes returned by Run. They are a contract: 0 means the report was
@@ -51,6 +55,7 @@ Arguments:
 
 Flags:
   -h, --help              show this help and exit
+      --interval <dur>    how often the monitor refreshes (default 60s)
       --json              print the epic as a JSON document and exit
       --plain             print a one-shot text snapshot of the epic and exit
       --provider <name>   Provider to read from: "auto" (the default) picks one
@@ -77,7 +82,17 @@ type Deps struct {
 	// TokenSource discovers the GitHub API token. When nil it is
 	// github.DefaultTokenSource.
 	TokenSource github.TokenSource
+	// Stdin is the monitor's input. When nil it is os.Stdin.
+	Stdin io.Reader
 }
+
+// The monitor's refresh cadence. The default is one named constant rather than
+// a literal in the flag call so a config Profile has a single thing to
+// override; the floor is a separate one so raising it is a one-line decision.
+const (
+	defaultRefreshInterval = 60 * time.Second
+	minRefreshInterval     = 5 * time.Second
+)
 
 // Run executes sitrep with the given command-line arguments (excluding argv[0])
 // and returns the process exit code.
@@ -98,6 +113,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	asJSON := fs.Bool("json", false, "print the epic as a JSON document and exit")
 	asPlain := fs.Bool("plain", false, "print a one-shot text snapshot of the epic and exit")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
+	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
 
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -118,6 +134,15 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// one would hide a scripting mistake.
 	if *asJSON && *asPlain {
 		return usageError(stderr, "--json and --plain are mutually exclusive")
+	}
+
+	// --interval only means anything to the monitor. Rejecting it beside a
+	// one-shot flag would fail a script for a setting the script never used;
+	// checking it only on the path that honours it keeps the error honest.
+	if !*asJSON && !*asPlain {
+		if code, ok := checkInterval(stderr, *interval); !ok {
+			return code
+		}
 	}
 
 	if len(positional) == 0 {
@@ -158,8 +183,47 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runOneShot(ctx, stdout, stderr, p, r, deps.now(), plain.RenderEpic)
 	}
 
-	fmt.Fprintf(stderr, "%s: the terminal report is not implemented yet; use --json or --plain\n", buildinfo.Name)
-	return exitUsage
+	return runMonitor(ctx, stdout, stderr, deps, p, r, *interval)
+}
+
+// runMonitor opens the live monitor and blocks until the user quits.
+//
+// The context is cancelled on SIGINT and SIGTERM so an in-flight FetchEpic
+// goes with it: without that, quitting a monitor that has just started a
+// refresh holds the process open for the Tracker's HTTP timeout.
+func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
+	p provider.Provider, r ref.Ref, interval time.Duration) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err := tui.Run(ctx, tui.Options{
+		Source:   tui.EpicSource(p, r, deps.clock()),
+		Interval: interval,
+		Now:      deps.clock(),
+		Input:    deps.stdin(),
+		Output:   stdout,
+	})
+	if err != nil {
+		// Bubble Tea is the one thing here that knows whether it has a
+		// terminal, so this is where "you are in a pipe" gets named — with the
+		// way out, since both one-shot modes work anywhere.
+		return runtimeError(stderr, fmt.Errorf("the monitor needs a terminal (use --plain or --json here): %w", err))
+	}
+	return exitOK
+}
+
+// checkInterval rejects a refresh cadence that would hammer a Tracker. sitrep
+// is read-only and polite: a sub-second poll is a way to get rate-limited, not
+// a feature.
+func checkInterval(stderr io.Writer, d time.Duration) (int, bool) {
+	switch {
+	case d <= 0:
+		return usageError(stderr, "refresh interval must be positive"), false
+	case d < minRefreshInterval:
+		return usageError(stderr, fmt.Sprintf("refresh interval must be at least %s", minRefreshInterval)), false
+	default:
+		return exitOK, true
+	}
 }
 
 // runOneShot fetches the Epic once and writes one rendered report to stdout.
@@ -178,10 +242,7 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, p provider.Provid
 		return runtimeError(stderr, err)
 	}
 
-	snap.FetchedAt = now
-	if snap.Capabilities == (model.Capabilities{}) {
-		snap.Capabilities = p.Capabilities()
-	}
+	snap = provider.StampSnapshot(p, snap, now)
 
 	var buf bytes.Buffer
 	if err := render(&buf, snap); err != nil {
@@ -229,6 +290,23 @@ func (d Deps) now() time.Time {
 		return time.Now()
 	}
 	return d.Now()
+}
+
+// clock returns the run's clock itself, for the monitor, which reads it on
+// every frame rather than once.
+func (d Deps) clock() func() time.Time {
+	if d.Now == nil {
+		return time.Now
+	}
+	return d.Now
+}
+
+// stdin returns the monitor's input.
+func (d Deps) stdin() io.Reader {
+	if d.Stdin == nil {
+		return os.Stdin
+	}
+	return d.Stdin
 }
 
 // The --provider names. The default auto-detects the Tracker from the Epic
