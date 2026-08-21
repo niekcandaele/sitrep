@@ -1,0 +1,48 @@
+version: 2
+
+project_name: sitrep
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sitrep
+    main: ./cmd/sitrep
+    binary: sitrep
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/niekcandaele/sitrep/internal/buildinfo.Version={{.Version}}
+      - -X github.com/niekcandaele/sitrep/internal/buildinfo.Commit={{.ShortCommit}}
+      - -X github.com/niekcandaele/sitrep/internal/buildinfo.Date={{.Date}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: sitrep
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  draft: false
+  prerelease: auto

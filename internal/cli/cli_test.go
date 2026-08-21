@@ -1,0 +1,92 @@
+package cli_test
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/niekcandaele/sitrep/internal/cli"
+)
+
+func TestRun(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		wantCode       int
+		wantStdout     []string
+		wantStderr     []string
+		wantEmptyOut   bool
+		wantEmptyError bool
+	}{
+		{
+			name:           "version prints build info to stdout",
+			args:           []string{"--version"},
+			wantCode:       0,
+			wantStdout:     []string{"sitrep "},
+			wantEmptyError: true,
+		},
+		{
+			name:           "long help prints usage to stdout",
+			args:           []string{"--help"},
+			wantCode:       0,
+			wantStdout:     []string{"sitrep", "sitrep [flags] <ref>", "--version"},
+			wantEmptyError: true,
+		},
+		{
+			name:           "short help prints usage to stdout",
+			args:           []string{"-h"},
+			wantCode:       0,
+			wantStdout:     []string{"sitrep [flags] <ref>"},
+			wantEmptyError: true,
+		},
+		{
+			name:         "unknown flag is a usage error on stderr",
+			args:         []string{"--nope"},
+			wantCode:     2,
+			wantStderr:   []string{"nope", "sitrep [flags] <ref>"},
+			wantEmptyOut: true,
+		},
+		{
+			name:         "no arguments demands a ref",
+			args:         nil,
+			wantCode:     2,
+			wantStderr:   []string{"Epic Ref is required", "sitrep [flags] <ref>"},
+			wantEmptyOut: true,
+		},
+		{
+			name:         "a ref is not implemented yet",
+			args:         []string{"123"},
+			wantCode:     2,
+			wantStderr:   []string{"not implemented yet"},
+			wantEmptyOut: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+
+			code := cli.Run(tt.args, &stdout, &stderr)
+
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d (stderr: %q)", code, tt.wantCode, stderr.String())
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+			if tt.wantEmptyOut && stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if tt.wantEmptyError && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
