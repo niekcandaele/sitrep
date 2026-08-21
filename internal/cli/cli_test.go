@@ -54,6 +54,27 @@ func TestRun(t *testing.T) {
 			wantEmptyOut: true,
 		},
 		{
+			name:           "help documents the json and provider flags",
+			args:           []string{"--help"},
+			wantCode:       0,
+			wantStdout:     []string{"--json", "--provider"},
+			wantEmptyError: true,
+		},
+		{
+			name:         "two refs are a usage error",
+			args:         []string{"111", "112"},
+			wantCode:     2,
+			wantStderr:   []string{"only one Epic Ref"},
+			wantEmptyOut: true,
+		},
+		{
+			name:         "an unknown provider is a usage error",
+			args:         []string{"--provider", "bogus", "111"},
+			wantCode:     2,
+			wantStderr:   []string{`unknown provider "bogus"`},
+			wantEmptyOut: true,
+		},
+		{
 			name:         "a ref is not implemented yet",
 			args:         []string{"123"},
 			wantCode:     2,
