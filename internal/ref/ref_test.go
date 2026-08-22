@@ -290,7 +290,7 @@ func TestParseRemoteURL(t *testing.T) {
 }
 
 // A Ref renders the way a human writes one, which means it can be typed back
-// in: the display key of a cross-repo child is a working Epic Ref.
+// in: the display key of a cross-repo child is a working Ref.
 func TestRefStringRoundTrips(t *testing.T) {
 	raws := []string{
 		"acme/widgets#111",

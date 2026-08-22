@@ -83,7 +83,7 @@ func replayGitLab(t *testing.T) *httptest.Server {
 			milestonePages++
 		case strings.HasSuffix(path, "/issues") && strings.Contains(path, "/milestones/"):
 			file = "milestone_issues_empty.json"
-		// The first Ticket of each collection carries a real merge request, so
+		// The first Ticket of each Watchlist carries a real merge request, so
 		// the whole-program assertion has something to find; the rest carry none.
 		case strings.HasSuffix(path, "/issues/101/closed_by"),
 			strings.HasSuffix(path, "/issues/201/closed_by"),
@@ -395,8 +395,8 @@ func TestBareNumberInAGitLabCloneReachesTheGitLabDriver(t *testing.T) {
 		Tracker: ref.TrackerGitLab, Host: "gitlab.com",
 		Owner: "acme", Repo: "widgets", Number: 7, Raw: "7",
 	}
-	if p.LastRef() != want {
-		t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), want)
+	if p.LastSelector().(provider.EpicSelector).Ref != want {
+		t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, want)
 	}
 }
 
@@ -427,7 +427,7 @@ profiles:
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Tracker != ref.TrackerGitLab || r.Host != "git.acme.test" {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Tracker != ref.TrackerGitLab || r.Host != "git.acme.test" {
 		t.Errorf("the Provider was given %+v, want gitlab at git.acme.test", r)
 	}
 }
@@ -447,7 +447,7 @@ func TestSelfManagedCloneWithNoProfileIsStillGitHub(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Tracker != ref.TrackerGitHub {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Tracker != ref.TrackerGitHub {
 		t.Errorf("the Provider was given %+v, want the GitHub Enterprise reading unchanged", r)
 	}
 }
@@ -488,8 +488,8 @@ func TestGitLabReferenceFormsResolveThroughAProfile(t *testing.T) {
 			if got.code != 0 {
 				t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 			}
-			if p.LastRef() != tt.want {
-				t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), tt.want)
+			if p.LastSelector().(provider.EpicSelector).Ref != tt.want {
+				t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, tt.want)
 			}
 		})
 	}

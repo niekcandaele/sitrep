@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // oneChildEpic serves an epic with a single child issue, so a test about merge
@@ -32,9 +33,9 @@ func oneChildEpic(t *testing.T, mrs ...response) *replayServer {
 // firstTicket fetches the one-child epic and returns its only Ticket.
 func firstTicket(t *testing.T, s *replayServer) model.Ticket {
 	t.Helper()
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(snap.Tickets) != 1 {
 		t.Fatalf("got %d Tickets, want the one child", len(snap.Tickets))
@@ -170,9 +171,9 @@ func TestCorrelationRefusesANextPageThatGoesBackwards(t *testing.T) {
 		{body: page1, headers: map[string]string{"x-next-page": "1"}},
 	}
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded on a next page that is not after this one")
+		t.Fatal("Resolve succeeded on a next page that is not after this one")
 	}
 	if !strings.Contains(err.Error(), "not after page 1") {
 		t.Errorf("error %q, want it to name the contradiction", err)
@@ -381,8 +382,8 @@ func TestSystemicApprovalsFailureFailsTheFetch(t *testing.T) {
 			s.responses[mergeRequestApprovalsPath] = []response{{status: status, body: `{}`}}
 
 			p := newProvider(s)
-			if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
-				t.Fatalf("FetchEpic succeeded; want the %d to fail the fetch", status)
+			if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err == nil {
+				t.Fatalf("Resolve succeeded; want the %d to fail the fetch", status)
 			}
 		})
 	}
@@ -451,9 +452,9 @@ func TestFinishedTicketsAreNeverReopened(t *testing.T) {
 		[]response{{file: "approvals_pending.json"}}
 	s := newReplayServer(t, responses)
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := []struct {
@@ -492,8 +493,8 @@ func TestCorrelationSendsExactlyWhatItNeeds(t *testing.T) {
 	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
 	s.responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	var correlations, approvals int
@@ -536,9 +537,9 @@ func TestCorrelationDegradesPerTicketOnNotFound(t *testing.T) {
 	s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{status: http.StatusNotFound, body: `{}`}}
 	s.responses[mergeRequestsPath("gitlab-org/cli", 102)] = []response{{file: "closed_by_lead.json"}}
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v; one invisible project must not sink the report", err)
+		t.Fatalf("Resolve: %v; one invisible project must not sink the report", err)
 	}
 	if len(snap.Tickets) != 10 {
 		t.Errorf("got %d Tickets, want the whole epic intact", len(snap.Tickets))
@@ -565,9 +566,9 @@ func TestCorrelationFailsOnForbidden(t *testing.T) {
 			s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{{file: "closed_by.json"}}
 			s.responses[path] = []response{{status: http.StatusForbidden, body: `{}`}}
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded; a refused request must not read as an absent one")
+				t.Fatal("Resolve succeeded; a refused request must not read as an absent one")
 			}
 			if !strings.HasPrefix(err.Error(), "gitlab: ") {
 				t.Errorf("error %q, want the driver's own attributed prose", err)
@@ -599,9 +600,9 @@ func TestCorrelationFailsTheFetchOnSystemicProblems(t *testing.T) {
 			s := fullEpic(t)
 			s.responses[mergeRequestsPath("gitlab-org/cli", 101)] = []response{tt.resp}
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded; a systemic failure hits every Ticket")
+				t.Fatal("Resolve succeeded; a systemic failure hits every Ticket")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q, want it to mention %q", err, tt.want)
@@ -626,8 +627,8 @@ func TestCorrelationIsCancellable(t *testing.T) {
 		}
 	}
 
-	if _, err := newProvider(s).FetchEpic(ctx, epicRef); err == nil {
-		t.Fatal("FetchEpic succeeded on a cancelled context, want an error")
+	if _, err := newProvider(s).Resolve(ctx, provider.EpicSelector{Ref: epicRef}); err == nil {
+		t.Fatal("Resolve succeeded on a cancelled context, want an error")
 	}
 	cancel()
 }
@@ -641,9 +642,9 @@ func TestDecodedIssueCarriesItsMergeRequests(t *testing.T) {
 		mergeRequestApprovalsPath: {{file: "approvals_approved.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(snap.Epic.PullRequests) != 1 {
 		t.Fatalf("Epic.PullRequests = %+v, want the one related merge request", snap.Epic.PullRequests)
@@ -659,17 +660,17 @@ func TestDecodedIssueCarriesItsMergeRequests(t *testing.T) {
 
 // A collection is not an issue: there is no endpoint and no meaning.
 func TestCollectionsCarryNoMergeRequestsOfTheirOwn(t *testing.T) {
-	epic, err := newProvider(fullEpic(t)).FetchEpic(context.Background(), epicRef)
+	epic, err := newProvider(fullEpic(t)).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if epic.Epic.PullRequests != nil {
 		t.Errorf("an epic's Epic.PullRequests = %+v, want nil", epic.Epic.PullRequests)
 	}
 
-	milestone, err := newProvider(fullProjectMilestone(t)).FetchEpic(context.Background(), projectMilestoneRef)
+	milestone, err := newProvider(fullProjectMilestone(t)).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if milestone.Epic.PullRequests != nil {
 		t.Errorf("a milestone's Epic.PullRequests = %+v, want nil", milestone.Epic.PullRequests)

@@ -9,13 +9,13 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// The decode rule has one name and one test: children mean a collection, no
+// The decode rule has one name and one test: children mean a Watchlist, no
 // children mean the Ref named a Ticket. Everything else in this ticket follows
 // from this line, so it is asserted here rather than through six layers.
 func TestDecodesToTicket(t *testing.T) {
 	tests := []struct {
 		name string
-		snap model.EpicSnapshot
+		snap model.WatchlistSnapshot
 		want bool
 	}{
 		{"the fixture Epic", fake.FixtureSnapshot(), false},
@@ -23,7 +23,7 @@ func TestDecodesToTicket(t *testing.T) {
 		{"a Ticket with no parent", fake.FixtureOrphanTicketSnapshot(), true},
 		// §7.1's flagged consequence, asserted rather than discovered: an Epic
 		// with no Tickets yet opens as its own Detail.
-		{"a collection with nothing in it yet", model.EpicSnapshot{Epic: model.Epic{Key: "#900"}}, true},
+		{"a collection with nothing in it yet", model.WatchlistSnapshot{Epic: model.Epic{Key: "#900"}}, true},
 	}
 
 	for _, tt := range tests {
@@ -99,7 +99,7 @@ func TestDecodedMonitorOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			snap := model.EpicSnapshot{
+			snap := model.WatchlistSnapshot{
 				Epic:         ticket,
 				Parent:       tt.parent,
 				Capabilities: model.Capabilities{Comments: true},

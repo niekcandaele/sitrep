@@ -44,7 +44,7 @@ type Epic struct {
 	// package may branch on it.
 	NativeStatus string
 	// Assignees are the people the Epic is assigned to; may be empty. It exists
-	// for the Detail header a decoded Ticket is drawn with — an Epic Ref that
+	// for the Detail header a decoded Ticket is drawn with — a Ref that
 	// named a Ticket comes back as this Epic — and the epic renderers
 	// deliberately do not draw it.
 	Assignees []User
@@ -57,8 +57,8 @@ type Epic struct {
 	PullRequests []PullRequest
 }
 
-// Parent is the collection a Ticket belongs to: enough to draw a breadcrumb and
-// to re-enter sitrep on. Its Key and URL are both written in forms the Epic Ref
+// Parent is the parent Ticket a Ticket belongs to: enough to draw a breadcrumb
+// and to re-enter sitrep on. Its Key and URL are both written in forms the Ref
 // grammar accepts, so navigating up is a re-parse rather than a second lookup.
 // The zero value means "no parent", which is a normal state, never an error.
 type Parent struct {

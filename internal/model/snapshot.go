@@ -2,24 +2,22 @@ package model
 
 import "time"
 
-// EpicSnapshot is one batched read of an Epic and its Tickets: the result of a
-// single Provider.FetchEpic call and the unit the TUI re-fetches on every
-// refresh.
+// WatchlistSnapshot is one batched reading of a Watchlist produced by
+// Provider.Resolve and re-read by the TUI on every refresh.
 //
-// A batched fetch answers "what does this Epic Ref point at, and what hangs off
-// it". A Ref that turns out to name a plain Ticket comes back as a snapshot with
-// no Tickets, whose Epic field carries that Ticket's own identity and whose
-// Parent carries the Epic it belongs to. Deciding what to do about that is the
-// caller's job (internal/cli), not the Provider's: a Provider reports what the
-// Tracker says and never picks a screen.
-type EpicSnapshot struct {
+// Resolve answers what a Selector points at. A Ref that turns out to name a
+// plain Ticket comes back as a snapshot with no Tickets, whose Epic field
+// carries that Ticket's own identity and whose Parent carries its parent Ticket.
+// Deciding what to do about that is the caller's job (internal/cli), not the
+// Provider's: a Provider reports what the Tracker says and never picks a screen.
+type WatchlistSnapshot struct {
 	// Epic is the parent being monitored.
 	Epic Epic
 	// Tickets are the Epic's children in the Provider's own stable order.
 	// Grouping is a rendering concern; the model never reorders.
 	Tickets []Ticket
-	// Parent is the collection the fetched node itself belongs to, when the
-	// Tracker exposes one and declares the Hierarchy Capability. It is what a Ref
+	// Parent is the parent Ticket of the fetched node, when the Tracker exposes
+	// one and declares the Hierarchy Capability. It is what a Ref
 	// naming a plain Ticket is decoded through: the breadcrumb above that
 	// Ticket's Detail and the Epic the monitor walks up into. Zero means "no
 	// parent", which is a normal state.

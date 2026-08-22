@@ -14,7 +14,7 @@ import (
 )
 
 // detailID is the node ID the Detail fixtures were recorded for. It is a
-// model.TicketID because that is exactly what FetchEpic puts on every Ticket:
+// model.TicketID because that is exactly what Resolve puts on every Ticket:
 // GitHub's GraphQL node ID is the Ticket's identity for this driver.
 const detailID = model.TicketID("I_kwDOT_WhQ88AAAABNqYEOA")
 
@@ -227,8 +227,8 @@ func TestFetchDetailIsOneRequest(t *testing.T) {
 func TestTheEpicQueryCarriesNoDetailSelection(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	requests := s.recorded()

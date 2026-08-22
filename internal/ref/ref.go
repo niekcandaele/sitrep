@@ -1,8 +1,8 @@
-// Package ref owns sitrep's Epic Ref grammar: turning what a human typed into a
-// resolved pointer at one Epic.
+// Package ref owns sitrep's Ref grammar: turning what a human typed into a
+// resolved pointer at one Ticket or one Epic.
 //
 // A Ref is a value, resolved exactly once by the caller before a Provider is
-// chosen. That matters because Provider.FetchEpic is the polled hot path: if the
+// chosen. That matters because Provider.Resolve is the polled hot path: if the
 // bare-number form were re-resolved there, every refresh would fork a git
 // subprocess forever.
 //
@@ -19,7 +19,7 @@ import (
 	"strings"
 )
 
-// Tracker identifies which Tracker an Epic Ref points at.
+// Tracker identifies which Tracker a Ref points at.
 type Tracker string
 
 // The Trackers sitrep knows how to name. Every one of them has a Provider; a
@@ -35,8 +35,8 @@ const (
 	TrackerJira Tracker = "jira"
 )
 
-// Ref is a resolved Epic Ref: everything a Provider needs to locate an Epic,
-// with the user's original input kept for error messages.
+// Ref is a resolved pointer: everything a Provider needs to locate one Ticket
+// or Epic, with the user's original input kept for error messages.
 type Ref struct {
 	// Tracker says which Provider serves this Ref.
 	Tracker Tracker
@@ -50,7 +50,7 @@ type Ref struct {
 	// reads it.
 	Repo string
 	// Number is the tracker-native issue number. Zero when the Ref names no
-	// single Epic, as ParseRemoteURL returns.
+	// single Ticket or Epic, as ParseRemoteURL returns.
 	Number int
 	// Key is the Jira-style key, e.g. "PROJ-12", always upper-cased, GitLab's
 	// own native epic reference, e.g. "acme/platform&12", or GitLab's milestone
@@ -111,7 +111,7 @@ func WithDir(dir string) Option {
 // "111" against where this clone came from, not against an arbitrary fork.
 const originRemote = "origin"
 
-// Parse resolves a user-supplied Epic Ref string. It accepts, in this order, a
+// Parse resolves a user-supplied Ref string. It accepts, in this order, a
 // full issue URL, "owner/repo#111" (or "owner/repo/111"), a Jira-style key such
 // as "ABC-123", and a bare number such as "111" or "#111", which is resolved
 // through the working directory's git origin remote.
@@ -139,7 +139,7 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	}
 	// GitLab's own reference form, "&12" or "acme/platform&12", is tried before
 	// the owner/repo forms because it cannot collide with any of them: no other
-	// Epic Ref form contains an "&" at all, so a string carrying one is either
+	// Ref form contains an "&" at all, so a string carrying one is either
 	// this form or nothing.
 	if r, ok := parseGitLabReference(trimmed, raw); ok {
 		return r, nil
@@ -148,7 +148,7 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	// the same reason and one more: the order is load-bearing. Left to
 	// parseOwnerRepoNumber, "acme/platform/core%3" would be split on its last
 	// "/", found to have a head containing "/", and returned as a hard "cannot
-	// parse" error rather than declined. No other Epic Ref form contains a "%".
+	// parse" error rather than declined. No other Ref form contains a "%".
 	if r, ok := parseGitLabMilestoneReference(trimmed, raw); ok {
 		return r, nil
 	}
@@ -164,7 +164,7 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 	return Ref{}, unparseable(raw)
 }
 
-// ParseParent resolves a Ticket's parent into the Epic Ref that names it, so
+// ParseParent resolves a Ticket's parent into the Ref that names it, so
 // navigating up is a re-parse of what the Provider already returned rather than
 // a second lookup. child is the Ref the parent was discovered through: an
 // Enterprise host, or a Tracker the URL form cannot betray, is inherited from
@@ -746,7 +746,7 @@ func isKeyPrefix(s string) bool {
 
 // KeyPrefix returns the project part of a Jira-style key: "ABC" for "ABC-123",
 // and "" for anything that is not one. It lives here because the shape of a key
-// is the Epic Ref grammar's business, which makes Profile prefix matching this
+// is the Ref grammar's business, which makes Profile prefix matching this
 // function plus a comparison.
 func KeyPrefix(key string) string {
 	normalized, ok := normalizeKey(strings.TrimSpace(key))

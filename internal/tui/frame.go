@@ -34,7 +34,7 @@ const (
 	barEmptyRune  = "░"
 )
 
-// renderHeader draws the block above the list: the collection's identity, then
+// renderHeader draws the block above the list: the Watchlist's identity, then
 // its progress bar, counts and staleness indicator.
 //
 // The progress it reports is computed from every Ticket in the reading, never
@@ -59,7 +59,7 @@ func rightAlign(s string, width int) string {
 	return truncateLine(s, width)
 }
 
-// headerIdentity draws "#111  Widget sync v2 …" with the collection's URL
+// headerIdentity draws "#111  Widget sync v2 …" with the Watchlist's URL
 // right-aligned when there is room for it. The URL is a convenience, not
 // load-bearing: it is the first thing dropped on a narrow terminal.
 func headerIdentity(h Header, width int, s Styles) string {

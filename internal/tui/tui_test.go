@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
@@ -154,9 +155,9 @@ func (s *session) finishWith(t *testing.T, quit tea.KeyPressMsg) (Model, []byte)
 	return m, frame(content)
 }
 
-// epicSource reads the fake Provider through the same seam production uses.
-func epicSource(p *fake.Provider, c *clock) Source {
-	return EpicSource(p, ref.Ref{Raw: "111"}, c.now)
+// selectorSource reads the fake Provider through the same seam production uses.
+func selectorSource(p *fake.Provider, c *clock) Source {
+	return SelectorSource(p, provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}, c.now)
 }
 
 // The headline frame: the header and its progress bar, every Status Category
@@ -165,7 +166,7 @@ func epicSource(p *fake.Provider, c *clock) Source {
 func TestInitialFrame(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	m, got := s.finish(t)
@@ -175,8 +176,8 @@ func TestInitialFrame(t *testing.T) {
 		t.Error("the first reading never landed")
 	}
 	// ADR-0003: a list refresh is one batched fetch and never touches Detail.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1 batched fetch", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1 batched fetch", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: the monitor never fetches Detail", n)
@@ -196,15 +197,15 @@ func TestFrameAfterAutoRefresh(t *testing.T) {
 
 	p := fake.New(fake.WithSnapshots(before, after))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	// A beat before the interval has elapsed must not fetch.
 	s.clock.advance(30 * time.Second)
 	s.beat()
 	s.waitFor(t, "updated 30s ago")
-	if n := p.EpicCalls(); n != 1 {
-		t.Fatalf("EpicCalls() = %d after 30s of a 60s interval, want 1", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Fatalf("ResolveCalls() = %d after 30s of a 60s interval, want 1", n)
 	}
 
 	s.clock.advance(31 * time.Second)
@@ -216,8 +217,8 @@ func TestFrameAfterAutoRefresh(t *testing.T) {
 	m, got := s.finish(t)
 
 	checkGolden(t, "after_refresh.golden.txt", got)
-	if n := p.EpicCalls(); n != 2 {
-		t.Errorf("EpicCalls() = %d, want 2: one refresh is one FetchEpic", n)
+	if n := p.ResolveCalls(); n != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2: one refresh is one Resolve", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0", n)
@@ -238,7 +239,7 @@ func TestFrameAfterFailedRefresh(t *testing.T) {
 		if calls.Add(1) > 1 {
 			return ListInput{}, errors.New("dial tcp: lookup tracker.example.test: no such host")
 		}
-		return epicSource(p, c)(ctx)
+		return selectorSource(p, c)(ctx)
 	}
 
 	s := start(t, c, src, time.Minute)
@@ -264,7 +265,7 @@ func TestFrameAfterFailedRefresh(t *testing.T) {
 func TestFrameWithoutThePullRequestCapability(t *testing.T) {
 	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	_, got := s.finish(t)
@@ -277,10 +278,10 @@ func TestFrameWithoutThePullRequestCapability(t *testing.T) {
 	}
 }
 
-// A collection with no Tickets renders its header without dividing by zero and
+// A Watchlist with no Tickets renders its header without dividing by zero and
 // says so rather than trailing off into an empty void.
 func TestFrameWithNoTickets(t *testing.T) {
-	empty := model.EpicSnapshot{
+	empty := model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID:     "acme/widgets#900",
 			Key:    "#900",
@@ -291,7 +292,7 @@ func TestFrameWithNoTickets(t *testing.T) {
 	}
 	p := fake.New(fake.WithSnapshot(empty))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v3")
 
 	_, got := s.finish(t)
@@ -317,9 +318,9 @@ func TestFrameWhenTheFirstFetchFails(t *testing.T) {
 	}
 }
 
-// The list screen consumes a collection of Tickets plus a header, not an Epic.
+// The list screen consumes a Watchlist of Tickets plus a header, not an Epic.
 // This is the executable form of that contract: a hand-built ListInput that
-// was never an EpicSnapshot renders.
+// was never a WatchlistSnapshot renders.
 func TestFrameFromAHandBuiltListInput(t *testing.T) {
 	in := ListInput{
 		Header:  Header{Key: "query", Title: "Everything assigned to @tobias"},
@@ -343,18 +344,18 @@ func TestFrameFromAHandBuiltListInput(t *testing.T) {
 func TestRefreshDoesNotOverlap(t *testing.T) {
 	p := fake.New(fake.WithDelay(50 * time.Millisecond))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("r"))
 	s.tm.Send(keyPress("r"))
 	s.waitFor(t, "refreshing…")
-	waitUntil(t, "the forced refresh to finish", func() bool { return p.EpicCalls() >= 2 })
+	waitUntil(t, "the forced refresh to finish", func() bool { return p.ResolveCalls() >= 2 })
 
 	m, _ := s.finish(t)
 
-	if n := p.EpicCalls(); n != 2 {
-		t.Errorf("EpicCalls() = %d, want 2: two rapid refreshes are one fetch", n)
+	if n := p.ResolveCalls(); n != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2: two rapid refreshes are one fetch", n)
 	}
 	if !m.quitting {
 		t.Error("the final model does not report quitting")
@@ -366,7 +367,7 @@ func TestRefreshDoesNotOverlap(t *testing.T) {
 func TestFullHelpKeepsTheFrameOnScreen(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("?"))
@@ -402,7 +403,7 @@ func TestQuitKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := fake.New()
 			c := newClock()
-			s := start(t, c, epicSource(p, c), time.Minute)
+			s := start(t, c, selectorSource(p, c), time.Minute)
 			s.waitFor(t, "Widget sync v2")
 
 			s.tm.Send(tt.key)

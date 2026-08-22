@@ -153,8 +153,8 @@ func TestBareNumberResolvesThroughTheOriginRemote(t *testing.T) {
 		Tracker: ref.TrackerGitHub, Host: "github.com",
 		Owner: "acme", Repo: "widgets", Number: 111, Raw: "111",
 	}
-	if p.LastRef() != want {
-		t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), want)
+	if p.LastSelector().(provider.EpicSelector).Ref != want {
+		t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, want)
 	}
 	// ADR-0003 still holds on the resolved path.
 	if n := p.DetailCalls(); n != 0 {
@@ -177,7 +177,7 @@ func TestFullURLNeedsNoClone(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Owner != "other" || r.Repo != "repo" || r.Number != 7 {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Owner != "other" || r.Repo != "repo" || r.Number != 7 {
 		t.Errorf("the Provider was given %+v, want other/repo#7", r)
 	}
 }
@@ -190,7 +190,7 @@ func TestOwnerRepoNumberForm(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Owner != "acme" || r.Repo != "widgets" || r.Number != 111 {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Owner != "acme" || r.Repo != "widgets" || r.Number != 111 {
 		t.Errorf("the Provider was given %+v, want acme/widgets#111", r)
 	}
 }
@@ -276,7 +276,7 @@ func TestRefResolutionFailures(t *testing.T) {
 	}
 }
 
-// --provider fake serves any Epic Ref, including one no git remote can resolve:
+// --provider fake serves any Ref, including one no git remote can resolve:
 // development must not need a clone.
 func TestFakeProviderServesAnUnresolvableRef(t *testing.T) {
 	got := runWith([]string{"--provider", "fake", "111", "--json"}, cli.Deps{

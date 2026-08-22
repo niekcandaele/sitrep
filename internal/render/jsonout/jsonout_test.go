@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
@@ -114,7 +115,7 @@ func TestRenderDetailWithoutCommentsCapability(t *testing.T) {
 
 func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
 	var buf bytes.Buffer
-	empty := model.EpicSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
+	empty := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
 	if err := jsonout.RenderEpic(&buf, empty, "fake"); err != nil {
 		t.Fatalf("RenderEpic: %v", err)
 	}
@@ -129,9 +130,9 @@ func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
 func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 	p := fake.New()
 
-	snap, err := p.FetchEpic(context.Background(), ref.Ref{Raw: "111"})
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{Raw: "111"}})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	snap.FetchedAt = generatedAt
 

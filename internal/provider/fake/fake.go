@@ -19,7 +19,6 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
-	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // allCapabilities is what New declares by default: everything on, so a test
@@ -35,15 +34,15 @@ var allCapabilities = model.Capabilities{
 // is not usable; call New.
 type Provider struct {
 	mu             sync.Mutex
-	snapshots      []model.EpicSnapshot
+	snapshots      []model.WatchlistSnapshot
 	details        map[model.TicketID]model.Detail
 	caps           model.Capabilities
-	epicErr        error
+	resolveErr     error
 	detailErr      error
 	delay          time.Duration
 	cursor         int
-	lastRef        ref.Ref
-	epicCalls      int
+	lastSelector   provider.Selector
+	resolveCalls   int
 	detailCalls    int
 	detailCallsFor map[model.TicketID]int
 }
@@ -56,7 +55,7 @@ type Option func(*Provider)
 // specific test scenarios.
 func New(opts ...Option) *Provider {
 	p := &Provider{
-		snapshots:      []model.EpicSnapshot{FixtureSnapshot()},
+		snapshots:      []model.WatchlistSnapshot{FixtureSnapshot()},
 		details:        FixtureDetails(),
 		caps:           allCapabilities,
 		detailCallsFor: make(map[model.TicketID]int),
@@ -77,17 +76,17 @@ func WithCapabilities(c model.Capabilities) Option {
 	return func(p *Provider) { p.caps = c }
 }
 
-// WithSnapshot replaces the fixture epic with s for every FetchEpic call.
-func WithSnapshot(s model.EpicSnapshot) Option {
-	return func(p *Provider) { p.snapshots = []model.EpicSnapshot{s} }
+// WithSnapshot replaces the fixture epic with s for every Resolve call.
+func WithSnapshot(s model.WatchlistSnapshot) Option {
+	return func(p *Provider) { p.snapshots = []model.WatchlistSnapshot{s} }
 }
 
-// WithSnapshots serves s in order, one per FetchEpic call, repeating the last
+// WithSnapshots serves s in order, one per Resolve call, repeating the last
 // one once they run out. This is how refresh behaviour is tested: give the
 // Provider the world before and after a Ticket moves.
-func WithSnapshots(s ...model.EpicSnapshot) Option {
+func WithSnapshots(s ...model.WatchlistSnapshot) Option {
 	return func(p *Provider) {
-		p.snapshots = make([]model.EpicSnapshot, len(s))
+		p.snapshots = make([]model.WatchlistSnapshot, len(s))
 		copy(p.snapshots, s)
 	}
 }
@@ -103,9 +102,9 @@ func WithDetails(d map[model.TicketID]model.Detail) Option {
 	}
 }
 
-// WithEpicError makes every FetchEpic call fail with err.
-func WithEpicError(err error) Option {
-	return func(p *Provider) { p.epicErr = err }
+// WithResolveError makes every Resolve call fail with err.
+func WithResolveError(err error) Option {
+	return func(p *Provider) { p.resolveErr = err }
 }
 
 // WithDetailError makes every FetchDetail call fail with err.
@@ -113,7 +112,7 @@ func WithDetailError(err error) Option {
 	return func(p *Provider) { p.detailErr = err }
 }
 
-// WithDelay makes both fetch methods take d before returning, so loading states
+// WithDelay makes both read methods take d before returning, so loading states
 // and spinners have something to spin for. The delay is cancellable through the
 // call's context.
 func WithDelay(d time.Duration) Option {
@@ -130,23 +129,23 @@ func (p *Provider) Capabilities() model.Capabilities {
 	return p.caps
 }
 
-// FetchEpic returns the current fixture snapshot, serving any Epic Ref. The
-// result is a deep copy filtered to the declared Capabilities, with FetchedAt
-// left zero for the caller to stamp. Successive calls advance through the
-// snapshots given to WithSnapshots. The Ref is recorded for LastRef and
+// Resolve returns the current fixture snapshot for any Selector. The result is
+// a deep copy filtered to the declared Capabilities, with FetchedAt left zero
+// for the caller to stamp. Successive calls advance through the snapshots given
+// to WithSnapshots. The complete Selector is recorded for LastSelector and
 // otherwise ignored.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := p.wait(ctx); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.epicCalls++
-	p.lastRef = r
-	if p.epicErr != nil {
-		return model.EpicSnapshot{}, p.epicErr
+	p.resolveCalls++
+	p.lastSelector = selector
+	if p.resolveErr != nil {
+		return model.WatchlistSnapshot{}, p.resolveErr
 	}
 
 	snap := cloneSnapshot(p.snapshots[p.cursor])
@@ -194,20 +193,20 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return d, nil
 }
 
-// EpicCalls returns how many times FetchEpic has been called, including calls
+// ResolveCalls returns how many times Resolve has been called, including calls
 // that returned an injected error.
-func (p *Provider) EpicCalls() int {
+func (p *Provider) ResolveCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.epicCalls
+	return p.resolveCalls
 }
 
-// LastRef returns the Epic Ref passed to the most recent FetchEpic call, so a
-// caller's ref resolution can be asserted at the seam where it lands.
-func (p *Provider) LastRef() ref.Ref {
+// LastSelector returns the Selector passed to the most recent Resolve call, so
+// caller-side selector construction can be asserted at the seam where it lands.
+func (p *Provider) LastSelector() provider.Selector {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastRef
+	return p.lastSelector
 }
 
 // DetailCalls returns how many times FetchDetail has been called. A list
@@ -282,7 +281,7 @@ func applyDetailCapabilities(d *model.Detail, caps model.Capabilities) {
 
 // cloneSnapshot deep-copies a snapshot so a caller mutating what it got cannot
 // corrupt the fixture for the next call.
-func cloneSnapshot(s model.EpicSnapshot) model.EpicSnapshot {
+func cloneSnapshot(s model.WatchlistSnapshot) model.WatchlistSnapshot {
 	out := s
 	out.Epic = cloneEpic(s.Epic)
 	if s.Tickets != nil {

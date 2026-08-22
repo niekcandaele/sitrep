@@ -3,14 +3,14 @@
 //
 // # The list-view contract
 //
-// The screen consumes a ListInput — a collection of Tickets plus a Header, the
+// The screen consumes a ListInput — a Watchlist of Tickets plus a Header, the
 // Capabilities that decide what may be shown, and when the reading was taken —
-// not an Epic. ListFromEpicSnapshot is the only function in this package
+// not an Epic. ListFromWatchlistSnapshot is the only function in this package
 // allowed to mention model.Epic; nothing downstream of it takes an Epic
 // parameter. That is deliberate: a future ad-hoc Ticket set or query result
 // feeds the same screen by producing a ListInput, without the screen learning
 // a second shape. Where those Tickets come from is the Source seam, which the
-// TUI holds as a plain function so it knows nothing about Epic Refs, auth or
+// TUI holds as a plain function so it knows nothing about Refs, auth or
 // GraphQL.
 //
 // # Progress is computed from every Ticket
@@ -65,13 +65,13 @@
 // # The program can start in Detail, and can be seeded
 //
 // Options.Open starts the program on one Ticket's Detail — the decoder entry for
-// an Epic Ref that named a Ticket rather than a collection — with the parent
+// a Ref that named a Ticket rather than a Watchlist — with the parent
 // breadcrumb the Detail screen already had a seat for, and u to open that parent
 // in the monitor. Until the user presses it the list is never fetched at all.
 // Options.Initial seats a reading the caller already took, so a monitor draws
 // data on its first frame rather than re-fetching what its caller just fetched.
 //
-// Neither teaches this package about Epic Refs: the walk-up is a Source the
+// Neither teaches this package about Refs: the walk-up is a Source the
 // caller built, and the breadcrumb is a Header the caller filled.
 //
 // The body is wrapped into lines once and scrolled by slicing them, for the same
@@ -112,8 +112,8 @@ import (
 // Options are the monitor's injectable dependencies. Every zero value that has
 // a sensible production default takes it.
 type Options struct {
-	// Source produces one reading of the collection on every refresh. It may be
-	// nil when Open is set and the decoded Ticket has no collection behind it:
+	// Source produces one reading of the Watchlist on every refresh. It may be
+	// nil when Open is set and the decoded Ticket has no Watchlist behind it:
 	// there is then nothing to monitor, and the walk-up key is not offered.
 	Source Source
 	// DetailSource reads one Ticket's Detail when the user opens it, and at no
@@ -121,7 +121,7 @@ type Options struct {
 	// then says why it cannot open them.
 	DetailSource DetailSource
 	// Open, when non-nil, starts the program on one Ticket's Detail instead of
-	// the list: the decoder entry point for an Epic Ref that named a Ticket. The
+	// the list: the decoder entry point for a Ref that named a Ticket. The
 	// Detail itself is read from DetailSource on the first frame, the same way a
 	// drill-in reads it, and the list is not fetched at all until the user walks
 	// up into it.

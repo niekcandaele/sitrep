@@ -4,22 +4,21 @@
 // Providers are compiled in and read-only (ADR-0002): no method mutates Tracker
 // state, and none ever will — sitrep is a situation report, not a client.
 //
-// The interface is split by view, not by entity (ADR-0003). FetchEpic is the
-// cheap batched hot path: one logical fetch returning the Epic plus its
-// lightweight Tickets, re-run on every refresh. FetchDetail is the lazy
-// per-ticket call made only when a human opens a Ticket. Detail data —
-// descriptions, comments, links — must never migrate into FetchEpic's result,
-// however convenient it looks: a list refresh that drags full descriptions
-// along turns one request into N and is exactly what this split exists to
-// prevent. If a view seems to need Detail while listing, that is a FetchDetail
-// call, not a wider Ticket.
+// The interface is split by view, not by entity (ADR-0003). Resolve is the
+// cheap batched hot path: one logical read returning a Watchlist's lightweight
+// Tickets, re-run on every refresh. FetchDetail is the lazy per-ticket call made
+// only when a human opens a Ticket. Detail data — descriptions, comments, links
+// — must never migrate into Resolve's result, however convenient it looks: a
+// list refresh that drags full descriptions along turns one request into N and
+// is exactly what this split exists to prevent. If a view seems to need Detail
+// while listing, that is a FetchDetail call, not a wider Ticket.
 //
-// A batched call answers what the Epic Ref points at, whatever that turns out to
-// be. A Ref naming a plain Ticket rather than a collection comes back as a
-// snapshot with no Tickets, carrying that Ticket's identity in Epic and the
-// collection it belongs to in Parent (model.EpicSnapshot). A Provider reports
-// that and stops there: which screen opens is the caller's decision, and no
-// third method exists to ask the question (ADR-0003).
+// A Resolve answers what the Selector points at, whatever that turns out to be.
+// A Ref naming a plain Ticket comes back as a snapshot with no Tickets, carrying
+// that Ticket's identity in Epic and its parent Ticket in Parent
+// (model.WatchlistSnapshot). A Provider reports that and stops there: which
+// screen opens is the caller's decision, and no third method exists to ask the
+// question (ADR-0003).
 //
 // # A Provider's failures are part of its contract
 //
@@ -39,6 +38,20 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
+// Selector names a Watchlist. EpicSelector is the only implementation in v0.2
+// after ticket #44; later tickets add other kinds without changing Provider.Resolve.
+type Selector interface {
+	selector()
+}
+
+// EpicSelector names a Watchlist by one Ref expected to identify an Epic.
+// The existing decoder may discover that the Ref actually names a Ticket.
+type EpicSelector struct {
+	Ref ref.Ref
+}
+
+func (EpicSelector) selector() {}
+
 // Provider translates one Tracker's API into sitrep's model. Implementations
 // must be safe for concurrent use: the TUI polls from its own goroutines.
 type Provider interface {
@@ -50,14 +63,12 @@ type Provider interface {
 	// supports. It is cheap and pure: callers may ask on every render.
 	Capabilities() model.Capabilities
 
-	// FetchEpic returns the Epic named by an Epic Ref plus its Tickets in one
-	// logical fetch. The Ref is resolved once by the caller; FetchEpic is
-	// polled and must not repeat ref resolution — re-reading a git remote on
-	// every refresh is exactly the cost this value type exists to avoid.
-	// Implementations must be safe to call repeatedly for polling and must
-	// return Tickets in a stable order. The returned snapshot's FetchedAt is
-	// left zero for the caller to stamp.
-	FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error)
+	// Resolve returns one batched reading of the Watchlist named by selector.
+	// The Selector is constructed after Ref resolution and reused on every poll,
+	// so implementations must not repeat that work. Implementations must be safe
+	// to call repeatedly and return Tickets in a stable order. The returned
+	// snapshot's FetchedAt is left zero for the caller to stamp.
+	Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error)
 
 	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
 	// called only on drill-in, never during a list refresh.
@@ -73,7 +84,7 @@ type Provider interface {
 // and the TUI's refresh — so "what turns a fetch into something displayable"
 // has exactly one definition and the monitor and the snapshot cannot disagree
 // about which Capabilities are in force.
-func StampSnapshot(p Provider, snap model.EpicSnapshot, now time.Time) model.EpicSnapshot {
+func StampSnapshot(p Provider, snap model.WatchlistSnapshot, now time.Time) model.WatchlistSnapshot {
 	snap.FetchedAt = now
 	if snap.Capabilities == (model.Capabilities{}) {
 		snap.Capabilities = p.Capabilities()

@@ -85,16 +85,16 @@ func TestGroupHeadersAreNotSelectable(t *testing.T) {
 	}
 }
 
-// ListFromEpicSnapshot is the only place in the package that knows what an
-// Epic is; everything downstream sees a collection and a header.
-func TestListFromEpicSnapshot(t *testing.T) {
-	snap := model.EpicSnapshot{
+// ListFromWatchlistSnapshot is the only place in the package that knows what an
+// Epic is; everything downstream sees a Watchlist and a header.
+func TestListFromWatchlistSnapshot(t *testing.T) {
+	snap := model.WatchlistSnapshot{
 		Epic:         model.Epic{Key: "#111", Title: "Widget sync", URL: "https://example.test/111"},
 		Tickets:      []model.Ticket{ticket("#1", model.StatusTodo)},
 		Capabilities: model.Capabilities{PullRequests: true},
 	}
 
-	in := ListFromEpicSnapshot(snap)
+	in := ListFromWatchlistSnapshot(snap)
 
 	if in.Header.Key != "#111" || in.Header.Title != "Widget sync" || in.Header.URL != "https://example.test/111" {
 		t.Errorf("header = %+v, want the Epic's identity", in.Header)

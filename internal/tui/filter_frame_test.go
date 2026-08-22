@@ -30,7 +30,7 @@ func startFixture(t *testing.T) (*fake.Provider, *session) {
 
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 	return p, s
 }
@@ -64,7 +64,7 @@ func TestFrameWithFinishedTicketsHidden(t *testing.T) {
 	if !m.filter.HideFinished {
 		t.Error("d did not turn the hide toggle on")
 	}
-	// The header reports the collection, not the view.
+	// The header reports the Watchlist, not the view.
 	if !strings.Contains(string(got), "3/9 done · 1 cancelled · 33%") {
 		t.Errorf("the progress header moved when the list was filtered:\n%s", got)
 	}
@@ -216,7 +216,7 @@ func TestFilterSurvivesAutoRefresh(t *testing.T) {
 
 	p := fake.New(fake.WithSnapshots(before, after))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("d"))
@@ -235,8 +235,8 @@ func TestFilterSurvivesAutoRefresh(t *testing.T) {
 	if strings.Contains(string(got), "#113") {
 		t.Errorf("#113 finished but is still listed under a hide-finished filter:\n%s", got)
 	}
-	if n := p.EpicCalls(); n != 2 {
-		t.Errorf("EpicCalls() = %d, want 2: filtering adds no fetch of its own", n)
+	if n := p.ResolveCalls(); n != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2: filtering adds no fetch of its own", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0", n)
@@ -256,8 +256,8 @@ func TestFilteringNeverRefetches(t *testing.T) {
 
 	s.finish(t)
 
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want 1: filtering never refetches", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want 1: filtering never refetches", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: this ticket adds no Detail call", n)
@@ -285,8 +285,8 @@ func TestTheFindBoxOwnsTheKeyboard(t *testing.T) {
 		t.Errorf("the frame does not show the typed query:\n%s", got)
 	}
 	// The r in "drift" must not have forced a refresh.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want 1: r is a letter inside the find box", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want 1: r is a letter inside the find box", n)
 	}
 }
 
@@ -343,7 +343,7 @@ func TestEscapeLadder(t *testing.T) {
 func TestRefreshDoesNotClobberTheDraftQuery(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("/"))
@@ -351,7 +351,7 @@ func TestRefreshDoesNotClobberTheDraftQuery(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	waitUntil(t, "the auto-refresh to land", func() bool { return p.EpicCalls() >= 2 })
+	waitUntil(t, "the auto-refresh to land", func() bool { return p.ResolveCalls() >= 2 })
 
 	s.typeText("rd")
 

@@ -28,7 +28,7 @@ const commentIndent = "  "
 const commentTimeLayout = "2006-01-02 15:04"
 
 // renderDetailHeader draws the block above the Detail body: the breadcrumb of
-// the collection this Ticket was reached through, the Ticket's own identity, and
+// the Watchlist this Ticket was reached through, the Ticket's own identity, and
 // the same meta line the list row shows for it.
 //
 // It is drawn in every state — loading, failed, loaded — because a screen that
@@ -42,7 +42,7 @@ func renderDetailHeader(in DetailInput, staleness string, width int, s Styles) s
 	}, "\n")
 }
 
-// renderBreadcrumb draws the collection a Ticket was reached through. The zero
+// renderBreadcrumb draws the Watchlist a Ticket was reached through. The zero
 // Header draws nothing at all: a Ticket opened without a list behind it has no
 // parent to name, and an empty breadcrumb is the honest way to say so.
 func renderBreadcrumb(parent Header, width int, s Styles) string {

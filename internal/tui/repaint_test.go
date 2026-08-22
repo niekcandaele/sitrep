@@ -35,7 +35,7 @@ func sizedFixtureModel(t *testing.T, w, h int) Model {
 
 	m := New(t.Context(), Options{Interval: time.Minute, Now: func() time.Time { return time.Time{} }})
 	snap := provider.StampSnapshot(fake.New(), fake.FixtureSnapshot(), time.Time{})
-	m.input = ListFromEpicSnapshot(snap)
+	m.input = ListFromWatchlistSnapshot(snap)
 	m.hasData = true
 
 	next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})

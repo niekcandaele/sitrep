@@ -8,6 +8,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
@@ -58,7 +59,7 @@ func TestJiraKeyRefReachesTheProviderWithTheProfilesHost(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	r := p.LastRef()
+	r := p.LastSelector().(provider.EpicSelector).Ref
 	if r.Key != "ABC-123" || r.Tracker != ref.TrackerJira || r.Host != "acme.atlassian.net" {
 		t.Errorf("the Provider was given %+v, want ABC-123 on jira at acme.atlassian.net", r)
 	}
@@ -77,7 +78,7 @@ func TestJiraKeyRefMatchesCaseInsensitively(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Key != "ABC-123" || r.Host != "acme.atlassian.net" {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Key != "ABC-123" || r.Host != "acme.atlassian.net" {
 		t.Errorf("the Provider was given %+v, want ABC-123 at acme.atlassian.net", r)
 	}
 }
@@ -198,7 +199,7 @@ profiles:
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Host != "other.atlassian.net" {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Host != "other.atlassian.net" {
 		t.Errorf("the Provider was given %+v, want the named profile's host", r)
 	}
 }
@@ -269,7 +270,7 @@ func TestZeroConfigGitHubIsUnchanged(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
 	checkGolden(t, "epic.golden.json", []byte(got.stdout))
-	if r := p.LastRef(); r.Owner != "acme" || r.Repo != "widgets" || r.Number != 111 {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Owner != "acme" || r.Repo != "widgets" || r.Number != 111 {
 		t.Errorf("the Provider was given %+v, want acme/widgets#111 untouched by any Profile", r)
 	}
 }

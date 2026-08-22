@@ -107,7 +107,6 @@ import (
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
-	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // pageSize is GitLab's documented maximum page, and maxPages bounds the loop.
@@ -185,7 +184,7 @@ func WithBaseURL(rawurl string) Option {
 }
 
 // WithPath sets the default group or project path — the Profile's project —
-// used for an Epic Ref that names none, such as the bare reference form "&12".
+// used for a Ref that names none, such as the bare reference form "&12".
 func WithPath(path string) Option {
 	return func(p *Provider) { p.path = strings.TrimSpace(path) }
 }
@@ -223,8 +222,8 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// FetchEpic returns the Epic named by r and, for a group epic or a milestone,
-// every child issue GitLab lists under it.
+// Resolve resolves selector and returns the named Epic and, for a group epic or
+// a milestone, every child issue GitLab lists under it.
 //
 // A milestone is an Epic that GitLab addresses differently, and nothing after
 // the mapping knows the difference: the same children, the same pagination, the
@@ -232,53 +231,54 @@ func (p *Provider) Capabilities() model.Capabilities {
 //
 // A project issue Ref comes back with no Tickets, the issue's own identity on
 // Epic and its epic — or, failing that, its milestone — on Parent: GitLab's
-// hierarchy in v1 is collection → issues, and an issue's own child work items
+// hierarchy in v1 is epic or milestone → issues, and an issue's own child work items
 // (tasks) are not expanded. internal/cli decodes that into a Detail screen; the
 // driver never decides which screen opens (ADR-0003).
 //
 // Child epics are not expanded either — whatever the children endpoint returns
 // is exactly what sitrep shows.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	r := selector.(provider.EpicSelector).Ref
 	t, err := targetFor(r, p.path)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	// Tickets starts non-nil so an Epic with no children renders as "no
 	// Tickets" rather than as null.
-	snap := model.EpicSnapshot{Tickets: []model.Ticket{}, Capabilities: p.Capabilities()}
+	snap := model.WatchlistSnapshot{Tickets: []model.Ticket{}, Capabilities: p.Capabilities()}
 
 	switch {
 	case t.kind == kindIssue:
 		if err := p.fetchIssueSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 		// FetchedAt is left zero for the caller to stamp.
 		return snap, nil
 
 	case t.isMilestone():
 		if err := p.fetchMilestoneSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 
 	default:
 		if err := p.fetchEpicSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 	}
 
 	if err := p.correlate(ctx, snap.Tickets); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 	return snap, nil
 }
 
-// fetchIssueSnapshot reads the single issue an Epic Ref turned out to name,
+// fetchIssueSnapshot reads the single issue a Ref turned out to name,
 // including the merge requests moving it: model.Epic.PullRequests exists for
 // exactly this decoded Detail header, and cli.decodedTicket copies it onto the
 // Ticket it renders. One extra request, on a path that is a drill-in by
 // definition.
-func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	var issue issueWire
 	if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 		return err
@@ -296,7 +296,7 @@ func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model
 }
 
 // fetchEpicSnapshot reads a group epic and its children.
-func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	var epic epicWire
 	if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 		return err
@@ -324,7 +324,7 @@ func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.
 // A group milestone's issues span projects, so each Ticket's Repository and
 // project-qualified Key differ; newTicketFromIssue already derives both from the
 // issue's own references.full, so this needs no code of its own.
-func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	milestone, err := p.fetchMilestone(ctx, t)
 	if err != nil {
 		return err
@@ -407,7 +407,7 @@ func pagedGet[T any](ctx context.Context, p *Provider, t target, path, noun stri
 }
 
 // FetchDetail returns one Ticket's description, comments and, for an issue, its
-// links. id is what FetchEpic put on every Ticket; see the package doc for what
+// links. id is what Resolve put on every Ticket; see the package doc for what
 // it encodes.
 //
 // This is three requests where the polled path is two, and that is the point of
@@ -481,7 +481,7 @@ func (p *Provider) fetchEpicDetail(ctx context.Context, t target, id model.Ticke
 
 // fetchMilestoneDetail reads a milestone's Detail, which a Ref naming a
 // milestone with no issues decodes to. It is one request: the same iids[] lookup
-// FetchEpic makes, which is what the iid-carrying TicketID trades for.
+// Resolve makes, which is what the iid-carrying TicketID trades for.
 //
 // Comments stays nil because GitLab has no milestone notes endpoint at all —
 // not because the Comments Capability is a lie. A Capability is a Provider-level

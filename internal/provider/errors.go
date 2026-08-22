@@ -37,7 +37,7 @@ const (
 	// driver that forgets to classify something must not cause sitrep to give
 	// up on a monitor that would have recovered.
 	KindUnknown Kind = iota
-	// KindBadRef is an Epic Ref that names nothing this Tracker has, or that
+	// KindBadRef is a Ref that names nothing this Tracker has, or that
 	// this driver cannot parse: a typo, a wrong repo, a deleted issue, a 404.
 	KindBadRef
 	// KindAuth is a credential problem: none found, rejected (401), or

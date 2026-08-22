@@ -136,7 +136,7 @@ func (r graphQLResponse) err(target ref.Ref, endpoint string, header http.Header
 }
 
 // err turns the Detail query's errors[] payload into one line, naming the node
-// id the caller asked for rather than an Epic Ref it does not have.
+// id the caller asked for rather than a Ref it does not have.
 func (r detailResponse) err(id model.TicketID, endpoint string, header http.Header) error {
 	return graphQLErrors(r.Errors, detailNotFound(id), endpoint, header)
 }
@@ -209,7 +209,7 @@ func isAuthErrorType(t string) bool {
 // is what a human can paste straight back into sitrep.
 //
 // The assignees and pull requests are the same selections every child already
-// carries, read here because an Epic Ref may name a plain Ticket: the decoded
+// carries, read here because a Ref may name a plain Ticket: the decoded
 // Ticket's Detail header is built from this Epic and has to read exactly the way
 // the same Ticket's row reads in a list. That is also why the pull-request rule
 // for in-progress runs here as it does in newTicket — one node must not describe
@@ -281,7 +281,7 @@ func newTicket(n issueNode, epicRepo string) model.Ticket {
 
 // issueKey renders the display identity: "#112" for a child of the Epic's own
 // repository, "owner/repo#112" for a child from anywhere else. Both forms round
-// -trip through sitrep's Epic Ref grammar, so a key a human sees is a key they
+// -trip through sitrep's Ref grammar, so a key a human sees is a key they
 // can type.
 func issueKey(n issueNode, epicRepo string) string {
 	if repo := n.Repository.NameWithOwner; repo != "" && repo != epicRepo {
@@ -359,7 +359,7 @@ func newLinks(n detailNode) []model.Link {
 }
 
 // newLink maps one linked issue onto a Link. ticketRepo is the *opened*
-// Ticket's repository, not the Epic's: at Detail time the driver has no Epic Ref
+// Ticket's repository, not the Epic's: at Detail time the driver has no Ref
 // in hand and re-deriving one would cost a request. So a target living beside
 // the Ticket renders "#115" and anything else "owner/repo#115" — identical to
 // what the list shows whenever the Epic and the Ticket share a repository, which

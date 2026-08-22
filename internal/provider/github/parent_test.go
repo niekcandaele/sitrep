@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// ticketRef is the Epic Ref a decoding run resolves: it names a plain Ticket
+// ticketRef is the Ref a decoding run resolves: it names a plain Ticket
 // rather than a collection, which the caller can only learn from the answer.
 var ticketRef = ref.Ref{
 	Tracker: ref.TrackerGitHub,
@@ -23,12 +24,12 @@ var ticketRef = ref.Ref{
 // A Ref naming a Ticket comes back as a snapshot with no Tickets, whose Epic
 // carries that Ticket's own identity and whose Parent carries the collection it
 // belongs to. The driver reports it and decides nothing.
-func TestFetchEpicReportsTheFetchedIssuesParent(t *testing.T) {
+func TestResolveReportsTheFetchedIssuesParent(t *testing.T) {
 	s := newReplayServer(t, response{file: "ticket_with_parent.json"})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ticketRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ticketRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if len(snap.Tickets) != 0 {
@@ -55,12 +56,12 @@ func TestFetchEpicReportsTheFetchedIssuesParent(t *testing.T) {
 
 // The root issue's assignees and pull requests ride on the same batched call,
 // because the decoded Ticket's Detail header is built from them.
-func TestFetchEpicReadsTheRootIssuesAssigneesAndPullRequests(t *testing.T) {
+func TestResolveReadsTheRootIssuesAssigneesAndPullRequests(t *testing.T) {
 	s := newReplayServer(t, response{file: "ticket_with_parent.json"})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ticketRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ticketRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if got := snap.Epic.Repository; got != "niekcandaele/sitrep" {
@@ -85,12 +86,12 @@ func TestFetchEpicReadsTheRootIssuesAssigneesAndPullRequests(t *testing.T) {
 
 // A parent in another repository is qualified against the fetched issue's own
 // repository — the rule the children and the Detail link targets already use.
-func TestFetchEpicQualifiesACrossRepoParent(t *testing.T) {
+func TestResolveQualifiesACrossRepoParent(t *testing.T) {
 	s := newReplayServer(t, response{file: "ticket_cross_repo_parent.json"})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ticketRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ticketRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if got := snap.Parent.Key; got != "acme/widgets#111" {
@@ -106,12 +107,12 @@ func TestFetchEpicQualifiesACrossRepoParent(t *testing.T) {
 }
 
 // A Ticket that hangs off nothing is an ordinary state, not an error.
-func TestFetchEpicWithoutAParent(t *testing.T) {
+func TestResolveWithoutAParent(t *testing.T) {
 	s := newReplayServer(t, response{file: "ticket_no_parent.json"})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ticketRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ticketRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if !snap.Parent.IsZero() {
@@ -127,8 +128,8 @@ func TestFetchEpicWithoutAParent(t *testing.T) {
 func TestEpicQueryStaysTheCheapDocument(t *testing.T) {
 	s := newReplayServer(t, response{file: "ticket_with_parent.json"})
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), ticketRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ticketRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	query := s.recorded()[0].query

@@ -197,27 +197,28 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// FetchEpic returns the Epic named by r and every issue naming it as their
-// parent, following the search endpoint's cursor to the last page.
+// Resolve resolves selector and returns the named Epic and every issue naming
+// it as their parent, following the search endpoint's cursor to the last page.
 // Cross-project children need no special handling: they arrive carrying their
 // own project and are attributed to it.
 //
 // Only one level of the parent graph is fetched — sub-tasks of children are not
 // expanded — exactly as the GitHub driver fetches one level of sub-issues.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	r := selector.(provider.EpicSelector).Ref
 	key, err := checkRef(r)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	issue, err := p.fetchIssue(ctx, key, epicFields)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
-	snap := model.EpicSnapshot{
+	snap := model.WatchlistSnapshot{
 		Epic: newEpic(issue, p.host),
-		// The fetched issue's own parent, for an Epic Ref that turns out to name
+		// The fetched issue's own parent, for a Ref that turns out to name
 		// a plain Ticket. Reporting it is all this driver does about it: which
 		// screen that opens is internal/cli's decision (ADR-0003).
 		Parent:  newParent(issue.Fields.Parent, p.host),
@@ -226,7 +227,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 
 	tickets, err := p.fetchChildren(ctx, key)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 	snap.Tickets = append(snap.Tickets, tickets...)
 
@@ -235,7 +236,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 }
 
 // FetchDetail returns one Ticket's description, comments and links. id is the
-// issue key, which is what FetchEpic put on every Ticket and what every REST
+// issue key, which is what Resolve put on every Ticket and what every REST
 // path takes.
 //
 // This is three requests where the polled path is two, and that is the point of
@@ -293,7 +294,7 @@ func checkRef(r ref.Ref) (string, error) {
 	return key, nil
 }
 
-// normalizeKey upper-cases an issue key and validates it against the Epic Ref
+// normalizeKey upper-cases an issue key and validates it against the Ref
 // grammar's own key shape. It is both the input check and the injection defence
 // — nothing that fails it can reach a JQL string or a URL path — which is what
 // makes "what can reach JQL" one readable predicate.

@@ -29,7 +29,7 @@ var _ provider.Provider = (*github.Provider)(nil)
 // is asserting something visible.
 const fixtureToken = "fixture-token-not-a-real-secret"
 
-// epicRef is the Epic Ref the fixtures were recorded for.
+// epicRef is the Ref the fixtures were recorded for.
 var epicRef = ref.Ref{
 	Tracker: ref.TrackerGitHub,
 	Host:    "github.com",
@@ -160,12 +160,12 @@ func TestName(t *testing.T) {
 	}
 }
 
-func TestFetchEpicNormalizesTheEpic(t *testing.T) {
+func TestResolveNormalizesTheEpic(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -194,12 +194,12 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicNormalizesEveryTicket(t *testing.T) {
+func TestResolveNormalizesEveryTicket(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	type want struct {
@@ -261,9 +261,9 @@ func TestFetchEpicNormalizesEveryTicket(t *testing.T) {
 func TestNotPlannedIsCancelledAndLeavesTheDenominator(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	var cancelled []string
@@ -293,9 +293,9 @@ func TestNotPlannedIsCancelledAndLeavesTheDenominator(t *testing.T) {
 func TestCrossRepoChildKeepsItsOwnRepository(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	var found *model.Ticket
@@ -311,7 +311,7 @@ func TestCrossRepoChildKeepsItsOwnRepository(t *testing.T) {
 		t.Errorf("Key = %q, want a repo-qualified key", found.Key)
 	}
 
-	// The display key of a cross-repo child is a working Epic Ref: a human can
+	// The display key of a cross-repo child is a working Ref: a human can
 	// paste it straight back into sitrep.
 	back, err := ref.Parse(context.Background(), found.Key)
 	if err != nil {
@@ -323,7 +323,7 @@ func TestCrossRepoChildKeepsItsOwnRepository(t *testing.T) {
 }
 
 // ticketsByKey indexes a fetched epic so a test can name the Ticket it means.
-func ticketsByKey(t *testing.T, snap model.EpicSnapshot) map[string]model.Ticket {
+func ticketsByKey(t *testing.T, snap model.WatchlistSnapshot) map[string]model.Ticket {
 	t.Helper()
 	byKey := make(map[string]model.Ticket, len(snap.Tickets))
 	for _, ticket := range snap.Tickets {
@@ -338,9 +338,9 @@ func ticketsByKey(t *testing.T, snap model.EpicSnapshot) map[string]model.Ticket
 func TestPullRequestsAreCorrelatedToTickets(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	byKey := ticketsByKey(t, snap)
 
@@ -480,9 +480,9 @@ func TestPullRequestsAreCorrelatedToTickets(t *testing.T) {
 func TestTicketsWithNoPullRequests(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	byKey := ticketsByKey(t, snap)
 
@@ -499,9 +499,9 @@ func TestTicketsWithNoPullRequests(t *testing.T) {
 func TestTheLeadPullRequestComesFirst(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	byKey := ticketsByKey(t, snap)
 
@@ -540,9 +540,9 @@ func TestTheLeadPullRequestComesFirst(t *testing.T) {
 func TestOpenPullRequestsMakeTicketsInProgress(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	progress := model.ComputeProgress(snap.Tickets)
@@ -571,8 +571,8 @@ func TestOpenPullRequestsMakeTicketsInProgress(t *testing.T) {
 func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	requests := s.recorded()
@@ -589,9 +589,9 @@ func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
 func TestAssigneesAreMapped(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	byKey := map[string]model.Ticket{}
@@ -642,9 +642,9 @@ func TestPaginationSafety(t *testing.T) {
 			response{body: endlessPage("same")},
 		)
 
-		_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+		_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
+			t.Fatal("Resolve succeeded, want an error about the repeated cursor")
 		}
 		// A server that reports a next page and hands over no usable cursor is
 		// misbehaving, which is what KindUnavailable means — and it stays
@@ -676,9 +676,9 @@ func TestPaginationSafety(t *testing.T) {
 			github.WithEndpoint(srv.URL),
 			github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }))
 
-		_, err := p.FetchEpic(context.Background(), epicRef)
+		_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
+			t.Fatal("Resolve succeeded, want an error about refusing to keep paging")
 		}
 		// A collection past the cap is a stable property of the ref, so the
 		// monitor prints one line and exits rather than retrying forever.
@@ -701,8 +701,8 @@ func TestPaginationSafety(t *testing.T) {
 func TestPaginationFollowsTheCursor(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	requests := s.recorded()
@@ -728,8 +728,8 @@ func TestPaginationFollowsTheCursor(t *testing.T) {
 func TestEveryRequestCarriesTheHeadersGitHubNeeds(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	requests := s.recorded()
@@ -758,8 +758,8 @@ func TestEveryRequestCarriesTheHeadersGitHubNeeds(t *testing.T) {
 func TestTheDocumentSentIsAlwaysAQuery(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	for i, r := range s.recorded() {
@@ -777,9 +777,9 @@ func TestTheDocumentSentIsAlwaysAQuery(t *testing.T) {
 func TestEmptyEpic(t *testing.T) {
 	p := newProvider(newReplayServer(t, response{file: "epic_empty.json"}))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Tickets == nil {
 		t.Error("Tickets is nil, want an empty slice")
@@ -797,7 +797,7 @@ type epicFailure struct {
 }
 
 // epicFailures is the driver's failure table, hoisted out of the test that
-// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// iterates it so that TestResolveFailuresCoverTheNamedClasses can assert what
 // it covers rather than trusting a comment.
 func epicFailures() []epicFailure {
 	return []epicFailure{
@@ -949,14 +949,14 @@ func epicFailures() []epicFailure {
 	}
 }
 
-func TestFetchEpicErrors(t *testing.T) {
+func TestResolveErrors(t *testing.T) {
 	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			p := newProvider(newReplayServer(t, tt.response))
 
-			snap, err := p.FetchEpic(context.Background(), epicRef)
+			snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			if err == nil {
-				t.Fatalf("FetchEpic = %+v, want an error", snap)
+				t.Fatalf("Resolve = %+v, want an error", snap)
 			}
 			providertest.CheckError(t, "github", err, tt.want)
 		})
@@ -967,7 +967,7 @@ func TestFetchEpicErrors(t *testing.T) {
 // limiting each explain themselves on this Tracker. This asserts the table
 // above actually exercises all three, so deleting the only rate-limit row is
 // loud rather than quiet.
-func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+func TestResolveFailuresCoverTheNamedClasses(t *testing.T) {
 	kinds := []provider.Kind{}
 	for _, tt := range epicFailures() {
 		kinds = append(kinds, tt.want.Kind)
@@ -977,7 +977,7 @@ func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
 
 // A user with no token gets one line naming both ways to fix it, and sitrep
 // does not waste a request finding out.
-func TestFetchEpicWithoutAToken(t *testing.T) {
+func TestResolveWithoutAToken(t *testing.T) {
 	sources := map[string]github.TokenSource{
 		"the source finds nothing": func(context.Context, string) (string, error) {
 			return "", nil
@@ -992,7 +992,7 @@ func TestFetchEpicWithoutAToken(t *testing.T) {
 			s := fullEpic(t)
 			p := github.New("github.com", github.WithEndpoint(s.URL), github.WithTokenSource(source))
 
-			_, err := p.FetchEpic(context.Background(), epicRef)
+			_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "github", err, providertest.Want{
 				Kind:     provider.KindAuth,
 				Contains: []string{"gh auth login", "GITHUB_TOKEN"},
@@ -1021,8 +1021,8 @@ func TestTheTokenIsResolvedOnce(t *testing.T) {
 	)
 
 	for i := range 2 {
-		if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-			t.Fatalf("FetchEpic %d: %v", i, err)
+		if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+			t.Fatalf("Resolve %d: %v", i, err)
 		}
 	}
 	if calls != 1 {
@@ -1047,23 +1047,23 @@ func TestATransientTokenFailureIsNotCached(t *testing.T) {
 		}),
 	)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
-		t.Fatal("the first FetchEpic succeeded, want the token failure")
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err == nil {
+		t.Fatal("the first Resolve succeeded, want the token failure")
 	}
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("the second FetchEpic: %v; a transient token failure must not be cached", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("the second Resolve: %v; a transient token failure must not be cached", err)
 	}
 	if calls != 2 {
 		t.Errorf("the token source was called %d times, want 2: the failure must be retried", calls)
 	}
 }
 
-func TestFetchEpicRejectsANonGitHubRef(t *testing.T) {
+func TestResolveRejectsANonGitHubRef(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	_, err := p.FetchEpic(context.Background(), ref.Ref{Tracker: ref.TrackerGitLab, Raw: "https://gitlab.com/a/b/-/issues/1"})
+	_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{Tracker: ref.TrackerGitLab, Raw: "https://gitlab.com/a/b/-/issues/1"}})
 	if err == nil {
-		t.Fatal("FetchEpic accepted a GitLab Ref, want an error")
+		t.Fatal("Resolve accepted a GitLab Ref, want an error")
 	}
 	// A Ref this driver cannot serve is a bad ref, and sitrep says so before it
 	// spends a request finding out.
@@ -1073,7 +1073,7 @@ func TestFetchEpicRejectsANonGitHubRef(t *testing.T) {
 	})
 }
 
-func TestFetchEpicHonoursContextCancellation(t *testing.T) {
+func TestResolveHonoursContextCancellation(t *testing.T) {
 	blocked := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		<-blocked
@@ -1091,12 +1091,12 @@ func TestFetchEpicHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.FetchEpic(ctx, epicRef)
+		_, err := p.Resolve(ctx, provider.EpicSelector{Ref: epicRef})
 		done <- err
 	}()
 	cancel()
 
 	if err := <-done; err == nil {
-		t.Fatal("FetchEpic returned no error after its context was cancelled")
+		t.Fatal("Resolve returned no error after its context was cancelled")
 	}
 }

@@ -21,7 +21,7 @@ type linkType struct {
 //
 // Discovery is lazy, on the first FetchDetail, rather than in the constructor:
 // construction must stay free of side effects (`sitrep --help` may not call
-// Jira) and FetchEpic is the polled hot path, which must not carry a catalogue
+// Jira) and Resolve is the polled hot path, which must not carry a catalogue
 // request. Once per process, before the first link is mapped, is the only
 // moment that satisfies both — do not "fix" this into a constructor request.
 //

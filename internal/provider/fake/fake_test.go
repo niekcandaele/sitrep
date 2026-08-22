@@ -20,7 +20,7 @@ var _ provider.Provider = (*fake.Provider)(nil)
 
 const richTicket = model.TicketID("acme/widgets#112")
 
-// testRef is any Epic Ref: the fake serves them all alike.
+// testRef is any Ref: the fake serves them all alike.
 func testRef(raw string) ref.Ref {
 	return ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Raw: raw}
 }
@@ -36,20 +36,20 @@ func TestNameAndCapabilities(t *testing.T) {
 	}
 }
 
-func TestFetchEpicIsDeterministic(t *testing.T) {
+func TestResolveIsDeterministic(t *testing.T) {
 	p := fake.New()
 
-	first, err := p.FetchEpic(context.Background(), testRef("111"))
+	first, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), testRef("something-else"))
+	second, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("something-else")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if !reflect.DeepEqual(first, second) {
-		t.Error("two FetchEpic calls returned different snapshots")
+		t.Error("two Resolve calls returned different snapshots")
 	}
 	if !first.FetchedAt.IsZero() {
 		t.Errorf("FetchedAt = %v, want the zero time: the caller stamps it", first.FetchedAt)
@@ -61,20 +61,20 @@ func TestFetchEpicIsDeterministic(t *testing.T) {
 
 // The fixture is shared by every downstream test, so a caller mutating what it
 // got must not be able to corrupt it.
-func TestFetchEpicReturnsADefensiveCopy(t *testing.T) {
+func TestResolveReturnsADefensiveCopy(t *testing.T) {
 	p := fake.New()
 
-	snap, err := p.FetchEpic(context.Background(), testRef("111"))
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	wantTitle := snap.Tickets[0].Title
 	snap.Tickets[0].Title = "clobbered"
 	snap.Tickets = snap.Tickets[:1]
 
-	again, err := p.FetchEpic(context.Background(), testRef("111"))
+	again, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if again.Tickets[0].Title != wantTitle {
 		t.Errorf("ticket title = %q, want %q: the fixture was mutated by a caller", again.Tickets[0].Title, wantTitle)
@@ -85,9 +85,9 @@ func TestFetchEpicReturnsADefensiveCopy(t *testing.T) {
 }
 
 func TestFixtureSpansTheModel(t *testing.T) {
-	snap, err := fake.New().FetchEpic(context.Background(), testRef("111"))
+	snap, err := fake.New().Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	seen := map[model.StatusCategory]bool{}
@@ -137,9 +137,9 @@ func TestFixtureSpansTheModel(t *testing.T) {
 func TestWithCapabilitiesStripsTheData(t *testing.T) {
 	p := fake.New(fake.WithCapabilities(model.Capabilities{}))
 
-	snap, err := p.FetchEpic(context.Background(), testRef("111"))
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Capabilities != (model.Capabilities{}) {
 		t.Errorf("snapshot capabilities = %+v, want none declared", snap.Capabilities)
@@ -202,32 +202,32 @@ func TestFetchDetailServesTheFixture(t *testing.T) {
 }
 
 func TestWithSnapshotsAdvancesAndRepeatsTheLast(t *testing.T) {
-	first := model.EpicSnapshot{Epic: model.Epic{Key: "#1"}}
-	second := model.EpicSnapshot{Epic: model.Epic{Key: "#2"}}
+	first := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}}
+	second := model.WatchlistSnapshot{Epic: model.Epic{Key: "#2"}}
 	p := fake.New(fake.WithSnapshots(first, second))
 
 	want := []string{"#1", "#2", "#2"}
 	for i, key := range want {
-		snap, err := p.FetchEpic(context.Background(), testRef("111"))
+		snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 		if err != nil {
-			t.Fatalf("FetchEpic %d: %v", i, err)
+			t.Fatalf("Resolve %d: %v", i, err)
 		}
 		if snap.Epic.Key != key {
 			t.Errorf("call %d returned epic %q, want %q", i+1, snap.Epic.Key, key)
 		}
 	}
-	if got := p.EpicCalls(); got != len(want) {
-		t.Errorf("EpicCalls() = %d, want %d", got, len(want))
+	if got := p.ResolveCalls(); got != len(want) {
+		t.Errorf("ResolveCalls() = %d, want %d", got, len(want))
 	}
 }
 
 func TestWithSnapshotReplacesTheFixture(t *testing.T) {
-	replacement := model.EpicSnapshot{Epic: model.Epic{Key: "#42"}}
+	replacement := model.WatchlistSnapshot{Epic: model.Epic{Key: "#42"}}
 	p := fake.New(fake.WithSnapshot(replacement))
 
-	snap, err := p.FetchEpic(context.Background(), testRef("111"))
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Epic.Key != "#42" || len(snap.Tickets) != 0 {
 		t.Errorf("snapshot = %+v, want the replacement", snap.Epic)
@@ -237,16 +237,16 @@ func TestWithSnapshotReplacesTheFixture(t *testing.T) {
 func TestErrorInjection(t *testing.T) {
 	boom := errors.New("boom")
 
-	p := fake.New(fake.WithEpicError(boom), fake.WithDetailError(boom))
+	p := fake.New(fake.WithResolveError(boom), fake.WithDetailError(boom))
 
-	if _, err := p.FetchEpic(context.Background(), testRef("111")); !errors.Is(err, boom) {
-		t.Errorf("FetchEpic error = %v, want %v", err, boom)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")}); !errors.Is(err, boom) {
+		t.Errorf("Resolve error = %v, want %v", err, boom)
 	}
 	if _, err := p.FetchDetail(context.Background(), richTicket); !errors.Is(err, boom) {
 		t.Errorf("FetchDetail error = %v, want %v", err, boom)
 	}
-	if got := p.EpicCalls(); got != 1 {
-		t.Errorf("EpicCalls() = %d, want 1: failed calls count too", got)
+	if got := p.ResolveCalls(); got != 1 {
+		t.Errorf("ResolveCalls() = %d, want 1: failed calls count too", got)
 	}
 	if got := p.DetailCalls(); got != 1 {
 		t.Errorf("DetailCalls() = %d, want 1: failed calls count too", got)
@@ -261,16 +261,16 @@ func TestCallCounters(t *testing.T) {
 	}
 
 	for range 2 {
-		if _, err := p.FetchEpic(context.Background(), testRef("111")); err != nil {
-			t.Fatalf("FetchEpic: %v", err)
+		if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")}); err != nil {
+			t.Fatalf("Resolve: %v", err)
 		}
 	}
 	if _, err := p.FetchDetail(context.Background(), richTicket); err != nil {
 		t.Fatalf("FetchDetail: %v", err)
 	}
 
-	if got := p.EpicCalls(); got != 2 {
-		t.Errorf("EpicCalls() = %d, want 2", got)
+	if got := p.ResolveCalls(); got != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2", got)
 	}
 	if got := p.DetailCalls(); got != 1 {
 		t.Errorf("DetailCalls() = %d, want 1", got)
@@ -288,8 +288,8 @@ func TestCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := p.FetchEpic(ctx, testRef("111")); !errors.Is(err, context.Canceled) {
-		t.Errorf("FetchEpic error = %v, want context.Canceled", err)
+	if _, err := p.Resolve(ctx, provider.EpicSelector{Ref: testRef("111")}); !errors.Is(err, context.Canceled) {
+		t.Errorf("Resolve error = %v, want context.Canceled", err)
 	}
 	if _, err := p.FetchDetail(ctx, richTicket); !errors.Is(err, context.Canceled) {
 		t.Errorf("FetchDetail error = %v, want context.Canceled", err)
@@ -303,7 +303,7 @@ func TestWithDelayRespectsCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.FetchEpic(ctx, testRef("111"))
+		_, err := p.Resolve(ctx, provider.EpicSelector{Ref: testRef("111")})
 		done <- err
 	}()
 
@@ -311,10 +311,10 @@ func TestWithDelayRespectsCancellation(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("FetchEpic error = %v, want context.Canceled", err)
+			t.Errorf("Resolve error = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("FetchEpic ignored the cancelled context and kept waiting")
+		t.Fatal("Resolve ignored the cancelled context and kept waiting")
 	}
 }
 
@@ -328,8 +328,8 @@ func TestConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := p.FetchEpic(context.Background(), testRef("111")); err != nil {
-				t.Errorf("FetchEpic: %v", err)
+			if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")}); err != nil {
+				t.Errorf("Resolve: %v", err)
 			}
 			if _, err := p.FetchDetail(context.Background(), richTicket); err != nil {
 				t.Errorf("FetchDetail: %v", err)
@@ -338,27 +338,27 @@ func TestConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := p.EpicCalls(); got != 8 {
-		t.Errorf("EpicCalls() = %d, want 8", got)
+	if got := p.ResolveCalls(); got != 8 {
+		t.Errorf("ResolveCalls() = %d, want 8", got)
 	}
 	if got := p.DetailCallsFor(richTicket); got != 8 {
 		t.Errorf("DetailCallsFor() = %d, want 8", got)
 	}
 }
 
-// The fake ignores the Epic Ref's content but records it, so a caller's ref
-// resolution can be asserted at the seam where it lands.
-func TestLastRef(t *testing.T) {
+// The fake ignores the Selector's content but records it, so caller-side
+// construction can be asserted at the seam where it lands.
+func TestLastSelector(t *testing.T) {
 	p := fake.New()
-	if got := p.LastRef(); got != (ref.Ref{}) {
-		t.Errorf("LastRef() before any fetch = %+v, want the zero Ref", got)
+	if got := p.LastSelector(); got != nil {
+		t.Errorf("LastSelector() before any resolve = %+v, want nil", got)
 	}
 
-	want := testRef("111")
-	if _, err := p.FetchEpic(context.Background(), want); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	want := provider.EpicSelector{Ref: testRef("111")}
+	if _, err := p.Resolve(context.Background(), want); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	if got := p.LastRef(); got != want {
-		t.Errorf("LastRef() = %+v, want %+v", got, want)
+	if got := p.LastSelector(); got != want {
+		t.Errorf("LastSelector() = %+v, want %+v", got, want)
 	}
 }
