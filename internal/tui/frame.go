@@ -232,6 +232,22 @@ func rowHeights(rows []Row, caps model.Capabilities) []int {
 	return heights
 }
 
+// rowAt maps a zero-based line in the rendered list body back to the row that
+// owns it. The height map is authoritative: a later group heading owns its
+// spacer and heading lines, while a Ticket owns both its title and meta lines.
+func rowAt(heights []int, offset, y int) (int, bool) {
+	if len(heights) == 0 || offset < 0 || offset >= len(heights) || y < 0 {
+		return 0, false
+	}
+	for i := offset; i < len(heights); i++ {
+		if y < heights[i] {
+			return i, true
+		}
+		y -= heights[i]
+	}
+	return 0, false
+}
+
 // ensureVisible returns the offset that keeps the selected row inside a window
 // of height lines, scrolling as little as possible: up to reach a selection
 // above the window, down just far enough to bring one below it into view.

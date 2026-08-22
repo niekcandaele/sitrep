@@ -36,6 +36,8 @@ type KeyMap struct {
 	// filter is active, which is what keeps esc from claiming two meanings at
 	// once: with nothing filtered the same key falls through to Quit.
 	ClearFilter key.Binding
+	// ToggleMouse enables or disables terminal mouse capture.
+	ToggleMouse key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -90,6 +92,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("esc", "clear filter"),
 			key.WithDisabled(),
 		),
+		ToggleMouse: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "off · shift-drag to select text"),
+		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -101,21 +107,11 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the one-line footer shows. ClearFilter appears
-// only when it is enabled, so the footer never offers to clear a filter that is
-// not there — and Quit is advertised as "q", never as "esc", because esc means
-// whichever rung of the ladder the session is on.
-//
-// Open is in the footer because drill-in is the monitor's headline feature and
-// nothing else advertises it: a key nobody knows about is a key nobody presses.
-//
-// Refresh is not, and that is the trade this line pays for it: all nine
-// bindings measure eighty-seven cells, which an eighty-column terminal clips.
-// Refresh is the one to lose — the monitor refreshes on its own interval
-// anyway, so the hint saves a wait; drill-in does not happen at all if nobody
-// knows the key. `?` still lists every binding, Refresh included.
+// ShortHelp returns the bindings the one-line footer shows. The primary action,
+// mouse escape hatch and quit come first so all three survive clipping on an
+// 80-column terminal. Every binding remains available in FullHelp.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Open, k.HideFinished, k.Find, k.ClearFilter, k.Help, k.Quit}
+	return []key.Binding{k.Open, k.ToggleMouse, k.Quit, k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Help}
 }
 
 // FullHelp returns every binding, grouped into the columns "?" expands to.
@@ -124,7 +120,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown},
 		{k.Home, k.End, k.Open},
 		{k.HideFinished, k.Find, k.ClearFilter},
-		{k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.Refresh, k.Help, k.Quit},
 	}
 }
 
@@ -158,6 +154,8 @@ type DetailKeyMap struct {
 	// Parent opens the Watchlist this Ticket belongs to in the monitor. It is
 	// enabled only when there is one to walk up into.
 	Parent key.Binding
+	// ToggleMouse enables or disables terminal mouse capture.
+	ToggleMouse key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -184,7 +182,8 @@ func DefaultDetailKeyMap() DetailKeyMap {
 			key.WithHelp("u", "epic"),
 			key.WithDisabled(),
 		),
-		Help: list.Help,
+		ToggleMouse: list.ToggleMouse,
+		Help:        list.Help,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -197,7 +196,7 @@ func DefaultDetailKeyMap() DetailKeyMap {
 // Watchlist this Ticket has none of — and that footer line is the whole
 // affordance for the walk-up: no second help line, no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Back, k.Parent, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Back, k.ToggleMouse, k.Quit, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
 }
 
 // FullHelp returns every binding, grouped into the columns "?" expands to.
@@ -206,7 +205,7 @@ func (k DetailKeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.PageUp, k.PageDown},
 		{k.Home, k.End},
 		{k.Back, k.Parent, k.Refresh},
-		{k.Help, k.Quit},
+		{k.ToggleMouse, k.Help, k.Quit},
 	}
 }
 
@@ -220,6 +219,9 @@ type SearchKeyMap struct {
 	Cancel key.Binding
 	// Move steps the list selection without leaving the box.
 	Move key.Binding
+	// MouseHint explains how to select terminal text while capture is enabled. It
+	// has no command path and is hidden when capture is disabled.
+	MouseHint key.Binding
 	// Quit ends the program from inside the box. Only ctrl+c: a plain q is
 	// text here.
 	Quit key.Binding
@@ -240,6 +242,10 @@ func DefaultSearchKeyMap() SearchKeyMap {
 			key.WithKeys("up", "down", "pgup", "pgdown"),
 			key.WithHelp("↑/↓", "move"),
 		),
+		MouseHint: key.NewBinding(
+			key.WithKeys("shift+drag"),
+			key.WithHelp("shift-drag", "to select text"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
@@ -249,7 +255,7 @@ func DefaultSearchKeyMap() SearchKeyMap {
 
 // ShortHelp returns the bindings the find box's footer shows.
 func (k SearchKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Apply, k.Cancel, k.Move, k.Quit}
+	return []key.Binding{k.Apply, k.Cancel, k.MouseHint, k.Move, k.Quit}
 }
 
 // FullHelp returns the same bindings: the find box has no second tier.

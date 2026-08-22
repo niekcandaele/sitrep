@@ -62,7 +62,7 @@ func TestRun(t *testing.T) {
 			name:           "help documents the one-shot modes, the provider flag and the refresh cadence",
 			args:           []string{"--help"},
 			wantCode:       0,
-			wantStdout:     []string{"--json", "--plain", "--provider", "--interval"},
+			wantStdout:     []string{"--json", "--plain", "--provider", "--interval", "--no-mouse"},
 			wantEmptyError: true,
 		},
 		{

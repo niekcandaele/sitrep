@@ -204,6 +204,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m = m.clearPendingClick()
 	m.mode = modeDetail
 	m.detail = detailState{ticket: t}
 
@@ -243,6 +244,7 @@ func (m Model) syncDetailKeys() Model {
 // until now — and from a drill-in it is esc by another name, because both mean
 // "the Watchlist this Ticket belongs to".
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
+	m = m.clearPendingClick()
 	m.mode = modeList
 	m.detail = detailState{}
 	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
@@ -327,6 +329,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// from everywhere, so nobody is trapped either way.
 			return m.quit(msg), tea.Quit
 		}
+		m = m.clearPendingClick()
 		m.mode = modeList
 		m.detail = detailState{}
 		// The list's own state was never touched, but the help listing may have
@@ -339,6 +342,9 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Only this Ticket, and only its Detail: r here never touches the list.
 		next, cmd := m.startDetailFetch()
 		return next, cmd
+
+	case key.Matches(msg, m.detailKeys.ToggleMouse):
+		return m.toggleMouse(), nil
 
 	case key.Matches(msg, m.detailKeys.Help):
 		m.help.ShowAll = !m.help.ShowAll

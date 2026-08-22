@@ -37,4 +37,4 @@ is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
 
 
 
-↑/k up • ↓/j down • esc quit • r refresh • ? help • q quit
+esc quit • m off · shift-drag to select text • q quit • ↑/k up • ↓/j down • r refresh • ? help

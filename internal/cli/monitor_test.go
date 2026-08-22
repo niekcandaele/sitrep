@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/tui"
 )
 
 // Neither --json nor --plain means the live monitor, and the monitor needs a
@@ -19,7 +21,7 @@ import (
 func TestMonitorWithoutATerminalExplainsTheOneShotModes(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	code := cli.RunWith([]string{"111"}, &stdout, &stderr, cli.Deps{
+	code := cli.RunWith([]string{"111", "--no-mouse"}, &stdout, &stderr, cli.Deps{
 		Provider: fake.New(),
 		Stdin:    strings.NewReader(""),
 	})
@@ -34,6 +36,100 @@ func TestMonitorWithoutATerminalExplainsTheOneShotModes(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want it to mention %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestOneShotModesIgnoreNoMouse(t *testing.T) {
+	for _, mode := range []string{"--json", "--plain"} {
+		without := run([]string{"111", mode}, fake.New())
+		with := run([]string{"111", mode, "--no-mouse"}, fake.New())
+		if with.code != 0 || with.stderr != "" {
+			t.Fatalf("%s --no-mouse: code=%d stderr=%q", mode, with.code, with.stderr)
+		}
+		if with.stdout != without.stdout {
+			t.Errorf("%s report changed with --no-mouse", mode)
+		}
+	}
+}
+
+func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		provider   provider.Provider
+		stdin      io.Reader
+		stdinEntry bool
+		wantOpen   bool
+		wantSeed   bool
+	}{
+		{
+			name:     "ordinary seeded monitor",
+			args:     []string{"--no-mouse", "acme/widgets#111"},
+			provider: fake.New(),
+			stdin:    strings.NewReader(""),
+			wantSeed: true,
+		},
+		{
+			name:     "decoded Ticket Detail monitor",
+			args:     []string{"--no-mouse", "acme/widgets#112"},
+			provider: fake.New(fake.WithSnapshot(fake.FixtureTicketSnapshot())),
+			stdin:    strings.NewReader(""),
+			wantOpen: true,
+		},
+		{
+			name:     "retryable preflight monitor",
+			args:     []string{"--no-mouse", "acme/widgets#111"},
+			provider: fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down"))),
+			stdin:    strings.NewReader(""),
+		},
+		{
+			name:       "stdin-selected monitor",
+			args:       []string{"--no-mouse", "-"},
+			provider:   fake.New(),
+			stdin:      strings.NewReader("acme/widgets#112"),
+			stdinEntry: true,
+			wantSeed:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured *tui.Options
+			var tty *trackedReadCloser
+			deps := cli.Deps{
+				Provider: tt.provider,
+				Stdin:    tt.stdin,
+				RunMonitor: func(_ context.Context, opts tui.Options) error {
+					captured = &opts
+					return nil
+				},
+			}
+			if tt.stdinEntry {
+				tty = &trackedReadCloser{Reader: strings.NewReader("")}
+				deps.OpenTTY = func() (io.ReadCloser, error) { return tty, nil }
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, deps)
+			if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("result = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if captured == nil {
+				t.Fatal("monitor runner was not called")
+			}
+			if !captured.NoMouse {
+				t.Error("NoMouse was lost before the monitor runner")
+			}
+			if (captured.Open != nil) != tt.wantOpen {
+				t.Errorf("Open present = %t, want %t", captured.Open != nil, tt.wantOpen)
+			}
+			if (captured.Initial != nil) != tt.wantSeed {
+				t.Errorf("Initial present = %t, want %t", captured.Initial != nil, tt.wantSeed)
+			}
+			if tty != nil && !tty.closed {
+				t.Error("stdin-selected monitor did not close its controlling terminal")
+			}
+		})
 	}
 }
 
@@ -68,7 +164,7 @@ func TestStdinMonitorUsesAndClosesControllingTerminal(t *testing.T) {
 	input := &trackedReadCloser{Reader: strings.NewReader("")}
 	opens := 0
 	var stdout, stderr bytes.Buffer
-	code := cli.RunWith([]string{"-"}, &stdout, &stderr, cli.Deps{
+	code := cli.RunWith([]string{"--no-mouse", "-"}, &stdout, &stderr, cli.Deps{
 		Provider: p,
 		Stdin:    strings.NewReader("acme/widgets#112"),
 		OpenTTY: func() (io.ReadCloser, error) {
@@ -101,7 +197,7 @@ func TestStdinMonitorReportsControllingTerminalOpenFailure(t *testing.T) {
 	p := fake.New()
 	opens := 0
 	var stdout, stderr bytes.Buffer
-	code := cli.RunWith([]string{"-"}, &stdout, &stderr, cli.Deps{
+	code := cli.RunWith([]string{"--no-mouse", "-"}, &stdout, &stderr, cli.Deps{
 		Provider: p,
 		Stdin:    strings.NewReader("acme/widgets#112"),
 		OpenTTY: func() (io.ReadCloser, error) {
@@ -144,7 +240,7 @@ func TestOrdinaryMonitorsNeverOpenControllingTerminal(t *testing.T) {
 func TestNonRetryableStdinPreflightFailureNeverOpensTerminal(t *testing.T) {
 	p := fake.New(fake.WithResolveError(provider.Errorf(provider.KindBadRef, "bad selector")))
 	var stdout, stderr bytes.Buffer
-	code := cli.RunWith([]string{"-"}, &stdout, &stderr, cli.Deps{
+	code := cli.RunWith([]string{"--no-mouse", "-"}, &stdout, &stderr, cli.Deps{
 		Provider: p,
 		Stdin:    strings.NewReader("acme/widgets#112"),
 		OpenTTY:  panicTTY,
@@ -161,7 +257,7 @@ func TestRetryableStdinPreflightFailureStillOpensTerminal(t *testing.T) {
 	p := fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down")))
 	opens := 0
 	var stdout, stderr bytes.Buffer
-	code := cli.RunWith([]string{"-"}, &stdout, &stderr, cli.Deps{
+	code := cli.RunWith([]string{"--no-mouse", "-"}, &stdout, &stderr, cli.Deps{
 		Provider: p,
 		Stdin:    strings.NewReader("acme/widgets#112"),
 		OpenTTY: func() (io.ReadCloser, error) {

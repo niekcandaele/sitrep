@@ -86,6 +86,42 @@ func TestEnsureVisible(t *testing.T) {
 	}
 }
 
+func TestRowAt(t *testing.T) {
+	tests := []struct {
+		name    string
+		heights []int
+		offset  int
+		y       int
+		want    int
+		ok      bool
+	}{
+		{name: "empty height map", y: 0},
+		{name: "negative line", heights: []int{1}, y: -1},
+		{name: "negative offset", heights: []int{1}, offset: -1, y: 0},
+		{name: "offset below map", heights: []int{1}, offset: 1, y: 0},
+		{name: "first group heading", heights: []int{1, 2, 2, 1}, y: 0, want: 0, ok: true},
+		{name: "ticket title", heights: []int{1, 2, 2, 1}, y: 1, want: 1, ok: true},
+		{name: "ticket meta", heights: []int{1, 2, 2, 1}, y: 2, want: 1, ok: true},
+		{name: "later group spacer", heights: []int{1, 2, 2, 1}, y: 3, want: 2, ok: true},
+		{name: "later group heading", heights: []int{1, 2, 2, 1}, y: 4, want: 2, ok: true},
+		{name: "one-line ticket boundary", heights: []int{1, 2, 2, 1}, y: 5, want: 3, ok: true},
+		{name: "padding below rows", heights: []int{1, 2, 2, 1}, y: 6},
+		{name: "nonzero offset starts at its row", heights: []int{1, 2, 2, 1}, offset: 2, y: 0, want: 2, ok: true},
+		{name: "nonzero offset second row", heights: []int{1, 2, 2, 1}, offset: 2, y: 2, want: 3, ok: true},
+		{name: "nonzero offset padding", heights: []int{1, 2, 2, 1}, offset: 2, y: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := rowAt(tt.heights, tt.offset, tt.y)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("rowAt(%v, %d, %d) = (%d, %t), want (%d, %t)",
+					tt.heights, tt.offset, tt.y, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 // A meta line cut mid-word reads as a complete answer about the wrong thing:
 // "ci FAIL" clipped to "ci FA" is a truncated CI verdict that looks whole. The
 // ellipsis is the difference between a short answer and a wrong one.

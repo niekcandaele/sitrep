@@ -77,6 +77,10 @@ type Model struct {
 	width, height int
 	ready         bool
 
+	mouseEnabled bool
+	lastClickID  model.TicketID
+	lastClickAt  time.Time
+
 	keys       KeyMap
 	searchKeys SearchKeyMap
 	detailKeys DetailKeyMap
@@ -141,20 +145,22 @@ func New(ctx context.Context, opts Options) Model {
 		now:      now,
 		interval: opts.Interval,
 		// The first refresh is already on its way out of Init.
-		generation:  1,
-		refreshing:  true,
-		lastAttempt: now(),
-		listArmed:   true,
-		hasSource:   src != nil,
-		search:      search,
-		fetchDetail: fetchDetail,
-		details:     make(map[model.TicketID]detailEntry),
-		keys:        DefaultKeyMap(),
-		searchKeys:  DefaultSearchKeyMap(),
-		detailKeys:  DefaultDetailKeyMap(),
-		help:        help.New(),
-		styles:      DefaultStyles(true),
+		generation:   1,
+		refreshing:   true,
+		lastAttempt:  now(),
+		listArmed:    true,
+		hasSource:    src != nil,
+		search:       search,
+		fetchDetail:  fetchDetail,
+		mouseEnabled: !opts.NoMouse,
+		details:      make(map[model.TicketID]detailEntry),
+		keys:         DefaultKeyMap(),
+		searchKeys:   DefaultSearchKeyMap(),
+		detailKeys:   DefaultDetailKeyMap(),
+		help:         help.New(),
+		styles:       DefaultStyles(true),
 	}
+	m = m.syncMouseKeys()
 
 	if opts.Initial != nil {
 		// A reading the caller already took is folded in exactly the way a
@@ -243,17 +249,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case detailFetchedMsg:
 		return m.onDetailFetched(msg), nil
 
+	case listMouseClickMsg:
+		if m.mode != modeList {
+			return m, nil
+		}
+		return m.onListMouseClick(msg)
+
+	case listMouseWheelMsg:
+		if m.mode != modeList {
+			return m, nil
+		}
+		return m.onListMouseWheel(msg), nil
+
+	case detailMouseWheelMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseWheel(msg), nil
+
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
 		// consulted: while the box is open every list command is text, and while
 		// Detail is open the list's commands are not on this screen at all.
 		switch {
 		case m.searching:
+			if key.Matches(msg, m.searchKeys.Apply, m.searchKeys.Cancel, m.searchKeys.Move, m.searchKeys.Quit) {
+				m = m.clearPendingClick()
+			}
 			return m.onSearchKey(msg)
 		case m.mode == modeDetail:
-			return m.onDetailKey(msg)
+			return m.clearPendingClick().onDetailKey(msg)
 		}
-		return m.onKey(msg)
+		return m.clearPendingClick().onKey(msg)
 
 	case tea.PasteMsg:
 		// A pasted Ticket key is the obvious way to use this box, and a paste
@@ -270,6 +297,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	v := tea.NewView("")
 	v.AltScreen = true
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	if !m.ready {
 		// Before the terminal has reported its size there is nothing honest to
 		// draw: a frame guessed at 80x24 flashes the wrong layout for one
@@ -279,12 +311,18 @@ func (m Model) View() tea.View {
 
 	if m.mode == modeDetail {
 		v.SetContent(m.detailFrame())
+		if m.mouseEnabled {
+			v.OnMouse = m.detailMouseHandler()
+		}
 		return v
 	}
 
 	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
 	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
 	v.Cursor = m.cursor()
+	if m.mouseEnabled {
+		v.OnMouse = m.listMouseHandler()
+	}
 	return v
 }
 
@@ -457,6 +495,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Quit):
 		return m.quit(msg), tea.Quit
+
+	case key.Matches(msg, m.keys.ToggleMouse):
+		return m.toggleMouse(), nil
 
 	case key.Matches(msg, m.keys.Help):
 		// The expanded listing eats body height, so the window has to be

@@ -87,6 +87,7 @@ Arguments:
 Flags:
   -h, --help              show this help and exit
       --interval <dur>    how often the monitor refreshes (default 60s)
+      --no-mouse          start the monitor without mouse capture
       --json              print the epic as a JSON document and exit
       --plain             print a one-shot text snapshot of the epic and exit
       --profile <name>    the Profile to connect with, from
@@ -126,6 +127,8 @@ type Deps struct {
 	// OpenTTY opens the controlling terminal used for monitor keys after Stdin
 	// carried selector bytes. When nil it opens /dev/tty read-only.
 	OpenTTY func() (io.ReadCloser, error)
+	// RunMonitor starts the full-screen monitor. When nil it is tui.Run.
+	RunMonitor func(context.Context, tui.Options) error
 	// Config is the loaded global config. When non-nil it wins outright and no
 	// file is read: tests inject it, and so does any caller that has already
 	// read one.
@@ -228,6 +231,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	profileName := fs.String("profile", "", "the Profile to connect with")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
 	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
+	noMouse := fs.Bool("no-mouse", false, "start the monitor without mouse capture")
 
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -350,6 +354,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
 			Interval:     refresh,
+			NoMouse:      *noMouse,
 		})
 	}
 	snap = provider.StampSnapshot(p, snap, deps.now())
@@ -363,7 +368,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}
-		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, refresh)
+		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, refresh, *noMouse)
 	}
 
 	switch {
@@ -383,6 +388,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		DetailSource: tui.TicketDetailSource(p),
 		Initial:      &initial,
 		Interval:     refresh,
+		NoMouse:      *noMouse,
 	})
 }
 
@@ -436,7 +442,7 @@ func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, stdinS
 		opts.Input = input
 	}
 
-	code, failure := monitorExit(ctx, tui.Run(ctx, opts))
+	code, failure := monitorExit(ctx, deps.runTUI(ctx, opts))
 	if failure != nil {
 		return runtimeError(stderr, failure)
 	}
@@ -1068,6 +1074,13 @@ func (d Deps) openTTY() (io.ReadCloser, error) {
 		return d.OpenTTY()
 	}
 	return os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+}
+
+func (d Deps) runTUI(ctx context.Context, opts tui.Options) error {
+	if d.RunMonitor != nil {
+		return d.RunMonitor(ctx, opts)
+	}
+	return tui.Run(ctx, opts)
 }
 
 // The --provider names. The default auto-detects the Tracker from the Epic

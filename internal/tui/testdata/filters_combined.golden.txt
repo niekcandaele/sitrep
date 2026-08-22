@@ -37,4 +37,4 @@ TODO (1)
 
 
 filter: done+cancelled hidden · "shard" · 2 of 10 Tickets                                                      esc clear
-↑/k up • ↓/j down • enter open • d hide finished • / find • esc clear filter • ? help • q quit
+enter open • m off · shift-drag to select text • q quit • ↑/k up • ↓/j down • d hide finished • / find …
