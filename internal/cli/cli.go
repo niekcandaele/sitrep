@@ -565,7 +565,9 @@ func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs [
 		return selection, nil
 	}
 
-	selection.selector = provider.RefListSelector{Refs: deduplicateRefs(refs)}
+	unique := deduplicateRefs(refs)
+	selection.first = unique[0]
+	selection.selector = provider.RefListSelector{Refs: unique}
 	return selection, nil
 }
 
@@ -656,9 +658,38 @@ func deduplicateRefs(refs []ref.Ref) []ref.Ref {
 			continue
 		}
 		seen[identity] = struct{}{}
+
+		// Parsed fields may alias one bulk stdin string. The selector survives for
+		// every monitor refresh, so retain only the unique Ref's own bytes.
+		r.Host = strings.Clone(r.Host)
+		r.Owner = strings.Clone(r.Owner)
+		r.Repo = strings.Clone(r.Repo)
+		r.Key = strings.Clone(r.Key)
+		r.Raw = strings.Clone(r.Raw)
 		unique = append(unique, r)
 	}
-	return unique
+	if !shouldCopyDeduplicatedRefs(len(unique), cap(unique)) {
+		return unique[:len(unique):len(unique)]
+	}
+	retained := make([]ref.Ref, len(unique))
+	copy(retained, unique)
+	return retained
+}
+
+// A clipped near-full slice intentionally keeps its small hidden slack rather
+// than paying for a second large allocation. Duplicate-heavy slices are always
+// copied; shallower reductions are copied only when at least 1024 Ref slots are
+// reclaimed and the copy is at most four times larger than that slack. Counting
+// slots keeps this policy independent of Ref's architecture-specific byte size.
+const compactRefSlackSlots = 1024
+
+func shouldCopyDeduplicatedRefs(retained, capacity int) bool {
+	slack := capacity - retained
+	if slack == 0 {
+		return false
+	}
+	return slack >= retained ||
+		slack >= compactRefSlackSlots && slack*4 >= retained
 }
 
 // selectProfile finds the Profile serving this Ref, returning nil when none
