@@ -5,11 +5,15 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 func TestEffectiveInterval(t *testing.T) {
@@ -106,6 +110,113 @@ func TestIsFlagSetSurvivesRepeatedParses(t *testing.T) {
 			t.Error("isFlagSet = true for a flag nobody typed")
 		}
 	})
+}
+
+func TestShouldCopyDeduplicatedRefs(t *testing.T) {
+	tests := []struct {
+		name     string
+		retained int
+		capacity int
+		want     bool
+	}{
+		{name: "all unique", retained: 100_000, capacity: 100_000},
+		{name: "one duplicate in a large list", retained: 100_000, capacity: 100_001},
+		{name: "small shallow reduction", retained: 63, capacity: 64},
+		{name: "small duplicate-heavy reduction", retained: 1, capacity: 64, want: true},
+		{name: "half the backing is slack", retained: 32, capacity: 64, want: true},
+		{name: "material ratio below slot threshold", retained: 4092, capacity: 5115},
+		{name: "slot and ratio thresholds met", retained: 4096, capacity: 5120, want: true},
+		{name: "slot threshold without material ratio", retained: 100_000, capacity: 101_024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldCopyDeduplicatedRefs(tt.retained, tt.capacity); got != tt.want {
+				t.Errorf("shouldCopyDeduplicatedRefs(%d, %d) = %v, want %v",
+					tt.retained, tt.capacity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSelectionDetachesFullURLBeforeProviderRetention(t *testing.T) {
+	const duplicates = 64
+	raw := "https://github.com/acme/widgets/issues/112"
+	backing := strings.Repeat(raw+"\n", duplicates)
+	rawRefs := strings.Fields(backing)
+
+	stopAfterHost := errors.New("stop after capturing provider host")
+	var providerHost string
+	deps := Deps{TokenSource: func(_ context.Context, host string) (string, error) {
+		providerHost = host
+		return "", stopAfterHost
+	}}
+	selection, err := deps.resolveSelection(
+		context.Background(), config.Config{}, rawRefs, true, providerAuto, "",
+	)
+	if err != nil {
+		t.Fatalf("resolveSelection: %v", err)
+	}
+
+	selected, ok := selection.selector.(provider.RefListSelector)
+	if !ok {
+		t.Fatalf("selector = %T, want provider.RefListSelector", selection.selector)
+	}
+	if len(selected.Refs) != 1 || cap(selected.Refs) != 1 {
+		t.Fatalf("deduplicated selector len/cap = %d/%d, want 1/1", len(selected.Refs), cap(selected.Refs))
+	}
+
+	retained := []struct {
+		name string
+		ref  ref.Ref
+	}{
+		{name: "selection.first", ref: selection.first},
+		{name: "selector.Refs[0]", ref: selected.Refs[0]},
+	}
+	for _, item := range retained {
+		fields := []struct {
+			name  string
+			value string
+		}{
+			{name: "Host", value: item.ref.Host},
+			{name: "Owner", value: item.ref.Owner},
+			{name: "Repo", value: item.ref.Repo},
+			{name: "Key", value: item.ref.Key},
+			{name: "Raw", value: item.ref.Raw},
+		}
+		for _, field := range fields {
+			if stringAliases(field.value, backing) {
+				t.Errorf("%s.%s still aliases the bulk stdin string", item.name, field.name)
+			}
+		}
+	}
+
+	p, err := deps.newProvider(providerAuto, selection.first, selection.profile, "")
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	if _, err := p.Resolve(context.Background(), selection.selector); !errors.Is(err, stopAfterHost) {
+		t.Fatalf("provider Resolve error = %v, want %v", err, stopAfterHost)
+	}
+	if providerHost != "github.com" {
+		t.Fatalf("provider host = %q, want github.com", providerHost)
+	}
+	if stringAliases(providerHost, backing) {
+		t.Error("provider-retained Host still aliases the bulk stdin string")
+	}
+}
+
+func stringAliases(value, backing string) bool {
+	if value == "" || backing == "" {
+		return false
+	}
+	valueData := unsafe.StringData(value)
+	for i := 0; i < len(backing); i++ {
+		if valueData == unsafe.StringData(backing[i:]) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProfileTokenSource(t *testing.T) {

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -74,5 +75,24 @@ func TestMonitorExit(t *testing.T) {
 				t.Errorf("failure = %q, want it to mention %q", failure, tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestReadStdinRefsUsesUnicodeWhitespaceOnly(t *testing.T) {
+	input := "  acme/widgets#112\t#38\r\n\n-\v--json\fABC-123 acme/widgets#121  "
+	got, err := readStdinRefs(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("readStdinRefs: %v", err)
+	}
+	want := []string{
+		"acme/widgets#112",
+		"#38",
+		"-",
+		"--json",
+		"ABC-123",
+		"acme/widgets#121",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Refs = %#v, want %#v", got, want)
 	}
 }

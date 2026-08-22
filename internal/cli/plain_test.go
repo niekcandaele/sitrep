@@ -63,6 +63,57 @@ func TestPlainRefListReport(t *testing.T) {
 	}
 }
 
+func TestPlainStdinRefListMatchesPositionalSelection(t *testing.T) {
+	input := "acme/widgets#112\nacme/widgets#115 acme/widgets#118\tacme/widgets#121\n"
+	before := runStdin([]string{"--plain", "-"}, input, fake.New())
+	after := runStdin([]string{"-", "--plain"}, input, fake.New())
+	positional := run([]string{
+		"--plain",
+		"acme/widgets#112",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}, fake.New())
+
+	if before.code != 0 || after.code != 0 {
+		t.Fatalf("stdin runs failed: before=%q after=%q", before.stderr, after.stderr)
+	}
+	if before.stdout != after.stdout || before.stdout != positional.stdout {
+		t.Error("stdin and positional Refs produced different plain Watchlists")
+	}
+	checkGolden(t, "ref_list_plain.golden.txt", []byte(before.stdout))
+}
+
+func TestPlainSingleStdinRefUsesOneTicketHeader(t *testing.T) {
+	got := runStdin([]string{"--plain", "-"}, "acme/widgets#112", fake.New())
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  1 ticket\n") {
+		t.Errorf("plain output starts %q, want one-ticket Header", got.stdout[:min(len(got.stdout), 40)])
+	}
+}
+
+func TestStdinBareRefsUseCWDRemoteForEveryMember(t *testing.T) {
+	p := fake.New()
+	lookups := 0
+	got := runWith([]string{"--json", "-"}, cli.Deps{
+		Provider: p,
+		Stdin:    strings.NewReader("112\t115"),
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			lookups++
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if lookups != 2 || len(selector.Refs) != 2 || selector.Refs[0].Number != 112 || selector.Refs[1].Number != 115 {
+		t.Errorf("lookups = %d selector = %+v, want two resolved bare Refs", lookups, selector)
+	}
+}
+
 // The acceptance criterion is "no alt-screen, safe for dumb terminals and
 // pipes": escape sequences are exactly what a dumb terminal over SSH and a log
 // file cannot handle, so --plain emits none at all — not even when stdout is a
