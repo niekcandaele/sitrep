@@ -273,10 +273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Detail is open the list's commands are not on this screen at all.
 		switch {
 		case m.searching:
-			if key.Matches(msg, m.searchKeys.Apply, m.searchKeys.Cancel, m.searchKeys.Move, m.searchKeys.Quit) {
-				m = m.clearPendingClick()
-			}
-			return m.onSearchKey(msg)
+			return m.clearPendingClick().onSearchKey(msg)
 		case m.mode == modeDetail:
 			return m.clearPendingClick().onDetailKey(msg)
 		}
@@ -286,7 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A pasted Ticket key is the obvious way to use this box, and a paste
 		// arrives as its own message rather than as key presses.
 		if m.searching {
-			return m.updateSearch(msg)
+			return m.clearPendingClick().updateSearch(msg)
 		}
 	}
 	return m, nil

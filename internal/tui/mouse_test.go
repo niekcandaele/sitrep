@@ -633,6 +633,45 @@ func TestDoubleClickInterruptionState(t *testing.T) {
 	}
 }
 
+func TestSearchInputClearsPendingDoubleClick(t *testing.T) {
+	start := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+
+	for _, tt := range []struct {
+		name  string
+		input tea.Msg
+	}{
+		{name: "typed text", input: keyPress("a")},
+		{name: "pasted text", input: tea.PasteMsg{Content: "a"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			now := start
+			m := mouseListModel(t, Options{
+				Now: func() time.Time { return now },
+				DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+					return model.Detail{}, model.Capabilities{}, nil
+				},
+			}, []model.Ticket{{ID: "#1", Key: "#1", Title: "alpha", Status: model.StatusTodo}}, 80, 20)
+			next, _ := m.Update(keyPress("/"))
+			m = next.(Model)
+
+			click := tea.MouseClickMsg{X: 10, Y: ticketLineY(t, m, "#1", 0), Button: tea.MouseLeft}
+			m, _, _ = dispatchMouse(t, m, click)
+			next, _ = m.Update(tt.input)
+			m = next.(Model)
+			if m.lastClickID != "" || !m.lastClickAt.IsZero() {
+				t.Fatalf("search input left pending click id=%q at=%s", m.lastClickID, m.lastClickAt)
+			}
+
+			now = now.Add(100 * time.Millisecond)
+			m, cmd, _ := dispatchMouse(t, m, click)
+			if m.mode != modeList || cmd != nil || m.lastClickID != "#1" {
+				t.Errorf("click after search input: mode=%v cmd nil=%t pending=%q, want a re-armed first click",
+					m.mode, cmd == nil, m.lastClickID)
+			}
+		})
+	}
+}
+
 func TestDoubleClickWhileSearchingCommitsTheLiveFilter(t *testing.T) {
 	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
 	m := mouseListModel(t, Options{
@@ -1028,8 +1067,8 @@ func TestTeatestMouseAfterFilterAndResize(t *testing.T) {
 		s.tm.Send(tea.MouseClickMsg{X: 10, Y: 3, Button: tea.MouseLeft})
 		s.waitFor(t, "▸ #113")
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
+		s.waitFor(t, "▸ #7")
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
-		s.waitFor(t, "▸ #115")
 		s.tm.Send(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
 		s.waitFor(t, "CANCELLED (1)")
 
