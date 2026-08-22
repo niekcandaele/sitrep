@@ -414,9 +414,25 @@ func TestDetailMouseWheelAndClicks(t *testing.T) {
 		t.Errorf("wheel after rewrap offset=%d, want %d", m.detail.offset, max(before-3, 0))
 	}
 
+	linkLine := -1
+	for i, line := range m.detailBodyLines() {
+		if strings.Contains(line, "is blocked by") {
+			linkLine = i
+			break
+		}
+	}
+	if linkLine < 0 {
+		t.Fatal("Detail fixture has no rendered Link line")
+	}
+	m.detail.offset = m.clampDetail(linkLine)
+	linkY := detailHeaderHeight + linkLine - m.detail.offset
+	if linkY < detailHeaderHeight || linkY >= detailHeaderHeight+m.detailBodyHeight() {
+		t.Fatalf("Link line y=%d is outside the rendered Detail body", linkY)
+	}
+
 	before = m.detail.offset
 	for _, click := range []tea.MouseMsg{
-		tea.MouseClickMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseLeft},
+		tea.MouseClickMsg{X: 0, Y: linkY, Button: tea.MouseLeft},
 		tea.MouseClickMsg{X: 0, Y: detailHeaderHeight + 1, Button: tea.MouseRight},
 		tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelRight},
 	} {

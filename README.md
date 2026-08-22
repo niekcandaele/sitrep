@@ -103,6 +103,7 @@ rather than quitting.
 | `esc` | back to the list — or quit, when the Ticket was opened directly |
 | `u` | open the Epic this Ticket belongs to, when it has one |
 | `r` | re-read this Ticket's Detail |
+| `m` | turn mouse capture off or on |
 | `?` | expand the help |
 | `q`, `ctrl+c` | quit |
 
