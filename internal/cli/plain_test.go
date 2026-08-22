@@ -41,6 +41,28 @@ func TestPlainEpicReport(t *testing.T) {
 	}
 }
 
+func TestPlainRefListReport(t *testing.T) {
+	p := fake.New()
+	got := run([]string{
+		"acme/widgets#112",
+		"--plain",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}, p)
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	checkGolden(t, "ref_list_plain.golden.txt", []byte(got.stdout))
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  4 tickets\n") {
+		t.Errorf("plain output starts %q, want Ref-list Header", got.stdout[:min(len(got.stdout), 40)])
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
 // The acceptance criterion is "no alt-screen, safe for dumb terminals and
 // pipes": escape sequences are exactly what a dumb terminal over SSH and a log
 // file cannot handle, so --plain emits none at all — not even when stdout is a
@@ -87,6 +109,11 @@ func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
 // and the monitor's empty state is its twin — so it is still worth a golden.
 func TestPlainEmptyEpic(t *testing.T) {
 	empty := model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{
+			Key:   "#900",
+			Title: "Widget sync v3: nothing planned yet",
+			URL:   "https://tracker.example.test/acme/widgets/900",
+		},
 		Epic: model.Epic{
 			ID:           "acme/widgets#900",
 			Key:          "#900",
@@ -98,8 +125,8 @@ func TestPlainEmptyEpic(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := plain.RenderEpic(&buf, empty); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, empty); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	checkGolden(t, "epic_plain_empty.golden.txt", buf.Bytes())
 }
@@ -150,6 +177,33 @@ func TestPlainFlagOrderDoesNotMatter(t *testing.T) {
 	if before.stdout != after.stdout || before.code != after.code {
 		t.Errorf("flag order changed the run: %d/%d bytes, codes %d and %d",
 			len(before.stdout), len(after.stdout), before.code, after.code)
+	}
+}
+
+func TestPlainInterspersedBareRefListResolvesEachMemberOnce(t *testing.T) {
+	source := model.WatchlistSnapshot{Tickets: []model.Ticket{
+		{ID: "acme/widgets#38", Key: "#38", Title: "Thirty eight"},
+		{ID: "acme/widgets#39", Key: "#39", Title: "Thirty nine"},
+	}}
+	p := fake.New(fake.WithSnapshot(source))
+	lookups := 0
+	got := runWith([]string{"38", "--plain", "#39"}, cli.Deps{
+		Provider: p,
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			lookups++
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if lookups != 2 {
+		t.Errorf("origin lookups = %d, want one per Ref at startup", lookups)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 2 || selector.Refs[0].Number != 38 || selector.Refs[1].Number != 39 {
+		t.Errorf("selector = %+v, want ordered 38, 39", selector)
 	}
 }
 

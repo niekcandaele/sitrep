@@ -61,13 +61,6 @@ func TestRun(t *testing.T) {
 			wantEmptyError: true,
 		},
 		{
-			name:         "two refs are a usage error",
-			args:         []string{"111", "112"},
-			wantCode:     2,
-			wantStderr:   []string{"only one Epic Ref"},
-			wantEmptyOut: true,
-		},
-		{
 			name:         "an unknown provider is a usage error",
 			args:         []string{"--provider", "bogus", "111"},
 			wantCode:     2,

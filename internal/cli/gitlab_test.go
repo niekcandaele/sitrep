@@ -216,7 +216,9 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 			Name         string          `json:"name"`
 			Capabilities map[string]bool `json:"capabilities"`
 		} `json:"provider"`
-		Epic    map[string]json.RawMessage   `json:"epic"`
+		Watchlist struct {
+			Epic map[string]json.RawMessage `json:"epic"`
+		} `json:"watchlist"`
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
 	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
@@ -231,7 +233,7 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 	if len(doc.Tickets) != 7 {
 		t.Errorf("got %d tickets, want the fixture milestone's 7", len(doc.Tickets))
 	}
-	if got := string(doc.Epic["key"]); got != `"gitlab-org/cli%3"` {
+	if got := string(doc.Watchlist.Epic["key"]); got != `"gitlab-org/cli%3"` {
 		t.Errorf("epic.key = %s, want GitLab's own milestone reference", got)
 	}
 	if _, ok := doc.Tickets[0]["pull_requests"]; !ok {

@@ -85,9 +85,8 @@ func (p *Provider) correlate(ctx context.Context, tickets []model.Ticket) error 
 }
 
 // correlateTicket attaches one Ticket's merge requests and refines its Status
-// Category. A Ticket whose id does not name an issue is skipped rather than
-// failed: there is no such Ticket today, and being total here is cheaper than
-// being surprised later.
+// Category. A Ref-list Epic or milestone root has no issue correlation endpoint,
+// so its non-issue Ticket ID is skipped.
 func (p *Provider) correlateTicket(ctx context.Context, ticket *model.Ticket) error {
 	t, err := parseTicketID(ticket.ID)
 	if err != nil || t.kind != kindIssue {

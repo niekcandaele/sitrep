@@ -279,6 +279,23 @@ func newEpicFromIssue(i issueWire) model.Epic {
 	}
 }
 
+// newTicketFromEpic preserves the thin root identity when an explicit Ref-list
+// member is a native epic or a milestone. In a Ref-list it is an ordinary
+// Ticket; there is no synthetic outer Epic or Parent.
+func newTicketFromEpic(epic model.Epic) model.Ticket {
+	return model.Ticket{
+		ID:           epic.ID,
+		Key:          epic.Key,
+		Title:        epic.Title,
+		URL:          epic.URL,
+		Status:       epic.Status,
+		NativeStatus: epic.NativeStatus,
+		Assignees:    epic.Assignees,
+		Repository:   epic.Repository,
+		PullRequests: epic.PullRequests,
+	}
+}
+
 // newTicketFromIssue maps one of an epic's child issues onto a Ticket.
 //
 // parentID is the fetched Epic's own TicketID: honest for a child reached

@@ -1,6 +1,6 @@
 // Package fake provides sitrep's built-in fake Provider: a deterministic,
-// dependency-free implementation of provider.Provider serving a hand-written
-// fixture epic.
+// dependency-free implementation of provider.Provider serving hand-written
+// fixture Watchlists.
 //
 // This is the standing test double for all renderer and TUI work in sitrep, not
 // scaffolding for one package's tests. It is production code precisely so every
@@ -14,11 +14,13 @@ package fake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // allCapabilities is what New declares by default: everything on, so a test
@@ -30,7 +32,7 @@ var allCapabilities = model.Capabilities{
 	PullRequests:  true,
 }
 
-// Provider is a fake Provider serving a built-in fixture epic. The zero value
+// Provider is a fake Provider serving built-in Watchlist fixtures. The zero value
 // is not usable; call New.
 type Provider struct {
 	mu             sync.Mutex
@@ -129,11 +131,11 @@ func (p *Provider) Capabilities() model.Capabilities {
 	return p.caps
 }
 
-// Resolve returns the current fixture snapshot for any Selector. The result is
-// a deep copy filtered to the declared Capabilities, with FetchedAt left zero
-// for the caller to stamp. Successive calls advance through the snapshots given
-// to WithSnapshots. The complete Selector is recorded for LastSelector and
-// otherwise ignored.
+// Resolve returns the current fixture snapshot for selector. The result is a
+// deep copy filtered to the declared Capabilities, with FetchedAt left zero for
+// the caller to stamp. Successive calls advance through snapshots given to
+// WithSnapshots. Ref-list selectors keep only their exact members in Selector
+// order and never expose an outer Epic or Parent.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := p.wait(ctx); err != nil {
 		return model.WatchlistSnapshot{}, err
@@ -143,6 +145,7 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	defer p.mu.Unlock()
 
 	p.resolveCalls++
+	selector = cloneSelector(selector)
 	p.lastSelector = selector
 	if p.resolveErr != nil {
 		return model.WatchlistSnapshot{}, p.resolveErr
@@ -153,18 +156,83 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		p.cursor++
 	}
 
+	switch s := selector.(type) {
+	case provider.EpicSelector:
+		snap.Header = provider.EpicHeader(snap.Epic)
+	case provider.RefListSelector:
+		if len(s.Refs) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"fake: Ref-list Selector is empty")
+		}
+		var err error
+		snap, err = selectRefListSnapshot(snap, s.Refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	default:
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"fake: unsupported Watchlist Selector")
+	}
+
+	if snap.Tickets == nil {
+		snap.Tickets = []model.Ticket{}
+	}
 	snap.Capabilities = p.caps
 	snap.FetchedAt = time.Time{}
 	applyEpicCapabilities(&snap.Epic, p.caps)
 	if !p.caps.Hierarchy {
-		// Without the Hierarchy Capability the Tracker exposes no parent links at
-		// all, so there is nothing to decode a breadcrumb from.
 		snap.Parent = model.Parent{}
 	}
 	for i := range snap.Tickets {
 		applyTicketCapabilities(&snap.Tickets[i], p.caps)
 	}
 	return snap, nil
+}
+
+func selectRefListSnapshot(snap model.WatchlistSnapshot, refs []ref.Ref) (model.WatchlistSnapshot, error) {
+	tickets := make([]model.Ticket, 0, len(refs))
+	for _, r := range refs {
+		index := -1
+		for i := range snap.Tickets {
+			if fakeTicketMatchesRef(snap.Tickets[i], r) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			name := strings.TrimSpace(r.Raw)
+			if name == "" {
+				name = r.String()
+			}
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"fake: ticket %q was not found (or you lack access)", name)
+		}
+		tickets = append(tickets, snap.Tickets[index])
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(tickets)),
+		Tickets:      tickets,
+		Capabilities: snap.Capabilities,
+	}, nil
+}
+
+func fakeTicketMatchesRef(ticket model.Ticket, r ref.Ref) bool {
+	if r.Owner != "" && r.Repo != "" && r.Number > 0 {
+		return string(ticket.ID) == fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number)
+	}
+	if r.Key != "" {
+		return strings.EqualFold(string(ticket.ID), r.Key) || strings.EqualFold(ticket.Key, r.Key)
+	}
+	name := strings.TrimSpace(r.Raw)
+	return name != "" && (string(ticket.ID) == name || ticket.Key == name)
+}
+
+func cloneSelector(selector provider.Selector) provider.Selector {
+	if s, ok := selector.(provider.RefListSelector); ok {
+		s.Refs = append([]ref.Ref(nil), s.Refs...)
+		return s
+	}
+	return selector
 }
 
 // FetchDetail returns the fixture Detail for id, filtered to the declared
@@ -206,7 +274,7 @@ func (p *Provider) ResolveCalls() int {
 func (p *Provider) LastSelector() provider.Selector {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastSelector
+	return cloneSelector(p.lastSelector)
 }
 
 // DetailCalls returns how many times FetchDetail has been called. A list

@@ -160,6 +160,20 @@ func selectorSource(p *fake.Provider, c *clock) Source {
 	return SelectorSource(p, provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}, c.now)
 }
 
+func refListSelectorSource(p *fake.Provider, c *clock) Source {
+	refs := make([]ref.Ref, 0, 4)
+	for _, number := range []int{112, 115, 118, 121} {
+		refs = append(refs, ref.Ref{
+			Tracker: ref.TrackerGitHub,
+			Host:    "github.com",
+			Owner:   "acme",
+			Repo:    "widgets",
+			Number:  number,
+		})
+	}
+	return SelectorSource(p, provider.RefListSelector{Refs: refs}, c.now)
+}
+
 // The headline frame: the header and its progress bar, every Status Category
 // grouped with its count, assignees, all four pull request shapes, the unicode
 // title, the cross-repo Ticket, the selected-row marker and the footer help.
@@ -181,6 +195,80 @@ func TestInitialFrame(t *testing.T) {
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: the monitor never fetches Detail", n)
+	}
+}
+
+func TestRefListInitialFrame(t *testing.T) {
+	p := fake.New()
+	c := newClock()
+	s := start(t, c, refListSelectorSource(p, c), time.Minute)
+	s.waitFor(t, "4 tickets")
+
+	m, got := s.finish(t)
+
+	checkGolden(t, "ref_list.golden.txt", got)
+	if m.input.Header != (Header{Title: "4 tickets"}) {
+		t.Errorf("Header = %+v, want 4 tickets", m.input.Header)
+	}
+	if len(m.input.Tickets) != 4 {
+		t.Errorf("Tickets = %d, want 4", len(m.input.Tickets))
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestRefListFilteringDrillInAndRefreshUseTheCommonListPath(t *testing.T) {
+	before := fake.FixtureSnapshot()
+	after := fake.FixtureSnapshot()
+	after.Tickets[0].Status = model.StatusDone
+	after.Tickets[0].NativeStatus = "closed"
+	after.Tickets = append(after.Tickets, model.Ticket{ID: "acme/widgets#999", Key: "#999", Title: "unrequested"})
+	p := fake.New(fake.WithSnapshots(before, after))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       refListSelectorSource(p, c),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "4 tickets")
+
+	// Hide-finished operates on the same rows while whole-Watchlist progress stays
+	// based on all four members.
+	s.tm.Send(keyPress("d"))
+	s.waitFor(t, "2 of 4 Tickets")
+	s.tm.Send(keyPress("d"))
+
+	// Fuzzy find selects #112, and opening it is the only Detail read.
+	s.tm.Send(keyPress("/"))
+	s.typeText("Draft shard")
+	s.tm.Send(enterKey)
+	s.tm.Send(enterKey)
+	waitUntil(t, "the selected Ref-list Ticket detail", func() bool { return p.DetailCallsFor("acme/widgets#112") == 1 })
+	s.waitFor(t, "The shard sync protocol")
+	s.tm.Send(escKey)
+	s.waitFor(t, "4 tickets")
+
+	// Clear the query before refreshing so the changed status is visible.
+	s.tm.Send(escKey)
+	s.tm.Send(keyPress("r"))
+	waitUntil(t, "the Ref-list refresh", func() bool { return p.ResolveCalls() == 2 })
+
+	m, _ := s.finish(t)
+	if m.input.Header != (Header{Title: "4 tickets"}) {
+		t.Errorf("Header after refresh = %+v", m.input.Header)
+	}
+	if len(m.input.Tickets) != 4 {
+		t.Fatalf("membership after refresh = %d, want 4", len(m.input.Tickets))
+	}
+	for _, ticket := range m.input.Tickets {
+		if ticket.ID == "acme/widgets#999" {
+			t.Error("refresh added an unrequested Ticket")
+		}
+	}
+	if p.ResolveCalls() != 2 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 2 and 1", p.ResolveCalls(), p.DetailCalls())
 	}
 }
 
@@ -282,6 +370,11 @@ func TestFrameWithoutThePullRequestCapability(t *testing.T) {
 // says so rather than trailing off into an empty void.
 func TestFrameWithNoTickets(t *testing.T) {
 	empty := model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{
+			Key:   "#900",
+			Title: "Widget sync v3: nothing planned yet",
+			URL:   "https://tracker.example.test/acme/widgets/900",
+		},
 		Epic: model.Epic{
 			ID:     "acme/widgets#900",
 			Key:    "#900",

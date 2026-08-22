@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -113,15 +114,64 @@ func TestRenderDetailWithoutCommentsCapability(t *testing.T) {
 	}
 }
 
-func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
+func TestRenderWatchlistAlwaysEmitsATicketArray(t *testing.T) {
 	var buf bytes.Buffer
 	empty := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
-	if err := jsonout.RenderEpic(&buf, empty, "fake"); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "1"}}
+	if err := jsonout.RenderWatchlist(&buf, empty, selector, "fake"); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
 	if !strings.Contains(buf.String(), `"tickets": []`) {
 		t.Errorf("an epic with no tickets must emit an empty array, got:\n%s", buf.String())
+	}
+}
+
+func TestRenderRefListSelectorAndOmitsEpic(t *testing.T) {
+	snap := fake.FixtureRefListSnapshot()
+	snap.FetchedAt = generatedAt
+	selector := provider.RefListSelector{Refs: []ref.Ref{
+		{Raw: "  acme/widgets#121  "},
+		{Owner: "acme", Repo: "widgets", Number: 112},
+	}}
+
+	var buf bytes.Buffer
+	if err := jsonout.RenderWatchlist(&buf, snap, selector, "fake"); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
+	}
+
+	var doc struct {
+		SchemaVersion int `json:"schema_version"`
+		Watchlist     struct {
+			Selector struct {
+				Kind string   `json:"kind"`
+				Refs []string `json:"refs"`
+			} `json:"selector"`
+			Epic *json.RawMessage `json:"epic"`
+		} `json:"watchlist"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.SchemaVersion != 2 {
+		t.Errorf("schema_version = %d, want 2", doc.SchemaVersion)
+	}
+	if doc.Watchlist.Selector.Kind != "ref_list" {
+		t.Errorf("selector.kind = %q, want ref_list", doc.Watchlist.Selector.Kind)
+	}
+	wantRefs := []string{"acme/widgets#121", "acme/widgets#112"}
+	if !reflect.DeepEqual(doc.Watchlist.Selector.Refs, wantRefs) {
+		t.Errorf("selector.refs = %q, want %q", doc.Watchlist.Selector.Refs, wantRefs)
+	}
+	if doc.Watchlist.Epic != nil {
+		t.Error("Ref-list Watchlist emitted an epic")
+	}
+}
+
+func TestRenderWatchlistRejectsUnsupportedSelector(t *testing.T) {
+	var buf bytes.Buffer
+	if err := jsonout.RenderWatchlist(&buf, model.WatchlistSnapshot{}, nil, "fake"); err == nil {
+		t.Fatal("RenderWatchlist accepted a nil Selector")
 	}
 }
 
@@ -136,23 +186,27 @@ func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 	}
 	snap.FetchedAt = generatedAt
 
-	var epicBuf bytes.Buffer
-	if err := jsonout.RenderEpic(&epicBuf, snap, p.Name()); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	var watchlistBuf bytes.Buffer
+	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}
+	if err := jsonout.RenderWatchlist(&watchlistBuf, snap, selector, p.Name()); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
-	documents := map[string][]byte{
-		"epic":   epicBuf.Bytes(),
-		"detail": renderDetail(t, p, richTicket),
+	documents := map[string]struct {
+		raw     []byte
+		version float64
+	}{
+		"watchlist": {raw: watchlistBuf.Bytes(), version: 2},
+		"detail":    {raw: renderDetail(t, p, richTicket), version: 1},
 	}
-	for name, raw := range documents {
+	for name, document := range documents {
 		var doc map[string]any
-		if err := json.Unmarshal(raw, &doc); err != nil {
+		if err := json.Unmarshal(document.raw, &doc); err != nil {
 			t.Errorf("the %s document is not valid JSON: %v", name, err)
 			continue
 		}
-		if got := doc["schema_version"]; got != float64(1) {
-			t.Errorf("%s schema_version = %v, want 1", name, got)
+		if got := doc["schema_version"]; got != document.version {
+			t.Errorf("%s schema_version = %v, want %v", name, got, document.version)
 		}
 		if got := doc["generated_at"]; got != "2026-01-15T12:00:00Z" {
 			t.Errorf("%s generated_at = %v, want an RFC 3339 UTC timestamp", name, got)

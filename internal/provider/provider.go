@@ -32,14 +32,15 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// Selector names a Watchlist. EpicSelector is the only implementation in v0.2
-// after ticket #44; later tickets add other kinds without changing Provider.Resolve.
+// Selector names a Watchlist. Implementations are closed to this package so a
+// Provider can exhaustively choose the authoritative read for each kind.
 type Selector interface {
 	selector()
 }
@@ -52,6 +53,30 @@ type EpicSelector struct {
 
 func (EpicSelector) selector() {}
 
+// RefListSelector names the exact Tickets to read, in display order. Refs have
+// already been parsed, retagged, Profile-completed, de-duplicated, and checked
+// to share one Tracker and host. Providers perform no cwd git or Profile
+// resolution.
+type RefListSelector struct {
+	Refs []ref.Ref
+}
+
+func (RefListSelector) selector() {}
+
+// EpicHeader copies an Epic's display identity into the generic Watchlist seam.
+func EpicHeader(epic model.Epic) model.WatchlistHeader {
+	return model.WatchlistHeader{Key: epic.Key, Title: epic.Title, URL: epic.URL}
+}
+
+// RefListHeader identifies an explicit Ref-list Watchlist by its member count.
+func RefListHeader(count int) model.WatchlistHeader {
+	noun := "tickets"
+	if count == 1 {
+		noun = "ticket"
+	}
+	return model.WatchlistHeader{Title: fmt.Sprintf("%d %s", count, noun)}
+}
+
 // Provider translates one Tracker's API into sitrep's model. Implementations
 // must be safe for concurrent use: the TUI polls from its own goroutines.
 type Provider interface {
@@ -63,11 +88,13 @@ type Provider interface {
 	// supports. It is cheap and pure: callers may ask on every render.
 	Capabilities() model.Capabilities
 
-	// Resolve returns one batched reading of the Watchlist named by selector.
-	// The Selector is constructed after Ref resolution and reused on every poll,
-	// so implementations must not repeat that work. Implementations must be safe
-	// to call repeatedly and return Tickets in a stable order. The returned
-	// snapshot's FetchedAt is left zero for the caller to stamp.
+	// Resolve returns one logical batched reading of the Watchlist named by
+	// selector. A REST Provider may make multiple HTTP requests inside that one
+	// invocation. Selectors are constructed after Ref resolution and reused on
+	// every poll, so implementations must not repeat cwd git or Profile work.
+	// Every returned Ticket is thin list data; FetchDetail remains the only Detail
+	// path. Implementations return Tickets in stable Selector order and leave the
+	// snapshot's FetchedAt zero for the caller to stamp.
 	Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error)
 
 	// FetchDetail returns the expensive per-ticket data for one Ticket. It is

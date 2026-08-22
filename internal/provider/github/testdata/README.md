@@ -1,7 +1,7 @@
 # GitHub driver fixtures
 
 These payloads are replayed by the local test server in `github_test.go`. They are the
-GitHub driver's only test seam: assertions target the normalized `model.EpicSnapshot`, and
+GitHub driver's only test seam: assertions target the normalized `model.WatchlistSnapshot`, and
 no test in this repository ever calls the live API.
 
 ## Provenance
@@ -59,6 +59,29 @@ The shapes and what each one proves:
 
 `epic_empty.json` is the same real epic node with an empty `subIssues` page: an issue with
 no sub-issues is not an error, it is a Ticket someone pointed sitrep at.
+
+## Explicit Ref lists
+
+The Ref-list fixtures were added on **2026-08-22** and replay the dynamic aliased GraphQL
+response shape. They are deliberately hand-edited fixture payloads, not fresh live recordings:
+the successful nodes and pull-request shapes are derived from `epic_page1.json` and
+`epic_page2.json`, while the second repository and failure identities are fictional. The
+payload contains no credentials; avatar URLs are the already-grafted examples from the Epic
+fixtures, so no additional redaction was needed.
+
+`ref_list.json` orders its JSON members as `ref2`, `ref0`, `ref3`, `ref1` even though the
+Selector order is `ref0` through `ref3`. That edit proves response-object order cannot change
+Watchlist order. It combines two repositories and one open pull request so the direct-read
+path also exercises qualified keys and derived InProgress status.
+
+The failure payloads each include valid data before the failing member so returning a partial
+Watchlist would be visible:
+
+| Fixture | deliberate edit and purpose |
+|---|---|
+| `ref_list_missing.json` | `ref1` is a null repository, representing a missing or inaccessible target |
+| `ref_list_pull_request.json` | `ref1.issue` is null while `issueOrPullRequest.__typename` is `PullRequest` |
+| `ref_list_errors.json` | a `NOT_FOUND` GraphQL error carries path `["ref1"]`, alongside valid `ref0` data |
 
 ## Refs that name a Ticket
 

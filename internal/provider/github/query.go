@@ -1,5 +1,10 @@
 package github
 
+import (
+	"strconv"
+	"strings"
+)
+
 // epicQuery is the one GraphQL document the epic hot path sends. It is a
 // `query` and always will be: sitrep is read-only by design (ADR-0002) and no
 // mutation exists anywhere in this package.
@@ -72,6 +77,49 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
           }
         }
       }
+    }
+  }
+}`
+
+// buildRefListQuery constructs one direct issue lookup per Ref. The only
+// generated text is the numeric suffix on aliases and variable names; Tracker
+// values remain in the variables map sent beside the document.
+func buildRefListQuery(count int) string {
+	var document strings.Builder
+	document.WriteString("query(")
+	for i := range count {
+		if i > 0 {
+			document.WriteString(", ")
+		}
+		suffix := strconv.Itoa(i)
+		document.WriteString("$owner" + suffix + ":String!, $repo" + suffix + ":String!, $number" + suffix + ":Int!")
+	}
+	document.WriteString(") {\n")
+	for i := range count {
+		suffix := strconv.Itoa(i)
+		document.WriteString("  ref" + suffix + ": repository(owner:$owner" + suffix + ", name:$repo" + suffix + ") {\n")
+		document.WriteString("    kind: issueOrPullRequest(number:$number" + suffix + ") { __typename }\n")
+		document.WriteString("    issue(number:$number" + suffix + ") { ...RefListTicketFields }\n")
+		document.WriteString("  }\n")
+	}
+	document.WriteString("}\n")
+	document.WriteString(refListTicketFragment)
+	return document.String()
+}
+
+// refListTicketFragment is deliberately the same thin issue shape used for an
+// Epic's child Tickets. It excludes hierarchy and Detail fields because an
+// explicit Ref list names membership directly and remains on the polled path.
+const refListTicketFragment = `fragment RefListTicketFields on Issue {
+  id number title url state stateReason
+  repository { nameWithOwner }
+  assignees(first:10) { nodes { login name avatarUrl } }
+  closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
+    totalCount
+    nodes {
+      number title url state isDraft reviewDecision createdAt
+      repository { nameWithOwner }
+      commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
     }
   }
 }`

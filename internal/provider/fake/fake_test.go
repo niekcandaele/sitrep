@@ -3,6 +3,7 @@ package fake_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -23,6 +24,17 @@ const richTicket = model.TicketID("acme/widgets#112")
 // testRef is any Ref: the fake serves them all alike.
 func testRef(raw string) ref.Ref {
 	return ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Raw: raw}
+}
+
+func fixtureRef(number int) ref.Ref {
+	return ref.Ref{
+		Tracker: ref.TrackerGitHub,
+		Host:    "github.com",
+		Owner:   "acme",
+		Repo:    "widgets",
+		Number:  number,
+		Raw:     fmt.Sprintf("acme/widgets#%d", number),
+	}
 }
 
 func TestNameAndCapabilities(t *testing.T) {
@@ -56,6 +68,124 @@ func TestResolveIsDeterministic(t *testing.T) {
 	}
 	if len(first.Tickets) == 0 {
 		t.Fatal("the fixture epic has no tickets")
+	}
+}
+
+func TestResolveRefListKeepsOrderAndHasNoOuterEpic(t *testing.T) {
+	p := fake.New()
+	selector := provider.RefListSelector{Refs: []ref.Ref{fixtureRef(121), fixtureRef(112), fixtureRef(115)}}
+
+	snap, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	wantIDs := []model.TicketID{"acme/widgets#121", "acme/widgets#112", "acme/widgets#115"}
+	gotIDs := make([]model.TicketID, len(snap.Tickets))
+	for i, ticket := range snap.Tickets {
+		gotIDs[i] = ticket.ID
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Errorf("Tickets = %v, want %v", gotIDs, wantIDs)
+	}
+	if snap.Header != provider.RefListHeader(3) {
+		t.Errorf("Header = %+v, want 3 tickets", snap.Header)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Ref-list snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Tickets == nil {
+		t.Error("Tickets is nil on success")
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestResolveRefListHeaderPluralization(t *testing.T) {
+	p := fake.New()
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{fixtureRef(112)}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Header.Title != "1 ticket" {
+		t.Errorf("Header.Title = %q, want 1 ticket", snap.Header.Title)
+	}
+}
+
+func TestResolveRefListDefensivelyCopiesSelectorAndTickets(t *testing.T) {
+	p := fake.New()
+	refs := []ref.Ref{fixtureRef(112), fixtureRef(115)}
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	refs[0] = fixtureRef(121)
+	snap.Tickets[0].Title = "clobbered"
+
+	stored := p.LastSelector().(provider.RefListSelector)
+	if stored.Refs[0].Number != 112 {
+		t.Errorf("stored Selector mutated to %+v", stored.Refs[0])
+	}
+	stored.Refs[0] = fixtureRef(121)
+	if again := p.LastSelector().(provider.RefListSelector); again.Refs[0].Number != 112 {
+		t.Errorf("LastSelector exposed its Ref slice: %+v", again.Refs)
+	}
+
+	again, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{fixtureRef(112), fixtureRef(115)}})
+	if err != nil {
+		t.Fatalf("Resolve again: %v", err)
+	}
+	if again.Tickets[0].Title == "clobbered" {
+		t.Error("Resolve exposed the fixture Ticket slice")
+	}
+}
+
+func TestResolveRefListKeepsMembershipAcrossSnapshots(t *testing.T) {
+	before := fake.FixtureSnapshot()
+	after := fake.FixtureSnapshot()
+	after.Tickets[0].Status = model.StatusDone
+	after.Tickets = append(after.Tickets, model.Ticket{ID: "acme/widgets#999", Key: "#999"})
+	p := fake.New(fake.WithSnapshots(before, after))
+	selector := provider.RefListSelector{Refs: []ref.Ref{fixtureRef(112), fixtureRef(115)}}
+
+	first, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	second, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if len(first.Tickets) != 2 || len(second.Tickets) != 2 {
+		t.Fatalf("membership changed: %d then %d", len(first.Tickets), len(second.Tickets))
+	}
+	if second.Tickets[0].ID != "acme/widgets#112" || second.Tickets[0].Status != model.StatusDone {
+		t.Errorf("second first Ticket = %+v, want refreshed #112", second.Tickets[0])
+	}
+	if p.DetailCalls() != 0 {
+		t.Errorf("DetailCalls = %d, want 0", p.DetailCalls())
+	}
+}
+
+func TestResolveEmptyRefListFailsBeforeServingSnapshot(t *testing.T) {
+	p := fake.New()
+	_, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{}})
+	if err == nil || provider.KindOf(err) != provider.KindBadRef {
+		t.Fatalf("error = %v (kind %v), want KindBadRef", err, provider.KindOf(err))
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestResolveRejectsPointerSelector(t *testing.T) {
+	p := fake.New()
+	_, err := p.Resolve(context.Background(), &provider.EpicSelector{Ref: testRef("111")})
+	if err == nil || provider.KindOf(err) != provider.KindBadRef {
+		t.Fatalf("error = %v (kind %v), want unsupported KindBadRef", err, provider.KindOf(err))
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
 	}
 }
 

@@ -250,10 +250,6 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	if len(positional) == 0 {
 		return usageError(stderr, "an Epic Ref is required")
 	}
-	if len(positional) > 1 {
-		return usageError(stderr, "only one Epic Ref may be given")
-	}
-	rawRef := positional[0]
 
 	if !knownProviderName(*providerName) {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
@@ -273,40 +269,13 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The Ref is resolved once, here, before a Provider exists: the Provider is
-	// chosen from what the Ref points at, and Resolve is polled, so re-resolving a
-	// bare number there would re-run git forever.
-	r, err := deps.resolveRef(ctx, rawRef, *providerName)
+	selection, err := deps.resolveSelection(ctx, cfg, positional, *providerName, *profileName)
 	if err != nil {
 		return runtimeError(stderr, err)
 	}
-
-	// A Profile claiming the Ref's host names that host's Tracker, which is the
-	// only way a bare number inside a self-managed GitLab clone can be told
-	// apart from a GitHub Enterprise one.
-	r = retagProfileClaimedHost(cfg, r)
-
-	// An explicit --provider is authoritative for a Ref whose Tracker the
-	// grammar had to guess at. It is applied here, before the Profile is
-	// selected, so everything downstream — Profile matching, the driver, the
-	// Ref the driver reads — agrees about which Tracker this is.
-	if *providerName != providerAuto && *providerName != providerFake {
-		if r.Tracker, err = forceTracker(*providerName, r); err != nil {
-			return runtimeError(stderr, err)
-		}
-	}
-
-	// A Profile is resolved once, here, between the Ref and the Provider, and is
-	// consumed entirely at Provider-construction time. Nothing downstream — not
-	// the pre-flight fetch, not the renderers, not the TUI — knows a Profile exists.
-	prof, err := selectProfile(cfg, r, *profileName)
-	if err != nil {
-		return runtimeError(stderr, err)
-	}
-	if prof != nil {
-		r = prof.Complete(r)
-	}
-	selector := provider.EpicSelector{Ref: r}
+	selector := selection.selector
+	r := selection.first
+	prof := selection.profile
 
 	refresh := effectiveInterval(isFlagSet(fs, "interval"), *interval, profileInterval(prof))
 
@@ -322,9 +291,9 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// out of this call.
 	p = provider.Sanitized(p)
 
-	// One batched fetch, before the mode switch, because every mode needs its
-	// result: it is what decides whether this Ref named an Epic or a Ticket, and
-	// the monitor is seeded with it rather than fetching it again.
+	// One logical batched fetch, before the mode switch, because every mode needs
+	// its result. For a single Ref it also decides whether the Ref named an Epic
+	// or a Ticket; either Selector kind seeds the monitor without fetching again.
 	snap, err := p.Resolve(ctx, selector)
 	if err != nil {
 		if code, ok := interrupted(ctx); ok {
@@ -356,7 +325,12 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	}
 	snap = provider.StampSnapshot(p, snap, deps.now())
 
-	if decodesToTicket(snap) {
+	if list, ok := selector.(provider.RefListSelector); ok && len(snap.Tickets) != len(list.Refs) {
+		return runtimeError(stderr, provider.Errorf(provider.KindUnavailable,
+			"%s: Ref-list Resolve returned %d Tickets for %d Refs", p.Name(), len(snap.Tickets), len(list.Refs)))
+	}
+
+	if _, epic := selector.(provider.EpicSelector); epic && decodesToTicket(snap) {
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}
@@ -366,11 +340,11 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	switch {
 	case *asJSON:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return jsonout.RenderEpic(w, snap, p.Name())
+			return jsonout.RenderWatchlist(w, snap, selector, p.Name())
 		})
 	case *asPlain:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return plain.RenderEpic(w, snap)
+			return plain.RenderWatchlist(w, snap)
 		})
 	}
 
@@ -468,6 +442,165 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return set
+}
+
+type resolvedSelection struct {
+	selector provider.Selector
+	first    ref.Ref
+	profile  *config.Profile
+}
+
+// resolveSelection resolves every command-line Ref once and turns the invocation
+// form into the Selector reused by preflight and every refresh. Routing stays a
+// startup concern: Providers never read git remotes or Profiles.
+func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs []string,
+	providerName, profileName string) (resolvedSelection, error) {
+	refs := make([]ref.Ref, len(rawRefs))
+	for i, raw := range rawRefs {
+		r, err := d.resolveRef(ctx, raw, providerName)
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		r = retagProfileClaimedHost(cfg, r)
+		if providerName != providerAuto && providerName != providerFake {
+			if r.Tracker, err = forceTracker(providerName, r); err != nil {
+				return resolvedSelection{}, err
+			}
+		}
+		refs[i] = r
+	}
+
+	if left, right, ok := firstTrackerConflict(refs); ok {
+		completed := append([]ref.Ref(nil), refs...)
+		for i, r := range completed {
+			if prof, err := selectProfile(cfg, r, profileName); err == nil && prof != nil {
+				completed[i] = prof.Complete(r)
+			}
+		}
+		return resolvedSelection{}, mixedTrackerError(completed[left], completed[right])
+	}
+
+	profiles := make([]*config.Profile, len(refs))
+	for i, r := range refs {
+		prof, err := selectProfile(cfg, r, profileName)
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		profiles[i] = prof
+		if prof != nil {
+			refs[i] = prof.Complete(r)
+		}
+	}
+
+	if left, right, ok := firstRouteConflict(refs); ok {
+		return resolvedSelection{}, mixedTrackerError(refs[left], refs[right])
+	}
+	if left, right, ok := firstProfileConflict(profiles); ok {
+		//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+		return resolvedSelection{}, fmt.Errorf("Refs in one Watchlist resolve through different Profiles (%q and %q); pass --profile to choose one",
+			profileIdentity(profiles[left]), profileIdentity(profiles[right]))
+	}
+
+	selection := resolvedSelection{first: refs[0], profile: profiles[0]}
+	if len(rawRefs) == 1 {
+		selection.selector = provider.EpicSelector{Ref: refs[0]}
+		return selection, nil
+	}
+
+	selection.selector = provider.RefListSelector{Refs: deduplicateRefs(refs)}
+	return selection, nil
+}
+
+func firstTrackerConflict(refs []ref.Ref) (int, int, bool) {
+	for i := range refs {
+		for j := i + 1; j < len(refs); j++ {
+			if refs[i].Tracker != ref.TrackerUnknown && refs[j].Tracker != ref.TrackerUnknown &&
+				refs[i].Tracker != refs[j].Tracker {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func firstRouteConflict(refs []ref.Ref) (int, int, bool) {
+	for i := range refs {
+		for j := i + 1; j < len(refs); j++ {
+			if refs[i].Tracker != refs[j].Tracker || !strings.EqualFold(refs[i].Host, refs[j].Host) {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func mixedTrackerError(left, right ref.Ref) error {
+	//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+	return fmt.Errorf("Refs in one Watchlist must use one Tracker; %q resolves to %s (%s), while %q resolves to %s (%s)",
+		selectorRefLabel(left), trackerDisplayName(left.Tracker), left.Host,
+		selectorRefLabel(right), trackerDisplayName(right.Tracker), right.Host)
+}
+
+func selectorRefLabel(r ref.Ref) string {
+	if raw := strings.TrimSpace(r.Raw); raw != "" {
+		return raw
+	}
+	return r.String()
+}
+
+func trackerDisplayName(tracker ref.Tracker) string {
+	if tracker == ref.TrackerUnknown {
+		return "Unknown"
+	}
+	return providerDisplayName(string(tracker))
+}
+
+func firstProfileConflict(profiles []*config.Profile) (int, int, bool) {
+	for i := range profiles {
+		for j := i + 1; j < len(profiles); j++ {
+			if profileIdentity(profiles[i]) != profileIdentity(profiles[j]) {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func profileIdentity(prof *config.Profile) string {
+	if prof == nil {
+		return "none"
+	}
+	return prof.Name
+}
+
+type refIdentity struct {
+	tracker ref.Tracker
+	host    string
+	owner   string
+	repo    string
+	number  int
+	key     string
+}
+
+func deduplicateRefs(refs []ref.Ref) []ref.Ref {
+	unique := make([]ref.Ref, 0, len(refs))
+	seen := make(map[refIdentity]struct{}, len(refs))
+	for _, r := range refs {
+		identity := refIdentity{
+			tracker: r.Tracker,
+			host:    strings.ToLower(r.Host),
+			owner:   r.Owner,
+			repo:    r.Repo,
+			number:  r.Number,
+			key:     r.Key,
+		}
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+		unique = append(unique, r)
+	}
+	return unique
 }
 
 // selectProfile finds the Profile serving this Ref, returning nil when none
