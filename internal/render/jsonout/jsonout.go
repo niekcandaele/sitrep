@@ -119,8 +119,9 @@ type selectorDoc struct {
 }
 
 type watchlistDoc struct {
-	Selector selectorDoc `json:"selector"`
-	Epic     *epicDoc    `json:"epic,omitempty"`
+	Selector     selectorDoc `json:"selector"`
+	Epic         *epicDoc    `json:"epic,omitempty"`
+	LimitReached bool        `json:"limit_reached,omitempty"`
 }
 
 type watchlistDocument struct {
@@ -244,7 +245,10 @@ func newWatchlistDoc(snap model.WatchlistSnapshot, selector provider.Selector) (
 		return watchlistDoc{Selector: selectorDoc{Kind: "ref_list", Refs: refs}}, nil
 	case provider.QuerySelector:
 		query := s.Query
-		return watchlistDoc{Selector: selectorDoc{Kind: "query", Query: &query}}, nil
+		return watchlistDoc{
+			Selector:     selectorDoc{Kind: "query", Query: &query},
+			LimitReached: snap.LimitReached,
+		}, nil
 	default:
 		return watchlistDoc{}, fmt.Errorf("json: unsupported Watchlist Selector %T", selector)
 	}

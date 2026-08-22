@@ -28,6 +28,11 @@ type WatchlistSnapshot struct {
 	// Provider's stable Selector order. Grouping is a rendering concern; the model
 	// never reorders.
 	Tickets []Ticket
+	// LimitReached is true only for a successful Query Resolve whose configured
+	// membership budget was consumed while the Tracker indicated another ordered
+	// result. It says nothing about the unknown total and remains false for every
+	// non-Query Selector.
+	LimitReached bool
 	// Parent is the parent Ticket of the fetched node, when the Tracker exposes
 	// one and declares the Hierarchy Capability. It is what a Ref
 	// naming a plain Ticket is decoded through: the breadcrumb above that

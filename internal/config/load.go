@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -145,7 +147,7 @@ type yamlSection struct {
 // because it is a key anyone should use.
 var yamlSections = map[string]yamlSection{
 	"config.Config":  {label: "the top level", keys: []string{"profiles"}},
-	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval"}},
+	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval", "max_tickets"}},
 	"config.Auth":    {label: "auth", keys: []string{"token_env", "user", "user_env"}},
 }
 
@@ -198,7 +200,7 @@ func rewriteTypeError(entry string) string {
 }
 
 // validate checks the decoded document and fills in the fields that are derived
-// from it — a Profile's Name, its parsed RefreshInterval.
+// from it — a Profile's Name, parsed RefreshInterval, and effective MaxTickets.
 //
 // It is a pure function of the document: no environment is read, no file, no
 // network. In particular a Profile whose token_env is unset in the environment
@@ -233,7 +235,10 @@ func (c Config) validateProfile(p *Profile) error {
 	if err := c.validateAuth(*p); err != nil {
 		return err
 	}
-	return c.validateInterval(p)
+	if err := c.validateInterval(p); err != nil {
+		return err
+	}
+	return c.validateMaxTickets(p)
 }
 
 func (c Config) validateProvider(p Profile) error {
@@ -353,6 +358,22 @@ func (c Config) validateInterval(p *Profile) error {
 		return c.profileErrorf(p.Name, "refresh_interval must be at least %s", MinRefreshInterval)
 	}
 	p.RefreshInterval = d
+	return nil
+}
+
+func (c Config) validateMaxTickets(p *Profile) error {
+	if p.RawMaxTickets == "" {
+		p.MaxTickets = provider.DefaultMaxTickets
+		return nil
+	}
+	maxTickets, err := strconv.Atoi(p.RawMaxTickets)
+	if err != nil {
+		return c.profileErrorf(p.Name, "max_tickets %q is not a positive integer", p.RawMaxTickets)
+	}
+	if maxTickets < 1 {
+		return c.profileErrorf(p.Name, "max_tickets must be at least 1")
+	}
+	p.MaxTickets = maxTickets
 	return nil
 }
 

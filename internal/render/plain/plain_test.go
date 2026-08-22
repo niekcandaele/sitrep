@@ -61,6 +61,21 @@ func TestProgressBar(t *testing.T) {
 	}
 }
 
+func TestLimitNotice(t *testing.T) {
+	tests := []struct {
+		count int
+		want  string
+	}{
+		{count: 1, want: "Limit reached — showing 1 ticket."},
+		{count: 2, want: "Limit reached — showing 2 tickets."},
+	}
+	for _, tt := range tests {
+		if got := LimitNotice(tt.count); got != tt.want {
+			t.Errorf("LimitNotice(%d) = %q, want %q", tt.count, got, tt.want)
+		}
+	}
+}
+
 // Titles are truncated by runes, not bytes: the fixture epic carries « éclair »
 // and a byte slice would cut a code point in half.
 func TestTruncate(t *testing.T) {

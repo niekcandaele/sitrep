@@ -298,6 +298,40 @@ func TestQueryDetailUsesTheQueryBreadcrumb(t *testing.T) {
 	}
 }
 
+func TestQueryLimitNoticeSurvivesFilterAndDetailRoundTrip(t *testing.T) {
+	query := "state=opened"
+	p := fake.New(fake.WithMaxTickets(4))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Limit reached — showing 4 tickets.")
+
+	s.tm.Send(keyPress("/"))
+	s.typeText("shard")
+	s.tm.Send(enterKey)
+	s.waitFor(t, "2 of 4 Tickets")
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	s.tm.Send(escKey)
+
+	m, got := s.finish(t)
+	if m.mode != modeList || m.filter.Query != "shard" || !m.input.LimitReached {
+		t.Errorf("returned list state = mode %v filter %q LimitReached=%t", m.mode, m.filter.Query, m.input.LimitReached)
+	}
+	for _, want := range []string{"Limit reached — showing 4 tickets.", "2 of 4 Tickets"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("returned list omitted %q:\n%s", want, got)
+		}
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 1", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
 func TestQueryEscapeAndRefreshReplaceMembershipWithTheSameSelector(t *testing.T) {
 	query := "label:changing-membership"
 	before := fake.FixtureSnapshot()

@@ -11,6 +11,5 @@
     { "key": "DEF-4", "fields": {} },
     { "key": "ABC-1", "fields": {} }
   ],
-  "nextPageToken": "ignored-by-query-selector",
-  "isLast": false
+  "isLast": true
 }

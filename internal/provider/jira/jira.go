@@ -110,6 +110,7 @@ type Provider struct {
 	credentials      Credentials
 	credentialSource CredentialSource
 	userAgent        string
+	maxTickets       int
 
 	credentialsOnce sync.Once
 	credentialsErr  error
@@ -133,6 +134,7 @@ func New(host string, opts ...Option) *Provider {
 		baseURL:    "https://" + host,
 		httpClient: &http.Client{Timeout: requestTimeout},
 		userAgent:  buildinfo.Name + "/" + buildinfo.Version,
+		maxTickets: provider.DefaultMaxTickets,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -183,6 +185,16 @@ func WithUserAgent(ua string) Option {
 	return func(p *Provider) {
 		if ua != "" {
 			p.userAgent = ua
+		}
+	}
+}
+
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
 		}
 	}
 }
@@ -241,33 +253,78 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 }
 
 func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
-	response, err := p.searchQueryMembership(ctx, query)
-	if err != nil {
-		return model.WatchlistSnapshot{}, err
-	}
+	initialCapacity := min(p.maxTickets, pageSize)
+	refs := make([]ref.Ref, 0, initialCapacity)
+	seen := make(map[string]struct{}, initialCapacity)
+	seenTokens := make(map[string]struct{})
+	token := ""
+	consumed := 0
+	limitReached := false
 
-	refs := make([]ref.Ref, 0, len(response.Issues))
-	seen := make(map[string]struct{}, len(response.Issues))
-	for _, issue := range response.Issues {
-		key, ok := normalizeKey(issue.Key)
-		if !ok {
-			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
-				"jira: query search returned an issue with invalid key %q", issue.Key)
+	for {
+		remaining := p.maxTickets - consumed
+		response, err := p.searchQueryMembership(ctx, query, min(pageSize, remaining), token)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
 		}
-		if _, duplicate := seen[key]; duplicate {
+
+		issues := response.Issues
+		overflow := len(issues) > remaining
+		if overflow {
+			issues = issues[:remaining]
+		}
+		for _, issue := range issues {
+			key, ok := normalizeKey(issue.Key)
+			if !ok {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query search returned an issue with invalid key %q", issue.Key)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			refs = append(refs, ref.Ref{
+				Tracker: ref.TrackerJira,
+				Host:    p.host,
+				Key:     key,
+				Raw:     key,
+			})
+		}
+		consumed += len(issues)
+		if token != "" && len(issues) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"jira: query pagination returned an empty continuation page")
+		}
+
+		switch {
+		case overflow:
+			limitReached = true
+		case consumed == p.maxTickets:
+			limitReached = !response.IsLast
+		case response.IsLast:
+		default:
+			if len(issues) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but returned an empty page")
+			}
+			if response.NextPageToken == "" {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but returned no new page cursor")
+			}
+			if _, repeated := seenTokens[response.NextPageToken]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but repeated a page cursor")
+			}
+			seenTokens[response.NextPageToken] = struct{}{}
+			token = response.NextPageToken
 			continue
 		}
-		seen[key] = struct{}{}
-		refs = append(refs, ref.Ref{
-			Tracker: ref.TrackerJira,
-			Host:    p.host,
-			Key:     key,
-			Raw:     key,
-		})
+		break
 	}
 
 	tickets := []model.Ticket{}
 	if len(refs) > 0 {
+		var err error
 		tickets, err = p.fetchExactRefs(ctx, refs)
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
@@ -276,11 +333,12 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 	return model.WatchlistSnapshot{
 		Header:       provider.QueryHeader(query),
 		Tickets:      tickets,
+		LimitReached: limitReached,
 		Capabilities: p.Capabilities(),
 	}, nil
 }
 
-func (p *Provider) searchQueryMembership(ctx context.Context, jql string) (searchResponse, error) {
+func (p *Provider) searchQueryMembership(ctx context.Context, jql string, maxResults int, token string) (searchResponse, error) {
 	credentials, err := p.resolveCredentials(ctx)
 	if err != nil {
 		return searchResponse{}, err
@@ -289,7 +347,10 @@ func (p *Provider) searchQueryMembership(ctx context.Context, jql string) (searc
 	query := url.Values{
 		"jql":        {jql},
 		"fields":     {"key"},
-		"maxResults": {fmt.Sprint(pageSize)},
+		"maxResults": {fmt.Sprint(maxResults)},
+	}
+	if token != "" {
+		query.Set("nextPageToken", token)
 	}
 	path := apiBase + searchPath
 	endpoint := p.baseURL + path + "?" + query.Encode()

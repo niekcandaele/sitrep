@@ -99,6 +99,11 @@ type Profile struct {
 	// RawRefreshInterval is the duration as written; parsed into
 	// RefreshInterval during validation so a bad value names its Profile.
 	RawRefreshInterval string `yaml:"refresh_interval"`
+	// MaxTickets bounds Tracker-discovered Query membership. Parsed Profiles
+	// always carry a positive effective value.
+	MaxTickets int `yaml:"-"`
+	// RawMaxTickets retains the scalar as written for precise validation errors.
+	RawMaxTickets string `yaml:"max_tickets"`
 }
 
 // Auth is a Profile's auth reference: the names of the environment variables

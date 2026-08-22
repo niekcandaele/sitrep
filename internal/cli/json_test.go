@@ -136,7 +136,7 @@ func TestJSONProviderFailure(t *testing.T) {
 }
 
 func TestJSONRefListDocumentAndSelector(t *testing.T) {
-	p := fake.New()
+	p := fake.New(fake.WithMaxTickets(1))
 
 	got := run([]string{
 		"acme/widgets#112",
@@ -192,6 +192,43 @@ func TestJSONQueryDocumentAndSelector(t *testing.T) {
 	}
 }
 
+func TestJSONQueryLimitReached(t *testing.T) {
+	p := fake.New(fake.WithMaxTickets(2))
+	got := run([]string{"--json", "--query", "state=opened&labels=ready"}, p)
+	if got.code != 0 || got.stderr != "" {
+		t.Fatalf("result = code %d stderr %q", got.code, got.stderr)
+	}
+
+	var doc struct {
+		Watchlist map[string]json.RawMessage `json:"watchlist"`
+		Progress  struct {
+			Total int `json:"total"`
+		} `json:"progress"`
+		Tickets []struct {
+			Key string `json:"key"`
+		} `json:"tickets"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := string(doc.Watchlist["limit_reached"]); got != "true" {
+		t.Errorf("watchlist.limit_reached = %s, want true", got)
+	}
+	wantKeys := []string{"#112", "#113"}
+	keys := make([]string, len(doc.Tickets))
+	for i := range doc.Tickets {
+		keys[i] = doc.Tickets[i].Key
+	}
+	if !reflect.DeepEqual(keys, wantKeys) || doc.Progress.Total != 2 {
+		t.Errorf("tickets/progress.total = %v/%d, want %v/2", keys, doc.Progress.Total, wantKeys)
+	}
+	for _, forbidden := range []string{"max_tickets", "total_matches", "Limit reached"} {
+		if strings.Contains(got.stdout, forbidden) {
+			t.Errorf("limited Query JSON contains unsupported %q", forbidden)
+		}
+	}
+}
+
 func TestJSONExplicitEmptyQueryKeepsMandatoryQueryKey(t *testing.T) {
 	p := fake.New(fake.WithSnapshots(model.WatchlistSnapshot{Tickets: []model.Ticket{}}))
 
@@ -237,7 +274,7 @@ func TestStdinSentinelAfterFlagSeparator(t *testing.T) {
 }
 
 func TestStdinJSONRefListMatchesPositionalSelection(t *testing.T) {
-	p := fake.New()
+	p := fake.New(fake.WithMaxTickets(1))
 	input := "  acme/widgets#112\tacme/widgets#115\r\n\nacme/widgets#118 acme/widgets#121  "
 	got := runStdin([]string{"-", "--json"}, input, p)
 	if got.code != 0 {
@@ -251,7 +288,7 @@ func TestStdinJSONRefListMatchesPositionalSelection(t *testing.T) {
 		"acme/widgets#115",
 		"acme/widgets#118",
 		"acme/widgets#121",
-	}, fake.New())
+	}, fake.New(fake.WithMaxTickets(1)))
 	if got.stdout != positional.stdout {
 		t.Error("stdin and positional Refs produced different JSON Watchlists")
 	}
@@ -279,7 +316,7 @@ func TestStdinJSONRefListMatchesPositionalSelection(t *testing.T) {
 }
 
 func TestSingleStdinRefRemainsARefList(t *testing.T) {
-	p := fake.New()
+	p := fake.New(fake.WithMaxTickets(1))
 	got := runStdin([]string{"--json", "-"}, "acme/widgets#112\n", p)
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)

@@ -21,3 +21,9 @@ state authoritatively; search-result titles, statuses, and other list fields are
 rendered. Both stages rerun on every refresh, so membership may appear or disappear while
 current member state still comes from direct reads. Opening a member continues to be the
 only operation that calls `FetchDetail`.
+
+Query membership may make multiple blocking page requests inside that one logical
+`Resolve`. It restarts from the first page on every refresh, stops at the Provider's
+configured Ticket limit or cursor exhaustion, and completes the authoritative exact-root
+stage before any snapshot reaches rendering. This internal paging exposes neither partial
+search state nor a new Provider method.

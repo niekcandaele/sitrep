@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -114,6 +116,45 @@ func TestFrameShapeSurvivesFilterTransitions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLimitReachedFooterLayout(t *testing.T) {
+	const (
+		width  = 24
+		height = 12
+	)
+	m := sizedFixtureModel(t, width, height)
+	baseBodyHeight := m.bodyHeight()
+	m.input.LimitReached = true
+	if got := m.bodyHeight(); got != baseBodyHeight-1 {
+		t.Errorf("body height with limit notice = %d, want %d", got, baseBodyHeight-1)
+	}
+
+	content := m.View().Content
+	checkFrameShape(t, "with clipped limit notice", content, width, height)
+	plainContent := ansi.Strip(content)
+	if !strings.Contains(plainContent, "Limit reached") {
+		t.Errorf("narrow frame lost the important notice prefix:\n%s", plainContent)
+	}
+	if strings.Contains(plainContent, "Limit reached — showing 10 tickets.") {
+		t.Errorf("narrow frame did not clip the notice:\n%s", plainContent)
+	}
+
+	m.lastErr = errors.New("boom")
+	if got := m.bodyHeight(); got != baseBodyHeight-2 {
+		t.Errorf("body height with notice and error = %d, want %d", got, baseBodyHeight-2)
+	}
+	next, _ := m.Update(keyPress("/"))
+	searching := next.(Model)
+	view := searching.View()
+	checkFrameShape(t, "searching below notice and error", view.Content, width, height)
+	if view.Cursor == nil {
+		t.Fatal("find box has no terminal cursor")
+	}
+	lines := strings.Split(ansi.Strip(view.Content), "\n")
+	if view.Cursor.Y < 0 || view.Cursor.Y >= len(lines) || !strings.HasPrefix(lines[view.Cursor.Y], "/") {
+		t.Errorf("cursor row %d does not point at the find box in %q", view.Cursor.Y, lines)
 	}
 }
 

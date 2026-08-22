@@ -294,6 +294,42 @@ func fullEpic(t *testing.T) *replayServer {
 	return newReplayServer(t, responses)
 }
 
+const (
+	queryGlobalIssues  = "/api/v4/issues"
+	queryCLI101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+	queryPlatform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+	queryCLI101MRs     = queryCLI101Path + "/closed_by"
+	queryPlatform7MRs  = queryPlatform7Path + "/closed_by"
+
+	queryIssueCLI101 = `{"iid":101,"project_id":34675721,"references":{"full":"gitlab-org/cli#101"}}`
+	queryIssueCore7  = `{"iid":7,"project_id":51000123,"references":{"full":"gitlab-org/platform/core#7"}}`
+)
+
+func queryPage(issues string, next string) response {
+	return response{
+		body:    "[" + issues + "]",
+		headers: map[string]string{"X-Next-Page": next},
+	}
+}
+
+func queryResponses(pages ...response) map[string][]response {
+	return map[string][]response{
+		queryGlobalIssues:  pages,
+		queryCLI101Path:    {{file: "query_issue_cli_101.json"}},
+		queryPlatform7Path: {{file: "query_issue_core_7.json"}},
+		queryCLI101MRs:     {{file: "closed_by_empty.json"}},
+		queryPlatform7MRs:  {{file: "closed_by_empty.json"}},
+	}
+}
+
+func ticketKeys(tickets []model.Ticket) []string {
+	keys := make([]string, len(tickets))
+	for i := range tickets {
+		keys[i] = tickets[i].Key
+	}
+	return keys
+}
+
 func TestName(t *testing.T) {
 	if p := gitlab.New(fixtureHost); p.Name() != "gitlab" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "gitlab")
@@ -720,7 +756,7 @@ func TestResolveQuerySearchesMembershipThenReadsExactIssues(t *testing.T) {
 		platform7MRs  = platform7Path + "/closed_by"
 	)
 	responses := map[string][]response{
-		globalIssues:  {{file: "query_membership.json", headers: map[string]string{"x-next-page": "2"}}},
+		globalIssues:  {{file: "query_membership.json"}},
 		cli101Path:    {{file: "query_issue_cli_101.json"}},
 		platform7Path: {{file: "query_issue_core_7.json"}},
 		cli101MRs:     {{file: "closed_by_empty.json"}},
@@ -762,7 +798,7 @@ func TestResolveQuerySearchesMembershipThenReadsExactIssues(t *testing.T) {
 	if membership.method != http.MethodGet {
 		t.Errorf("membership method = %s, want GET", membership.method)
 	}
-	if got, want := membership.rawQuery, query+"&per_page=100"; got != want {
+	if got, want := membership.rawQuery, query+"&per_page=100&page=1"; got != want {
 		t.Errorf("raw membership query = %q, want opaque bytes plus bound %q", got, want)
 	}
 	if got := membership.query["per_page"]; !reflect.DeepEqual(got, []string{"7", "100"}) {
@@ -783,6 +819,217 @@ func TestResolveQuerySearchesMembershipThenReadsExactIssues(t *testing.T) {
 	}
 }
 
+func TestResolveQueryPaginatesBeforeExactReads(t *testing.T) {
+	const query = "state=opened&per_page=7&page=44&search=ready%20%26%20waiting"
+	responses := queryResponses(
+		queryPage(queryIssueCLI101+","+queryIssueCLI101, "2"),
+		queryPage(queryIssueCore7, ""),
+	)
+	s := newReplayServer(t, responses)
+	p := newProvider(s, gitlab.WithMaxTickets(4))
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true below an exhausted budget")
+	}
+	wantKeys := []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"}
+	if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("Ticket keys = %v, want %v", got, wantKeys)
+	}
+
+	searches := s.requestsTo(queryGlobalIssues)
+	if len(searches) != 2 {
+		t.Fatalf("membership searches = %d, want two", len(searches))
+	}
+	all := s.recorded()
+	if len(all) < 2 || all[0].path != queryGlobalIssues || all[1].path != queryGlobalIssues {
+		t.Fatalf("first requests = %+v, want both membership pages before exact reads", all[:min(len(all), 2)])
+	}
+	for i, wantSuffix := range []string{"&per_page=4&page=1", "&per_page=2&page=2"} {
+		if got, want := searches[i].rawQuery, query+wantSuffix; got != want {
+			t.Errorf("page %d raw query = %q, want exact opaque prefix %q", i+1, got, want)
+		}
+	}
+	if got := searches[0].query["per_page"]; !reflect.DeepEqual(got, []string{"7", "4"}) {
+		t.Errorf("page one per_page values = %v, want user value followed by Provider value", got)
+	}
+	if got := searches[1].query["page"]; !reflect.DeepEqual(got, []string{"44", "2"}) {
+		t.Errorf("page two page values = %v, want user value followed by Provider value", got)
+	}
+	for _, path := range []string{queryCLI101Path, queryPlatform7Path} {
+		if got := len(s.requestsTo(path)); got != 1 {
+			t.Errorf("authoritative reads to %s = %d, want one after membership", path, got)
+		}
+	}
+}
+
+func TestResolveQueryCutoffAccounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		issues     string
+		next       string
+		maxTickets int
+		wantKeys   []string
+		wantLimit  bool
+	}{
+		{
+			name:       "exact boundary exhausted",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7,
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+		},
+		{
+			name:       "exact boundary with unused malformed continuation",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7,
+			next:       "not-a-page",
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "oversized response is clipped",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7 + "," + queryIssueCLI101,
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "duplicate consumes native budget before de-duplication",
+			issues:     queryIssueCLI101 + "," + queryIssueCLI101,
+			next:       "2",
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101"},
+			wantLimit:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, queryResponses(queryPage(tt.issues, tt.next)))
+			snap, err := newProvider(s, gitlab.WithMaxTickets(tt.maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
+				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryRejectsNonProgressingPagination(t *testing.T) {
+	tests := []struct {
+		name  string
+		pages []response
+	}{
+		{
+			name:  "malformed next page",
+			pages: []response{queryPage(queryIssueCLI101, "oops")},
+		},
+		{
+			name:  "non-forward next page",
+			pages: []response{queryPage(queryIssueCLI101, "1")},
+		},
+		{
+			name: "repeated next page",
+			pages: []response{
+				queryPage(queryIssueCLI101, "2"),
+				queryPage(queryIssueCore7, "2"),
+			},
+		},
+		{
+			name: "empty continuation page",
+			pages: []response{
+				queryPage(queryIssueCLI101, "2"),
+				queryPage("", ""),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{queryGlobalIssues: tt.pages})
+			snap, err := newProvider(s, gitlab.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != len(tt.pages) {
+				t.Errorf("membership requests = %d, want %d", got, len(tt.pages))
+			}
+			if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+				t.Errorf("non-membership reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "server failure",
+			resp: response{status: http.StatusInternalServerError, body: `{"message":"down"}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"API error", "down"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `[{`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed native query",
+			resp: response{status: http.StatusUnprocessableEntity, body: `{"message":{"state":["invalid"]}}`},
+			want: providertest.Want{Kind: provider.KindBadRef, Contains: []string{"query rejected"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				queryGlobalIssues: {
+					queryPage(queryIssueCLI101, "2"),
+					tt.resp,
+				},
+			})
+			snap, err := newProvider(s, gitlab.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			providertest.CheckError(t, "gitlab", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != 2 {
+				t.Errorf("membership requests = %d, want 2", got)
+			}
+			if got := len(s.recorded()) - 2; got != 0 {
+				t.Errorf("non-membership reads = %d, want none", got)
+			}
+		})
+	}
+}
+
 func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.T) {
 	const scoped = "/api/v4/projects/gitlab-org%2Fcli/issues"
 	s := newReplayServer(t, map[string][]response{
@@ -800,7 +1047,7 @@ func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.
 		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
 	}
 	requests := s.recorded()
-	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100" {
+	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100&page=1" {
 		t.Errorf("requests = %+v, want one project-scoped maximal first page", requests)
 	}
 }
@@ -820,8 +1067,18 @@ func TestResolveQueryPreservesLiteralHashInRawQuery(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("membership requests = %d, want 1", len(requests))
 	}
-	if got, want := requests[0].rawQuery, query+"&per_page=100"; got != want {
+	if got, want := requests[0].rawQuery, query+"&per_page=100&page=1"; got != want {
 		t.Errorf("raw query = %q, want literal bytes %q", got, want)
+	}
+}
+
+func TestResolveQueryHugeLimitDoesNotPreallocateTheBudget(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		queryGlobalIssues: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithMaxTickets(int(^uint(0)>>1)))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q=1"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 }
 

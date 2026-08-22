@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,36 @@ func TestFailedRefreshKeepsTheLastGoodReading(t *testing.T) {
 	ok := failed.onRefreshed(refreshedMsg{generation: 1, input: ListInput{Tickets: []model.Ticket{ticket("#1", model.StatusTodo)}}})
 	if ok.lastErr != nil {
 		t.Errorf("lastErr = %v, want it cleared by a successful refresh", ok.lastErr)
+	}
+}
+
+func TestRefreshSetsClearsAndPreservesLimitReached(t *testing.T) {
+	m := listModel(t, []model.Ticket{ticket("#1", model.StatusTodo)})
+	m.generation = 1
+	limitedInput := ListInput{
+		Tickets:      []model.Ticket{ticket("#1", model.StatusTodo), ticket("#2", model.StatusDone)},
+		LimitReached: true,
+	}
+	limited := m.onRefreshed(refreshedMsg{generation: 1, input: limitedInput})
+	const notice = "Limit reached — showing 2 tickets."
+	if !limited.input.LimitReached || !strings.Contains(limited.View().Content, notice) {
+		t.Errorf("successful limited refresh did not set the notice:\n%s", limited.View().Content)
+	}
+
+	failed := limited.onRefreshed(refreshedMsg{generation: 1, err: errors.New("boom")})
+	if failed.lastErr == nil || !failed.input.LimitReached || !strings.Contains(failed.View().Content, notice) {
+		t.Errorf("failed refresh did not preserve the prior limited reading:\n%s", failed.View().Content)
+	}
+	if !strings.Contains(failed.View().Content, "refresh failed: boom") {
+		t.Errorf("failed refresh omitted its error beside the notice:\n%s", failed.View().Content)
+	}
+
+	cleared := failed.onRefreshed(refreshedMsg{
+		generation: 1,
+		input:      ListInput{Tickets: []model.Ticket{ticket("#1", model.StatusTodo)}},
+	})
+	if cleared.lastErr != nil || cleared.input.LimitReached || strings.Contains(cleared.View().Content, "Limit reached") {
+		t.Errorf("successful exhausted refresh did not clear limit/error state:\n%s", cleared.View().Content)
 	}
 }
 

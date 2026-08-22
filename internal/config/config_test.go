@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -71,6 +72,7 @@ profiles:
 		},
 		RefreshInterval:    30 * time.Second,
 		RawRefreshInterval: "30s",
+		MaxTickets:         100,
 	}
 	if got := cfg.Profiles["acme-jira"]; got != want {
 		t.Errorf("acme-jira = %+v\nwant %+v", got, want)
@@ -83,6 +85,81 @@ profiles:
 	}
 	if got := cfg.Profiles["acme-gitlab"].RefreshInterval; got != 0 {
 		t.Errorf("refresh_interval = %s, want zero when unwritten", got)
+	}
+}
+
+func TestParseMaxTickets(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{name: "omitted", want: provider.DefaultMaxTickets},
+		{name: "one", raw: "1", want: 1},
+		{name: "default explicit", raw: "100", want: 100},
+		{name: "large", raw: "1000", want: 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := "profiles:\n  work:\n    provider: github\n    refresh_interval: 1h\n"
+			if tt.raw != "" {
+				doc += "    max_tickets: " + tt.raw + "\n"
+			}
+			profile := parse(t, doc).Profiles["work"]
+			if profile.MaxTickets != tt.want {
+				t.Errorf("MaxTickets = %d, want %d", profile.MaxTickets, tt.want)
+			}
+			if profile.RawMaxTickets != tt.raw {
+				t.Errorf("RawMaxTickets = %q, want %q", profile.RawMaxTickets, tt.raw)
+			}
+			if profile.RefreshInterval != time.Hour {
+				t.Errorf("RefreshInterval = %s, want 1h independent of max_tickets", profile.RefreshInterval)
+			}
+		})
+	}
+}
+
+func TestParseEmptyMaxTicketsUsesDefault(t *testing.T) {
+	profile := parse(t, "profiles:\n  work:\n    provider: github\n    max_tickets:\n").Profiles["work"]
+	if profile.MaxTickets != provider.DefaultMaxTickets || profile.RawMaxTickets != "" {
+		t.Errorf("MaxTickets/RawMaxTickets = %d/%q, want %d/empty",
+			profile.MaxTickets, profile.RawMaxTickets, provider.DefaultMaxTickets)
+	}
+}
+
+func TestParseRejectsInvalidMaxTickets(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "0", want: "max_tickets must be at least 1"},
+		{raw: "-1", want: "max_tickets must be at least 1"},
+		{raw: "many", want: `max_tickets "many" is not a positive integer`},
+		{raw: "999999999999999999999999999999999", want: `max_tickets "999999999999999999999999999999999" is not a positive integer`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			doc := "profiles:\n  work:\n    provider: github\n    max_tickets: " + tt.raw + "\n"
+			_, err := config.Parse(strings.NewReader(doc), testPath)
+			if err == nil {
+				t.Fatal("invalid max_tickets parsed cleanly")
+			}
+			for _, want := range []string{testPath, `profile "work"`, tt.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestUnknownProfileKeyListsMaxTicketsAsValid(t *testing.T) {
+	_, err := config.Parse(strings.NewReader("profiles:\n  work:\n    provider: github\n    max_ticket: 2\n"), testPath)
+	if err == nil {
+		t.Fatal("unknown key parsed cleanly")
+	}
+	if !strings.Contains(err.Error(), "valid keys are provider, host, project, auth, refresh_interval, max_tickets") {
+		t.Errorf("error = %q, want max_tickets in the valid Profile keys", err)
 	}
 }
 
@@ -388,14 +465,14 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 			// only pins a host must not have to name a token variable to use it.
 			name: "a gitlab profile with no token_env",
 			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    project: platform/widgets\n",
-			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "platform/widgets"},
+			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "platform/widgets", MaxTickets: 100},
 		},
 		{
 			// After credential scoping a Profile is the only way a self-hosted
 			// host on a custom port can get a token, so it has to be nameable.
 			name: "a host with an explicit port",
 			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: acme.example:8443\n",
-			want: config.Profile{Name: "x", Provider: "gitlab", Host: "acme.example:8443"},
+			want: config.Profile{Name: "x", Provider: "gitlab", Host: "acme.example:8443", MaxTickets: 100},
 		},
 	}
 

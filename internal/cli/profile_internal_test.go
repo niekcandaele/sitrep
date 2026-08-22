@@ -65,6 +65,43 @@ func TestEffectiveInterval(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxTickets(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile *config.Profile
+		want    int
+	}{
+		{name: "nil Profile uses the shared default", want: provider.DefaultMaxTickets},
+		{name: "zero-value test Profile uses the shared default", profile: &config.Profile{}, want: provider.DefaultMaxTickets},
+		{name: "positive Profile value wins", profile: &config.Profile{MaxTickets: 1000}, want: 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveMaxTickets(tt.profile); got != tt.want {
+				t.Errorf("effectiveMaxTickets(%+v) = %d, want %d", tt.profile, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewFakeProviderUsesProfileMaxTicketsIndependentlyOfCadence(t *testing.T) {
+	profile := &config.Profile{MaxTickets: 2, RefreshInterval: time.Hour}
+	p, err := (Deps{}).newProvider(providerFake, connectionRoute{}, profile, "")
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != 2 || !snap.LimitReached {
+		t.Errorf("Query snapshot = %d tickets, LimitReached=%t; want 2/true", len(snap.Tickets), snap.LimitReached)
+	}
+	if got := effectiveInterval(false, 0, profile.RefreshInterval); got != time.Hour {
+		t.Errorf("effective interval = %s, want 1h", got)
+	}
+}
+
 // parseArgs calls Parse repeatedly, once per positional argument. The claim
 // that the flag package remembers explicitly-set flags across those calls is
 // what effectiveInterval's precedence rests on, so it is asserted rather than

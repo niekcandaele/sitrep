@@ -92,6 +92,7 @@ func TestListFromWatchlistSnapshot(t *testing.T) {
 		Header:       model.WatchlistHeader{Title: "4 tickets"},
 		Epic:         model.Epic{Key: "ignored", Title: "ignored", URL: "ignored"},
 		Tickets:      []model.Ticket{ticket("#1", model.StatusTodo)},
+		LimitReached: true,
 		Capabilities: model.Capabilities{PullRequests: true},
 	}
 
@@ -100,8 +101,8 @@ func TestListFromWatchlistSnapshot(t *testing.T) {
 	if in.Header.Key != "" || in.Header.Title != "4 tickets" || in.Header.URL != "" {
 		t.Errorf("header = %+v, want the snapshot Header", in.Header)
 	}
-	if len(in.Tickets) != 1 || !in.Capabilities.PullRequests {
-		t.Errorf("input = %+v, want the Epic's Tickets and Capabilities", in)
+	if len(in.Tickets) != 1 || !in.LimitReached || !in.Capabilities.PullRequests {
+		t.Errorf("input = %+v, want Tickets, LimitReached, and Capabilities", in)
 	}
 }
 
