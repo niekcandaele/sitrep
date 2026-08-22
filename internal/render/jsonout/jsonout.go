@@ -49,10 +49,17 @@ type providerDoc struct {
 }
 
 type capabilitiesDoc struct {
-	Hierarchy     bool `json:"hierarchy"`
-	BlockingLinks bool `json:"blocking_links"`
-	Comments      bool `json:"comments"`
-	PullRequests  bool `json:"pull_requests"`
+	Hierarchy     bool                     `json:"hierarchy"`
+	BlockingLinks bool                     `json:"blocking_links"`
+	Comments      bool                     `json:"comments"`
+	PullRequests  bool                     `json:"pull_requests"`
+	Selectors     *selectorCapabilitiesDoc `json:"selectors,omitempty"`
+}
+
+type selectorCapabilitiesDoc struct {
+	Epic    bool `json:"epic"`
+	RefList bool `json:"ref_list"`
+	Query   bool `json:"query"`
 }
 
 type userDoc struct {
@@ -105,9 +112,10 @@ type ticketDoc struct {
 }
 
 type selectorDoc struct {
-	Kind string   `json:"kind"`
-	Ref  string   `json:"ref,omitempty"`
-	Refs []string `json:"refs,omitempty"`
+	Kind  string   `json:"kind"`
+	Ref   string   `json:"ref,omitempty"`
+	Refs  []string `json:"refs,omitempty"`
+	Query *string  `json:"query,omitempty"`
 }
 
 type watchlistDoc struct {
@@ -202,7 +210,7 @@ func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot, selector provide
 	doc := watchlistDocument{
 		SchemaVersion: watchlistSchemaVersion,
 		GeneratedAt:   wireTime(snap.FetchedAt),
-		Provider:      newProviderDoc(providerName, snap.Capabilities),
+		Provider:      newWatchlistProviderDoc(providerName, snap.Capabilities),
 		Watchlist:     watchlist,
 		Progress:      newProgressDoc(model.ComputeProgress(snap.Tickets)),
 		Tickets:       make([]ticketDoc, 0, len(snap.Tickets)),
@@ -234,6 +242,9 @@ func newWatchlistDoc(snap model.WatchlistSnapshot, selector provider.Selector) (
 			refs = append(refs, selectorRef(r))
 		}
 		return watchlistDoc{Selector: selectorDoc{Kind: "ref_list", Refs: refs}}, nil
+	case provider.QuerySelector:
+		query := s.Query
+		return watchlistDoc{Selector: selectorDoc{Kind: "query", Query: &query}}, nil
 	default:
 		return watchlistDoc{}, fmt.Errorf("json: unsupported Watchlist Selector %T", selector)
 	}
@@ -320,6 +331,16 @@ func newDetailDocument(d model.Detail, caps model.Capabilities, providerName str
 // people and scripts read.
 func wireTime(t time.Time) time.Time {
 	return t.UTC().Truncate(time.Second)
+}
+
+func newWatchlistProviderDoc(name string, caps model.Capabilities) providerDoc {
+	doc := newProviderDoc(name, caps)
+	doc.Capabilities.Selectors = &selectorCapabilitiesDoc{
+		Epic:    caps.Selectors.Epic,
+		RefList: caps.Selectors.RefList,
+		Query:   caps.Selectors.Query,
+	}
+	return doc
 }
 
 func newProviderDoc(name string, caps model.Capabilities) providerDoc {

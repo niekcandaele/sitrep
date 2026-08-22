@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -81,7 +82,10 @@ func TestJSONFlagOrderDoesNotMatter(t *testing.T) {
 // An undeclared Capability is silently absent, never an error: with pull
 // requests off no ticket carries the key at all.
 func TestJSONOmitsUndeclaredCapabilities(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 
 	got := run([]string{"111", "--json"}, p)
 
@@ -160,6 +164,68 @@ func TestJSONRefListDocumentAndSelector(t *testing.T) {
 	}
 	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
 		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestJSONQueryDocumentAndSelector(t *testing.T) {
+	p := fake.New()
+	query := "  label:bug assignee:@me  "
+
+	got := run([]string{"--json", "--query", query}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if got.stderr != "" {
+		t.Errorf("stderr = %q, want empty", got.stderr)
+	}
+	checkGolden(t, "query.golden.json", []byte(got.stdout))
+
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok {
+		t.Fatalf("selector = %T, want provider.QuerySelector", p.LastSelector())
+	}
+	if selector.Query != query {
+		t.Errorf("selector Query = %q, want %q", selector.Query, query)
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestJSONExplicitEmptyQueryKeepsMandatoryQueryKey(t *testing.T) {
+	p := fake.New(fake.WithSnapshots(model.WatchlistSnapshot{Tickets: []model.Ticket{}}))
+
+	got := run([]string{"--json", "--query="}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+
+	var doc struct {
+		Watchlist map[string]json.RawMessage `json:"watchlist"`
+		Tickets   []json.RawMessage          `json:"tickets"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshal document: %v", err)
+	}
+	if _, ok := doc.Watchlist["epic"]; ok {
+		t.Error("Query Watchlist unexpectedly carries an outer epic")
+	}
+	var selector map[string]json.RawMessage
+	if err := json.Unmarshal(doc.Watchlist["selector"], &selector); err != nil {
+		t.Fatalf("unmarshal selector: %v", err)
+	}
+	if got := string(selector["kind"]); got != `"query"` {
+		t.Errorf("selector kind = %s, want %s", got, `"query"`)
+	}
+	query, ok := selector["query"]
+	if !ok {
+		t.Fatal("explicit empty Query omitted selector.query")
+	}
+	if got := string(query); got != `""` {
+		t.Errorf("selector query = %s, want empty string", got)
+	}
+	if doc.Tickets == nil || len(doc.Tickets) != 0 {
+		t.Errorf("tickets = %#v, want non-null empty array", doc.Tickets)
 	}
 }
 
@@ -404,5 +470,35 @@ func TestRunResolvesTheFakeProvider(t *testing.T) {
 	}
 	if got := doc["schema_version"]; got != float64(2) {
 		t.Errorf("schema_version = %v, want 2", got)
+	}
+}
+
+func TestRunResolvesTheFakeProviderForQueryWithoutProfileOrOrigin(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	query := " label:agent "
+
+	code := cli.RunWith([]string{"--provider", "fake", "--json", "--query", query}, &stdout, &stderr, cli.Deps{
+		Now: fixedClock,
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			panic("origin was read for explicit fake Query")
+		},
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+
+	var doc struct {
+		Watchlist struct {
+			Selector struct {
+				Kind  string `json:"kind"`
+				Query string `json:"query"`
+			} `json:"selector"`
+		} `json:"watchlist"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal Query document: %v", err)
+	}
+	if doc.Watchlist.Selector.Kind != "query" || doc.Watchlist.Selector.Query != query {
+		t.Errorf("selector = %+v, want exact fake Query", doc.Watchlist.Selector)
 	}
 }

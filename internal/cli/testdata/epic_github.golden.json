@@ -7,7 +7,12 @@
       "hierarchy": true,
       "blocking_links": true,
       "comments": true,
-      "pull_requests": true
+      "pull_requests": true,
+      "selectors": {
+        "epic": true,
+        "ref_list": true,
+        "query": true
+      }
     }
   },
   "watchlist": {

@@ -63,6 +63,14 @@ type RefListSelector struct {
 
 func (RefListSelector) selector() {}
 
+// QuerySelector names a Watchlist through one opaque Tracker-native query.
+// Connection selection is complete before this value reaches a Provider.
+type QuerySelector struct {
+	Query string
+}
+
+func (QuerySelector) selector() {}
+
 // EpicHeader copies an Epic's display identity into the generic Watchlist seam.
 func EpicHeader(epic model.Epic) model.WatchlistHeader {
 	return model.WatchlistHeader{Key: epic.Key, Title: epic.Title, URL: epic.URL}
@@ -75,6 +83,35 @@ func RefListHeader(count int) model.WatchlistHeader {
 		noun = "ticket"
 	}
 	return model.WatchlistHeader{Title: fmt.Sprintf("%d %s", count, noun)}
+}
+
+// QueryHeader identifies a Query Watchlist without inventing a Tracker key or
+// URL. The query remains complete here; terminal-width truncation belongs to a
+// renderer.
+func QueryHeader(query string) model.WatchlistHeader {
+	return model.WatchlistHeader{Title: query}
+}
+
+// CheckSelectorSupport rejects an undeclared Selector before a Provider
+// validates values or performs I/O. Concrete Providers call it at the top of
+// Resolve so direct callers receive the same contract as the CLI.
+func CheckSelectorSupport(name string, caps model.Capabilities, selector Selector) error {
+	var supported bool
+	var label string
+	switch selector.(type) {
+	case EpicSelector:
+		supported, label = caps.Selectors.Epic, "Epic Selector"
+	case RefListSelector:
+		supported, label = caps.Selectors.RefList, "Ref-list Selector"
+	case QuerySelector:
+		supported, label = caps.Selectors.Query, "Query Selector"
+	default:
+		return Errorf(KindBadRef, "%s: unsupported Watchlist selector %T", name, selector)
+	}
+	if !supported {
+		return Errorf(KindBadRef, "%s: %s is not supported", name, label)
+	}
+	return nil
 }
 
 // Provider translates one Tracker's API into sitrep's model. Implementations

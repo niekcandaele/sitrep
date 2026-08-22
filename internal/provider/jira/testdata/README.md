@@ -46,6 +46,22 @@ is `ABC-1`.
 | `epic_children_empty.json` | `issues: []`, `isLast: true` — a Ref that named a plain Ticket, which is not an error |
 | `ticket_with_parent.json` | an issue carrying `fields.parent`: the decoder's breadcrumb and the `u` walk-up |
 
+## Native queries
+
+The Query fixtures were added on **2026-08-22** and, like every Jira fixture in this
+directory, are **hand-written** to Atlassian's enhanced-search response schema. The
+successful second stage deliberately reuses the v3 bulk-fetch fixtures below. No live JQL
+was recorded, and the payloads contain only synthetic site and issue data.
+
+| File | What it proves |
+|---|---|
+| `query_membership.json` | minimal keys in search order, a lower-case/upper-case duplicate, stale summary/status fields that cannot reach output, and an ignored `nextPageToken` pinning first-page-only behavior |
+| `query_empty.json` | `issues: []` — a zero-match JQL Query succeeds without a bulk-fetch request |
+
+Malformed-JQL tests use a compact error payload emitted directly by the replay server so
+they can assert both `errorMessages` and deterministically ordered per-field `errors`
+without adding a fixture file.
+
 ## Exact Ref-list bulk reads
 
 The two v3 bulk-fetch fixtures were hand-written on 2026-08-22 from

@@ -42,7 +42,10 @@ func TestNameAndCapabilities(t *testing.T) {
 	if p.Name() != "fake" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "fake")
 	}
-	want := model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
+	want := model.Capabilities{
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
+	}
 	if got := p.Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
@@ -98,6 +101,87 @@ func TestResolveRefListKeepsOrderAndHasNoOuterEpic(t *testing.T) {
 	}
 	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
 		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestResolveQueryUsesCurrentMembershipAndExactHeader(t *testing.T) {
+	first := fake.FixtureSnapshot()
+	first.Epic = model.Epic{Key: "ignored"}
+	first.Parent = model.Parent{Key: "ignored"}
+	first.Tickets = first.Tickets[:1]
+	second := fake.FixtureSnapshot()
+	second.Tickets = second.Tickets[1:3]
+	p := fake.New(fake.WithSnapshots(first, second))
+	selector := provider.QuerySelector{Query: "  state=opened&labels=agent  "}
+
+	before, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	before.Tickets[0].Title = "clobbered"
+	selector.Query = "changed by caller"
+
+	after, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "  state=opened&labels=agent  "})
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if before.Header != provider.QueryHeader("  state=opened&labels=agent  ") || after.Header != before.Header {
+		t.Errorf("headers = %+v then %+v, want exact Query header", before.Header, after.Header)
+	}
+	if !reflect.DeepEqual(before.Epic, model.Epic{}) || !before.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", before.Epic, before.Parent)
+	}
+	if len(before.Tickets) != 1 || len(after.Tickets) != 2 {
+		t.Fatalf("membership = %d then %d, want 1 then 2", len(before.Tickets), len(after.Tickets))
+	}
+	if after.Tickets[0].Title == "clobbered" {
+		t.Error("Resolve exposed a configured snapshot's Ticket storage")
+	}
+	stored := p.LastSelector().(provider.QuerySelector)
+	if stored.Query != "  state=opened&labels=agent  " {
+		t.Errorf("stored Query = %q, want exact value", stored.Query)
+	}
+	if !after.FetchedAt.IsZero() || p.DetailCalls() != 0 {
+		t.Errorf("FetchedAt/Detail calls = %v/%d, want zero/none", after.FetchedAt, p.DetailCalls())
+	}
+}
+
+func TestResolveQueryReturnsNonNilEmptyMembership(t *testing.T) {
+	p := fake.New(fake.WithSnapshot(model.WatchlistSnapshot{Tickets: nil}))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+}
+
+func TestUnsupportedQueryFailsBeforeDelayContextAndInjectedError(t *testing.T) {
+	boom := errors.New("injected later-stage error")
+	p := fake.New(
+		fake.WithCapabilities(model.Capabilities{Selectors: model.SelectorCapabilities{Epic: true}}),
+		fake.WithResolveError(boom),
+		fake.WithDelay(time.Hour),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := p.Resolve(ctx, provider.QuerySelector{Query: "q"})
+	if err == nil || provider.KindOf(err) != provider.KindBadRef {
+		t.Fatalf("error = %v (kind %v), want selector KindBadRef", err, provider.KindOf(err))
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, boom) {
+		t.Errorf("error = %v, Query support must be checked first", err)
+	}
+	if got, want := err.Error(), "fake: Query Selector is not supported"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+	if p.ResolveCalls() != 1 {
+		t.Errorf("ResolveCalls = %d, want failed call counted", p.ResolveCalls())
 	}
 }
 
@@ -265,14 +349,17 @@ func TestFixtureSpansTheModel(t *testing.T) {
 }
 
 func TestWithCapabilitiesStripsTheData(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 
 	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if snap.Capabilities != (model.Capabilities{}) {
-		t.Errorf("snapshot capabilities = %+v, want none declared", snap.Capabilities)
+	wantCapabilities := model.Capabilities{Selectors: model.SelectorCapabilities{Epic: true}}
+	if snap.Capabilities != wantCapabilities {
+		t.Errorf("snapshot capabilities = %+v, want %+v", snap.Capabilities, wantCapabilities)
 	}
 	for _, ticket := range snap.Tickets {
 		if ticket.PullRequests != nil {

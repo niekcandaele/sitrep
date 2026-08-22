@@ -199,7 +199,10 @@ func TestDetailFrameWhenTheFetchFails(t *testing.T) {
 // Comments nor BlockingLinks shows a description and the Relates link, with no
 // heading, no placeholder and no error to say what is missing.
 func TestDetailFrameWithoutTheDetailCapabilities(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true, PullRequests: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 	s := startBoth(t, p, newClock(), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 

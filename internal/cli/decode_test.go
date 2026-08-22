@@ -88,7 +88,10 @@ func TestDecodedTicketWithNoParent(t *testing.T) {
 // nor BlockingLinks emits no COMMENTS heading and no blocking links, with no
 // explanation of what is missing. The Relates link survives.
 func TestDecodedTicketWithoutTheDetailCapabilities(t *testing.T) {
-	p := decoder(fake.WithCapabilities(model.Capabilities{Hierarchy: true, PullRequests: true}))
+	p := decoder(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 
 	got := run([]string{"112", "--plain"}, p)
 

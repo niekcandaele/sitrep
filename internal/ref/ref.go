@@ -274,6 +274,27 @@ func inherit(r, child Ref) Ref {
 // defaultHost is the host the grammar assumes when the text it read named none.
 const defaultHost = "github.com"
 
+// ResolveOrigin reads and parses the current clone's origin route without
+// fabricating an issue number. The returned Ref never retains the remote's raw
+// text: HTTPS remotes may carry credential-bearing userinfo, while callers need
+// only the parsed route.
+func ResolveOrigin(ctx context.Context, opts ...Option) (Ref, error) {
+	o := options{lookup: gitRemoteLookup}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	remote, err := o.lookup(ctx, o.dir, originRemote)
+	if err != nil {
+		return Ref{}, err
+	}
+	r, err := ParseRemoteURL(remote)
+	if err != nil {
+		return Ref{}, errors.New("cannot parse git origin as a remote URL")
+	}
+	r.Raw = originRemote
+	return r, nil
+}
+
 // ParseRemoteURL turns a git remote URL into a Ref naming its repository, with
 // Number left zero. It is exported because every Tracker driver has to
 // recognize its own clone URLs and they all arrive in the same handful of

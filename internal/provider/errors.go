@@ -3,6 +3,7 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Kind classifies a Provider failure by what the person at the terminal has to
@@ -123,6 +124,43 @@ type sanitizedMessage struct {
 
 func (e *sanitizedMessage) Error() string { return e.msg }
 func (e *sanitizedMessage) Unwrap() error { return e.err }
+
+// RedactedTransportError keeps a transport failure available to errors.Is while
+// replacing its rendered text. net/http wraps RoundTripper failures in a
+// *url.Error whose text contains the complete request URL, and custom transports
+// may include request context of their own; Query Providers use this at their
+// request boundary so an opaque native Query never appears in stderr.
+func RedactedTransportError(err error) error {
+	return &redactedTransportError{err: err}
+}
+
+type redactedTransportError struct{ err error }
+
+func (e *redactedTransportError) Error() string { return "transport failure" }
+func (e *redactedTransportError) Unwrap() error { return e.err }
+
+// RedactQuery removes an opaque Query value from Tracker-controlled error prose.
+// A Tracker may quote a rejected query back in its explanation; stderr must keep
+// the useful explanation without turning the invocation's subject into a log.
+func RedactQuery(message, query string) string {
+	if query == "" {
+		return message
+	}
+	return strings.ReplaceAll(message, query, "[query]")
+}
+
+// RedactQueryError applies RedactQuery without losing classification or wrapped
+// causes such as context cancellation.
+func RedactQueryError(err error, query string) error {
+	message := RedactQuery(err.Error(), query)
+	if message == err.Error() {
+		return err
+	}
+	return &Error{
+		Kind: KindOf(err),
+		Err:  &sanitizedMessage{msg: message, err: err},
+	}
+}
 
 // KindOf reports the Kind of err, walking wrapped errors, and KindUnknown when
 // nothing in the chain is classified.

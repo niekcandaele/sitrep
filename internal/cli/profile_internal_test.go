@@ -12,6 +12,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/config"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
@@ -152,7 +153,7 @@ func TestResolveSelectionDetachesFullURLBeforeProviderRetention(t *testing.T) {
 		return "", stopAfterHost
 	}}
 	selection, err := deps.resolveSelection(
-		context.Background(), config.Config{}, rawRefs, true, providerAuto, "",
+		context.Background(), config.Config{}, rawRefs, true, false, "", providerAuto, "",
 	)
 	if err != nil {
 		t.Fatalf("resolveSelection: %v", err)
@@ -191,7 +192,7 @@ func TestResolveSelectionDetachesFullURLBeforeProviderRetention(t *testing.T) {
 		}
 	}
 
-	p, err := deps.newProvider(providerAuto, selection.first, selection.profile, "")
+	p, err := deps.newProvider(providerAuto, selection.route, selection.profile, "")
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
@@ -217,6 +218,208 @@ func stringAliases(value, backing string) bool {
 		}
 	}
 	return false
+}
+
+func TestResolveQuerySelectionUsesExplicitProfileWithoutOrigin(t *testing.T) {
+	tests := []struct {
+		name        string
+		profile     config.Profile
+		wantTracker ref.Tracker
+		wantHost    string
+		wantPath    string
+	}{
+		{name: "github", profile: config.Profile{Name: "work", Provider: "github"}, wantTracker: ref.TrackerGitHub, wantHost: "github.com"},
+		{name: "jira", profile: config.Profile{Name: "work", Provider: "jira", Host: "acme.atlassian.net", Project: "ABC"}, wantTracker: ref.TrackerJira, wantHost: "acme.atlassian.net", wantPath: "ABC"},
+		{name: "gitlab", profile: config.Profile{Name: "work", Provider: "gitlab", Host: "git.acme.test", Project: "group/project"}, wantTracker: ref.TrackerGitLab, wantHost: "git.acme.test", wantPath: "group/project"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Config{Profiles: map[string]config.Profile{"work": tt.profile}}
+			deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+				panic("origin was read")
+			}}
+			selection, err := deps.resolveQuerySelection(context.Background(), cfg, " exact query ", providerAuto, "work")
+			if err != nil {
+				t.Fatalf("resolveQuerySelection: %v", err)
+			}
+			if selection.route.tracker != tt.wantTracker || selection.route.host != tt.wantHost || selection.route.gitLabPath != tt.wantPath {
+				t.Errorf("route = %+v, want tracker=%s host=%q path=%q", selection.route, tt.wantTracker, tt.wantHost, tt.wantPath)
+			}
+			if selection.profile == nil || selection.profile.Name != "work" {
+				t.Errorf("profile = %#v, want work", selection.profile)
+			}
+			if got := selection.selector.(provider.QuerySelector).Query; got != " exact query " {
+				t.Errorf("query = %q, want exact value", got)
+			}
+		})
+	}
+}
+
+func TestResolveQuerySelectionHonorsExplicitProfileWithInjectedProvider(t *testing.T) {
+	profile := config.Profile{
+		Name: "work", Provider: providerGitHub, Host: "ghe.acme.test",
+		RefreshInterval: 30 * time.Second,
+	}
+	cfg := config.Config{Profiles: map[string]config.Profile{"work": profile}}
+	deps := Deps{
+		Provider: fake.New(),
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			panic("origin was read")
+		},
+	}
+
+	selection, err := deps.resolveQuerySelection(context.Background(), cfg, "q", providerAuto, "work")
+	if err != nil {
+		t.Fatalf("resolveQuerySelection: %v", err)
+	}
+	if selection.profile == nil || selection.profile.Name != "work" {
+		t.Fatalf("profile = %#v, want explicit work Profile", selection.profile)
+	}
+	if selection.route.tracker != ref.TrackerGitHub || selection.route.host != "ghe.acme.test" {
+		t.Errorf("route = %+v, want explicit Profile route", selection.route)
+	}
+	if got := profileInterval(selection.profile); got != 30*time.Second {
+		t.Errorf("profile interval = %s, want 30s", got)
+	}
+}
+
+func TestResolveQuerySelectionRejectsProviderProfileMismatch(t *testing.T) {
+	profile := config.Profile{Name: "work", Provider: "jira", Host: "acme.atlassian.net", Project: "ABC"}
+	cfg := config.Config{Profiles: map[string]config.Profile{"work": profile}}
+	_, err := (Deps{}).resolveQuerySelection(context.Background(), cfg, "q", providerGitHub, "work")
+	if err == nil || !strings.Contains(err.Error(), `provider "github"`) || !strings.Contains(err.Error(), `provider "jira"`) {
+		t.Fatalf("error = %v, want both provider values", err)
+	}
+}
+
+func TestResolveQuerySelectionRoutesFromOriginOnce(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      string
+		provider    string
+		wantTracker ref.Tracker
+		wantHost    string
+		wantPath    string
+	}{
+		{name: "github known host", remote: "git@github.com:acme/widgets.git", provider: providerAuto, wantTracker: ref.TrackerGitHub, wantHost: "github.com"},
+		{name: "gitlab known host", remote: "https://gitlab.com/acme/platform/widgets.git", provider: providerAuto, wantTracker: ref.TrackerGitLab, wantHost: "gitlab.com", wantPath: "acme/platform/widgets"},
+		{name: "unknown host forced github", remote: "ssh://git@git.acme.test/acme/widgets.git", provider: providerGitHub, wantTracker: ref.TrackerGitHub, wantHost: "git.acme.test"},
+		{name: "unknown host forced gitlab", remote: "ssh://git@git.acme.test/acme/widgets.git", provider: providerGitLab, wantTracker: ref.TrackerGitLab, wantHost: "git.acme.test", wantPath: "acme/widgets"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			deps := Deps{RemoteLookup: func(_ context.Context, dir, remote string) (string, error) {
+				calls++
+				if remote != "origin" {
+					t.Errorf("remote = %q, want origin", remote)
+				}
+				return tt.remote, nil
+			}}
+			selection, err := deps.resolveQuerySelection(context.Background(), config.Config{}, "q", tt.provider, "")
+			if err != nil {
+				t.Fatalf("resolveQuerySelection: %v", err)
+			}
+			if calls != 1 {
+				t.Errorf("origin lookups = %d, want 1", calls)
+			}
+			if selection.route.tracker != tt.wantTracker || selection.route.host != tt.wantHost || selection.route.gitLabPath != tt.wantPath {
+				t.Errorf("route = %+v, want tracker=%s host=%q path=%q", selection.route, tt.wantTracker, tt.wantHost, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestResolveQuerySelectionRedactsCredentialBearingOrigin(t *testing.T) {
+	const (
+		credential = "github_pat_SECRET_47"
+		query      = "SECRET_NATIVE_QUERY_47"
+	)
+
+	t.Run("provider contradiction", func(t *testing.T) {
+		deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "https://x-access-token:" + credential + "@github.com/acme/widgets.git", nil
+		}}
+		_, err := deps.resolveQuerySelection(context.Background(), config.Config{}, query, providerGitLab, "")
+		if err == nil || !strings.Contains(err.Error(), "github.com") || !strings.Contains(err.Error(), "not GitLab") {
+			t.Fatalf("error = %v, want credential-free provider contradiction", err)
+		}
+		for _, secret := range []string{credential, "x-access-token", query} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error = %q, leaked %q", err, secret)
+			}
+		}
+	})
+
+	t.Run("malformed origin", func(t *testing.T) {
+		deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "https://x-access-token:" + credential + "@github.com", nil
+		}}
+		_, err := deps.resolveQuerySelection(context.Background(), config.Config{}, query, providerAuto, "")
+		if err == nil || !strings.Contains(err.Error(), "cannot parse git origin") {
+			t.Fatalf("error = %v, want sanitized origin parse failure", err)
+		}
+		for _, secret := range []string{credential, "x-access-token", query} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error = %q, leaked %q", err, secret)
+			}
+		}
+	})
+}
+
+func TestResolveQuerySelectionInfersUniqueProfileForUnknownOrigin(t *testing.T) {
+	profile := config.Profile{Name: "work", Provider: "gitlab", Host: "git.acme.test", Project: "configured/path"}
+	cfg := config.Config{Profiles: map[string]config.Profile{"work": profile}}
+	deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+		return "git@git.acme.test:checkout/repository.git", nil
+	}}
+	selection, err := deps.resolveQuerySelection(context.Background(), cfg, "repo:ignored", providerAuto, "")
+	if err != nil {
+		t.Fatalf("resolveQuerySelection: %v", err)
+	}
+	if selection.profile == nil || selection.profile.Name != "work" {
+		t.Fatalf("profile = %#v, want work", selection.profile)
+	}
+	if selection.route.tracker != ref.TrackerGitLab || selection.route.gitLabPath != "configured/path" {
+		t.Errorf("route = %+v, want inferred GitLab Profile route", selection.route)
+	}
+}
+
+func TestResolveQuerySelectionReportsAmbiguousOrMissingOrigin(t *testing.T) {
+	t.Run("unknown host without interpretation", func(t *testing.T) {
+		deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "git@git.acme.test:acme/widgets.git", nil
+		}}
+		_, err := deps.resolveQuerySelection(context.Background(), config.Config{}, "looks like JQL", providerAuto, "")
+		if err == nil || !strings.Contains(err.Error(), "pass --profile or --provider") {
+			t.Fatalf("error = %v, want disambiguation", err)
+		}
+	})
+
+	t.Run("multiple matching profiles", func(t *testing.T) {
+		cfg := config.Config{Profiles: map[string]config.Profile{
+			"github": {Name: "github", Provider: "github", Host: "git.acme.test"},
+			"gitlab": {Name: "gitlab", Provider: "gitlab", Host: "git.acme.test"},
+		}}
+		deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "git@git.acme.test:acme/widgets.git", nil
+		}}
+		_, err := deps.resolveQuerySelection(context.Background(), cfg, "q", providerAuto, "")
+		if err == nil || !strings.Contains(err.Error(), "pass --profile to choose") {
+			t.Fatalf("error = %v, want profile ambiguity", err)
+		}
+	})
+
+	t.Run("origin lookup failure", func(t *testing.T) {
+		deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "", errors.New("no such remote")
+		}}
+		_, err := deps.resolveQuerySelection(context.Background(), config.Config{}, "q", providerGitHub, "")
+		want := "--query needs --profile or an unambiguous git origin in the current directory"
+		if err == nil || !strings.HasPrefix(err.Error(), want) {
+			t.Fatalf("error = %v, want prefix %q", err, want)
+		}
+	})
 }
 
 func TestProfileTokenSource(t *testing.T) {

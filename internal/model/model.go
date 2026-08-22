@@ -109,9 +109,19 @@ type Ticket struct {
 	PullRequests []PullRequest
 }
 
-// Capabilities declares which optional Tracker features the serving Provider
-// supports. Renderers and the TUI show only what is declared; an undeclared
-// feature is silently absent, never an error.
+// SelectorCapabilities declares which Watchlist subjects a Provider can
+// resolve. Unlike an absent feature Capability, which remains silently absent
+// from rendering, an absent Selector Capability is a loud error: the requested
+// Selector is the command's entire subject.
+type SelectorCapabilities struct {
+	Epic    bool
+	RefList bool
+	Query   bool
+}
+
+// Capabilities declares what the serving Provider supports. Renderers and the
+// TUI silently omit undeclared feature data; Selector support is checked by the
+// Provider before it performs any work.
 type Capabilities struct {
 	// Hierarchy reports whether the Tracker exposes sub-tickets / parent links.
 	Hierarchy bool
@@ -123,4 +133,6 @@ type Capabilities struct {
 	// PullRequests reports whether the Provider correlates pull or merge
 	// requests to Tickets.
 	PullRequests bool
+	// Selectors declares the Watchlist subjects this Provider accepts.
+	Selectors SelectorCapabilities
 }

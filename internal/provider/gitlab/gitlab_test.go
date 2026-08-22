@@ -142,10 +142,11 @@ type response struct {
 // method, the paths and the paging parameters sitrep sends without reaching
 // inside the driver.
 type recordedRequest struct {
-	method  string
-	path    string
-	query   map[string][]string
-	headers http.Header
+	method   string
+	path     string
+	rawQuery string
+	query    map[string][]string
+	headers  http.Header
 }
 
 // replayServer serves recorded payloads, routed by request path — GitLab
@@ -176,10 +177,11 @@ func newReplayServer(t *testing.T, responses map[string][]response) *replayServe
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests = append(s.requests, recordedRequest{
-			method:  r.Method,
-			path:    r.URL.EscapedPath(),
-			query:   r.URL.Query(),
-			headers: r.Header.Clone(),
+			method:   r.Method,
+			path:     r.URL.EscapedPath(),
+			rawQuery: r.URL.RawQuery,
+			query:    r.URL.Query(),
+			headers:  r.Header.Clone(),
 		})
 		path := r.URL.EscapedPath()
 		if _, configured := s.responses[path]; !configured {
@@ -267,6 +269,12 @@ func newProvider(s *replayServer, opts ...gitlab.Option) *gitlab.Provider {
 	return gitlab.New(fixtureHost, append(base, opts...)...)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // fullEpic serves the two-page fixture epic, with every child correlating to no
 // merge requests. A test about merge requests configures its own answers.
 func fullEpic(t *testing.T) *replayServer {
@@ -293,7 +301,10 @@ func TestName(t *testing.T) {
 }
 
 func TestCapabilities(t *testing.T) {
-	want := model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
+	want := model.Capabilities{
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
+	}
 	if got := gitlab.New(fixtureHost).Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
@@ -699,6 +710,265 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	}
 }
 
+func TestResolveQuerySearchesMembershipThenReadsExactIssues(t *testing.T) {
+	const (
+		query         = "state=opened&labels=agent%20ready&scope=all&per_page=7"
+		globalIssues  = "/api/v4/issues"
+		cli101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+		platform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+		cli101MRs     = cli101Path + "/closed_by"
+		platform7MRs  = platform7Path + "/closed_by"
+	)
+	responses := map[string][]response{
+		globalIssues:  {{file: "query_membership.json", headers: map[string]string{"x-next-page": "2"}}},
+		cli101Path:    {{file: "query_issue_cli_101.json"}},
+		platform7Path: {{file: "query_issue_core_7.json"}},
+		cli101MRs:     {{file: "closed_by_empty.json"}},
+		platform7MRs:  {{file: "closed_by_empty.json"}},
+	}
+	s := newReplayServer(t, responses)
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Header != provider.QueryHeader(query) {
+		t.Errorf("Header = %+v, want exact Query", snap.Header)
+	}
+	if !snap.FetchedAt.IsZero() || snap.Capabilities != p.Capabilities() {
+		t.Errorf("FetchedAt/Capabilities = %v/%+v", snap.FetchedAt, snap.Capabilities)
+	}
+	wantKeys := []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"}
+	wantTitles := []string{"Ship the epic monitor", "Publish the release archives"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	for i := range wantKeys {
+		if snap.Tickets[i].Key != wantKeys[i] || snap.Tickets[i].Title != wantTitles[i] {
+			t.Errorf("Tickets[%d] = {%q %q}, want {%q %q} from direct state",
+				i, snap.Tickets[i].Key, snap.Tickets[i].Title, wantKeys[i], wantTitles[i])
+		}
+	}
+
+	searches := s.requestsTo(globalIssues)
+	if len(searches) != 1 {
+		t.Fatalf("membership searches = %d, want one maximal first page", len(searches))
+	}
+	membership := searches[0]
+	if membership.method != http.MethodGet {
+		t.Errorf("membership method = %s, want GET", membership.method)
+	}
+	if got, want := membership.rawQuery, query+"&per_page=100"; got != want {
+		t.Errorf("raw membership query = %q, want opaque bytes plus bound %q", got, want)
+	}
+	if got := membership.query["per_page"]; !reflect.DeepEqual(got, []string{"7", "100"}) {
+		t.Errorf("per_page values = %v, want original value plus appended first-page bound", got)
+	}
+	for _, path := range []string{cli101Path, platform7Path, cli101MRs, platform7MRs} {
+		if got := len(s.requestsTo(path)); got != 1 {
+			t.Errorf("requests to %s = %d, want 1", path, got)
+		}
+	}
+	if got := len(s.recorded()); got != 5 {
+		t.Errorf("all requests = %d, want membership, two roots and two correlation reads", got)
+	}
+	for _, request := range s.recorded() {
+		if strings.Contains(request.path, "/notes") || strings.Contains(request.path, "/links") {
+			t.Errorf("Query Resolve requested Detail path %s", request.path)
+		}
+	}
+}
+
+func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.T) {
+	const scoped = "/api/v4/projects/gitlab-org%2Fcli/issues"
+	s := newReplayServer(t, map[string][]response{
+		scoped: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithPath("gitlab-org/cli"))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+	requests := s.recorded()
+	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100" {
+		t.Errorf("requests = %+v, want one project-scoped maximal first page", requests)
+	}
+}
+
+func TestResolveQueryPreservesLiteralHashInRawQuery(t *testing.T) {
+	const (
+		query        = "search=#47&labels=agent%23ready"
+		globalIssues = "/api/v4/issues"
+	)
+	s := newReplayServer(t, map[string][]response{globalIssues: {{body: `[]`}}})
+
+	_, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.requestsTo(globalIssues)
+	if len(requests) != 1 {
+		t.Fatalf("membership requests = %d, want 1", len(requests))
+	}
+	if got, want := requests[0].rawQuery, query+"&per_page=100"; got != want {
+		t.Errorf("raw query = %q, want literal bytes %q", got, want)
+	}
+}
+
+func TestResolveQueryRejectsMalformedNativeQuery(t *testing.T) {
+	const (
+		globalIssues = "/api/v4/issues"
+		query        = "state=wat"
+	)
+	s := newReplayServer(t, map[string][]response{
+		globalIssues: {{
+			status: http.StatusUnprocessableEntity,
+			body:   `{"message":{"labels":["is invalid"],"query":["state=wat is invalid"],"state":["does not have a valid value"]}}`,
+		}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind: provider.KindBadRef,
+		Contains: []string{
+			"query rejected",
+			`labels: ["is invalid"]`,
+			`query: ["[query] is invalid"]`,
+			`state: ["does not have a valid value"]`,
+		},
+		Secret: query,
+	})
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("error = %q, leaked credential", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if provider.KindOf(err).Retryable() {
+		t.Error("malformed native query must not be retryable")
+	}
+}
+
+func TestResolveQueryPreservesMembershipFailureClasses(t *testing.T) {
+	const globalIssues = "/api/v4/issues"
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"Too many requests"}`, headers: map[string]string{"Retry-After": "30"}},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit", "30"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `[{`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{globalIssues: {tt.resp}})
+			snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+			providertest.CheckError(t, "gitlab", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want none", snap)
+			}
+			if len(s.recorded()) != 1 {
+				t.Errorf("requests = %d, want membership stage only", len(s.recorded()))
+			}
+		})
+	}
+}
+
+func TestResolveQueryTransportErrorDoesNotExposeQuery(t *testing.T) {
+	const query = "search=SECRET_QUERY_47"
+	transportErr := errors.New("dial failed")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	p := gitlab.New(fixtureHost,
+		gitlab.WithTokenSource(func(context.Context, string) (string, error) {
+			return fixtureToken, nil
+		}),
+		gitlab.WithHTTPClient(client),
+	)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"transport failure"},
+		Secret:   query,
+	})
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(%v, transportErr) = false, want true", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveQueryRootFailureReturnsNoPartialSnapshot(t *testing.T) {
+	const (
+		globalIssues  = "/api/v4/issues"
+		cli101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+		platform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+	)
+	s := newReplayServer(t, map[string][]response{
+		globalIssues:  {{file: "query_membership.json"}},
+		cli101Path:    {{file: "query_issue_cli_101.json"}},
+		platform7Path: {{status: http.StatusNotFound, body: `{"message":"404 Issue Not Found"}`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"gitlab-org/platform/core#7", "not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial membership", snap)
+	}
+	if len(s.recorded()) != 3 {
+		t.Errorf("requests = %d, want membership and roots only", len(s.recorded()))
+	}
+	for _, request := range s.recorded() {
+		if strings.Contains(request.path, "/closed_by") {
+			t.Errorf("correlation started after root failure: %s", request.path)
+		}
+	}
+}
+
+func TestResolveQueryRejectsInvalidSearchIdentity(t *testing.T) {
+	const globalIssues = "/api/v4/issues"
+	s := newReplayServer(t, map[string][]response{
+		globalIssues: {{body: `[{"iid":0,"project_id":34675721,"references":{"full":"gitlab-org/cli#0"}}]`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"invalid identity"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
 func TestResolveRefListReadsExactHeterogeneousRootsInOrder(t *testing.T) {
 	responses := map[string][]response{
 		groupMilestonesPath:       {{file: "milestone_group.json"}},
@@ -868,8 +1138,8 @@ func TestResolveRefListRejectsEmptyAndUnknownSelectorsWithoutIO(t *testing.T) {
 		contains string
 	}{
 		{"empty Ref-list", provider.RefListSelector{}, "at least one Ref"},
-		{"unknown nil Selector", nil, "unsupported Selector"},
-		{"pointer Selector", &provider.EpicSelector{Ref: epicRef}, "unsupported Selector"},
+		{"unknown nil Selector", nil, "unsupported Watchlist selector"},
+		{"pointer Selector", &provider.EpicSelector{Ref: epicRef}, "unsupported Watchlist selector"},
 	}
 
 	for _, tt := range tests {

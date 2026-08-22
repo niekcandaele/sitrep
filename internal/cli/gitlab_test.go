@@ -170,8 +170,8 @@ func TestJSONGitLabEpicDocument(t *testing.T) {
 
 	var doc struct {
 		Provider struct {
-			Name         string          `json:"name"`
-			Capabilities map[string]bool `json:"capabilities"`
+			Name         string                     `json:"name"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
 		} `json:"provider"`
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
@@ -181,7 +181,7 @@ func TestJSONGitLabEpicDocument(t *testing.T) {
 	if doc.Provider.Name != "gitlab" {
 		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
 	}
-	if !doc.Provider.Capabilities["pull_requests"] {
+	if string(doc.Provider.Capabilities["pull_requests"]) != "true" {
 		t.Error("provider.capabilities.pull_requests = false; this driver correlates merge requests")
 	}
 	if len(doc.Tickets) != 10 {
@@ -213,8 +213,8 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 
 	var doc struct {
 		Provider struct {
-			Name         string          `json:"name"`
-			Capabilities map[string]bool `json:"capabilities"`
+			Name         string                     `json:"name"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
 		} `json:"provider"`
 		Watchlist struct {
 			Epic map[string]json.RawMessage `json:"epic"`
@@ -227,7 +227,7 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 	if doc.Provider.Name != "gitlab" {
 		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
 	}
-	if !doc.Provider.Capabilities["pull_requests"] {
+	if string(doc.Provider.Capabilities["pull_requests"]) != "true" {
 		t.Error("provider.capabilities.pull_requests = false, want true")
 	}
 	if len(doc.Tickets) != 7 {

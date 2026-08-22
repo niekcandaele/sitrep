@@ -63,6 +63,39 @@ func TestPlainRefListReport(t *testing.T) {
 	}
 }
 
+func TestPlainQueryReportKeepsFullHeader(t *testing.T) {
+	p := fake.New()
+	query := "state=opened&labels=agent"
+
+	got := run([]string{"--query", query, "--plain"}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if got.stderr != "" {
+		t.Errorf("stderr = %q, want empty", got.stderr)
+	}
+	checkGolden(t, "query_plain.golden.txt", []byte(strings.TrimSuffix(got.stdout, "\n")))
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  "+query+"\n") {
+		t.Errorf("plain output does not preserve full Query Header: %q", got.stdout[:min(len(got.stdout), 80)])
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestPlainEmptyQueryWatchlistUsesGenericEmptyState(t *testing.T) {
+	p := fake.New(fake.WithSnapshots(model.WatchlistSnapshot{Tickets: []model.Ticket{}}))
+
+	got := run([]string{"--plain", "--query", "state=none"}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	checkGolden(t, "query_plain_empty.golden.txt", []byte(strings.TrimSuffix(got.stdout, "\n")))
+	if !strings.Contains(got.stdout, "This Watchlist has no Tickets") {
+		t.Errorf("stdout = %q, want generic empty Watchlist wording", got.stdout)
+	}
+}
+
 func TestPlainStdinRefListMatchesPositionalSelection(t *testing.T) {
 	input := "acme/widgets#112\nacme/widgets#115 acme/widgets#118\tacme/widgets#121\n"
 	before := runStdin([]string{"--plain", "-"}, input, fake.New())
@@ -132,7 +165,10 @@ func TestPlainHasNoEscapeSequences(t *testing.T) {
 // An undeclared Capability is silently absent, never an error: with pull
 // requests off no Ticket carries pull request text and nothing complains.
 func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 
 	got := run([]string{"111", "--plain"}, p)
 

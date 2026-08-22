@@ -2,12 +2,14 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/cli"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
 
@@ -269,5 +271,101 @@ func TestPositionalSelectionNeverReadsStdin(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+}
+
+func TestQuerySelectorPreservesExactFlagValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		query string
+	}{
+		{name: "opaque", args: []string{"--plain", "--query", "  label:bug assignee:@me  "}, query: "  label:bug assignee:@me  "},
+		{name: "empty", args: []string{"--query=", "--plain"}, query: ""},
+		{name: "whitespace", args: []string{"--plain", "--query", " \t "}, query: " \t "},
+		{name: "interspersed and repeated", args: []string{"--query", "first", "--plain", "--query=last & exact"}, query: "last & exact"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New()
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{
+				Provider: p,
+				Stdin:    panicReader{},
+				OpenTTY:  panicTTY,
+			})
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+			}
+			selector, ok := p.LastSelector().(provider.QuerySelector)
+			if !ok {
+				t.Fatalf("selector = %T, want provider.QuerySelector", p.LastSelector())
+			}
+			if selector.Query != tt.query {
+				t.Errorf("query = %q, want exact %q", selector.Query, tt.query)
+			}
+			if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+				t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+			}
+		})
+	}
+}
+
+func TestQueryRejectsEveryPositionalSelectorBeforeRuntimeWork(t *testing.T) {
+	for _, positional := range [][]string{{"111"}, {"111", "112"}, {"-"}} {
+		args := append([]string{"--query", "q", "--plain"}, positional...)
+		p := fake.New()
+		var stdout, stderr bytes.Buffer
+		code := cli.RunWith(args, &stdout, &stderr, cli.Deps{
+			Provider:   p,
+			Stdin:      panicReader{},
+			OpenTTY:    panicTTY,
+			ConfigPath: "/config/must-not-be-read",
+			RemoteLookup: func(context.Context, string, string) (string, error) {
+				panic("origin was read")
+			},
+		})
+		if code != 2 || stdout.Len() != 0 {
+			t.Fatalf("args %v: result = code %d stdout %q stderr %q", args, code, stdout.String(), stderr.String())
+		}
+		want := "sitrep: --query cannot be combined with positional Refs or \"-\"\n\n"
+		if !strings.HasPrefix(stderr.String(), want) {
+			t.Errorf("args %v: stderr = %q, want prefix %q", args, stderr.String(), want)
+		}
+		if p.ResolveCalls() != 0 || p.DetailCalls() != 0 {
+			t.Errorf("args %v: Provider was called", args)
+		}
+	}
+}
+
+func TestQueryFlagParsingAndEarlyResultPrecedence(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "missing value", args: []string{"--query"}, wantCode: 2, wantStderr: "flag needs an argument: --query"},
+		{name: "help", args: []string{"--help", "--query", "q", "111"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "version", args: []string{"--version", "--query", "q", "111"}, wantCode: 0, wantStdout: "sitrep "},
+		{name: "mode conflict", args: []string{"--json", "--plain", "--query", "q"}, wantCode: 2, wantStderr: "mutually exclusive"},
+		{name: "invalid monitor interval", args: []string{"--interval", "0", "--query", "q"}, wantCode: 2, wantStderr: "refresh interval must be positive"},
+		{name: "unknown provider", args: []string{"--provider", "bogus", "--query", "q"}, wantCode: 2, wantStderr: "unknown provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{Stdin: panicReader{}, OpenTTY: panicTTY})
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
+			}
+			if tt.wantStdout != "" && !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+			if tt.wantStderr != "" && !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
+			}
+		})
 	}
 }

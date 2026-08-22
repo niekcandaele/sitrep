@@ -32,6 +32,53 @@ type graphQLResponse struct {
 	Errors []graphQLError `json:"errors"`
 }
 
+type queryResponse struct {
+	Data struct {
+		Search struct {
+			Nodes []queryMembershipNode `json:"nodes"`
+		} `json:"search"`
+	} `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
+type queryMembershipNode struct {
+	TypeName   string        `json:"__typename"`
+	Number     int           `json:"number"`
+	Repository repositoryRef `json:"repository"`
+}
+
+func (r queryResponse) err(endpoint string, header http.Header, query string) error {
+	if len(r.Errors) == 0 {
+		return nil
+	}
+	for _, graphErr := range r.Errors {
+		if isNativeQueryError(graphErr) {
+			message := strings.TrimSpace(graphErr.Message)
+			if message == "" {
+				message = "the Tracker rejected the query"
+			}
+			message = provider.RedactQuery(message, query)
+			return provider.Errorf(provider.KindBadRef, "github: query rejected: %s", message)
+		}
+	}
+	redacted := append([]graphQLError(nil), r.Errors...)
+	for i := range redacted {
+		redacted[i].Message = provider.RedactQuery(redacted[i].Message, query)
+	}
+	return graphQLErrors(redacted, "github: query returned no searchable issues", endpoint, header)
+}
+
+func isNativeQueryError(graphErr graphQLError) bool {
+	switch strings.ToUpper(strings.TrimSpace(graphErr.Type)) {
+	case "SEARCH_QUERY_ERROR":
+		return true
+	case "BAD_USER_INPUT", "UNPROCESSABLE":
+		return len(graphErr.Path) > 0 && graphErr.Path[0] == "search"
+	default:
+		return false
+	}
+}
+
 type refListResponse struct {
 	Data   map[string]*refListRepository `json:"data"`
 	Errors []graphQLError                `json:"errors"`

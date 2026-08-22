@@ -174,6 +174,10 @@ func refListSelectorSource(p *fake.Provider, c *clock) Source {
 	return SelectorSource(p, provider.RefListSelector{Refs: refs}, c.now)
 }
 
+func querySelectorSource(p *fake.Provider, c *clock, query string) Source {
+	return SelectorSource(p, provider.QuerySelector{Query: query}, c.now)
+}
+
 // The headline frame: the header and its progress bar, every Status Category
 // grouped with its count, assignees, all four pull request shapes, the unicode
 // title, the cross-repo Ticket, the selected-row marker and the footer help.
@@ -215,6 +219,127 @@ func TestRefListInitialFrame(t *testing.T) {
 	}
 	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
 		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestLongQueryHeaderFitsANarrowFrameWithoutChangingTheQuery(t *testing.T) {
+	const (
+		width  = 42
+		height = 18
+	)
+	query := "  project = FOO AND statusCategory != Done ORDER BY updated DESC  "
+	p := fake.New()
+	c := newClock()
+	tm := teatest.NewTestModel(t, New(t.Context(), Options{
+		Source:   querySelectorSource(p, c, query),
+		Interval: time.Minute,
+		Now:      c.now,
+	}), teatest.WithInitialTermSize(width, height))
+	s := &session{tm: tm, clock: c}
+	s.waitFor(t, "project = FOO")
+
+	tm.Send(keyPress("q"))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+	m, ok := tm.FinalModel(t).(Model)
+	if !ok {
+		t.Fatalf("final model is %T, want tui.Model", tm.FinalModel(t))
+	}
+	content := m.View().Content
+	got := frame(content)
+	checkGolden(t, "query_narrow.golden.txt", got)
+
+	if h := lipgloss.Height(content); h != height {
+		t.Errorf("frame height = %d, want %d", h, height)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Errorf("line width = %d, want at most %d: %q", got, width, line)
+		}
+	}
+	if first := strings.SplitN(string(got), "\n", 2)[0]; !strings.HasSuffix(strings.TrimRight(first, " "), "…") {
+		t.Errorf("narrow Query Header = %q, want ellipsis", first)
+	}
+	if m.input.Header.Title != query {
+		t.Errorf("stored Header Title = %q, want full Query %q", m.input.Header.Title, query)
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != query {
+		t.Errorf("last selector = %#v, want exact Query %q", p.LastSelector(), query)
+	}
+}
+
+func TestQueryDetailUsesTheQueryBreadcrumb(t *testing.T) {
+	query := "label:bug assignee:@me"
+	p := fake.New()
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, query)
+
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	m, got := s.finish(t)
+
+	if m.mode != modeDetail {
+		t.Error("enter did not open Detail from the Query Watchlist")
+	}
+	if m.detail.input.Parent != (Header{Title: query}) {
+		t.Errorf("Detail Parent = %+v, want Query Header", m.detail.input.Parent)
+	}
+	if !strings.Contains(string(got), query) {
+		t.Errorf("Detail frame omitted Query breadcrumb:\n%s", got)
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 1", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestQueryEscapeAndRefreshReplaceMembershipWithTheSameSelector(t *testing.T) {
+	query := "label:changing-membership"
+	before := fake.FixtureSnapshot()
+	before.Tickets = append([]model.Ticket(nil), before.Tickets[0])
+	after := fake.FixtureSnapshot()
+	after.Tickets = append([]model.Ticket(nil), after.Tickets[1])
+	p := fake.New(fake.WithSnapshots(before, after))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Draft the shard sync protocol")
+
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	s.tm.Send(escKey)
+	s.tm.Send(keyPress("r"))
+	waitUntil(t, "the Query refresh", func() bool { return p.ResolveCalls() == 2 })
+	s.waitFor(t, "Retry & backoff for the sync worker")
+
+	m, got := s.finish(t)
+	if m.mode != modeList {
+		t.Error("esc did not return to the Query Watchlist")
+	}
+	if m.input.Header != (Header{Title: query}) {
+		t.Errorf("Header after refresh = %+v, want Query Header", m.input.Header)
+	}
+	if len(m.input.Tickets) != 1 || m.input.Tickets[0].ID != "acme/widgets#113" {
+		t.Errorf("membership after refresh = %+v, want only #113", m.input.Tickets)
+	}
+	if strings.Contains(string(got), "Draft the shard sync protocol") {
+		t.Errorf("former Query member remained in refreshed frame:\n%s", got)
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != query {
+		t.Errorf("last selector = %#v, want exact Query %q", p.LastSelector(), query)
+	}
+	if p.ResolveCalls() != 2 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 2 and 1", p.ResolveCalls(), p.DetailCalls())
 	}
 }
 
@@ -351,7 +476,10 @@ func TestFrameAfterFailedRefresh(t *testing.T) {
 // An undeclared Capability is silently absent: no pull request text anywhere,
 // no error, no placeholder.
 func TestFrameWithoutThePullRequestCapability(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 	c := newClock()
 	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")

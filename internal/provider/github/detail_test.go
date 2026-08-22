@@ -33,7 +33,10 @@ func fetchDetail(t *testing.T, file string) (*replayServer, model.Detail) {
 // A Capability declares what the driver returns today. Detail is served now, so
 // Comments and BlockingLinks are on — flipped in the same change as the data.
 func TestCapabilitiesIncludeDetail(t *testing.T) {
-	want := model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
+	want := model.Capabilities{
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
+	}
 	if got := github.New("github.com").Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
