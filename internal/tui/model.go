@@ -77,6 +77,10 @@ type Model struct {
 	width, height int
 	ready         bool
 
+	mouseEnabled bool
+	lastClickID  model.TicketID
+	lastClickAt  time.Time
+
 	keys       KeyMap
 	searchKeys SearchKeyMap
 	detailKeys DetailKeyMap
@@ -141,20 +145,22 @@ func New(ctx context.Context, opts Options) Model {
 		now:      now,
 		interval: opts.Interval,
 		// The first refresh is already on its way out of Init.
-		generation:  1,
-		refreshing:  true,
-		lastAttempt: now(),
-		listArmed:   true,
-		hasSource:   src != nil,
-		search:      search,
-		fetchDetail: fetchDetail,
-		details:     make(map[model.TicketID]detailEntry),
-		keys:        DefaultKeyMap(),
-		searchKeys:  DefaultSearchKeyMap(),
-		detailKeys:  DefaultDetailKeyMap(),
-		help:        help.New(),
-		styles:      DefaultStyles(true),
+		generation:   1,
+		refreshing:   true,
+		lastAttempt:  now(),
+		listArmed:    true,
+		hasSource:    src != nil,
+		search:       search,
+		fetchDetail:  fetchDetail,
+		mouseEnabled: !opts.NoMouse,
+		details:      make(map[model.TicketID]detailEntry),
+		keys:         DefaultKeyMap(),
+		searchKeys:   DefaultSearchKeyMap(),
+		detailKeys:   DefaultDetailKeyMap(),
+		help:         help.New(),
+		styles:       DefaultStyles(true),
 	}
+	m = m.syncMouseKeys()
 
 	if opts.Initial != nil {
 		// A reading the caller already took is folded in exactly the way a
@@ -243,23 +249,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case detailFetchedMsg:
 		return m.onDetailFetched(msg), nil
 
+	case listMouseClickMsg:
+		if m.mode != modeList {
+			return m, nil
+		}
+		return m.onListMouseClick(msg)
+
+	case listMouseWheelMsg:
+		if m.mode != modeList {
+			return m, nil
+		}
+		return m.onListMouseWheel(msg), nil
+
+	case detailMouseWheelMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseWheel(msg), nil
+
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
 		// consulted: while the box is open every list command is text, and while
 		// Detail is open the list's commands are not on this screen at all.
 		switch {
 		case m.searching:
-			return m.onSearchKey(msg)
+			return m.clearPendingClick().onSearchKey(msg)
 		case m.mode == modeDetail:
-			return m.onDetailKey(msg)
+			return m.clearPendingClick().onDetailKey(msg)
 		}
-		return m.onKey(msg)
+		return m.clearPendingClick().onKey(msg)
 
 	case tea.PasteMsg:
 		// A pasted Ticket key is the obvious way to use this box, and a paste
 		// arrives as its own message rather than as key presses.
 		if m.searching {
-			return m.updateSearch(msg)
+			return m.clearPendingClick().updateSearch(msg)
 		}
 	}
 	return m, nil
@@ -270,6 +294,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	v := tea.NewView("")
 	v.AltScreen = true
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	if !m.ready {
 		// Before the terminal has reported its size there is nothing honest to
 		// draw: a frame guessed at 80x24 flashes the wrong layout for one
@@ -279,12 +308,18 @@ func (m Model) View() tea.View {
 
 	if m.mode == modeDetail {
 		v.SetContent(m.detailFrame())
+		if m.mouseEnabled {
+			v.OnMouse = m.detailMouseHandler()
+		}
 		return v
 	}
 
 	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
 	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
 	v.Cursor = m.cursor()
+	if m.mouseEnabled {
+		v.OnMouse = m.listMouseHandler()
+	}
 	return v
 }
 
@@ -457,6 +492,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Quit):
 		return m.quit(msg), tea.Quit
+
+	case key.Matches(msg, m.keys.ToggleMouse):
+		return m.toggleMouse(), nil
 
 	case key.Matches(msg, m.keys.Help):
 		// The expanded listing eats body height, so the window has to be
@@ -733,16 +771,54 @@ func (m Model) filterLineIndex() int {
 // one the keyboard is on whenever that footer is drawn. A footer offering list
 // commands while the find box holds the keyboard would be describing a program
 // the user is not in.
-//
-// The Detail screen's footer names m.detailKeys directly rather than going
-// through here: the list's body height is measured against this footer, and a
-// list whose window silently re-measured itself because another screen is open
-// would not come back the way it left.
 func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
-		return m.searchKeys
+		return m.responsiveHelpKeys(m.searchKeys)
 	}
-	return m.keys
+	return m.responsiveHelpKeys(m.keys)
+}
+
+// detailHelpKeys applies the same responsive help layout to Detail without
+// making list body measurements depend on the screen currently in front.
+func (m Model) detailHelpKeys() help.KeyMap {
+	return m.responsiveHelpKeys(m.detailKeys)
+}
+
+type responsiveHelpKeyMap struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
+func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
+
+// responsiveHelpKeys keeps compact help actionable and expanded help complete.
+// It shortens capture guidance only when the first three actions do not fit,
+// and stacks full-help columns rather than letting bubbles omit a column.
+func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
+	short := append([]key.Binding(nil), keys.ShortHelp()...)
+	full := keys.FullHelp()
+
+	unbounded := m.help
+	unbounded.SetWidth(0)
+	if len(short) >= 3 && short[0].Help().Key == "m" &&
+		short[0].Help().Desc == mouseEnabledHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("m", mouseEnabledCompactHelp)
+	}
+	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
+		short[0].Help().Desc == searchMouseHintHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
+	}
+	if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
+		stacked := make([]key.Binding, 0)
+		for _, group := range full {
+			stacked = append(stacked, group...)
+		}
+		full = [][]key.Binding{stacked}
+	}
+	return responsiveHelpKeyMap{short: short, full: full}
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is

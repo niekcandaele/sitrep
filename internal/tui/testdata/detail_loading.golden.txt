@@ -37,4 +37,4 @@ Reading Ticket detail…
 
 
 
-↑/k up • ↓/j down • esc back • u epic • r refresh • ? help • q quit
+m off · shift-drag to select text • esc back • q quit • ↑/k up • ↓/j down • u epic • r refresh • ? help

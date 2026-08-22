@@ -1,5 +1,5 @@
-#111  Widget sync v2: shards, retries & telemetry                          https://tracker.example.test/acme/widgets/111
-█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
+#111  Widget sync v2: shards, retries & telemetry
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%              just now
 
 IN PROGRESS (3)
 ▸ #112     Draft the shard sync protocol
@@ -30,11 +30,11 @@ CANCELLED (1)
            [not planned]
 
 
-
-
-
-
-
-
-
-m off · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help
+m     off · shift-drag to select text    ↑/k  up
+enter open                               ↓/j  down
+r     refresh                            pgup page up
+?     help                               pgdn page down
+q     quit                               g    first
+                                         G    last
+                                         d    hide finished
+                                         /    find

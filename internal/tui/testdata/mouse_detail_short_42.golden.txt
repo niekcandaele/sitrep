@@ -1,0 +1,40 @@
+#111 · Widget sync v2: shards, retries & t
+#112  Draft the shard sync protocol
+[In Review]  @mara-vos  #501 open ci ok ch
+
+DESCRIPTION
+
+The shard sync protocol has to survive a
+shard going away mid-transfer & coming
+back with a different generation number.
+
+## Shape
+
+1. The sender announces `(shard,
+generation, offset)`.
+2. The receiver either accepts or replies
+with the offset it wants.
+3. Either side may abort; an aborted
+transfer leaves no partial state.
+
+Open question: do we version the handshake
+itself, or rely on the generation number
+to carry it? Leaning towards an explicit
+version — see the linked ticket.
+
+COMMENTS (3)
+
+@mara-vos · 2026-01-12 09:14 UTC
+  Sketched the state machine; the abort
+  path is the one that bites.
+
+@tobias · 2026-01-12 16:02 UTC
+  Agreed on an explicit version byte.
+  Costs nothing now, saves a migration
+  later.
+
+@mara-vos · 2026-01-13 08:30 UTC
+  Version byte it is. Updating the draft.
+
+
+m off, shift-drag • esc back • q quit … 0%

@@ -33,6 +33,12 @@ with the tracker's own label — fetched at that moment and never during a list 
 returns to the list with the selection, the scroll position and any filters exactly as they
 were.
 
+Mouse capture is on by default in the monitor. Click a Ticket row to select it, double-click
+one to open its Detail, and use the wheel to move one Ticket at a time in the list or three
+lines at a time in Detail. Press `m` to turn capture off or on. Shift-drag is the common
+terminal escape hatch for selecting text while capture is on; if a terminal or multiplexer
+does not honor it, use `m`, or start with `--no-mouse` and enable capture only when wanted.
+
 A Ref with sub-tickets is an Epic; one without is a Ticket. Point sitrep at a Ticket —
 `sitrep 112` — and it lands straight in that Ticket's Detail, which is how you decode a
 number an agent just handed you. A breadcrumb above it names the Epic the Ticket belongs
@@ -61,6 +67,9 @@ full list. This table is the lookup.
 | Key | Does |
 |---|---|
 | `↑` / `k`, `↓` / `j` | move the selection |
+| click | select a Ticket |
+| double-click | open a Ticket's Detail |
+| wheel | move one Ticket |
 | `pgup`, `pgdn` | move one page |
 | `g`, `G` | first Ticket, last Ticket |
 | `enter` | open the selected Ticket's Detail |
@@ -68,6 +77,7 @@ full list. This table is the lookup.
 | `/` | open the fuzzy find |
 | `esc` | clear the filters — and quit when none are active |
 | `r` | refresh now |
+| `m` | turn mouse capture off or on |
 | `?` | expand the help |
 | `q`, `ctrl+c` | quit |
 
@@ -79,6 +89,7 @@ rather than quitting.
 | `enter` | keep the query and close the box |
 | `esc` | abandon the query and close the box |
 | `↑`, `↓`, `pgup`, `pgdn` | move the selection without leaving the box |
+| shift-drag | select terminal text while mouse capture is on |
 | `ctrl+c` | quit |
 
 **A Ticket's Detail**
@@ -86,11 +97,13 @@ rather than quitting.
 | Key | Does |
 |---|---|
 | `↑` / `k`, `↓` / `j` | scroll one line |
+| wheel | scroll three lines |
 | `pgup`, `pgdn` | scroll one page |
 | `g`, `G` | top, bottom |
 | `esc` | back to the list — or quit, when the Ticket was opened directly |
 | `u` | open the Epic this Ticket belongs to, when it has one |
 | `r` | re-read this Ticket's Detail |
+| `m` | turn mouse capture off or on |
 | `?` | expand the help |
 | `q`, `ctrl+c` | quit |
 

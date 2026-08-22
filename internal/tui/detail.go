@@ -204,6 +204,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m = m.clearPendingClick()
 	m.mode = modeDetail
 	m.detail = detailState{ticket: t}
 
@@ -243,6 +244,7 @@ func (m Model) syncDetailKeys() Model {
 // until now — and from a drill-in it is esc by another name, because both mean
 // "the Watchlist this Ticket belongs to".
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
+	m = m.clearPendingClick()
 	m.mode = modeList
 	m.detail = detailState{}
 	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
@@ -327,6 +329,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// from everywhere, so nobody is trapped either way.
 			return m.quit(msg), tea.Quit
 		}
+		m = m.clearPendingClick()
 		m.mode = modeList
 		m.detail = detailState{}
 		// The list's own state was never touched, but the help listing may have
@@ -339,6 +342,9 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Only this Ticket, and only its Detail: r here never touches the list.
 		next, cmd := m.startDetailFetch()
 		return next, cmd
+
+	case key.Matches(msg, m.detailKeys.ToggleMouse):
+		return m.toggleMouse(), nil
 
 	case key.Matches(msg, m.detailKeys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -420,7 +426,7 @@ func (m Model) detailFooterLines() []string {
 			"could not re-read this Ticket's detail: "+m.detail.lastErr.Error(), m.width)))
 	}
 
-	help := strings.Split(m.help.View(m.detailKeys), "\n")
+	help := strings.Split(m.help.View(m.detailHelpKeys()), "\n")
 	// The indicator is drawn only when there is somewhere to scroll: a Detail
 	// that fits on screen has no position to report.
 	if pos := scrollIndicator(m.detail.offset, len(m.detailBodyLines()), m.detailBodyHeight()); pos != "" {
@@ -444,6 +450,6 @@ func (m Model) detailBodyHeight() int {
 	if m.detail.lastErr != nil && m.detail.loaded {
 		lines++
 	}
-	lines += len(strings.Split(m.help.View(m.detailKeys), "\n"))
+	lines += len(strings.Split(m.help.View(m.detailHelpKeys()), "\n"))
 	return max(m.height-detailHeaderHeight-lines, 1)
 }

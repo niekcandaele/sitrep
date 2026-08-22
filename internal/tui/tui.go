@@ -136,6 +136,9 @@ type Options struct {
 	// Now reads the clock the staleness indicator and the refresh schedule are
 	// measured against. When nil it is time.Now.
 	Now func() time.Time
+	// NoMouse starts the monitor without terminal mouse capture. The user can
+	// enable it at runtime with m.
+	NoMouse bool
 	// Input is the terminal the monitor reads keys from.
 	Input io.Reader
 	// Output is the terminal the monitor draws to.

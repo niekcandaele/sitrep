@@ -92,7 +92,7 @@ func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider
 // usable, gets no Source — there is no Watchlist to monitor, and the key is
 // simply not offered.
 func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
-	p provider.Provider, r ref.Ref, snap model.WatchlistSnapshot, interval time.Duration) int {
+	p provider.Provider, r ref.Ref, snap model.WatchlistSnapshot, interval time.Duration, noMouse bool) int {
 	open, source := decodedMonitorOptions(p, r, snap, deps.clock())
 
 	return runMonitor(ctx, stdout, stderr, deps, false, tui.Options{
@@ -100,6 +100,7 @@ func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 		DetailSource: tui.TicketDetailSource(p),
 		Open:         &open,
 		Interval:     interval,
+		NoMouse:      noMouse,
 	})
 }
 
