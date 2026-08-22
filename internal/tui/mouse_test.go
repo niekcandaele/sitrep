@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +125,314 @@ func TestMouseViewLifecycleAndToggle(t *testing.T) {
 	})
 }
 
+func requireHelpText(t *testing.T, view string, wants ...string) {
+	t.Helper()
+	got := strings.Join(strings.Fields(string(frame(view))), " ")
+	for _, want := range wants {
+		want = strings.Join(strings.Fields(want), " ")
+		if !strings.Contains(got, want) {
+			t.Errorf("help omitted %q:\n%s", want, string(frame(view)))
+		}
+	}
+}
+
+func TestMouseHelpLayoutContracts(t *testing.T) {
+	const (
+		enabledMouseHelp    = "m off · shift-drag to select text"
+		compactMouseHelp    = "m off, shift-drag"
+		searchMouseHelp     = "shift-drag select text"
+		fullSearchMouseHelp = "shift-drag to select text"
+	)
+	listHelp := []string{
+		enabledMouseHelp, "enter open", "r refresh", "? help", "q quit",
+		"↑/k up", "↓/j down", "pgup page up", "pgdn page down",
+		"g first", "G last", "d hide finished", "/ find", "esc clear filter",
+	}
+
+	t.Run("full list reference is complete at 80 in both mouse states", func(t *testing.T) {
+		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 80, 40)
+		m.help.SetWidth(80)
+		m.help.ShowAll = true
+		m.keys.ClearFilter.SetEnabled(true)
+		requireHelpText(t, m.help.View(m.helpKeys()), listHelp...)
+
+		next, _ := m.Update(keyPress("m"))
+		m = next.(Model)
+		disabledHelp := append([]string(nil), listHelp[1:]...)
+		disabledHelp = append([]string{"m on"}, disabledHelp...)
+		requireHelpText(t, m.help.View(m.helpKeys()), disabledHelp...)
+	})
+
+	t.Run("narrow list short help remains actionable and full help is complete", func(t *testing.T) {
+		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 40, 40)
+		m.help.SetWidth(40)
+		m.keys.ClearFilter.SetEnabled(true)
+		requireHelpText(t, m.help.View(m.helpKeys()), compactMouseHelp, "enter open", "q quit")
+
+		m.help.ShowAll = true
+		requireHelpText(t, m.help.View(m.helpKeys()), listHelp...)
+
+		next, _ := m.Update(keyPress("m"))
+		m = next.(Model)
+		m.width = 12
+		m.help.SetWidth(12)
+		m.help.ShowAll = false
+		disabled := m.help.View(m.helpKeys())
+		requireHelpText(t, disabled, "m on")
+		if strings.Contains(disabled, "shift-drag") {
+			t.Errorf("disabled narrow help advertises capture mitigation:\n%s", disabled)
+		}
+	})
+
+	t.Run("Detail reference and narrow layouts remain actionable and complete", func(t *testing.T) {
+		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 80, 40)
+		m.mode = modeDetail
+		m.detailKeys.Parent.SetEnabled(true)
+		m.help.SetWidth(80)
+		m.help.ShowAll = true
+		requireHelpText(t, m.help.View(m.detailHelpKeys()),
+			enabledMouseHelp, "esc back", "u epic", "r refresh", "? help", "q quit",
+			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
+
+		m.width = 40
+		m.help.SetWidth(40)
+		m.help.ShowAll = false
+		requireHelpText(t, m.help.View(m.detailHelpKeys()), compactMouseHelp, "esc back", "q quit")
+		m.help.ShowAll = true
+		requireHelpText(t, m.help.View(m.detailHelpKeys()),
+			enabledMouseHelp, "esc back", "u epic", "r refresh", "? help", "q quit",
+			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
+	})
+
+	t.Run("narrow search exposes text selection and cancel", func(t *testing.T) {
+		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 40, 40)
+		m.searching = true
+		m.help.SetWidth(40)
+		requireHelpText(t, m.help.View(m.helpKeys()), searchMouseHelp, "esc cancel")
+		m.help.ShowAll = true
+		requireHelpText(t, m.help.View(m.helpKeys()),
+			fullSearchMouseHelp, "esc cancel", "enter apply", "↑/↓ move", "ctrl+c quit")
+	})
+}
+
+func TestMouseToggleReclampsChangedHelpGeometry(t *testing.T) {
+	t.Run("list keeps the selected Ticket visible in both directions", func(t *testing.T) {
+		tickets := make([]model.Ticket, 40)
+		for i := range tickets {
+			key := fmt.Sprintf("#%d", i+1)
+			tickets[i] = ticket(key, model.StatusTodo)
+		}
+		m := mouseListModel(t, Options{NoMouse: true}, tickets, 42, 20)
+		m.help.SetWidth(42)
+		m.help.ShowAll = true
+		m = m.jump(len(m.rows)-1, -1)
+
+		disabledHeight := m.bodyHeight()
+		disabledOffset := m.offset
+		next, cmd := m.Update(keyPress("m"))
+		m = next.(Model)
+		if cmd != nil {
+			t.Fatalf("toggle command = %v, want nil", cmd)
+		}
+		if m.bodyHeight() >= disabledHeight {
+			t.Fatalf("enabled body height = %d, want less than disabled height %d", m.bodyHeight(), disabledHeight)
+		}
+		if m.offset <= disabledOffset {
+			t.Errorf("offset = %d after body shrank, want greater than %d", m.offset, disabledOffset)
+		}
+		selectedY := ticketLineY(t, m, m.selectedID, 0)
+		if selectedY >= headerHeight+m.bodyHeight() {
+			t.Errorf("selected Ticket y=%d is below body ending at %d", selectedY, headerHeight+m.bodyHeight()-1)
+		}
+		if got := string(frame(m.View().Content)); !strings.Contains(got, "▸ #40") {
+			t.Errorf("selected Ticket disappeared after toggle:\n%s", got)
+		}
+
+		shrunkenOffset := m.offset
+		next, _ = m.Update(keyPress("m"))
+		m = next.(Model)
+		if m.bodyHeight() != disabledHeight {
+			t.Errorf("disabled body height = %d, want %d", m.bodyHeight(), disabledHeight)
+		}
+		if m.offset != shrunkenOffset {
+			t.Errorf("growing body moved offset from %d to %d", shrunkenOffset, m.offset)
+		}
+		selectedY = ticketLineY(t, m, m.selectedID, 0)
+		if selectedY >= headerHeight+m.bodyHeight() {
+			t.Errorf("selected Ticket y=%d is below grown body ending at %d", selectedY, headerHeight+m.bodyHeight()-1)
+		}
+	})
+
+	t.Run("decoded Detail stays inside the document in both directions", func(t *testing.T) {
+		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 42, 20)
+		m.help.SetWidth(42)
+		m.help.ShowAll = true
+		m.mode = modeDetail
+		m.listArmed = false
+		m.hasSource = false
+		m.detail = detailState{
+			ticket: m.rows[1].Ticket,
+			input:  fixtureDetailInput(model.Capabilities{Comments: true, BlockingLinks: true}),
+			loaded: true,
+		}
+		m = m.syncDetailKeys()
+		if len(m.detailBodyLines()) <= m.detailBodyHeight()+1 {
+			t.Fatal("Detail fixture is not long enough to expose a changed bottom clamp")
+		}
+
+		enabledHeight := m.detailBodyHeight()
+		m.detail.offset = m.clampDetail(1 << 20)
+		enabledBottom := m.detail.offset
+		next, _ := m.Update(keyPress("m"))
+		m = next.(Model)
+		if m.detailBodyHeight() <= enabledHeight {
+			t.Fatalf("disabled Detail body height = %d, want greater than enabled height %d", m.detailBodyHeight(), enabledHeight)
+		}
+		want := m.clampDetail(1 << 20)
+		if enabledBottom <= want {
+			t.Fatalf("fixture did not expose stale bottom offset: enabled=%d disabled=%d", enabledBottom, want)
+		}
+		if m.detail.offset != want {
+			t.Errorf("disabled Detail offset = %d, want clamped bottom %d", m.detail.offset, want)
+		}
+
+		grownOffset := m.detail.offset
+		next, _ = m.Update(keyPress("m"))
+		m = next.(Model)
+		if m.detailBodyHeight() != enabledHeight {
+			t.Errorf("re-enabled Detail body height = %d, want %d", m.detailBodyHeight(), enabledHeight)
+		}
+		if m.detail.offset != grownOffset {
+			t.Errorf("shrinking Detail body moved offset from %d to %d", grownOffset, m.detail.offset)
+		}
+		if got, clamped := m.detail.offset, m.clampDetail(m.detail.offset); got != clamped {
+			t.Errorf("re-enabled Detail offset = %d, clamped = %d", got, clamped)
+		}
+	})
+}
+
+func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
+	listFull := []string{
+		"enter open", "r refresh", "? help", "q quit",
+		"↑/k up", "↓/j down", "pgup page up", "pgdn page down",
+		"g first", "G last", "d hide finished", "/ find",
+	}
+	detailFull := []string{
+		"esc back", "u epic", "r refresh", "? help", "q quit",
+		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last",
+	}
+	tests := []struct {
+		name     string
+		screen   mode
+		search   bool
+		width    int
+		expanded bool
+		noMouse  bool
+		golden   string
+		wants    []string
+		forbids  []string
+	}{
+		{
+			name: "complete expanded list help at 80", width: 80, expanded: true,
+			golden: "mouse_help_full_80.golden.txt",
+			wants:  append([]string{"m off · shift-drag to select text"}, listFull...),
+		},
+		{
+			name: "actionable enabled list short help at 42", width: 42,
+			golden: "mouse_help_short_42.golden.txt",
+			wants:  []string{"m off, shift-drag", "enter open", "q quit"},
+		},
+		{
+			name: "actionable disabled list short help at 42", width: 42, noMouse: true,
+			golden: "mouse_help_short_disabled_42.golden.txt",
+			wants:  []string{"m on", "enter open", "q quit"}, forbids: []string{"shift-drag"},
+		},
+		{
+			name: "complete enabled list full help at 42", width: 42, expanded: true,
+			golden: "mouse_help_full_42.golden.txt",
+			wants:  append([]string{"m off · shift-drag to select text"}, listFull...),
+		},
+		{
+			name: "complete disabled list full help at 42", width: 42, expanded: true, noMouse: true,
+			golden: "mouse_help_full_disabled_42.golden.txt",
+			wants:  append([]string{"m on"}, listFull...), forbids: []string{"shift-drag"},
+		},
+		{
+			name: "actionable enabled Detail short help at 42", screen: modeDetail, width: 42,
+			golden: "mouse_detail_short_42.golden.txt",
+			wants:  []string{"m off, shift-drag", "esc back", "q quit"},
+		},
+		{
+			name: "actionable disabled Detail short help at 42", screen: modeDetail, width: 42, noMouse: true,
+			golden: "mouse_detail_short_disabled_42.golden.txt",
+			wants:  []string{"m on", "esc back", "q quit"}, forbids: []string{"shift-drag"},
+		},
+		{
+			name: "complete enabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true,
+			golden: "mouse_detail_full_42.golden.txt",
+			wants:  append([]string{"m off · shift-drag to select text"}, detailFull...),
+		},
+		{
+			name: "complete disabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true, noMouse: true,
+			golden: "mouse_detail_full_disabled_42.golden.txt",
+			wants:  append([]string{"m on"}, detailFull...), forbids: []string{"shift-drag"},
+		},
+		{
+			name: "enabled find short help exposes cancel at 42", search: true, width: 42,
+			golden: "mouse_find_short_42.golden.txt",
+			wants:  []string{"shift-drag select text", "esc cancel"}, forbids: []string{"m off"},
+		},
+		{
+			name: "disabled find short help exposes cancel at 42", search: true, width: 42, noMouse: true,
+			golden: "mouse_find_short_disabled_42.golden.txt",
+			wants:  []string{"esc cancel", "enter apply"}, forbids: []string{"shift-drag", "m on"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New()
+			c := newClock()
+			s := startWith(t, c, Options{
+				Source:       selectorSource(p, c),
+				DetailSource: TicketDetailSource(p),
+				Interval:     time.Minute,
+				Now:          c.now,
+				NoMouse:      tt.noMouse,
+			})
+			s.waitFor(t, "Widget sync v2")
+			s.tm.Send(tea.WindowSizeMsg{Width: tt.width, Height: termHeight})
+			if tt.screen == modeDetail {
+				s.tm.Send(enterKey)
+				s.waitFor(t, "DESCRIPTION")
+			}
+			if tt.search {
+				s.tm.Send(keyPress("/"))
+			}
+			if tt.expanded {
+				s.tm.Send(keyPress("?"))
+			}
+
+			quit := keyPress("q")
+			if tt.search {
+				quit = ctrlCKey
+			}
+			m, got := s.finishWith(t, quit)
+			checkGolden(t, tt.golden, got)
+			help := string(got)
+			requireHelpText(t, help, tt.wants...)
+			for _, forbidden := range tt.forbids {
+				if strings.Contains(help, forbidden) {
+					t.Errorf("help unexpectedly contains %q:\n%s", forbidden, help)
+				}
+			}
+			if m.help.ShowAll != tt.expanded {
+				t.Errorf("ShowAll = %t, want %t", m.help.ShowAll, tt.expanded)
+			}
+		})
+	}
+}
+
 func TestMouseToggleDoesNotStealSearchText(t *testing.T) {
 	m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 80, 20)
 	next, _ := m.Update(keyPress("/"))
@@ -186,14 +495,141 @@ func TestListMouseClickSelectionAndDoubleClick(t *testing.T) {
 	m, _, _ = dispatchMouse(t, m, click("#1"))
 	now = now.Add(doubleClickInterval + time.Nanosecond)
 	m, cmd, _ = dispatchMouse(t, m, click("#1"))
-	if m.mode != modeList || cmd != nil || detailCalls != 1 {
-		t.Errorf("late second click opened Detail: mode=%v calls=%d", m.mode, detailCalls)
+	if m.mode != modeList || cmd != nil || detailCalls != 1 || m.lastClickID != "#1" || !m.lastClickAt.Equal(now) {
+		t.Errorf("late second click did not re-arm: mode=%v calls=%d pending=%q at=%s",
+			m.mode, detailCalls, m.lastClickID, m.lastClickAt)
 	}
 
+	now = now.Add(doubleClickInterval)
+	m, cmd, _ = dispatchMouse(t, m, click("#1"))
+	if m.mode != modeDetail || cmd == nil || detailCalls != 1 {
+		t.Fatalf("click after re-armed timeout did not open: mode=%v cmd nil=%t calls=%d",
+			m.mode, cmd == nil, detailCalls)
+	}
+	_ = cmd()
+	if detailCalls != 2 {
+		t.Errorf("re-armed Detail calls = %d, want 2 total", detailCalls)
+	}
+
+	m.mode = modeList
+	m.detail = detailState{}
 	now = now.Add(time.Millisecond)
 	m, _, _ = dispatchMouse(t, m, click("#2"))
 	if m.selectedID != "#2" || m.mode != modeList || m.lastClickID != "#2" {
 		t.Errorf("different Ticket click: selected=%q mode=%v pending=%q", m.selectedID, m.mode, m.lastClickID)
+	}
+}
+
+func TestDoubleClickInterruptionState(t *testing.T) {
+	start := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+
+	for _, tt := range []struct {
+		name  string
+		event tea.MouseMsg
+	}{
+		{name: "release", event: tea.MouseReleaseMsg{X: 10, Button: tea.MouseLeft}},
+		{name: "motion", event: tea.MouseMotionMsg{X: 10, Button: tea.MouseLeft}},
+		{name: "shift-left", event: tea.MouseClickMsg{X: 10, Button: tea.MouseLeft, Mod: tea.ModShift}},
+		{name: "horizontal wheel", event: tea.MouseWheelMsg{X: 10, Button: tea.MouseWheelRight}},
+	} {
+		t.Run(tt.name+" preserves a qualifying pair", func(t *testing.T) {
+			now := start
+			m := mouseListModel(t, Options{
+				Now: func() time.Time { return now },
+				DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+					return model.Detail{}, model.Capabilities{}, nil
+				},
+			}, []model.Ticket{ticket("#1", model.StatusTodo)}, 80, 20)
+			click := tea.MouseClickMsg{X: 10, Y: ticketLineY(t, m, "#1", 0), Button: tea.MouseLeft}
+			event := tt.event
+			switch msg := event.(type) {
+			case tea.MouseReleaseMsg:
+				msg.Y = click.Y
+				event = msg
+			case tea.MouseMotionMsg:
+				msg.Y = click.Y
+				event = msg
+			case tea.MouseClickMsg:
+				msg.Y = click.Y
+				event = msg
+			case tea.MouseWheelMsg:
+				msg.Y = click.Y
+				event = msg
+			}
+
+			m, _, _ = dispatchMouse(t, m, click)
+			pendingAt := m.lastClickAt
+			got, _, applied := dispatchMouse(t, m, event)
+			if applied || got.lastClickID != "#1" || !got.lastClickAt.Equal(pendingAt) {
+				t.Fatalf("intermediate event applied=%t pending=%q at=%s, want preserved",
+					applied, got.lastClickID, got.lastClickAt)
+			}
+
+			now = now.Add(100 * time.Millisecond)
+			got, cmd, _ := dispatchMouse(t, got, click)
+			if got.mode != modeDetail || cmd == nil {
+				t.Errorf("press-event-press sequence did not open: mode=%v cmd nil=%t", got.mode, cmd == nil)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name      string
+		interrupt func(t *testing.T, m Model, click tea.MouseClickMsg) Model
+	}{
+		{
+			name: "click miss",
+			interrupt: func(t *testing.T, m Model, click tea.MouseClickMsg) Model {
+				got, _, _ := dispatchMouse(t, m, tea.MouseClickMsg{X: click.X, Y: 0, Button: tea.MouseLeft})
+				return got
+			},
+		},
+		{
+			name: "non-left click",
+			interrupt: func(t *testing.T, m Model, click tea.MouseClickMsg) Model {
+				click.Button = tea.MouseRight
+				got, _, _ := dispatchMouse(t, m, click)
+				return got
+			},
+		},
+		{
+			name: "vertical wheel",
+			interrupt: func(t *testing.T, m Model, click tea.MouseClickMsg) Model {
+				got, _, _ := dispatchMouse(t, m, tea.MouseWheelMsg{X: click.X, Y: click.Y, Button: tea.MouseWheelDown})
+				return got
+			},
+		},
+		{
+			name: "mouse toggle",
+			interrupt: func(t *testing.T, m Model, _ tea.MouseClickMsg) Model {
+				next, _ := m.Update(keyPress("m"))
+				return next.(Model)
+			},
+		},
+		{
+			name: "command key",
+			interrupt: func(t *testing.T, m Model, _ tea.MouseClickMsg) Model {
+				next, _ := m.Update(keyPress("?"))
+				return next.(Model)
+			},
+		},
+		{
+			name: "mode transition",
+			interrupt: func(t *testing.T, m Model, _ tea.MouseClickMsg) Model {
+				next, _ := m.Update(enterKey)
+				return next.(Model)
+			},
+		},
+	} {
+		t.Run(tt.name+" clears a qualifying pair", func(t *testing.T) {
+			m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 80, 20)
+			click := tea.MouseClickMsg{X: 10, Y: ticketLineY(t, m, "#1", 0), Button: tea.MouseLeft}
+			m, _, _ = dispatchMouse(t, m, click)
+			m = tt.interrupt(t, m, click)
+			if m.lastClickID != "" || !m.lastClickAt.IsZero() {
+				t.Errorf("pending click survived: id=%q at=%s", m.lastClickID, m.lastClickAt)
+			}
+		})
 	}
 }
 

@@ -1,4 +1,4 @@
-  project = FOO AND statusCategory != Don…
+#111  Widget sync v2: shards, retries & te
 ███░░░░░░░  3/9 done · 1 cancelled · 33% j
 
 IN PROGRESS (3)
@@ -14,5 +14,27 @@ TODO (3)
            [open]
   #116     Protocol conformance tests
            [Selected for Development]  @t…
+  #117     Renseigner la métrique « éclai…
+           [open]
+
+DONE (3)
+  #118     Cache shard lookups
+           [closed]  @mara-vos  #504 merg…
+  #119     Emit sync telemetry
+           [Done]  @tobias
+  #120     Write the sync v2 runbook
+           [closed]
+
+CANCELLED (1)
+  #121     Mirror shards to the legacy fe…
+           [not planned]
+
+
+
+
+
+
+
+
 
 m off, shift-drag • enter open • q quit …

@@ -94,7 +94,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		ToggleMouse: key.NewBinding(
 			key.WithKeys("m"),
-			key.WithHelp("m", "off · shift-drag to select text"),
+			key.WithHelp("m", mouseEnabledHelp),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -107,20 +107,21 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the one-line footer shows. The primary action,
-// mouse escape hatch and quit come first so all three survive clipping on an
-// 80-column terminal. Every binding remains available in FullHelp.
+// ShortHelp returns the bindings the one-line footer shows. The mouse escape
+// hatch comes first so terminals too narrow for the normal primary-action trio
+// still explain how to recover text selection. Open and quit follow, keeping all
+// three visible at 80 columns. Every binding remains available in FullHelp.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Open, k.ToggleMouse, k.Quit, k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Help}
+	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Help}
 }
 
-// FullHelp returns every binding, grouped into the columns "?" expands to.
+// FullHelp returns every binding in two dense columns. The model stacks these
+// groups into one column when they would not fit side by side, so expanded help
+// remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.Home, k.End, k.Open},
-		{k.HideFinished, k.Find, k.ClearFilter},
-		{k.ToggleMouse, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.Open, k.Refresh, k.Help, k.Quit},
+		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
 
@@ -196,16 +197,15 @@ func DefaultDetailKeyMap() DetailKeyMap {
 // Watchlist this Ticket has none of — and that footer line is the whole
 // affordance for the walk-up: no second help line, no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Back, k.ToggleMouse, k.Quit, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
+	return []key.Binding{k.ToggleMouse, k.Back, k.Quit, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
 }
 
-// FullHelp returns every binding, grouped into the columns "?" expands to.
+// FullHelp keeps the mouse escape hatch and essential Detail actions together;
+// the model stacks both groups when the terminal cannot show them side by side.
 func (k DetailKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.Home, k.End},
-		{k.Back, k.Parent, k.Refresh},
-		{k.ToggleMouse, k.Help, k.Quit},
+		{k.ToggleMouse, k.Back, k.Parent, k.Refresh, k.Help, k.Quit},
+		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }
 
@@ -244,7 +244,7 @@ func DefaultSearchKeyMap() SearchKeyMap {
 		),
 		MouseHint: key.NewBinding(
 			key.WithKeys("shift+drag"),
-			key.WithHelp("shift-drag", "to select text"),
+			key.WithHelp("shift-drag", searchMouseHintHelp),
 		),
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
@@ -255,7 +255,7 @@ func DefaultSearchKeyMap() SearchKeyMap {
 
 // ShortHelp returns the bindings the find box's footer shows.
 func (k SearchKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Apply, k.Cancel, k.MouseHint, k.Move, k.Quit}
+	return []key.Binding{k.MouseHint, k.Cancel, k.Apply, k.Move, k.Quit}
 }
 
 // FullHelp returns the same bindings: the find box has no second tier.

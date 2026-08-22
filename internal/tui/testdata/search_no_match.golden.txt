@@ -37,4 +37,4 @@ No Tickets match this filter.  Press esc to clear it.
 
 
 /zzz                                                                                                     0 of 10 Tickets
-enter apply • esc cancel • shift-drag to select text • ↑/↓ move • ctrl+c quit
+shift-drag to select text • esc cancel • enter apply • ↑/↓ move • ctrl+c quit

@@ -8,7 +8,13 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
-const doubleClickInterval = 500 * time.Millisecond
+const (
+	doubleClickInterval        = 500 * time.Millisecond
+	mouseEnabledHelp           = "off · shift-drag to select text"
+	mouseEnabledCompactHelp    = "off, shift-drag"
+	searchMouseHintHelp        = "to select text"
+	searchMouseHintCompactHelp = "select text"
+)
 
 type listMouseClickMsg struct {
 	id model.TicketID
@@ -43,8 +49,16 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	return func(msg tea.MouseMsg) tea.Cmd {
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
-			if msg.Button != tea.MouseLeft || msg.Mod != 0 ||
-				msg.X < 0 || msg.X >= width ||
+			if msg.Button != tea.MouseLeft {
+				return mouseCmd(listMouseClickMsg{})
+			}
+			// Modified primary clicks are reserved for terminal gestures such as
+			// Shift-drag text selection. They are transparent to both selection and
+			// an in-progress click pair, just like release and motion messages.
+			if msg.Mod != 0 {
+				return nil
+			}
+			if msg.X < 0 || msg.X >= width ||
 				msg.Y < headerHeight || msg.Y >= headerHeight+bodyHeight {
 				return mouseCmd(listMouseClickMsg{})
 			}
@@ -130,15 +144,40 @@ func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
 }
 
 func (m Model) toggleMouse() Model {
+	previousBodyHeight := 0
+	if m.ready {
+		if m.mode == modeDetail {
+			previousBodyHeight = m.detailBodyHeight()
+		} else {
+			previousBodyHeight = m.bodyHeight()
+		}
+	}
+
 	m.mouseEnabled = !m.mouseEnabled
-	m = m.clearPendingClick()
-	return m.syncMouseKeys()
+	m = m.clearPendingClick().syncMouseKeys()
+	if !m.ready {
+		return m
+	}
+
+	// At constrained widths the shorter disabled-state help can admit another
+	// expanded-help column. Reconcile the active screen only when that changes
+	// the body geometry; an unchanged footer must not move either scroll owner.
+	if m.mode == modeDetail {
+		if m.detailBodyHeight() != previousBodyHeight {
+			m.detail.offset = m.clampDetail(m.detail.offset)
+		}
+		return m
+	}
+	if m.bodyHeight() != previousBodyHeight {
+		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
+	}
+	return m
 }
 
 func (m Model) syncMouseKeys() Model {
 	if m.mouseEnabled {
-		m.keys.ToggleMouse.SetHelp("m", "off · shift-drag to select text")
-		m.detailKeys.ToggleMouse.SetHelp("m", "off · shift-drag to select text")
+		m.keys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
+		m.detailKeys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
 		m.searchKeys.MouseHint.SetEnabled(true)
 		return m
 	}

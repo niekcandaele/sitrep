@@ -426,7 +426,7 @@ func (m Model) detailFooterLines() []string {
 			"could not re-read this Ticket's detail: "+m.detail.lastErr.Error(), m.width)))
 	}
 
-	help := strings.Split(m.help.View(m.detailKeys), "\n")
+	help := strings.Split(m.help.View(m.detailHelpKeys()), "\n")
 	// The indicator is drawn only when there is somewhere to scroll: a Detail
 	// that fits on screen has no position to report.
 	if pos := scrollIndicator(m.detail.offset, len(m.detailBodyLines()), m.detailBodyHeight()); pos != "" {
@@ -450,6 +450,6 @@ func (m Model) detailBodyHeight() int {
 	if m.detail.lastErr != nil && m.detail.loaded {
 		lines++
 	}
-	lines += len(strings.Split(m.help.View(m.detailKeys), "\n"))
+	lines += len(strings.Split(m.help.View(m.detailHelpKeys()), "\n"))
 	return max(m.height-detailHeaderHeight-lines, 1)
 }

@@ -774,16 +774,54 @@ func (m Model) filterLineIndex() int {
 // one the keyboard is on whenever that footer is drawn. A footer offering list
 // commands while the find box holds the keyboard would be describing a program
 // the user is not in.
-//
-// The Detail screen's footer names m.detailKeys directly rather than going
-// through here: the list's body height is measured against this footer, and a
-// list whose window silently re-measured itself because another screen is open
-// would not come back the way it left.
 func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
-		return m.searchKeys
+		return m.responsiveHelpKeys(m.searchKeys)
 	}
-	return m.keys
+	return m.responsiveHelpKeys(m.keys)
+}
+
+// detailHelpKeys applies the same responsive help layout to Detail without
+// making list body measurements depend on the screen currently in front.
+func (m Model) detailHelpKeys() help.KeyMap {
+	return m.responsiveHelpKeys(m.detailKeys)
+}
+
+type responsiveHelpKeyMap struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
+func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
+
+// responsiveHelpKeys keeps compact help actionable and expanded help complete.
+// It shortens capture guidance only when the first three actions do not fit,
+// and stacks full-help columns rather than letting bubbles omit a column.
+func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
+	short := append([]key.Binding(nil), keys.ShortHelp()...)
+	full := keys.FullHelp()
+
+	unbounded := m.help
+	unbounded.SetWidth(0)
+	if len(short) >= 3 && short[0].Help().Key == "m" &&
+		short[0].Help().Desc == mouseEnabledHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("m", mouseEnabledCompactHelp)
+	}
+	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
+		short[0].Help().Desc == searchMouseHintHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
+	}
+	if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
+		stacked := make([]key.Binding, 0)
+		for _, group := range full {
+			stacked = append(stacked, group...)
+		}
+		full = [][]key.Binding{stacked}
+	}
+	return responsiveHelpKeyMap{short: short, full: full}
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is
