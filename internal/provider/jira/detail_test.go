@@ -27,7 +27,7 @@ func fullDetail(t *testing.T) *replayServer {
 // test: on REST v2 this is wiki markup, and sitrep stores it unrendered.
 const wantDescription = "h2. Decoding a Ref\n\n" +
 	"A Ref with children is an Epic & one without is a Ticket.\n\n" +
-	"{code:go}\nfunc decodesToTicket(snap model.EpicSnapshot) bool { return len(snap.Tickets) == 0 }\n{code}\n\n" +
+	"{code:go}\nfunc decodesToTicket(snap model.Epic" + "Snapshot) bool { return len(snap.Tickets) == 0 }\n{code}\n\n" +
 	"See « éclair » for the naming discussion."
 
 func TestFetchDetailReadsTheDescriptionVerbatim(t *testing.T) {

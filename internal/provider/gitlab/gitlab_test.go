@@ -104,7 +104,7 @@ func noMergeRequests(responses map[string][]response, project string, iids ...in
 	return responses
 }
 
-// The Epic Ref and the TicketIDs the fixtures were written for.
+// The Ref and the TicketIDs the fixtures were written for.
 var (
 	epicRef = ref.Ref{
 		Tracker: ref.TrackerGitLab,
@@ -299,12 +299,12 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
-func TestFetchEpicNormalizesTheEpic(t *testing.T) {
+func TestResolveNormalizesTheEpic(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -331,12 +331,12 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
+func TestResolveReturnsEveryChildAcrossBothPages(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	type want struct {
@@ -405,12 +405,12 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 
 // ADR-0003 with teeth: GitLab sends every child's description on the polled
 // path whether sitrep wants it or not, and none of it may reach a model.Ticket.
-func TestFetchEpicPutsNoDescriptionOnTheHotPath(t *testing.T) {
+func TestResolvePutsNoDescriptionOnTheHotPath(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	const leak = "polled path"
@@ -431,11 +431,11 @@ func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 	epic.responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	milestone := fullProjectMilestone(t)
 
-	if _, err := newProvider(epic).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic on the epic: %v", err)
+	if _, err := newProvider(epic).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve on the epic: %v", err)
 	}
-	if _, err := newProvider(milestone).FetchEpic(context.Background(), projectMilestoneRef); err != nil {
-		t.Fatalf("FetchEpic on the milestone: %v", err)
+	if _, err := newProvider(milestone).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef}); err != nil {
+		t.Fatalf("Resolve on the milestone: %v", err)
 	}
 
 	var seen int
@@ -464,12 +464,12 @@ func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 	}
 }
 
-func TestFetchEpicSendsExactlyWhatItNeeds(t *testing.T) {
+func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if n := len(s.requestsTo(epicPath)); n != 1 {
@@ -520,8 +520,8 @@ func TestNamespacedPathsAreEscapedWhole(t *testing.T) {
 
 	r := ref.Ref{Tracker: ref.TrackerGitLab, Host: fixtureHost,
 		Owner: "acme", Repo: "platform", Number: 12, Key: "acme/platform&12", Raw: "acme/platform&12"}
-	if _, err := p.FetchEpic(context.Background(), r); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: r}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 	if n := len(s.requestsTo(path)); n != 1 {
 		t.Errorf("%d requests to the escaped epic path, want 1", n)
@@ -530,15 +530,15 @@ func TestNamespacedPathsAreEscapedWhole(t *testing.T) {
 
 // An epic someone pointed sitrep at that has no children is a Ticket, not an
 // error — and its Tickets slice is empty rather than null.
-func TestFetchEpicWithNoChildren(t *testing.T) {
+func TestResolveWithNoChildren(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		epicPath:       {{file: "epic.json"}},
 		epicIssuesPath: {{file: "epic_children_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Tickets == nil {
 		t.Fatal("Tickets is nil; an epic with no children renders as none, not as null")
@@ -551,15 +551,15 @@ func TestFetchEpicWithNoChildren(t *testing.T) {
 // An epic's parent breadcrumb is built from parent_iid, with no Title: the
 // payload does not carry one and the polled path will not spend a request per
 // refresh on it.
-func TestFetchEpicReportsItsOwnParent(t *testing.T) {
+func TestResolveReportsItsOwnParent(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		epicPath:       {{file: "epic_with_parent.json"}},
 		epicIssuesPath: {{file: "epic_children_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	want := model.Parent{
 		ID:  "epic:gitlab-org&4200",
@@ -573,15 +573,15 @@ func TestFetchEpicReportsItsOwnParent(t *testing.T) {
 
 // The decoder's input, asserted at this seam: a project issue Ref comes back
 // with no Tickets, the issue's own identity on Epic, and its epic on Parent.
-func TestFetchEpicOnAnIssueRef(t *testing.T) {
+func TestResolveOnAnIssueRef(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue_with_epic.json"}},
 		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if len(snap.Tickets) != 0 {
@@ -617,15 +617,15 @@ func TestFetchEpicOnAnIssueRef(t *testing.T) {
 	}
 }
 
-func TestFetchEpicOnAnIssueWithNoEpic(t *testing.T) {
+func TestResolveOnAnIssueWithNoEpic(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue.json"}},
 		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the recorded issue has epic: null", snap.Parent)
@@ -647,9 +647,9 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	s := newReplayServer(t, responses)
 	p := newProvider(s)
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if !snap.Capabilities.PullRequests {
 		t.Error("Capabilities.PullRequests = false; this driver correlates merge requests")
@@ -721,7 +721,7 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
-			_, err := newProvider(s).FetchEpic(context.Background(), tt.r)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			providertest.CheckError(t, "gitlab", err, providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{tt.want},
@@ -741,7 +741,7 @@ type epicFailure struct {
 }
 
 // epicFailures is the driver's failure table, hoisted out of the test that
-// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// iterates it so that TestResolveFailuresCoverTheNamedClasses can assert what
 // it covers rather than trusting a comment.
 func epicFailures() []epicFailure {
 	return []epicFailure{
@@ -845,12 +845,12 @@ func epicFailures() []epicFailure {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
+func TestResolveFailures(t *testing.T) {
 	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "gitlab", err, tt.want)
 		})
 	}
@@ -859,7 +859,7 @@ func TestFetchEpicFailures(t *testing.T) {
 // The ticket's promise is per-driver: a bad ref, an auth failure and rate
 // limiting each explain themselves on this Tracker. This asserts the table
 // above actually exercises all three.
-func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+func TestResolveFailuresCoverTheNamedClasses(t *testing.T) {
 	kinds := []provider.Kind{}
 	for _, tt := range epicFailures() {
 		kinds = append(kinds, tt.want.Kind)
@@ -875,7 +875,7 @@ func TestForbiddenOnANonEpicPath(t *testing.T) {
 		issuePath: {{status: http.StatusForbidden, body: `{"message":"403 Forbidden"}`}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindAuth,
 		Contains: []string{"access denied (403)", "read_api"},
@@ -896,9 +896,9 @@ func TestPaginationRefusesToLoop(t *testing.T) {
 		},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	// A paging API contradicting itself is a server fault, which is what
 	// KindUnavailable means — and it stays retryable, on the same terms as a
@@ -925,9 +925,9 @@ func TestPaginationSanitizesTheNextPageHeader(t *testing.T) {
 		}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	if strings.ContainsRune(err.Error(), '\x1b') {
 		t.Errorf("error %q carries a terminal escape", err)
@@ -959,9 +959,9 @@ func TestPaginationIsBounded(t *testing.T) {
 		return out
 	}()
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindBadRef,
@@ -994,11 +994,11 @@ func TestATransientTokenFailureIsNotCached(t *testing.T) {
 		return fixtureToken, nil
 	}))
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
-		t.Fatal("the first FetchEpic succeeded, want the token failure")
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err == nil {
+		t.Fatal("the first Resolve succeeded, want the token failure")
 	}
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("the second FetchEpic: %v; a transient token failure must not be cached", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("the second Resolve: %v; a transient token failure must not be cached", err)
 	}
 	if calls != 2 {
 		t.Errorf("the token source was called %d times, want 2: the failure must be retried", calls)
@@ -1026,13 +1026,13 @@ func TestPollingIsStableAndResolvesTheTokenOnce(t *testing.T) {
 		return fixtureToken, nil
 	}))
 
-	first, err := p.FetchEpic(context.Background(), epicRef)
+	first, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("first FetchEpic: %v", err)
+		t.Fatalf("first Resolve: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), epicRef)
+	second, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("second FetchEpic: %v", err)
+		t.Fatalf("second Resolve: %v", err)
 	}
 
 	if !reflect.DeepEqual(first, second) {
@@ -1056,7 +1056,7 @@ func TestNoTokenFailsWithoutARequest(t *testing.T) {
 			return "", fmt.Errorf(`no GitLab token found: run "glab auth login" or set GITLAB_TOKEN`)
 		}))
 
-	_, err := p.FetchEpic(context.Background(), epicRef)
+	_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindAuth,
 		Contains: []string{"glab auth login", "GITLAB_TOKEN"},
@@ -1070,7 +1070,7 @@ func TestNoTokenFailsWithoutARequest(t *testing.T) {
 // Milestone as Epic
 // ---------------------------------------------------------------------------
 
-// The Epic Refs the milestone fixtures were written for.
+// The Refs the milestone fixtures were written for.
 var (
 	projectMilestoneRef = ref.Ref{
 		Tracker: ref.TrackerGitLab,
@@ -1112,13 +1112,13 @@ func fullProjectMilestone(t *testing.T) *replayServer {
 
 // The headline of this ticket, executable: a milestone Ref renders a full Epic
 // view, exactly as a Premium epic does.
-func TestFetchEpicOnAProjectMilestone(t *testing.T) {
+func TestResolveOnAProjectMilestone(t *testing.T) {
 	s := fullProjectMilestone(t)
 	p := newProvider(s)
 
-	snap, err := p.FetchEpic(context.Background(), projectMilestoneRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -1190,8 +1190,8 @@ func TestFetchEpicOnAProjectMilestone(t *testing.T) {
 func TestMilestoneIsResolvedByIIDAndReadByID(t *testing.T) {
 	s := fullProjectMilestone(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), projectMilestoneRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	lookups := s.requestsTo(projectMilestonesPath)
@@ -1227,7 +1227,7 @@ func TestMilestoneIsResolvedByIIDAndReadByID(t *testing.T) {
 
 // A group milestone: sitrep's own "groups/" spelling, GitLab's group scope, and
 // children from more than one project.
-func TestFetchEpicOnAGroupMilestone(t *testing.T) {
+func TestResolveOnAGroupMilestone(t *testing.T) {
 	responses := map[string][]response{
 		groupMilestonesPath:      {{file: "milestone_group.json"}},
 		groupMilestoneIssuesPath: {{file: "milestone_issues_page1.json"}},
@@ -1236,9 +1236,9 @@ func TestFetchEpicOnAGroupMilestone(t *testing.T) {
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
 	s := newReplayServer(t, responses)
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), groupMilestoneRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: groupMilestoneRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -1273,9 +1273,9 @@ func TestMilestoneWithNoWebURLGetsABuiltOne(t *testing.T) {
 		projectMilestonesPath + "/6239397/issues": {{file: "milestone_issues_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ref4)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ref4})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if got := snap.Epic.URL; got != "https://gitlab.com/gitlab-org/cli/-/milestones/4" {
 		t.Errorf("Epic.URL = %q, want the built one", got)
@@ -1326,9 +1326,9 @@ func TestMilestoneLookupFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{projectMilestonesPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), projectMilestoneRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
+				t.Fatal("Resolve succeeded, want an error")
 			}
 			providertest.CheckError(t, "gitlab", err, providertest.Want{
 				Kind:     tt.kind,
@@ -1349,9 +1349,9 @@ func TestPremiumForbiddenPointsAtMilestones(t *testing.T) {
 		epicPath: {{status: http.StatusForbidden, file: "error_forbidden.json"}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	for _, want := range []string{
 		"GitLab Premium or Ultimate (403)",
@@ -1387,9 +1387,9 @@ func TestBadMilestoneRefsFailBeforeAnyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
-			_, err := newProvider(s).FetchEpic(context.Background(), tt.r)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
+				t.Fatal("Resolve succeeded, want an error")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q, want it to mention %q", err, tt.want)
@@ -1495,9 +1495,9 @@ func TestChildIssueBreadcrumb(t *testing.T) {
 				issueMRsPath: {{file: "closed_by_empty.json"}},
 			})
 
-			snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+			snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 			if err != nil {
-				t.Fatalf("FetchEpic: %v", err)
+				t.Fatalf("Resolve: %v", err)
 			}
 			if snap.Parent != tt.want {
 				t.Errorf("Parent = %+v, want %+v", snap.Parent, tt.want)

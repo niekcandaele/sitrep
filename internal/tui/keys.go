@@ -26,7 +26,7 @@ type KeyMap struct {
 	// Refresh forces a refresh now.
 	Refresh key.Binding
 	// Open opens the selected Ticket's Detail. With nothing selectable — an
-	// empty collection, or a filter matching nothing — it does nothing.
+	// empty Watchlist, or a filter matching nothing — it does nothing.
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
@@ -155,7 +155,7 @@ type DetailKeyMap struct {
 	// behind the screen — a Ticket decoded straight into Detail — there is
 	// nowhere to go back to and esc is the ladder's last rung: it quits.
 	Back key.Binding
-	// Parent opens the collection this Ticket belongs to in the monitor. It is
+	// Parent opens the Watchlist this Ticket belongs to in the monitor. It is
 	// enabled only when there is one to walk up into.
 	Parent key.Binding
 	// Help toggles the full help listing.
@@ -194,7 +194,7 @@ func DefaultDetailKeyMap() DetailKeyMap {
 
 // ShortHelp returns the bindings the Detail screen's one-line footer shows.
 // Parent appears only when it is enabled, so the footer never offers to open a
-// collection this Ticket has none of — and that footer line is the whole
+// Watchlist this Ticket has none of — and that footer line is the whole
 // affordance for the walk-up: no second help line, no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.Up, k.Down, k.Back, k.Parent, k.Refresh, k.Help, k.Quit}

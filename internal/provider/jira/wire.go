@@ -181,7 +181,7 @@ func browseURL(host, key string) string {
 // newEpic maps the fetched issue onto sitrep's Epic. Key is the issue key
 // verbatim: Jira keys are globally unique on a site, so there is no
 // qualification rule to mirror from GitHub, and the key round-trips through the
-// Epic Ref grammar — a key a human sees is a key they can type.
+// Ref grammar — a key a human sees is a key they can type.
 func newEpic(issue issueWire, host string) model.Epic {
 	status, native := normalizeStatus(
 		issue.Fields.categoryKey(), issue.Fields.statusName(), issue.Fields.resolutionName())

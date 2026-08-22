@@ -139,21 +139,22 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// FetchEpic returns the Epic named by r and every one of its sub-issues,
-// following sub-issue pagination to the last page. Cross-repo children need no
+// Resolve resolves selector and returns the named Epic and every one of its
+// sub-issues, following sub-issue pagination to the last page. Cross-repo children need no
 // special handling: they arrive as ordinary nodes carrying their own
 // repository, and are attributed to it.
 //
 // Only one level of the sub-issue graph is fetched — sub-issues of sub-issues
 // are not expanded — so ParentID stays empty and every Ticket hangs directly
 // off the Epic.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	r := selector.(provider.EpicSelector).Ref
 	if err := checkRef(r); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	var (
-		snap     model.EpicSnapshot
+		snap     model.WatchlistSnapshot
 		epicRepo string
 		cursor   string
 		haveEpic bool
@@ -165,14 +166,14 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// A collection larger than sitrep's cap is a stable property of the
 			// ref: it will be exactly as large on the next tick, so retrying
 			// buys nothing.
-			return model.EpicSnapshot{}, provider.Errorf(provider.KindBadRef,
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
 				"github: %s has more than %d sub-issues; refusing to keep paging",
 				refKey(r), maxPages*100)
 		}
 
 		issue, err := p.fetchPage(ctx, r, cursor)
 		if err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 
 		if !haveEpic {
@@ -180,7 +181,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// a title edited mid-fetch cannot produce a half-updated snapshot.
 			snap.Epic = newEpic(issue)
 			epicRepo = issue.Repository.NameWithOwner
-			// The fetched issue's own parent, for an Epic Ref that turns out to
+			// The fetched issue's own parent, for a Ref that turns out to
 			// name a plain Ticket. Reporting it is all this driver does about it:
 			// which screen that opens is internal/cli's decision.
 			snap.Parent = newParent(issue.Parent, epicRepo)
@@ -199,7 +200,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// A server that reports a next page and hands over no usable cursor
 			// is misbehaving, not a ref the user got wrong — so it stays
 			// retryable, on the same terms as a 500.
-			return model.EpicSnapshot{}, provider.Errorf(provider.KindUnavailable,
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"github: %s reports more sub-issues but returned no new page cursor", refKey(r))
 		}
 		cursor = next.EndCursor
@@ -212,7 +213,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 // FetchDetail returns one Ticket's description, comments and blocked-by/blocks
 // links in a single request, sending detailQuery rather than widening the polled
 // epic document (ADR-0003). id is GitHub's GraphQL node ID, which is what
-// FetchEpic put on every Ticket.
+// Resolve put on every Ticket.
 //
 // Nothing here paginates: one drill-in is one request, and the caps in
 // detailQuery say what a very long discussion or dependency list gives up.

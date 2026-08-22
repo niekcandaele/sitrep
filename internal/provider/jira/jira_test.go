@@ -48,7 +48,7 @@ const (
 	linkTypePath = "/rest/api/2/issueLinkType"
 )
 
-// epicRef is the Epic Ref the fixtures were written for.
+// epicRef is the Ref the fixtures were written for.
 var epicRef = ref.Ref{
 	Tracker: ref.TrackerJira,
 	Host:    fixtureHost,
@@ -186,12 +186,12 @@ func TestName(t *testing.T) {
 	}
 }
 
-func TestFetchEpicNormalizesTheEpic(t *testing.T) {
+func TestResolveNormalizesTheEpic(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -223,12 +223,12 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
+func TestResolveReturnsEveryChildAcrossBothPages(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	type want struct {
@@ -286,12 +286,12 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 	}
 }
 
-func TestFetchEpicSendsExactlyWhatItNeeds(t *testing.T) {
+func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if n := len(s.requestsTo(epicPath)); n != 1 {
@@ -359,8 +359,8 @@ func TestEveryRequestIsAGet(t *testing.T) {
 	})
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 	if _, err := p.FetchDetail(context.Background(), "ABC-12"); err != nil {
 		t.Fatalf("FetchDetail: %v", err)
@@ -386,9 +386,9 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 		t.Error("Capabilities().PullRequests = true, want false")
 	}
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Epic.PullRequests != nil {
 		t.Errorf("Epic.PullRequests = %+v, want nil", snap.Epic.PullRequests)
@@ -413,7 +413,7 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 // A Ref that named a plain Ticket: no children, the fetched issue's identity on
 // Epic and its own parent on Parent. Which screen that opens is internal/cli's
 // decision, asserted at this seam rather than through the CLI.
-func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
+func TestResolveOnARefThatNamesAPlainTicket(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		ticketPath: {{file: "ticket_with_parent.json"}},
 		searchPath: {{file: "epic_children_empty.json"}},
@@ -421,9 +421,9 @@ func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
 	p := newProvider(s)
 
 	r := ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-12", Raw: "ABC-12"}
-	snap, err := p.FetchEpic(context.Background(), r)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: r})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if snap.Tickets == nil {
@@ -446,7 +446,7 @@ func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
 	}
 }
 
-func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
+func TestResolveRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		r    ref.Ref
@@ -484,7 +484,7 @@ func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
 			p := newProvider(s)
 
-			_, err := p.FetchEpic(context.Background(), tt.r)
+			_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			providertest.CheckError(t, "jira", err, providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{tt.want},
@@ -504,7 +504,7 @@ type epicFailure struct {
 }
 
 // epicFailures is the driver's failure table, hoisted out of the test that
-// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// iterates it so that TestResolveFailuresCoverTheNamedClasses can assert what
 // it covers rather than trusting a comment.
 func epicFailures() []epicFailure {
 	return []epicFailure{
@@ -619,12 +619,12 @@ func epicFailures() []epicFailure {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
+func TestResolveFailures(t *testing.T) {
 	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "jira", err, tt.want)
 		})
 	}
@@ -633,7 +633,7 @@ func TestFetchEpicFailures(t *testing.T) {
 // The ticket's promise is per-driver: a bad ref, an auth failure and rate
 // limiting each explain themselves on this Tracker. This asserts the table
 // above actually exercises all three.
-func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+func TestResolveFailuresCoverTheNamedClasses(t *testing.T) {
 	kinds := []provider.Kind{}
 	for _, tt := range epicFailures() {
 		kinds = append(kinds, tt.want.Kind)
@@ -666,7 +666,7 @@ func TestMissingCredentials(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {{file: "epic_issue.json"}}})
 			p := jira.New(fixtureHost, jira.WithBaseURL(s.URL), jira.WithCredentials(tt.credentials))
 
-			_, err := p.FetchEpic(context.Background(), epicRef)
+			_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "jira", err, providertest.Want{
 				Kind:     provider.KindAuth,
 				Contains: tt.want,
@@ -727,9 +727,9 @@ func TestParentIDNamesOnlyANonEpicParent(t *testing.T) {
 		searchPath: {{body: children}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(snap.Tickets) != 2 {
 		t.Fatalf("got %d Tickets, want 2", len(snap.Tickets))
@@ -751,9 +751,9 @@ func TestPaginationSafety(t *testing.T) {
 		})
 		p := newProvider(s)
 
-		_, err := p.FetchEpic(context.Background(), epicRef)
+		_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
+			t.Fatal("Resolve succeeded, want an error about the repeated cursor")
 		}
 		// A server that reports more and hands over the same cursor is
 		// misbehaving, which is what KindUnavailable means — and it stays
@@ -778,9 +778,9 @@ func TestPaginationSafety(t *testing.T) {
 		})
 		p := newProvider(s)
 
-		snap, err := p.FetchEpic(context.Background(), epicRef)
+		snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatalf("FetchEpic returned %d children and no error; want an error",
+			t.Fatalf("Resolve returned %d children and no error; want an error",
 				len(snap.Tickets))
 		}
 		providertest.CheckError(t, "jira", err, providertest.Want{
@@ -814,9 +814,9 @@ func TestPaginationSafety(t *testing.T) {
 			jira.WithBaseURL(s.URL),
 			jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
 
-		_, err := p.FetchEpic(context.Background(), epicRef)
+		_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
+			t.Fatal("Resolve succeeded, want an error about refusing to keep paging")
 		}
 		// A collection past the cap is a stable property of the ref, so the
 		// monitor prints one line and exits rather than retrying forever.
@@ -848,13 +848,13 @@ func TestPollingRefetches(t *testing.T) {
 			return jira.Credentials{Email: fixtureEmail, Token: fixtureToken}, nil
 		}))
 
-	first, err := p.FetchEpic(context.Background(), epicRef)
+	first, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("the first FetchEpic: %v", err)
+		t.Fatalf("the first Resolve: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), epicRef)
+	second, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("the second FetchEpic: %v", err)
+		t.Fatalf("the second Resolve: %v", err)
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Error("two fetches of an unchanged epic returned different snapshots")
@@ -878,8 +878,8 @@ func TestTheHotPathStaysCold(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	for _, r := range s.recorded() {

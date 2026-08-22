@@ -1,7 +1,7 @@
 // Package jsonout renders sitrep's machine-readable output: the --json epic
 // document, the matching Ticket detail document, and the decoder's ticket
 // document — the detail document plus the Ticket's own identity and its parent,
-// which is what --json emits for an Epic Ref that named a Ticket.
+// which is what --json emits for a Ref that named a Ticket.
 //
 // The wire format is a contract, so it lives here as its own layer of DTO
 // structs with json tags rather than tags scattered over the domain model.
@@ -157,7 +157,7 @@ type detailDocument struct {
 type TicketDocument struct {
 	// Ticket is the decoded Ticket in list-model form.
 	Ticket model.Ticket
-	// Parent is the collection it belongs to. The zero Parent emits no parent
+	// Parent is the Watchlist it belongs to. The zero Parent emits no parent
 	// key at all.
 	Parent model.Parent
 	// Detail is the expensive per-ticket data, exactly as the Provider returned
@@ -175,7 +175,7 @@ type TicketDocument struct {
 // RenderEpic writes the epic document for one snapshot to w. providerName is
 // the serving Provider's Name; the snapshot supplies everything else, including
 // the generated_at timestamp its caller stamped into FetchedAt.
-func RenderEpic(w io.Writer, snap model.EpicSnapshot, providerName string) error {
+func RenderEpic(w io.Writer, snap model.WatchlistSnapshot, providerName string) error {
 	doc := epicDocument{
 		SchemaVersion: schemaVersion,
 		GeneratedAt:   wireTime(snap.FetchedAt),

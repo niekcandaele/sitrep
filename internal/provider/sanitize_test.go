@@ -69,7 +69,7 @@ func TestSanitizedKeepsTheStructureOfMultiLineText(t *testing.T) {
 // carries: an escape sequence, a bare CR, a C1 byte and a DEL.
 const hostile = "x\x1b[2J\x1b]0;pwned\ay\rz\u009b\x7f"
 
-// hostileProvider answers with hostile text in every field of an EpicSnapshot
+// hostileProvider answers with hostile text in every field of a WatchlistSnapshot
 // and a Detail. Asserting field by field is the point: a field added later and
 // not sanitized fails this test rather than shipping.
 type hostileProvider struct{}
@@ -80,10 +80,10 @@ func (*hostileProvider) Capabilities() model.Capabilities {
 	return model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
 }
 
-func (*hostileProvider) FetchEpic(context.Context, ref.Ref) (model.EpicSnapshot, error) {
+func (*hostileProvider) Resolve(context.Context, provider.Selector) (model.WatchlistSnapshot, error) {
 	user := model.User{Login: hostile, DisplayName: hostile, AvatarURL: hostile}
 	pr := model.PullRequest{Number: 1, Title: hostile, URL: hostile, Repository: hostile}
-	return model.EpicSnapshot{
+	return model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID: "e1", Key: hostile, Title: hostile, URL: hostile, NativeStatus: hostile,
 			Repository: hostile, Assignees: []model.User{user}, PullRequests: []model.PullRequest{pr},
@@ -121,9 +121,9 @@ func (*hostileProvider) FetchDetail(context.Context, model.TicketID) (model.Deta
 func TestSanitizedCleansEveryField(t *testing.T) {
 	p := provider.Sanitized(&hostileProvider{})
 
-	snap, err := p.FetchEpic(context.Background(), ref.Ref{})
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{}})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	detail, err := p.FetchDetail(context.Background(), "t1")
 	if err != nil {

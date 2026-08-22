@@ -102,13 +102,13 @@ Flags:
 // Deps are the injectable dependencies of a sitrep run. Every field's zero
 // value is the production behaviour, which is what Run passes.
 type Deps struct {
-	// Provider serves the run. When nil it is resolved from the Epic Ref and
+	// Provider serves the run. When nil it is resolved from the Ref and
 	// --provider; when set it wins outright and nothing is constructed.
 	Provider provider.Provider
 	// Now reads the clock for the snapshot's timestamp. When nil it is
 	// time.Now.
 	Now func() time.Time
-	// RemoteLookup reads the git remote that resolves a bare Epic Ref number.
+	// RemoteLookup reads the git remote that resolves a bare Ref number.
 	// When nil it is the real `git remote get-url`.
 	RemoteLookup ref.RemoteLookup
 	// Dir is the working directory whose git remote resolves a bare number.
@@ -273,9 +273,9 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The Epic Ref is resolved once, here, before a Provider exists: the
-	// Provider is chosen from what the Ref points at, and FetchEpic is polled,
-	// so re-resolving a bare number there would re-run git forever.
+	// The Ref is resolved once, here, before a Provider exists: the Provider is
+	// chosen from what the Ref points at, and Resolve is polled, so re-resolving a
+	// bare number there would re-run git forever.
 	r, err := deps.resolveRef(ctx, rawRef, *providerName)
 	if err != nil {
 		return runtimeError(stderr, err)
@@ -296,10 +296,9 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		}
 	}
 
-	// A Profile is resolved once, here, between the Epic Ref and the Provider,
-	// and is consumed entirely at Provider-construction time. Nothing
-	// downstream — not the pre-flight fetch, not the renderers, not the TUI —
-	// knows a Profile exists.
+	// A Profile is resolved once, here, between the Ref and the Provider, and is
+	// consumed entirely at Provider-construction time. Nothing downstream — not
+	// the pre-flight fetch, not the renderers, not the TUI — knows a Profile exists.
 	prof, err := selectProfile(cfg, r, *profileName)
 	if err != nil {
 		return runtimeError(stderr, err)
@@ -307,6 +306,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	if prof != nil {
 		r = prof.Complete(r)
 	}
+	selector := provider.EpicSelector{Ref: r}
 
 	refresh := effectiveInterval(isFlagSet(fs, "interval"), *interval, profileInterval(prof))
 
@@ -325,7 +325,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// One batched fetch, before the mode switch, because every mode needs its
 	// result: it is what decides whether this Ref named an Epic or a Ticket, and
 	// the monitor is seeded with it rather than fetching it again.
-	snap, err := p.FetchEpic(ctx, r)
+	snap, err := p.Resolve(ctx, selector)
 	if err != nil {
 		if code, ok := interrupted(ctx); ok {
 			return code
@@ -349,7 +349,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		// request in an already-failing situation is the right price for keeping
 		// that.
 		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
-			Source:       tui.EpicSource(p, r, deps.clock()),
+			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
 			Interval:     refresh,
 		})
@@ -374,9 +374,9 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		})
 	}
 
-	initial := tui.ListFromEpicSnapshot(snap)
+	initial := tui.ListFromWatchlistSnapshot(snap)
 	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
-		Source:       tui.EpicSource(p, r, deps.clock()),
+		Source:       tui.SelectorSource(p, selector, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
 		Initial:      &initial,
 		Interval:     refresh,
@@ -474,7 +474,7 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 // does. A Ref with no Profile is the GitHub zero-config path: `gh auth login`
 // and nothing else is a supported way to run sitrep.
 //
-// An Epic Ref that carries a Jira-style key and no host is the exception. Such
+// A Ref that carries a Jira-style key and no host is the exception. Such
 // a Ref names a project and nothing more; without a Profile there is no site to
 // ask, so an unmatched key prefix is fatal and the error says exactly what to
 // add. A Jira URL is not that case — it names its own site, and its unserved
@@ -694,7 +694,7 @@ const (
 	providerFake   = "fake"
 )
 
-// defaultProviderName auto-detects the Provider from the Epic Ref: sitrep can
+// defaultProviderName auto-detects the Provider from the Ref: sitrep can
 // tell a GitHub URL from a GitLab one, so it should not make the user say.
 const defaultProviderName = providerAuto
 
@@ -707,14 +707,14 @@ func knownProviderName(name string) bool {
 	}
 }
 
-// resolveRef parses the user's Epic Ref, reading the working directory's git
+// resolveRef parses the user's Ref, reading the working directory's git
 // origin remote when it is a bare number.
 func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref, error) {
 	r, err := ref.Parse(ctx, raw, ref.WithRemoteLookup(d.RemoteLookup), ref.WithDir(d.Dir))
 	if err == nil {
 		return r, nil
 	}
-	// The fake serves any Epic Ref, so a Ref it cannot resolve is not fatal:
+	// The fake serves any Ref, so a Ref it cannot resolve is not fatal:
 	// development runs and the golden tests must not need a git remote.
 	if d.Provider != nil || providerName == providerFake {
 		return ref.Ref{Raw: raw}, nil

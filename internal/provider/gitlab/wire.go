@@ -262,7 +262,7 @@ func newEpicFromEpic(e epicWire, host, group string) model.Epic {
 	}
 }
 
-// newEpicFromIssue maps a project issue onto sitrep's Epic, for the Epic Ref
+// newEpicFromIssue maps a project issue onto sitrep's Epic, for the Ref
 // that turned out to name a plain Ticket. Reporting it is all this driver does
 // about it: which screen that opens is internal/cli's decision (ADR-0003).
 func newEpicFromIssue(i issueWire) model.Epic {
@@ -341,7 +341,7 @@ func newParentFromEpicObject(e *issueEpicWire, host string) model.Parent {
 // newParentFromEpic maps an epic's parent_iid onto sitrep's Parent.
 //
 // Title is left empty, deliberately: the epic payload does not carry the
-// parent's title, and FetchEpic is the polled hot path — spending one request
+// parent's title, and Resolve is the polled hot path — spending one request
 // per refresh on a breadcrumb's title is the wrong trade. Key and URL are built
 // from the group and the iid, which is everything the walk-up needs.
 func newParentFromEpic(e epicWire, host, group string) model.Parent {

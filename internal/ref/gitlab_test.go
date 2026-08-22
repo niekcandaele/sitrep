@@ -126,7 +126,7 @@ func TestParseGitLabReferenceForm(t *testing.T) {
 }
 
 // The milestone URL shapes. A milestone is how GitLab Free spells an Epic, so
-// these are Epic Refs like any other; "/-/" recognition already carries them to
+// these are Refs like any other; "/-/" recognition already carries them to
 // a self-managed host.
 func TestParseGitLabMilestoneURLShapes(t *testing.T) {
 	tests := []struct {

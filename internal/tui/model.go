@@ -18,7 +18,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
-// Model is the monitor's state: the last good reading of the collection, the
+// Model is the monitor's state: the last good reading of the Watchlist, the
 // rows derived from it, and where the cursor sits.
 type Model struct {
 	fetch    func() (ListInput, error)
@@ -33,10 +33,10 @@ type Model struct {
 	lastAttempt time.Time
 	// listArmed reports whether the list holds a reading or has a fetch in
 	// flight. It starts false in decoder mode — a session opened straight on one
-	// Ticket's Detail — so the heartbeat never fetches a collection the user has
+	// Ticket's Detail — so the heartbeat never fetches a Watchlist the user has
 	// not asked to see, and it is what the walk-up key turns on.
 	listArmed bool
-	// hasSource reports whether there is a collection to monitor at all. A
+	// hasSource reports whether there is a Watchlist to monitor at all. A
 	// decoded Ticket with no parent has none, and the walk-up key is then not
 	// offered rather than offered and broken.
 	hasSource bool
@@ -101,7 +101,7 @@ const interruptKey = "ctrl+c"
 // ctx is the program's lifetime, bound into the refresh command here: a Bubble
 // Tea command is handed no context of its own, and a context field on a model
 // outlives every update it was correct for. Binding it once means quitting
-// cancels an in-flight FetchEpic instead of holding the process open for the
+// cancels an in-flight Resolve instead of holding the process open for the
 // Tracker's HTTP timeout.
 func New(ctx context.Context, opts Options) Model {
 	now := opts.Now
@@ -195,7 +195,7 @@ func New(ctx context.Context, opts Options) Model {
 // is a wiring mistake rather than a Tracker failure, so it says which.
 var errNoDetailSource = errors.New("this monitor was opened without a Detail source")
 
-// errNoSource explains a refresh attempted with no collection behind the
+// errNoSource explains a refresh attempted with no Watchlist behind the
 // screen. A decoded Ticket with no parent has none, and the walk-up key is
 // disabled rather than offered — so reaching this is a wiring mistake.
 var errNoSource = errors.New("this monitor was opened without a collection to watch")
@@ -318,8 +318,8 @@ func (m Model) visibleTickets() []model.Ticket { return m.filter.Apply(m.input.T
 // without a data change.
 func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
 	// An unarmed list is a decoder session that has not walked up yet: the beat
-	// still drives the staleness indicator, but there is no collection anyone
-	// asked to see and FetchEpic must not be called at all.
+	// still drives the staleness indicator, but there is no Watchlist anyone
+	// asked to see and Resolve must not be called at all.
 	if !m.listArmed || m.refreshing || m.now().Sub(m.lastAttempt) < m.interval {
 		return m, heartbeat()
 	}
@@ -606,7 +606,7 @@ func (m Model) selectRow(i int) Model {
 	return m
 }
 
-// renderBody draws the list, or the state that stands in for it: a collection
+// renderBody draws the list, or the state that stands in for it: a Watchlist
 // with no Tickets, or a first fetch that has not landed yet.
 func (m Model) renderBody() string {
 	height := m.bodyHeight()
@@ -615,7 +615,7 @@ func (m Model) renderBody() string {
 	case m.hasData && len(m.rows) > 0:
 		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities, m.styles)
 	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
-		// Distinct from the empty collection below on purpose: "there is
+		// Distinct from the empty Watchlist below on purpose: "there is
 		// nothing here" and "you are hiding everything" look identical on
 		// screen, and a user who cannot tell them apart thinks sitrep is
 		// broken.

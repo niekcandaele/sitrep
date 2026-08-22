@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // Sanitized wraps a Provider so that every piece of tracker-controlled text it
@@ -35,8 +34,8 @@ func Sanitized(p Provider) Provider {
 
 type sanitized struct{ Provider }
 
-func (s sanitized) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
-	snap, err := s.Provider.FetchEpic(ctx, r)
+func (s sanitized) Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error) {
+	snap, err := s.Provider.Resolve(ctx, selector)
 	return sanitizeSnapshot(snap), err
 }
 
@@ -45,7 +44,7 @@ func (s sanitized) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return sanitizeDetail(detail), err
 }
 
-func sanitizeSnapshot(snap model.EpicSnapshot) model.EpicSnapshot {
+func sanitizeSnapshot(snap model.WatchlistSnapshot) model.WatchlistSnapshot {
 	snap.Epic = sanitizeEpic(snap.Epic)
 	snap.Parent = sanitizeParent(snap.Parent)
 	for i := range snap.Tickets {

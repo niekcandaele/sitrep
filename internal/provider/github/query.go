@@ -32,7 +32,7 @@ package github
 // pull request with a larger number can be the older one; see leadIndex.
 //
 // The root issue carries three selections its children already had — parent,
-// assignees and closedByPullRequestsReferences — because an Epic Ref may name a
+// assignees and closedByPullRequestsReferences — because a Ref may name a
 // plain Ticket rather than a collection, and the answer to "which is it, and
 // what does it hang off" has to come from this same batched call (ADR-0003, no
 // third Provider method). They are O(1) per fetch, not per Ticket: one issue's

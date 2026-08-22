@@ -15,11 +15,11 @@ import (
 // carried by words ("ci FAIL"), case (uppercase headings) and a glyph ("▸"),
 // so a monochrome terminal or a pipe still reads.
 type Styles struct {
-	// HeaderKey styles the collection's key.
+	// HeaderKey styles the Watchlist's key.
 	HeaderKey lipgloss.Style
-	// HeaderTitle styles the collection's title.
+	// HeaderTitle styles the Watchlist's title.
 	HeaderTitle lipgloss.Style
-	// HeaderURL styles the collection's URL.
+	// HeaderURL styles the Watchlist's URL.
 	HeaderURL lipgloss.Style
 	// BarFilled styles the completed part of the progress bar.
 	BarFilled lipgloss.Style
@@ -56,7 +56,7 @@ type Styles struct {
 	// EmptyFilter styles the notice that stands in for a list a filter has
 	// emptied.
 	EmptyFilter lipgloss.Style
-	// Breadcrumb styles the Detail screen's parent-collection line.
+	// Breadcrumb styles the Detail screen's parent Watchlist line.
 	Breadcrumb lipgloss.Style
 	// SectionHeader styles a Detail section heading, e.g. "COMMENTS (3)".
 	SectionHeader lipgloss.Style
@@ -69,7 +69,7 @@ type Styles struct {
 	Body lipgloss.Style
 	// Error styles the refresh error line.
 	Error lipgloss.Style
-	// Muted styles secondary prose, such as the empty-collection notice.
+	// Muted styles secondary prose, such as the empty Watchlist notice.
 	Muted lipgloss.Style
 }
 

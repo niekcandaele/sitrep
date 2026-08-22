@@ -46,8 +46,8 @@ func TestJSONEpicDocument(t *testing.T) {
 	checkGolden(t, "epic.golden.json", []byte(got.stdout))
 
 	// ADR-0003: the epic path is one batched fetch and never touches Detail.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1 batched fetch", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1 batched fetch", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: rendering a list must not fetch detail", n)
@@ -100,7 +100,7 @@ func TestJSONOmitsUndeclaredCapabilities(t *testing.T) {
 // A half-written document followed by an error would poison a consuming
 // script, so a failed fetch leaves stdout untouched.
 func TestJSONProviderFailure(t *testing.T) {
-	p := fake.New(fake.WithEpicError(errors.New("boom")))
+	p := fake.New(fake.WithResolveError(errors.New("boom")))
 
 	got := run([]string{"111", "--json"}, p)
 

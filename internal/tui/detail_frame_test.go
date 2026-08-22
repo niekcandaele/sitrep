@@ -25,7 +25,7 @@ func startBoth(t *testing.T, p *fake.Provider, c *clock, interval time.Duration)
 	t.Helper()
 
 	return startWith(t, c, Options{
-		Source:       epicSource(p, c),
+		Source:       selectorSource(p, c),
 		DetailSource: TicketDetailSource(p),
 		Interval:     interval,
 		Now:          c.now,
@@ -93,8 +93,8 @@ func TestDetailFrame(t *testing.T) {
 	if n := p.DetailCallsFor("acme/widgets#112"); n != 1 {
 		t.Errorf("DetailCallsFor(#112) = %d, want exactly 1", n)
 	}
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want 1: opening a Ticket is not a list refresh", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want 1: opening a Ticket is not a list refresh", n)
 	}
 }
 
@@ -140,7 +140,7 @@ func TestDetailFrameWhileLoading(t *testing.T) {
 	p := fake.New()
 	c := newClock()
 	s := startWith(t, c, Options{
-		Source: epicSource(p, c),
+		Source: selectorSource(p, c),
 		DetailSource: func(ctx context.Context, _ model.TicketID) (model.Detail, model.Capabilities, error) {
 			select {
 			case <-blocked:
@@ -290,10 +290,10 @@ func TestRefreshesNeverFetchDetail(t *testing.T) {
 		s.clock.advance(61 * time.Second)
 		s.beat()
 	}
-	waitUntil(t, "the auto-refreshes to land", func() bool { return p.EpicCalls() >= 3 })
+	waitUntil(t, "the auto-refreshes to land", func() bool { return p.ResolveCalls() >= 3 })
 
 	if n := p.DetailCalls(); n != 0 {
-		t.Fatalf("DetailCalls() = %d after %d refreshes, want 0", n, p.EpicCalls())
+		t.Fatalf("DetailCalls() = %d after %d refreshes, want 0", n, p.ResolveCalls())
 	}
 
 	s.tm.Send(enterKey)
@@ -324,7 +324,7 @@ func TestRefreshWhileReadingDetail(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	waitUntil(t, "the auto-refresh to land", func() bool { return p.EpicCalls() >= 2 })
+	waitUntil(t, "the auto-refresh to land", func() bool { return p.ResolveCalls() >= 2 })
 
 	m, _ := s.finish(t)
 
@@ -367,8 +367,8 @@ func TestDetailIsCachedForTheSession(t *testing.T) {
 	if n := p.DetailCallsFor(opened); n != 2 {
 		t.Errorf("DetailCallsFor(%s) = %d after r, want 2", opened, n)
 	}
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want 1: r in Detail refreshes one Ticket, not the list", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want 1: r in Detail refreshes one Ticket, not the list", n)
 	}
 	if !m.detail.loaded {
 		t.Error("the re-read left the screen without a Detail")
@@ -395,7 +395,7 @@ func TestQuitKeysFromDetail(t *testing.T) {
 // enter with nothing selectable is a no-op at the program level too: no fetch,
 // no mode change, no panic.
 func TestEnterWithNothingSelectable(t *testing.T) {
-	empty := model.EpicSnapshot{
+	empty := model.WatchlistSnapshot{
 		Epic: model.Epic{Key: "#900", Title: "Widget sync v3: nothing planned yet"},
 	}
 	p := fake.New(fake.WithSnapshot(empty))

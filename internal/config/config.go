@@ -31,7 +31,7 @@
 //
 //   - A Jira driver is constructed from Profile.Host (the site, e.g.
 //     "acme.atlassian.net"), Profile.Project (the project key, which is also the
-//     Epic Ref key prefix) and a Credential carrying User (the Atlassian account
+//     Ref key prefix) and a Credential carrying User (the Atlassian account
 //     email) and Token (the API token) — the pair Atlassian's documented
 //     basic-auth flow wants. The Ref it receives carries Key (upper-cased) and
 //     Host (completed from the Profile); Number is zero.
@@ -85,9 +85,9 @@ type Profile struct {
 	// where it defaults to github.com; required otherwise.
 	Host string `yaml:"host"`
 	// Project is the Tracker's own project identity: a Jira project key
-	// (required, and also the prefix of every Epic Ref key in it) or a GitLab
+	// (required, and also the prefix of every Ref key in it) or a GitLab
 	// project or group path (optional). A github Profile must not set it — a
-	// GitHub Epic Ref carries its own owner/repo — and one that does is
+	// GitHub Ref carries its own owner/repo — and one that does is
 	// rejected rather than silently ignored.
 	Project string `yaml:"project"`
 	// Auth is how this Profile's credential is found. It holds references only:
@@ -218,8 +218,8 @@ func (c Config) KeyPrefixes() []string {
 // Select returns the Profile serving r, if any. name, when non-empty, is an
 // explicit --profile override and must exist; everything else is inference:
 //
-//  1. An Epic Ref carrying a Jira-style key matches the Profile whose project
-//     is that key's prefix, case-insensitively. This is the Epic Ref grammar's
+//  1. A Ref carrying a Jira-style key matches the Profile whose project
+//     is that key's prefix, case-insensitively. This is the Ref grammar's
 //     third form: "PROJ-12" means nothing until a Profile says which site PROJ
 //     lives on. When the Ref also names a site — a /browse/ URL does — the
 //     Profile must serve that site too.
@@ -302,7 +302,7 @@ func (c Config) Select(r ref.Ref, name string) (Profile, bool, error) {
 	}
 }
 
-// Complete fills in what the Epic Ref grammar could not know without a Profile:
+// Complete fills in what the Ref grammar could not know without a Profile:
 // a Jira-style key carries no host, so the Profile supplies it, along with the
 // Tracker. Fields the Ref already carries are never overwritten — a full URL
 // always beats a Profile.

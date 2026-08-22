@@ -9,12 +9,12 @@
 // "ci ok" does not survive a pipe. Colour and styling arrive with the TUI,
 // where Lip Gloss is the decided stack (ADR-0001); do not add either here.
 //
-// Everything the renderer prints is a pure function of the model.EpicSnapshot
+// Everything the renderer prints is a pure function of the model.WatchlistSnapshot
 // it is given: no clock, no environment, no map iteration reaching the output,
 // no sorting beyond the display order the model already defines. That purity
 // is what makes a golden test at the terminal seam a total test of the
 // renderer, and it is why RenderEpic takes a snapshot and an io.Writer and
-// nothing else. RenderTicket, the report an Epic Ref that named a Ticket
+// nothing else. RenderTicket, the report a Ref that named a Ticket
 // produces, obeys the same rules on the same terms.
 //
 // The shaping functions here are the rendering vocabulary the TUI reuses: it
@@ -59,7 +59,7 @@ const (
 // RenderEpic writes the one-shot text snapshot of snap to w: a header block
 // with the Epic's identity and progress, then its Tickets grouped by Status
 // Category in the model's display order.
-func RenderEpic(w io.Writer, snap model.EpicSnapshot) error {
+func RenderEpic(w io.Writer, snap model.WatchlistSnapshot) error {
 	var b strings.Builder
 
 	progress := model.ComputeProgress(snap.Tickets)

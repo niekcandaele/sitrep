@@ -9,6 +9,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
@@ -32,8 +33,8 @@ func TestPlainEpicReport(t *testing.T) {
 	checkGolden(t, "epic_plain.golden.txt", []byte(got.stdout))
 
 	// ADR-0003: the epic path is one batched fetch and never touches Detail.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1 batched fetch", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1 batched fetch", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: rendering a list must not fetch detail", n)
@@ -82,10 +83,10 @@ func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
 //
 // It is asserted against the renderer rather than through the CLI because a Ref
 // that answers with no Tickets is decoded as a Ticket now (decodesToTicket). The
-// body is still reachable — a collection whose Tickets have all gone renders it,
+// body is still reachable — a Watchlist whose Tickets have all gone renders it,
 // and the monitor's empty state is its twin — so it is still worth a golden.
 func TestPlainEmptyEpic(t *testing.T) {
-	empty := model.EpicSnapshot{
+	empty := model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID:           "acme/widgets#900",
 			Key:          "#900",
@@ -123,7 +124,7 @@ func TestPlainGitHubEpicReport(t *testing.T) {
 // A half-written report followed by an error would leave a human reading a
 // truncated epic, so a failed fetch leaves stdout untouched.
 func TestPlainProviderFailure(t *testing.T) {
-	p := fake.New(fake.WithEpicError(errors.New("boom")))
+	p := fake.New(fake.WithResolveError(errors.New("boom")))
 
 	got := run([]string{"111", "--plain"}, p)
 
@@ -190,7 +191,7 @@ func TestPlainBareNumberResolvesThroughTheOriginRemote(t *testing.T) {
 		Tracker: ref.TrackerGitHub, Host: "github.com",
 		Owner: "acme", Repo: "widgets", Number: 111, Raw: "111",
 	}
-	if p.LastRef() != want {
-		t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), want)
+	if p.LastSelector().(provider.EpicSelector).Ref != want {
+		t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, want)
 	}
 }

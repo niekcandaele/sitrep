@@ -13,8 +13,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/tui"
 )
 
-// decodesToTicket reports whether the Epic Ref that produced snap named a plain
-// Ticket rather than a collection. It is the decode rule, and it lives here
+// decodesToTicket reports whether the Ref that produced snap named a plain
+// Ticket rather than a Watchlist. It is the decode rule, and it lives here
 // because a Provider reports what a Tracker says and never picks a screen.
 //
 // Children are the signal, because they are the only one that is true
@@ -22,14 +22,14 @@ import (
 // type a site can rename, and GitLab's depends on the tier. The cost is that an
 // Epic created but not yet populated opens as its own Detail — which shows the
 // plan the agent is about to work from, and is a better screen than "This
-// collection has no Tickets.". Changing that decision is changing this line.
-func decodesToTicket(snap model.EpicSnapshot) bool { return len(snap.Tickets) == 0 }
+// Watchlist has no Tickets.". Changing that decision is changing this line.
+func decodesToTicket(snap model.WatchlistSnapshot) bool { return len(snap.Tickets) == 0 }
 
-// decodedTicket reads an Epic-shaped snapshot as the Ticket it turned out to
+// decodedTicket reads the snapshot's root node as the Ticket it turned out to
 // name. It is the only place that conversion happens: one node has one
 // representation, and the Ticket is what both the Detail screen and the one-shot
 // reports are built from.
-func decodedTicket(snap model.EpicSnapshot) model.Ticket {
+func decodedTicket(snap model.WatchlistSnapshot) model.Ticket {
 	return model.Ticket{
 		ID:           snap.Epic.ID,
 		Key:          snap.Epic.Key,
@@ -50,7 +50,7 @@ func decodedTicket(snap model.EpicSnapshot) model.Ticket {
 // read is a runtime failure rather than a report: the decoded identity alone is
 // not worth printing as a success.
 func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider.Provider,
-	snap model.EpicSnapshot, asJSON bool) int {
+	snap model.WatchlistSnapshot, asJSON bool) int {
 	detail, err := p.FetchDetail(ctx, snap.Epic.ID)
 	if err != nil {
 		if code, ok := interrupted(ctx); ok {
@@ -86,13 +86,13 @@ func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider
 // breadcrumb to the Epic it belongs to and a Source to walk up into.
 //
 // The Source is what the walk-up key needs, and it is built here because the TUI
-// knows nothing about Epic Refs: the parent's Key and URL are written in forms
-// the grammar accepts, so walking up is a re-parse of what the Provider already
+// knows nothing about Refs: the parent's Key and URL are written in forms the
+// grammar accepts, so walking up is a re-parse of what the Provider already
 // returned. A Ticket with no parent, or a parent that resolves to nothing
-// usable, gets no Source — there is no collection to monitor, and the key is
+// usable, gets no Source — there is no Watchlist to monitor, and the key is
 // simply not offered.
 func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
-	p provider.Provider, r ref.Ref, snap model.EpicSnapshot, interval time.Duration) int {
+	p provider.Provider, r ref.Ref, snap model.WatchlistSnapshot, interval time.Duration) int {
 	open, source := decodedMonitorOptions(p, r, snap, deps.clock())
 
 	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
@@ -109,7 +109,7 @@ func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 // It is separate from runDecodedMonitor because everything above is a pure
 // function of the snapshot and the Ref, while runMonitor needs a terminal — so
 // this half can be tested and that half is one call.
-func decodedMonitorOptions(p provider.Provider, r ref.Ref, snap model.EpicSnapshot,
+func decodedMonitorOptions(p provider.Provider, r ref.Ref, snap model.WatchlistSnapshot,
 	clock func() time.Time) (tui.OpenTicket, tui.Source) {
 	open := tui.OpenTicket{
 		Ticket:       decodedTicket(snap),
@@ -127,5 +127,5 @@ func decodedMonitorOptions(p provider.Provider, r ref.Ref, snap model.EpicSnapsh
 		// offered and broken.
 		return open, nil
 	}
-	return open, tui.EpicSource(p, parent, clock)
+	return open, tui.SelectorSource(p, provider.EpicSelector{Ref: parent}, clock)
 }

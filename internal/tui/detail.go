@@ -56,7 +56,7 @@ type DetailHeader struct {
 type DetailInput struct {
 	// Ticket identifies what is being read.
 	Ticket DetailHeader
-	// Parent is the collection this Ticket was reached through, drawn as a
+	// Parent is the Watchlist this Ticket was reached through, drawn as a
 	// breadcrumb above the Ticket's own identity. The zero Header draws no
 	// breadcrumb.
 	Parent Header
@@ -93,13 +93,13 @@ func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	}
 }
 
-// OpenTicket is the decoder's entry: the Ticket to open, and the collection it
+// OpenTicket is the decoder's entry: the Ticket to open, and the Watchlist it
 // was reached through. A zero Parent means no breadcrumb and no walk-up — a
 // Ticket with no parent opens in Detail like any other.
 type OpenTicket struct {
 	// Ticket is the Ticket being decoded, in list-model form.
 	Ticket model.Ticket
-	// Parent is the collection drawn as the breadcrumb above it.
+	// Parent is the Watchlist drawn as the breadcrumb above it.
 	Parent Header
 	// Capabilities decide which Detail sections may be drawn.
 	Capabilities model.Capabilities
@@ -107,8 +107,8 @@ type OpenTicket struct {
 
 // DetailSource fetches one Ticket's Detail. It is the seam between the Detail
 // screen and the Provider, held as a plain function so the screen knows nothing
-// about auth, GraphQL or Epic Refs. One call is exactly one FetchDetail and
-// never a FetchEpic (ADR-0003).
+// about auth, GraphQL or Refs. One call is exactly one FetchDetail and
+// never a Resolve (ADR-0003).
 type DetailSource func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error)
 
 // TicketDetailSource returns a DetailSource reading from p.
@@ -183,7 +183,7 @@ func detailStaleness(fetchedAt, now time.Time, loading bool) string {
 }
 
 // selectedTicket returns the Ticket the cursor is on. A list with no selectable
-// row — an empty collection, or a filter matching nothing — has none, and that
+// row — an empty Watchlist, or a filter matching nothing — has none, and that
 // is an ordinary state rather than an error.
 func (m Model) selectedTicket() (model.Ticket, bool) {
 	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].Selectable() {
@@ -225,7 +225,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 
 // syncDetailKeys keeps the Detail keyboard in step with what is actually behind
 // this screen. It is one place with one rule, so the help line and the matcher
-// can never disagree: u is offered when there is a collection to walk up into
+// can never disagree: u is offered when there is a Watchlist to walk up into
 // and the caller named it, and esc says "back" only when there is a list to go
 // back to.
 func (m Model) syncDetailKeys() Model {
@@ -238,10 +238,10 @@ func (m Model) syncDetailKeys() Model {
 	return m
 }
 
-// walkUp leaves the Detail for the collection the Ticket belongs to. In a
+// walkUp leaves the Detail for the Watchlist the Ticket belongs to. In a
 // decoder session it is where the list is first fetched — nothing has read it
 // until now — and from a drill-in it is esc by another name, because both mean
-// "the collection this Ticket belongs to".
+// "the Watchlist this Ticket belongs to".
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	m.mode = modeList
 	m.detail = detailState{}
@@ -309,7 +309,7 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 // level up" is what esc means everywhere in this program. q and ctrl+c quit
 // outright, from here as from the list, so nobody is trapped in a Detail.
 //
-// u goes up to the collection this Ticket belongs to. From a drill-in that is
+// u goes up to the Watchlist this Ticket belongs to. From a drill-in that is
 // where esc already lands, which is coherent rather than surprising; from a
 // decoded Ticket it is the way into the full monitor.
 func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

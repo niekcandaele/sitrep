@@ -66,7 +66,7 @@ func TestCursorStopsAtTheEnds(t *testing.T) {
 	}
 }
 
-// A collection with no Tickets at all has no selectable row. Navigating it
+// A Watchlist with no Tickets at all has no selectable row. Navigating it
 // must not spin or panic.
 func TestCursorOnAnEmptyList(t *testing.T) {
 	m := listModel(t, nil)

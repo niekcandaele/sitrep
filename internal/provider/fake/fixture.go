@@ -29,8 +29,8 @@ func fixtureTime(day, hour, min int) time.Time {
 // pull request shapes, and Tickets with no pull request at all.
 //
 // It is safe to mutate the returned value: each call builds a fresh copy.
-func FixtureSnapshot() model.EpicSnapshot {
-	return model.EpicSnapshot{
+func FixtureSnapshot() model.WatchlistSnapshot {
+	return model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID:           "acme/widgets#111",
 			Key:          "#111",
@@ -177,18 +177,18 @@ func FixtureSnapshot() model.EpicSnapshot {
 	}
 }
 
-// FixtureTicketSnapshot returns what a batched fetch answers when the Epic Ref
-// named a plain Ticket rather than a collection: no Tickets, the Ticket's own
-// identity in the Epic field, and the collection it belongs to in Parent. It is
+// FixtureTicketSnapshot returns what a batched fetch answers when the Ref
+// named a plain Ticket rather than a Watchlist: no Tickets, the Ticket's own
+// identity in the Epic field, and the Watchlist it belongs to in Parent. It is
 // the fixture Ticket #112, so the Details FixtureDetails already serves — a
 // multi-paragraph description, three comments, all three Link kinds — are its
 // Detail.
 //
 // It is safe to mutate the returned value: each call builds a fresh copy.
-func FixtureTicketSnapshot() model.EpicSnapshot {
+func FixtureTicketSnapshot() model.WatchlistSnapshot {
 	epic := FixtureSnapshot()
 	t := epic.Tickets[0]
-	return model.EpicSnapshot{
+	return model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID:           t.ID,
 			Key:          t.Key,
@@ -215,9 +215,9 @@ func FixtureTicketSnapshot() model.EpicSnapshot {
 // the fixture Ticket #115, whose Detail is description-only.
 //
 // It is safe to mutate the returned value: each call builds a fresh copy.
-func FixtureOrphanTicketSnapshot() model.EpicSnapshot {
+func FixtureOrphanTicketSnapshot() model.WatchlistSnapshot {
 	t := FixtureSnapshot().Tickets[3]
-	return model.EpicSnapshot{
+	return model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID:           t.ID,
 			Key:          t.Key,

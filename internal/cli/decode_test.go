@@ -35,8 +35,8 @@ func TestJSONDecodedTicketDocument(t *testing.T) {
 
 	// One batched fetch to decode, one Detail read for what was decoded, and
 	// nothing else (ADR-0003).
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1", n)
 	}
 	if n := p.DetailCalls(); n != 1 {
 		t.Errorf("DetailCalls() = %d, want exactly 1", n)
@@ -106,7 +106,7 @@ func TestDecodedTicketWithoutTheDetailCapabilities(t *testing.T) {
 	}
 }
 
-// Every form of the Epic Ref grammar decodes to the same report. The bare
+// Every form of the Ref grammar decodes to the same report. The bare
 // number is resolved through an injected remote lookup: no test may depend on
 // the ambient git remote.
 func TestEveryRefFormDecodes(t *testing.T) {
@@ -150,7 +150,7 @@ func TestDecodedTicketWhenTheDetailFetchFails(t *testing.T) {
 	}
 }
 
-// An Epic Ref that names an Epic is untouched by any of this: same document,
+// A Ref that names an Epic is untouched by any of this: same document,
 // same one batched fetch, and still not one Detail read.
 func TestARefThatNamesAnEpicIsUnchanged(t *testing.T) {
 	for _, mode := range []string{"--json", "--plain"} {
@@ -164,8 +164,8 @@ func TestARefThatNamesAnEpicIsUnchanged(t *testing.T) {
 		if n := p.DetailCalls(); n != 0 {
 			t.Errorf("%s: DetailCalls() = %d, want 0: an Epic is not decoded", mode, n)
 		}
-		if n := p.EpicCalls(); n != 1 {
-			t.Errorf("%s: EpicCalls() = %d, want exactly 1", mode, n)
+		if n := p.ResolveCalls(); n != 1 {
+			t.Errorf("%s: ResolveCalls() = %d, want exactly 1", mode, n)
 		}
 	}
 }
@@ -179,8 +179,8 @@ func TestVersionAndHelpFetchNothing(t *testing.T) {
 
 		run(args, p)
 
-		if n := p.EpicCalls(); n != 0 {
-			t.Errorf("%v: EpicCalls() = %d, want 0", args, n)
+		if n := p.ResolveCalls(); n != 0 {
+			t.Errorf("%v: ResolveCalls() = %d, want 0", args, n)
 		}
 	}
 }

@@ -7,7 +7,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // hostileText is what a malicious ticket title, comment or link label looks
@@ -16,7 +16,7 @@ import (
 const hostileText = "hi\x1b[2J\x1b]0;pwned\aback\rgone\x7f"
 
 // hostileProvider serves tracker text with escape sequences in every field.
-// children decides whether the Ref reads as a collection or decodes to a
+// children decides whether the Ref reads as a Watchlist or decodes to a
 // Ticket, which is how the decoder path — descriptions, comments and links —
 // is reached.
 type hostileProvider struct{ children bool }
@@ -27,9 +27,9 @@ func (*hostileProvider) Capabilities() model.Capabilities {
 	return model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
 }
 
-func (p *hostileProvider) FetchEpic(context.Context, ref.Ref) (model.EpicSnapshot, error) {
+func (p *hostileProvider) Resolve(context.Context, provider.Selector) (model.WatchlistSnapshot, error) {
 	user := model.User{Login: hostileText, DisplayName: hostileText}
-	snap := model.EpicSnapshot{
+	snap := model.WatchlistSnapshot{
 		Epic: model.Epic{
 			ID: "e1", Key: hostileText, Title: hostileText, URL: hostileText,
 			Status: model.StatusInProgress, NativeStatus: hostileText,
@@ -127,8 +127,8 @@ func TestRuntimeErrorsCarryNoEscapeSequences(t *testing.T) {
 
 type failingProvider struct{ hostileProvider }
 
-func (*failingProvider) FetchEpic(context.Context, ref.Ref) (model.EpicSnapshot, error) {
-	return model.EpicSnapshot{}, errHostile
+func (*failingProvider) Resolve(context.Context, provider.Selector) (model.WatchlistSnapshot, error) {
+	return model.WatchlistSnapshot{}, errHostile
 }
 
 var errHostile = &plainError{"hostile: the tracker said \x1b[2Jboom\nand more"}
