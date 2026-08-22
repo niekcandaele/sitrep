@@ -203,6 +203,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 		// smart commit either. The capability being off is what makes the pull
 		// request section silently absent rather than empty or broken.
 		PullRequests: false,
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
@@ -210,6 +213,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 // existing root-plus-children path; Ref-list selection reads only the exact
 // named issues through Jira's bulk endpoint.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
 	switch selected := selector.(type) {
 	case provider.EpicSelector:
 		return p.resolveEpic(ctx, selected.Ref)
@@ -227,10 +233,98 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 			Tickets:      tickets,
 			Capabilities: p.Capabilities(),
 		}, nil
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, selected.Query)
 	default:
-		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
-			"jira: unsupported Selector %T", selector)
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
+}
+
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	response, err := p.searchQueryMembership(ctx, query)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+
+	refs := make([]ref.Ref, 0, len(response.Issues))
+	seen := make(map[string]struct{}, len(response.Issues))
+	for _, issue := range response.Issues {
+		key, ok := normalizeKey(issue.Key)
+		if !ok {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"jira: query search returned an issue with invalid key %q", issue.Key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref.Ref{
+			Tracker: ref.TrackerJira,
+			Host:    p.host,
+			Key:     key,
+			Raw:     key,
+		})
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		tickets, err = p.fetchExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+func (p *Provider) searchQueryMembership(ctx context.Context, jql string) (searchResponse, error) {
+	credentials, err := p.resolveCredentials(ctx)
+	if err != nil {
+		return searchResponse{}, err
+	}
+
+	query := url.Values{
+		"jql":        {jql},
+		"fields":     {"key"},
+		"maxResults": {fmt.Sprint(pageSize)},
+	}
+	path := apiBase + searchPath
+	endpoint := p.baseURL + path + "?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable, "jira: building the request: %w", err)
+	}
+	req.Header.Set("Authorization", credentials.header())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable,
+			"jira: requesting %s: %w", p.baseURL+path, provider.RedactedTransportError(err))
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusBadRequest {
+		message := queryErrorPayload(res)
+		if message == "" {
+			message = "the Tracker rejected the query"
+		}
+		message = provider.RedactQuery(message, jql)
+		return searchResponse{}, provider.Errorf(provider.KindBadRef, "jira: query rejected: %s", message)
+	}
+	if err := checkStatus(res, "query", path, p.host); err != nil {
+		return searchResponse{}, provider.RedactQueryError(err, jql)
+	}
+	var response searchResponse
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable,
+			"jira: decoding the response from %s: %w", path, err)
+	}
+	return response, nil
 }
 
 // resolveEpic returns the named Epic and every issue naming it as their parent,
@@ -659,18 +753,28 @@ func isCaptchaChallenge(header http.Header) bool {
 		"CAPTCHA_CHALLENGE")
 }
 
-// errorPayload reads Jira's own error document, or "" when the body is not one
-// or says nothing.
+// errorPayload reads Jira's own general error messages, or "" when the body is
+// not an error document or says nothing.
 func errorPayload(res *http.Response) string {
+	return readErrorPayload(res).message()
+}
+
+// queryErrorPayload also reads per-field explanations because malformed JQL is
+// reported in Jira's errors map rather than errorMessages on some deployments.
+func queryErrorPayload(res *http.Response) string {
+	return readErrorPayload(res).queryMessage()
+}
+
+func readErrorPayload(res *http.Response) errorResponse {
 	body, err := io.ReadAll(io.LimitReader(res.Body, errorBodyLimit))
 	if err != nil {
-		return ""
+		return errorResponse{}
 	}
 	var payload errorResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
+		return errorResponse{}
 	}
-	return payload.message()
+	return payload
 }
 
 // retryAfter renders when a rate-limited caller may try again: the Retry-After

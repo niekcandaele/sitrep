@@ -223,6 +223,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 		BlockingLinks: true, // the issue links endpoint, with its own link_type
 		Comments:      true, // notes, minus GitLab's system notes
 		PullRequests:  true, // related merge requests, with review posture and pipeline status
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
@@ -230,14 +233,18 @@ func (p *Provider) Capabilities() model.Capabilities {
 // the existing GitLab Epic-or-decoded-Ticket behavior. A RefListSelector reads
 // exactly the named roots as Tickets without expanding any root's children.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
 	switch s := selector.(type) {
 	case provider.EpicSelector:
 		return p.resolveEpic(ctx, s)
 	case provider.RefListSelector:
 		return p.resolveRefList(ctx, s)
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, s.Query)
 	default:
-		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
-			"gitlab: unsupported Selector %T", selector)
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
 }
 
@@ -296,6 +303,119 @@ func (p *Provider) resolveRefList(ctx context.Context, selector provider.RefList
 		Tickets:      tickets,
 		Capabilities: p.Capabilities(),
 	}, nil
+}
+
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	issues, err := p.searchQueryMembership(ctx, query)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+
+	refs := make([]ref.Ref, 0, len(issues))
+	seen := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		path := issue.projectPath()
+		if path == "" || issue.ProjectID <= 0 || issue.IID <= 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"gitlab: query search returned an issue with an invalid identity")
+		}
+		identity := strconv.Itoa(issue.ProjectID) + "#" + strconv.Itoa(issue.IID)
+		if _, duplicate := seen[identity]; duplicate {
+			continue
+		}
+		seen[identity] = struct{}{}
+		owner, repo, _ := strings.Cut(path, "/")
+		if owner == "" || repo == "" {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"gitlab: query search returned an issue with invalid project path %q", path)
+		}
+		refs = append(refs, ref.Ref{
+			Tracker: ref.TrackerGitLab,
+			Host:    p.host,
+			Owner:   owner,
+			Repo:    repo,
+			Number:  issue.IID,
+			Raw:     path + "#" + strconv.Itoa(issue.IID),
+		})
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		tickets, err = p.readExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+func (p *Provider) searchQueryMembership(ctx context.Context, query string) ([]issueWire, error) {
+	path := "/issues"
+	if p.path != "" {
+		path = "/projects/" + url.PathEscape(p.path) + "/issues"
+	}
+	rawQuery := query
+	if rawQuery != "" {
+		rawQuery += "&"
+	}
+	rawQuery += "per_page=" + strconv.Itoa(pageSize)
+
+	var issues []issueWire
+	if err := p.doQuery(ctx, path, rawQuery, query, &issues); err != nil {
+		return nil, err
+	}
+	return issues, nil
+}
+
+func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, out any) error {
+	token, err := p.resolveToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	endpoint, err := url.Parse(p.baseURL + apiBase + path)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable, "gitlab: building the request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable, "gitlab: building the request: %w", err)
+	}
+	// Query is already a tracker-native URL query component. Assign it only after
+	// NewRequest has parsed the endpoint: converting a URL carrying a literal '#'
+	// to a string and parsing it again would reinterpret the rest as a fragment.
+	req.URL.RawQuery = rawQuery
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable, "gitlab: requesting %s: %w",
+			apiBase+path, provider.RedactedTransportError(err))
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity {
+		message := errorPayload(res)
+		if message == "" {
+			message = "the Tracker rejected the query"
+		}
+		message = provider.RedactQuery(message, query)
+		return provider.Errorf(provider.KindBadRef, "gitlab: query rejected: %s", message)
+	}
+	if err := checkStatus(res, "query", apiBase+path, p.host); err != nil {
+		return provider.RedactQueryError(err, query)
+	}
+	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"gitlab: decoding the response from %s: %w", apiBase+path, err)
+	}
+	return nil
 }
 
 // readExactRefs authoritatively reads each named root as one thin Ticket. All

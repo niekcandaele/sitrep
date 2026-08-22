@@ -60,6 +60,20 @@ The shapes and what each one proves:
 `epic_empty.json` is the same real epic node with an empty `subIssues` page: an issue with
 no sub-issues is not an error, it is a Ticket someone pointed sitrep at.
 
+## Native queries
+
+The Query fixtures were added on **2026-08-22** and are **hand-written** to GitHub's
+GraphQL search response and error shapes; no live native query was recorded. They contain
+no credentials or personal data. The authoritative second stage deliberately reuses the
+existing aliased exact-Ref fixtures described below rather than introducing another copy of
+those issue payloads.
+
+| Fixture | deliberate shape and purpose |
+|---|---|
+| `query_membership.json` | cross-repository Issue identities in search order, a PullRequest node to ignore, a case-varied duplicate identity, and stale title data that cannot reach output |
+| `query_empty.json` | an empty `search.nodes` array, proving a zero-match Query succeeds without an exact-root request |
+| `query_invalid.json` | a documented GraphQL error envelope carrying `SEARCH_QUERY_ERROR` and an unclosed-quotation explanation, proving malformed native Query classification and prose |
+
 ## Explicit Ref lists
 
 The Ref-list fixtures were added on **2026-08-22** and replay the dynamic aliased GraphQL

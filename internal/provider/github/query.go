@@ -5,6 +5,18 @@ import (
 	"strings"
 )
 
+const queryMembershipDocument = `query($query:String!) {
+  search(query:$query, type:ISSUE, first:100) {
+    nodes {
+      __typename
+      ... on Issue {
+        number
+        repository { nameWithOwner }
+      }
+    }
+  }
+}`
+
 // epicQuery is the one GraphQL document the epic hot path sends. It is a
 // `query` and always will be: sitrep is read-only by design (ADR-0002) and no
 // mutation exists anywhere in this package.

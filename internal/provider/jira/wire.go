@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -145,13 +146,35 @@ type errorResponse struct {
 	Errors        map[string]string `json:"errors"`
 }
 
-// message joins an error payload into one line, or returns "" when it carries
-// nothing worth saying.
+// message joins Jira's general error messages into one line, or returns ""
+// when it carries nothing worth saying. Existing non-Query requests deliberately
+// ignore per-field form errors, as they submit no form fields.
 func (e errorResponse) message() string {
 	messages := make([]string, 0, len(e.ErrorMessages))
 	for _, m := range e.ErrorMessages {
 		if strings.TrimSpace(m) != "" {
 			messages = append(messages, strings.TrimSpace(m))
+		}
+	}
+	return strings.Join(messages, "; ")
+}
+
+// queryMessage includes Jira's per-field explanations because the JQL field is
+// exactly what a Query Selector submitted. Keys are sorted so one native error
+// payload always renders deterministically.
+func (e errorResponse) queryMessage() string {
+	messages := make([]string, 0, len(e.ErrorMessages)+len(e.Errors))
+	if message := e.message(); message != "" {
+		messages = append(messages, message)
+	}
+	keys := make([]string, 0, len(e.Errors))
+	for key := range e.Errors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if message := strings.TrimSpace(e.Errors[key]); message != "" {
+			messages = append(messages, key+": "+message)
 		}
 	}
 	return strings.Join(messages, "; ")

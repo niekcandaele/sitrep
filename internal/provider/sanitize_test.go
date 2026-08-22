@@ -146,7 +146,11 @@ func (*selectorRecorder) FetchDetail(context.Context, model.TicketID) (model.Det
 }
 func (p *selectorRecorder) Resolve(_ context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	p.selector = selector
-	return model.WatchlistSnapshot{Tickets: []model.Ticket{}}, nil
+	snap := model.WatchlistSnapshot{Tickets: []model.Ticket{}}
+	if query, ok := selector.(provider.QuerySelector); ok {
+		snap.Header = provider.QueryHeader(query.Query)
+	}
+	return snap, nil
 }
 
 func TestSanitizedForwardsRefListSelectorUnchanged(t *testing.T) {
@@ -162,6 +166,23 @@ func TestSanitizedForwardsRefListSelectorUnchanged(t *testing.T) {
 	}
 	if !reflect.DeepEqual(inner.selector, want) {
 		t.Errorf("selector = %+v, want %+v", inner.selector, want)
+	}
+}
+
+func TestSanitizedForwardsQuerySelectorUnchangedAndCleansItsHeader(t *testing.T) {
+	inner := &selectorRecorder{}
+	wrapped := provider.Sanitized(inner)
+	want := provider.QuerySelector{Query: "  labels=backend&search=%0Dsecret\r\nline  "}
+
+	snap, err := wrapped.Resolve(context.Background(), want)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(inner.selector, want) {
+		t.Errorf("selector = %+v, want %+v", inner.selector, want)
+	}
+	if got, want := snap.Header.Title, "  labels=backend&search=%0Dsecret line  "; got != want {
+		t.Errorf("Header.Title = %q, want %q", got, want)
 	}
 }
 

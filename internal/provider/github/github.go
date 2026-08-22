@@ -141,6 +141,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 		BlockingLinks: true, // blockedBy / blocking on the detail query
 		Comments:      true, // comments on the detail query
 		PullRequests:  true, // closedByPullRequestsReferences on the epic query
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
@@ -148,14 +151,18 @@ func (p *Provider) Capabilities() model.Capabilities {
 // Selector retains the paged sub-issue path; a Ref-list Selector directly reads
 // exactly its named roots without expanding hierarchy.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
 	switch selected := selector.(type) {
 	case provider.EpicSelector:
 		return p.resolveEpic(ctx, selected.Ref)
 	case provider.RefListSelector:
 		return p.resolveRefList(ctx, selected.Refs)
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, selected.Query)
 	default:
-		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
-			"github: unsupported Watchlist selector %T", selector)
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
 }
 
@@ -227,6 +234,64 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 	snap.Header = provider.EpicHeader(snap.Epic)
 	snap.Capabilities = p.Capabilities()
 	return snap, nil
+}
+
+// resolveQuery searches only for membership identities, then re-reads every
+// member through the authoritative exact-root path. Search payload fields can
+// therefore never become rendered Ticket state.
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	var response queryResponse
+	header, status, err := p.doGraphQL(ctx, queryMembershipDocument,
+		map[string]any{"query": query}, &response, true)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	if err := response.err(p.endpoint, header, query); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	if status != http.StatusOK {
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+			"github: unexpected response %d from %s", status, p.endpoint)
+	}
+
+	refs := make([]ref.Ref, 0, len(response.Data.Search.Nodes))
+	seen := make(map[string]struct{}, len(response.Data.Search.Nodes))
+	for _, node := range response.Data.Search.Nodes {
+		if node.TypeName != "Issue" {
+			continue
+		}
+		owner, repo, ok := strings.Cut(node.Repository.NameWithOwner, "/")
+		if !ok || owner == "" || repo == "" || node.Number <= 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"github: query search returned an Issue with an invalid identity")
+		}
+		identity := strings.ToLower(node.Repository.NameWithOwner) + "#" + strconv.Itoa(node.Number)
+		if _, duplicate := seen[identity]; duplicate {
+			continue
+		}
+		seen[identity] = struct{}{}
+		refs = append(refs, ref.Ref{
+			Tracker: ref.TrackerGitHub,
+			Host:    p.host,
+			Owner:   owner,
+			Repo:    repo,
+			Number:  node.Number,
+			Raw:     node.Repository.NameWithOwner + "#" + strconv.Itoa(node.Number),
+		})
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		tickets, err = p.readExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
 }
 
 // resolveRefList wraps the direct authoritative read in the Ref-list snapshot
@@ -414,9 +479,25 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 // budget as an errors[] entry on a *200*, and only the headers say when it
 // refills; see graphQLErrors.
 func (p *Provider) do(ctx context.Context, document string, variables map[string]any, out any) (http.Header, error) {
+	header, _, err := p.doGraphQL(ctx, document, variables, out, false)
+	return header, err
+}
+
+// doGraphQL is the transport shared by ordinary documents and native Query
+// membership. GitHub normally returns GraphQL errors under HTTP 200, but also
+// uses 400/422 for some rejected search strings. Only the Query path decodes
+// those two statuses so its errors[] payload can decide whether the user's
+// native query was bad; every other non-200 keeps the established status path.
+func (p *Provider) doGraphQL(
+	ctx context.Context,
+	document string,
+	variables map[string]any,
+	out any,
+	decodeQueryRejection bool,
+) (http.Header, int, error) {
 	token, err := p.resolveToken(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	body, err := json.Marshal(struct {
@@ -424,12 +505,12 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 		Variables map[string]any `json:"variables"`
 	}{Query: document, Variables: variables})
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: encoding the query: %w", err)
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: encoding the query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: building the request: %w", err)
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -442,18 +523,25 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: requesting %s: %w", p.endpoint, err)
+		if decodeQueryRejection {
+			err = provider.RedactedTransportError(err)
+		}
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: requesting %s: %w", p.endpoint, err)
 	}
 	defer res.Body.Close()
 
-	if err := p.checkStatus(res); err != nil {
-		return nil, err
+	queryRejection := decodeQueryRejection &&
+		(res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity)
+	if !queryRejection {
+		if err := p.checkStatus(res); err != nil {
+			return nil, res.StatusCode, err
+		}
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable,
+		return nil, res.StatusCode, provider.Errorf(provider.KindUnavailable,
 			"github: decoding the response from %s: %w", p.endpoint, err)
 	}
-	return res.Header, nil
+	return res.Header, res.StatusCode, nil
 }
 
 // checkStatus turns a non-200 response into the clearest one-line explanation

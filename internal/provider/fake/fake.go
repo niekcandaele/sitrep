@@ -30,6 +30,9 @@ var allCapabilities = model.Capabilities{
 	BlockingLinks: true,
 	Comments:      true,
 	PullRequests:  true,
+	Selectors: model.SelectorCapabilities{
+		Epic: true, RefList: true, Query: true,
+	},
 }
 
 // Provider is a fake Provider serving built-in Watchlist fixtures. The zero value
@@ -137,6 +140,16 @@ func (p *Provider) Capabilities() model.Capabilities {
 // WithSnapshots. Ref-list selectors keep only their exact members in Selector
 // order and never expose an outer Epic or Parent.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	selector = cloneSelector(selector)
+	p.mu.Lock()
+	p.resolveCalls++
+	p.lastSelector = selector
+	caps := p.caps
+	p.mu.Unlock()
+
+	if err := provider.CheckSelectorSupport(p.Name(), caps, selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
 	if err := p.wait(ctx); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
@@ -144,9 +157,6 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.resolveCalls++
-	selector = cloneSelector(selector)
-	p.lastSelector = selector
 	if p.resolveErr != nil {
 		return model.WatchlistSnapshot{}, p.resolveErr
 	}
@@ -169,9 +179,12 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
 		}
+	case provider.QuerySelector:
+		snap.Header = provider.QueryHeader(s.Query)
+		snap.Epic = model.Epic{}
+		snap.Parent = model.Parent{}
 	default:
-		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
-			"fake: unsupported Watchlist Selector")
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
 
 	if snap.Tickets == nil {
@@ -228,11 +241,16 @@ func fakeTicketMatchesRef(ticket model.Ticket, r ref.Ref) bool {
 }
 
 func cloneSelector(selector provider.Selector) provider.Selector {
-	if s, ok := selector.(provider.RefListSelector); ok {
+	switch s := selector.(type) {
+	case provider.RefListSelector:
 		s.Refs = append([]ref.Ref(nil), s.Refs...)
 		return s
+	case provider.QuerySelector:
+		s.Query = strings.Clone(s.Query)
+		return s
+	default:
+		return selector
 	}
-	return selector
 }
 
 // FetchDetail returns the fixture Detail for id, filtered to the declared

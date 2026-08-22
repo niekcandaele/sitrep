@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -190,6 +191,12 @@ func newProvider(s *replayServer, opts ...jira.Option) *jira.Provider {
 	return jira.New(fixtureHost, append(base, opts...)...)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // fullEpic serves the two-page fixture epic.
 func fullEpic(t *testing.T) *replayServer {
 	t.Helper()
@@ -370,6 +377,230 @@ func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	}
 }
 
+func TestResolveQuerySearchesMembershipThenBulkFetchesExactTickets(t *testing.T) {
+	const query = `  project in (ABC, DEF) AND labels = "agent ready" & text ~ "σ"  `
+	s := newReplayServer(t, map[string][]response{
+		searchPath:    {{file: "query_membership.json"}},
+		bulkFetchPath: {{file: "ref_list.json"}},
+	})
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Header != provider.QueryHeader(query) {
+		t.Errorf("Header = %+v, want exact Query", snap.Header)
+	}
+	if !snap.FetchedAt.IsZero() || snap.Capabilities != p.Capabilities() {
+		t.Errorf("FetchedAt/Capabilities = %v/%+v", snap.FetchedAt, snap.Capabilities)
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if snap.Tickets[i].Key != want {
+			t.Errorf("Tickets[%d].Key = %q, want %q", i, snap.Tickets[i].Key, want)
+		}
+	}
+	if got := snap.Tickets[0].Title; got != "A child living in another project" {
+		t.Errorf("first Ticket title = %q, want bulk-fetch state rather than stale search state", got)
+	}
+
+	searches := s.requestsTo(searchPath)
+	if len(searches) != 1 {
+		t.Fatalf("membership searches = %d, want exactly one first page", len(searches))
+	}
+	membership := searches[0]
+	if membership.method != http.MethodGet {
+		t.Errorf("membership method = %s, want GET", membership.method)
+	}
+	if got := membership.query["jql"]; len(got) != 1 || got[0] != query {
+		t.Errorf("jql = %q, want exact %q", got, query)
+	}
+	if got := membership.query["fields"]; len(got) != 1 || got[0] != "key" {
+		t.Errorf("membership fields = %q, want identity only", got)
+	}
+	if got := membership.query["maxResults"]; len(got) != 1 || got[0] != "100" {
+		t.Errorf("maxResults = %q, want maximal first page", got)
+	}
+	if len(membership.query) != 3 || membership.query["nextPageToken"] != nil || membership.query["startAt"] != nil {
+		t.Errorf("membership query params = %v, want only jql, fields and maxResults", membership.query)
+	}
+
+	bulk := s.requestsTo(bulkFetchPath)
+	if len(bulk) != 1 {
+		t.Fatalf("bulk reads = %d, want one exact-root read", len(bulk))
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		Fields         []string `json:"fields"`
+	}
+	if err := json.Unmarshal(bulk[0].body, &body); err != nil {
+		t.Fatalf("decoding bulk body: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("bulk issue keys = %v, want search order/de-duplication %v", body.IssueIDsOrKeys, wantKeys)
+	}
+	wantFields := []string{"summary", "status", "resolution", "assignee", "parent", "project"}
+	if !reflect.DeepEqual(body.Fields, wantFields) {
+		t.Errorf("bulk fields = %v, want thin exact-root fields %v", body.Fields, wantFields)
+	}
+	if got := len(s.recorded()); got != 2 {
+		t.Errorf("all requests = %d, want membership plus exact-root only", got)
+	}
+}
+
+func TestResolveQueryEmptyMembershipNeedsNoBulkRead(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{file: "query_empty.json"}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+	if len(s.recorded()) != 1 || len(s.requestsTo(bulkFetchPath)) != 0 {
+		t.Errorf("requests = %+v, want membership only", s.recorded())
+	}
+}
+
+func TestResolveQueryRejectsMalformedJQLWithNativeExplanation(t *testing.T) {
+	const query = `project in (ABC`
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{
+			status: http.StatusBadRequest,
+			body: `{"errorMessages":["The query project in (ABC is invalid."],` +
+				`"errors":{"jql":"Expected ')' before end of query.","zfield":"Unknown field."}}`,
+		}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind: provider.KindBadRef,
+		Contains: []string{
+			"query rejected",
+			"The query [query] is invalid.",
+			"jql: Expected ')' before end of query.",
+			"zfield: Unknown field.",
+		},
+		Secret: query,
+	})
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("error = %q, leaked credential", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if provider.KindOf(err).Retryable() {
+		t.Error("malformed JQL must not be retryable")
+	}
+}
+
+func TestResolveQueryPreservesMembershipFailureClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, file: "errors_auth.json"},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"errorMessages":["Rate limit exceeded"]}`, headers: map[string]string{"Retry-After": "30"}},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit", "30"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"issues": [`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{searchPath: {tt.resp}})
+			snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want none", snap)
+			}
+			if len(s.recorded()) != 1 {
+				t.Errorf("requests = %d, want membership stage only", len(s.recorded()))
+			}
+		})
+	}
+}
+
+func TestResolveQueryTransportErrorDoesNotExposeQuery(t *testing.T) {
+	const query = "SECRET_QUERY_47"
+	transportErr := errors.New("dial failed")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	p := jira.New(fixtureHost,
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}),
+		jira.WithHTTPClient(client),
+	)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"transport failure"},
+		Secret:   query,
+	})
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(%v, transportErr) = false, want true", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveQueryBulkFailureReturnsNoPartialSnapshot(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath:    {{file: "query_membership.json"}},
+		bulkFetchPath: {{file: "ref_list_error.json"}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial membership", snap)
+	}
+	if len(s.recorded()) != 2 {
+		t.Errorf("requests = %d, want membership plus failed exact-root read", len(s.recorded()))
+	}
+}
+
+func TestResolveQueryRejectsInvalidSearchIdentity(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{body: `{"issues":[{"key":"not a key"}],"isLast":true}`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"invalid key", "not a key"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
 func TestResolveRefListUsesAuthoritativeBulkFetch(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		bulkFetchPath: {{file: "ref_list.json"}},
@@ -514,8 +745,8 @@ func TestResolveRejectsEmptyAndUnknownSelectorsBeforeIO(t *testing.T) {
 		want     string
 	}{
 		{name: "empty Ref list", selector: provider.RefListSelector{}, want: "must name at least one"},
-		{name: "nil Selector", selector: nil, want: "unsupported Selector"},
-		{name: "pointer Selector", selector: &provider.EpicSelector{Ref: epicRef}, want: "unsupported Selector"},
+		{name: "nil Selector", selector: nil, want: "unsupported Watchlist selector"},
+		{name: "pointer Selector", selector: &provider.EpicSelector{Ref: epicRef}, want: "unsupported Watchlist selector"},
 	}
 
 	for _, tt := range tests {
@@ -874,6 +1105,16 @@ func epicFailures() []epicFailure {
 				Kind:     provider.KindUnavailable,
 				Contains: []string{"API error:", "Issue does not exist"},
 				Secret:   fixtureToken,
+			},
+		},
+		{
+			name: "a non-Query request ignores field errors",
+			resp: response{status: http.StatusBadRequest,
+				body: `{"errorMessages":[],"errors":{"jql":"query-field-only-message"}}`},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"unexpected response 400"},
+				Secret:   "query-field-only-message",
 			},
 		},
 		{

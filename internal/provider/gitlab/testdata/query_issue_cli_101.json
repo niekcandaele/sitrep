@@ -1,0 +1,27 @@
+{
+  "id": 198100001,
+  "iid": 101,
+  "project_id": 34675721,
+  "title": "Ship the epic monitor",
+  "description": "Authoritative direct description, dropped from the thin Ticket.",
+  "state": "opened",
+  "labels": ["backend", "workflow::in dev"],
+  "milestone": null,
+  "assignees": [],
+  "author": {
+    "id": 11809982,
+    "username": "jay_mccure",
+    "name": "Jay McCure",
+    "avatar_url": "https://avatar.example/redacted"
+  },
+  "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/101",
+  "references": {
+    "short": "#101",
+    "relative": "#101",
+    "full": "gitlab-org/cli#101"
+  },
+  "_links": {
+    "self": "https://gitlab.com/api/v4/projects/34675721/issues/101",
+    "closed_as_duplicate_of": null
+  }
+}

@@ -5,28 +5,20 @@
     "name": "fake",
     "capabilities": {
       "hierarchy": true,
-      "blocking_links": false,
-      "comments": false,
-      "pull_requests": false,
+      "blocking_links": true,
+      "comments": true,
+      "pull_requests": true,
       "selectors": {
         "epic": true,
-        "ref_list": false,
-        "query": false
+        "ref_list": true,
+        "query": true
       }
     }
   },
   "watchlist": {
     "selector": {
-      "kind": "epic",
-      "ref": "111"
-    },
-    "epic": {
-      "id": "acme/widgets#111",
-      "key": "#111",
-      "title": "Widget sync v2: shards, retries & telemetry",
-      "url": "https://tracker.example.test/acme/widgets/111",
-      "status": "in_progress",
-      "native_status": "open"
+      "kind": "query",
+      "query": "  label:bug assignee:@me  "
     }
   },
   "progress": {
@@ -54,6 +46,17 @@
           "display_name": "Mara Vos",
           "avatar_url": "https://avatars.example.test/u/mara-vos.png"
         }
+      ],
+      "pull_requests": [
+        {
+          "number": 501,
+          "title": "Shard sync protocol, first cut",
+          "url": "https://tracker.example.test/acme/widgets/pull/501",
+          "repository": "acme/widgets",
+          "state": "open",
+          "review": "changes_requested",
+          "checks": "passing"
+        }
       ]
     },
     {
@@ -73,6 +76,17 @@
         {
           "login": "tobias"
         }
+      ],
+      "pull_requests": [
+        {
+          "number": 502,
+          "title": "Exponential backoff with jitter",
+          "url": "https://tracker.example.test/acme/widgets/pull/502",
+          "repository": "acme/widgets",
+          "state": "open",
+          "review": "pending",
+          "checks": "failing"
+        }
       ]
     },
     {
@@ -82,7 +96,18 @@
       "url": "https://tracker.example.test/acme/gadgets/7",
       "status": "in_progress",
       "native_status": "In Progress",
-      "repository": "acme/gadgets"
+      "repository": "acme/gadgets",
+      "pull_requests": [
+        {
+          "number": 18,
+          "title": "WIP: sync v2 handshake",
+          "url": "https://tracker.example.test/acme/gadgets/pull/18",
+          "repository": "acme/gadgets",
+          "state": "draft",
+          "review": "none",
+          "checks": "pending"
+        }
+      ]
     },
     {
       "id": "acme/widgets#115",
@@ -130,6 +155,17 @@
           "login": "mara-vos",
           "display_name": "Mara Vos",
           "avatar_url": "https://avatars.example.test/u/mara-vos.png"
+        }
+      ],
+      "pull_requests": [
+        {
+          "number": 504,
+          "title": "Cache shard lookups for 30s",
+          "url": "https://tracker.example.test/acme/widgets/pull/504",
+          "repository": "acme/widgets",
+          "state": "merged",
+          "review": "approved",
+          "checks": "passing"
         }
       ]
     },

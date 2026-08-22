@@ -152,6 +152,12 @@ func newProvider(s *replayServer, opts ...github.Option) *github.Provider {
 	return github.New("github.com", append(base, opts...)...)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // fullEpic serves the two-page fixture epic.
 func fullEpic(t *testing.T) *replayServer {
 	t.Helper()
@@ -201,6 +207,248 @@ func TestResolveNormalizesTheEpic(t *testing.T) {
 	}
 	if got, want := snap.Capabilities, p.Capabilities(); got != want {
 		t.Errorf("snapshot Capabilities = %+v, want %+v", got, want)
+	}
+}
+
+func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
+	const query = `  is:issue label:"agent ready" & σ  `
+	s := newReplayServer(t,
+		response{file: "query_membership.json"},
+		response{file: "ref_list.json"},
+	)
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Header != provider.QueryHeader(query) {
+		t.Errorf("Header = %+v, want exact Query", snap.Header)
+	}
+	if !snap.FetchedAt.IsZero() || snap.Capabilities != p.Capabilities() {
+		t.Errorf("FetchedAt/Capabilities = %v/%+v", snap.FetchedAt, snap.Capabilities)
+	}
+	wantKeys := []string{"niekcandaele/sitrep#5", "acme/widgets#91", "niekcandaele/sitrep#3"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if snap.Tickets[i].Key != want {
+			t.Errorf("Tickets[%d].Key = %q, want %q", i, snap.Tickets[i].Key, want)
+		}
+	}
+	if got := snap.Tickets[0].Title; got != "GitHub Provider: epic fetch, Epic Ref grammar, auth" {
+		t.Errorf("first Ticket title = %q, want exact-root state rather than stale search state", got)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want one membership search and one exact-root read", len(requests))
+	}
+	membership := requests[0]
+	if got := membership.variables["query"]; got != query {
+		t.Errorf("membership query variable = %q, want exact %q", got, query)
+	}
+	for _, token := range []string{"search(query:$query", "type:ISSUE", "first:100", "__typename", "number", "nameWithOwner"} {
+		if !strings.Contains(membership.query, token) {
+			t.Errorf("membership document omits %q: %s", token, membership.query)
+		}
+	}
+	for _, forbidden := range []string{"pageInfo", "after:", "title", "url", "state", "assignees", "parent", "subIssues", "comments", "body"} {
+		if strings.Contains(membership.query, forbidden) {
+			t.Errorf("membership document includes non-identity or paging field %q: %s", forbidden, membership.query)
+		}
+	}
+	exact := requests[1]
+	wantVariables := map[string]any{
+		"owner0": "niekcandaele", "repo0": "sitrep", "number0": float64(5),
+		"owner1": "acme", "repo1": "widgets", "number1": float64(91),
+		"owner2": "niekcandaele", "repo2": "sitrep", "number2": float64(3),
+	}
+	if !reflect.DeepEqual(exact.variables, wantVariables) {
+		t.Errorf("exact-root variables = %#v, want %#v", exact.variables, wantVariables)
+	}
+	for _, forbidden := range []string{"subIssues", "body", "comments", "blockedBy", "blocking"} {
+		if strings.Contains(exact.query, forbidden) {
+			t.Errorf("exact-root query contains Detail/Epic field %q: %s", forbidden, exact.query)
+		}
+	}
+}
+
+func TestResolveQueryEmptyMembershipNeedsNoExactRead(t *testing.T) {
+	s := newReplayServer(t, response{file: "query_empty.json"})
+	p := newProvider(s)
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+	if got := len(s.recorded()); got != 1 {
+		t.Errorf("requests = %d, want membership only", got)
+	}
+}
+
+func TestResolveQueryRejectsMalformedNativeQuery(t *testing.T) {
+	s := newReplayServer(t, response{file: "query_invalid.json"})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: `is:issue "`})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "Unclosed quotation mark"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if provider.KindOf(err).Retryable() {
+		t.Error("a malformed native query must not be retryable")
+	}
+}
+
+func TestResolveQueryClassifiesMalformedNativeQueryOnHTTP422(t *testing.T) {
+	s := newReplayServer(t, response{status: http.StatusUnprocessableEntity, file: "query_invalid.json"})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: `is:issue "`})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "Unclosed quotation mark"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+}
+
+func TestResolveQueryRedactsQueryFromNativeExplanation(t *testing.T) {
+	const query = "SECRET_QUERY_47"
+	body := `{"errors":[{"type":"SEARCH_QUERY_ERROR","message":"Query SECRET_QUERY_47 is invalid: bad syntax","path":["search"]}]}`
+	s := newReplayServer(t, response{body: body})
+
+	_, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"Query [query] is invalid", "bad syntax"},
+		Secret:   query,
+	})
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("error = %q, leaked credential", err)
+	}
+}
+
+func TestResolveQueryDoesNotClassifyGraphQLValidationAsMalformedNativeQuery(t *testing.T) {
+	body := `{"errors":[{"type":"VALIDATION","message":"Unknown field in sitrep document"}]}`
+	s := newReplayServer(t, response{status: http.StatusBadRequest, body: body})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "valid query"})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindUnknown,
+		Contains: []string{"API error", "Unknown field in sitrep document"},
+		Secret:   fixtureToken,
+	})
+	if !provider.KindOf(err).Retryable() {
+		t.Error("a GraphQL document validation failure must remain retryable")
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+}
+
+func TestResolveQueryPreservesMembershipStageFailureClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"data": {`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, tt.resp)
+			snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "github", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want none", snap)
+			}
+			if len(s.recorded()) != 1 {
+				t.Errorf("requests = %d, want membership stage only", len(s.recorded()))
+			}
+		})
+	}
+}
+
+func TestResolveQueryTransportErrorDoesNotExposeQuery(t *testing.T) {
+	const query = "SECRET_QUERY_47"
+	transportErr := errors.New("dial failed after reading SECRET_QUERY_47")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	p := github.New("github.com",
+		github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }),
+		github.WithHTTPClient(client),
+	)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"transport failure"},
+		Secret:   query,
+	})
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(%v, transportErr) = false, want true", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveQueryExactReadFailureReturnsNoPartialSnapshot(t *testing.T) {
+	s := newReplayServer(t,
+		response{file: "query_membership.json"},
+		response{file: "ref_list_missing.json"},
+	)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"acme/widgets#91", "not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial membership", snap)
+	}
+	if len(s.recorded()) != 2 {
+		t.Errorf("requests = %d, want membership plus failed exact-root read", len(s.recorded()))
+	}
+}
+
+func TestResolveQueryRejectsInvalidSearchIdentity(t *testing.T) {
+	s := newReplayServer(t, response{body: `{"data":{"search":{"nodes":[{"__typename":"Issue","number":0,"repository":{"nameWithOwner":"acme/widgets"}}]}}}`})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"invalid identity"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
 	}
 }
 

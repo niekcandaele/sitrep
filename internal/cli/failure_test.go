@@ -84,6 +84,78 @@ func TestRetryablePreflightFailureStillOpensTheMonitor(t *testing.T) {
 	}
 }
 
+func TestNonRetryableQueryPreflightNeverOpensTheMonitor(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *fake.Provider
+		want string
+	}{
+		{
+			name: "malformed",
+			p: fake.New(fake.WithResolveError(
+				provider.Errorf(provider.KindBadRef, "fake: query rejected: invalid syntax"))),
+			want: "sitrep: fake: query rejected: invalid syntax\n",
+		},
+		{
+			name: "unsupported",
+			p: fake.New(fake.WithCapabilities(model.Capabilities{Selectors: model.SelectorCapabilities{
+				Epic: true, RefList: true,
+			}})),
+			want: "sitrep: fake: Query Selector is not supported\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith([]string{"--query", " label:bug "}, &stdout, &stderr, cli.Deps{
+				Provider: tt.p,
+				Stdin:    strings.NewReader(""),
+				OpenTTY:  panicTTY,
+			})
+
+			if code != 1 || stdout.Len() != 0 {
+				t.Fatalf("result = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if stderr.String() != tt.want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.want)
+			}
+			selector, ok := tt.p.LastSelector().(provider.QuerySelector)
+			if !ok || selector.Query != " label:bug " {
+				t.Errorf("selector = %#v, want exact Query", tt.p.LastSelector())
+			}
+			if tt.p.ResolveCalls() != 1 || tt.p.DetailCalls() != 0 {
+				t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", tt.p.ResolveCalls(), tt.p.DetailCalls())
+			}
+		})
+	}
+}
+
+func TestRetryableQueryPreflightStillOpensTheMonitor(t *testing.T) {
+	p := fake.New(fake.WithResolveError(
+		provider.Errorf(provider.KindUnavailable, "fake: requesting the API: network down")))
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"--query", " label:bug "}, &stdout, &stderr, cli.Deps{
+		Provider: p,
+		Stdin:    strings.NewReader(""),
+		OpenTTY:  panicTTY,
+	})
+
+	if code != 1 || stdout.Len() != 0 {
+		t.Fatalf("result = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "needs a terminal") {
+		t.Errorf("stderr = %q, want monitor terminal failure", stderr.String())
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != " label:bug " {
+		t.Errorf("selector = %#v, want exact Query", p.LastSelector())
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
 // A one-shot mode prints the failure whatever its class: there is no monitor to
 // keep open, so retryability changes nothing there.
 func TestOneShotModesPrintEveryFailureClass(t *testing.T) {

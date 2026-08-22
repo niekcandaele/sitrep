@@ -126,6 +126,7 @@ func TestOrdinaryMonitorsNeverOpenControllingTerminal(t *testing.T) {
 	for _, args := range [][]string{
 		{"acme/widgets#111"},
 		{"acme/widgets#112", "acme/widgets#115"},
+		{"--query", "label:bug"},
 	} {
 		p := fake.New()
 		var stdout, stderr bytes.Buffer

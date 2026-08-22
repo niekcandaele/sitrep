@@ -1,0 +1,47 @@
+[
+  {
+    "id": 198100001,
+    "iid": 101,
+    "project_id": 34675721,
+    "title": "stale search title for cli#101",
+    "state": "closed",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/101",
+    "labels": ["stale"],
+    "assignees": [],
+    "references": {
+      "short": "#101",
+      "relative": "#101",
+      "full": "gitlab-org/cli#101"
+    }
+  },
+  {
+    "id": 198100005,
+    "iid": 7,
+    "project_id": 51000123,
+    "title": "stale search title for platform/core#7",
+    "state": "closed",
+    "web_url": "https://gitlab.com/gitlab-org/platform/core/-/work_items/7",
+    "labels": ["stale"],
+    "assignees": [],
+    "references": {
+      "short": "#7",
+      "relative": "gitlab-org/platform/core#7",
+      "full": "gitlab-org/platform/core#7"
+    }
+  },
+  {
+    "id": 298100001,
+    "iid": 101,
+    "project_id": 34675721,
+    "title": "duplicate identity with conflicting search state",
+    "state": "opened",
+    "web_url": "https://gitlab.com/gitlab-org/cli/-/work_items/101",
+    "labels": [],
+    "assignees": [],
+    "references": {
+      "short": "#101",
+      "relative": "#101",
+      "full": "gitlab-org/cli#101"
+    }
+  }
+]

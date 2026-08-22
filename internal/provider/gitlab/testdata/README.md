@@ -48,6 +48,23 @@ curl -s -H "Authorization: Bearer $GITLAB_TOKEN" -H 'Accept: application/json' \
 and **redact avatar URLs and any personal email before committing** — a fixture must
 contain no real credential and no personal data. Then say so here, per file.
 
+## Native queries
+
+The Query fixtures were added on **2026-08-22** and are **hand-written** to GitLab's
+issue-list and direct-issue response shapes. No native filter request was recorded. Their
+project ids, issue ids, titles, and descriptions are synthetic. The author block in
+`query_issue_cli_101.json` is copied from the existing public `issue.json` recording with
+its avatar redaction retained; no credential or new personal data was added.
+
+| File | What it proves |
+|---|---|
+| `query_membership.json` | two-project search order, a repeated `project_id`/IID identity, and stale list state/title that cannot reach output |
+| `query_issue_cli_101.json` | the authoritative direct root for `gitlab-org/cli#101`, including current open state; its description is deliberately dropped from the thin Ticket |
+| `query_issue_core_7.json` | the authoritative nested-project root for `gitlab-org/platform/core#7`, proving project-id-to-path routing and cross-project order |
+
+The empty-Query response and malformed-filter error are emitted directly by the replay
+server as compact `[]` and documented `message` shapes; they need no fixture files.
+
 ## The epic and its children
 
 | File | Provenance | What it proves |
