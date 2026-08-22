@@ -35,6 +35,10 @@ type graphQLResponse struct {
 type queryResponse struct {
 	Data struct {
 		Search struct {
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
 			Nodes []queryMembershipNode `json:"nodes"`
 		} `json:"search"`
 	} `json:"data"`

@@ -39,6 +39,11 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
+// DefaultMaxTickets is the membership budget used for Query Selectors when a
+// Profile does not override it. Concrete Providers own and enforce the budget;
+// it never travels with a Selector.
+const DefaultMaxTickets = 100
+
 // Selector names a Watchlist. Implementations are closed to this package so a
 // Provider can exhaustively choose the authoritative read for each kind.
 type Selector interface {

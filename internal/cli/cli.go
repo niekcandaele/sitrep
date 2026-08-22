@@ -975,6 +975,16 @@ func profileInterval(prof *config.Profile) time.Duration {
 	return prof.RefreshInterval
 }
 
+// effectiveMaxTickets reads the construction-time Query budget from a selected
+// Profile. A nil Profile and a hand-built zero-value Profile both use the shared
+// Provider default; validated production Profiles always carry a positive value.
+func effectiveMaxTickets(prof *config.Profile) int {
+	if prof == nil || prof.MaxTickets <= 0 {
+		return provider.DefaultMaxTickets
+	}
+	return prof.MaxTickets
+}
+
 // parseArgs parses flags and positional arguments in any order. The flag
 // package stops at the first non-flag argument, which would make the natural
 // "sitrep 111 --json" a usage error; parsing what is left after each positional
@@ -1109,17 +1119,18 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
 func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string) (provider.Provider, error) {
+	maxTickets := effectiveMaxTickets(prof)
 	if name == providerFake {
-		return fake.New(), nil
+		return fake.New(fake.WithMaxTickets(maxTickets)), nil
 	}
 
 	switch route.tracker {
 	case ref.TrackerGitHub:
-		return d.newGitHub(route.host, prof), nil
+		return d.newGitHub(route.host, prof, maxTickets), nil
 	case ref.TrackerJira:
-		return d.newJira(route.host, prof, configPath)
+		return d.newJira(route.host, prof, configPath, maxTickets)
 	case ref.TrackerGitLab:
-		return d.newGitLab(route.host, route.gitLabPath, prof)
+		return d.newGitLab(route.host, route.gitLabPath, prof, maxTickets)
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", route.raw)
 	}
@@ -1169,7 +1180,12 @@ func providerDisplayName(name string) string {
 // its own site: the site is not the problem, the credential is, and a Profile is
 // the only place an Atlassian email and a token reference come from. Saying so
 // here is more useful than letting the driver fail at its first request.
-func (d Deps) newJira(host string, prof *config.Profile, configPath string) (provider.Provider, error) {
+func (d Deps) newJira(
+	host string,
+	prof *config.Profile,
+	configPath string,
+	maxTickets int,
+) (provider.Provider, error) {
 	if prof == nil {
 		return nil, fmt.Errorf("jira: reading %s needs a Profile — add one to %s with your "+
 			"Atlassian email and the environment variable holding your API token",
@@ -1182,10 +1198,12 @@ func (d Deps) newJira(host string, prof *config.Profile, configPath string) (pro
 	// Translating a config.Credential into the driver's own Credentials happens
 	// here, deliberately: it is what keeps internal/provider/jira free of any
 	// knowledge of the config file.
-	return jira.New(host, jira.WithCredentials(jira.Credentials{
-		Email: cred.User,
-		Token: cred.Token,
-	})), nil
+	return jira.New(host,
+		jira.WithCredentials(jira.Credentials{
+			Email: cred.User,
+			Token: cred.Token,
+		}),
+		jira.WithMaxTickets(maxTickets)), nil
 }
 
 // newGitLab constructs the GitLab driver from the Profile that matched this
@@ -1199,7 +1217,7 @@ func (d Deps) newJira(host string, prof *config.Profile, configPath string) (pro
 // Translating a config.Credential into the driver's own token happens here,
 // deliberately: it is what keeps internal/provider/gitlab free of any knowledge
 // of the config file.
-func (d Deps) newGitLab(host, path string, prof *config.Profile) (provider.Provider, error) {
+func (d Deps) newGitLab(host, path string, prof *config.Profile, maxTickets int) (provider.Provider, error) {
 	// The Profile's credential is resolved first so that a Profile naming a
 	// variable nobody set reports *that* rather than a vaguer failure later.
 	//
@@ -1217,7 +1235,8 @@ func (d Deps) newGitLab(host, path string, prof *config.Profile) (provider.Provi
 	}
 	return gitlab.New(host,
 		gitlab.WithPath(path),
-		gitlab.WithTokenSource(d.gitLabTokenSource(prof))), nil
+		gitlab.WithTokenSource(d.gitLabTokenSource(prof)),
+		gitlab.WithMaxTickets(maxTickets)), nil
 }
 
 // gitLabTokenSource layers a Profile's auth reference on top of the GitLab
@@ -1237,8 +1256,10 @@ func profileProject(prof *config.Profile) string {
 	return prof.Project
 }
 
-func (d Deps) newGitHub(host string, prof *config.Profile) provider.Provider {
-	return github.New(host, github.WithTokenSource(d.gitHubTokenSource(prof)))
+func (d Deps) newGitHub(host string, prof *config.Profile, maxTickets int) provider.Provider {
+	return github.New(host,
+		github.WithTokenSource(d.gitHubTokenSource(prof)),
+		github.WithMaxTickets(maxTickets))
 }
 
 // gitHubTokenSource layers a Profile's auth reference on top of the GitHub

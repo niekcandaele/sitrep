@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -93,7 +94,8 @@ func (*hostileProvider) Resolve(context.Context, provider.Selector) (model.Watch
 			ID: "t1", Key: hostile, Title: hostile, URL: hostile, NativeStatus: hostile,
 			Repository: hostile, Assignees: []model.User{user}, PullRequests: []model.PullRequest{pr},
 		}},
-		Parent: model.Parent{ID: "p1", Key: hostile, Title: hostile, URL: hostile},
+		LimitReached: true,
+		Parent:       model.Parent{ID: "p1", Key: hostile, Title: hostile, URL: hostile},
 	}, nil
 }
 
@@ -131,8 +133,23 @@ func TestSanitizedCleansEveryField(t *testing.T) {
 		t.Fatalf("FetchDetail: %v", err)
 	}
 
+	if !snap.LimitReached {
+		t.Error("sanitation dropped LimitReached")
+	}
 	checkClean(t, "snapshot", reflect.ValueOf(snap), false)
 	checkClean(t, "detail", reflect.ValueOf(detail), true)
+}
+
+func TestStampSnapshotPreservesLimitReached(t *testing.T) {
+	p := &hostileProvider{}
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	snap := provider.StampSnapshot(p, model.WatchlistSnapshot{LimitReached: true}, now)
+	if !snap.LimitReached {
+		t.Error("StampSnapshot dropped LimitReached")
+	}
+	if !snap.FetchedAt.Equal(now) || snap.Capabilities != p.Capabilities() {
+		t.Errorf("stamp = FetchedAt %v Capabilities %+v", snap.FetchedAt, snap.Capabilities)
+	}
 }
 
 type selectorRecorder struct {

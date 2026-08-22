@@ -146,6 +146,102 @@ func TestResolveQueryUsesCurrentMembershipAndExactHeader(t *testing.T) {
 	}
 }
 
+func TestResolveQueryAppliesMaxTicketsOnlyAboveTheBoundary(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "one", Key: "one", Title: "One"},
+		{ID: "two", Key: "two", Title: "Two"},
+		{ID: "three", Key: "three", Title: "Three"},
+	}
+	tests := []struct {
+		name         string
+		maxTickets   int
+		membership   int
+		wantTickets  int
+		limitReached bool
+	}{
+		{name: "below", maxTickets: 3, membership: 2, wantTickets: 2},
+		{name: "exact boundary", maxTickets: 3, membership: 3, wantTickets: 3},
+		{name: "above", maxTickets: 2, membership: 3, wantTickets: 2, limitReached: true},
+		{name: "singular cutoff", maxTickets: 1, membership: 3, wantTickets: 1, limitReached: true},
+		{name: "non-positive option keeps default", maxTickets: 0, membership: 3, wantTickets: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New(
+				fake.WithMaxTickets(tt.maxTickets),
+				fake.WithSnapshot(model.WatchlistSnapshot{Tickets: append([]model.Ticket(nil), tickets[:tt.membership]...)}),
+			)
+			snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "opaque"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if len(snap.Tickets) != tt.wantTickets || snap.LimitReached != tt.limitReached {
+				t.Errorf("Tickets/LimitReached = %d/%v, want %d/%v", len(snap.Tickets), snap.LimitReached, tt.wantTickets, tt.limitReached)
+			}
+			for i := range snap.Tickets {
+				if snap.Tickets[i].ID != tickets[i].ID {
+					t.Errorf("Tickets[%d].ID = %q, want ordered prefix %q", i, snap.Tickets[i].ID, tickets[i].ID)
+				}
+			}
+			if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() || snap.Header != provider.QueryHeader("opaque") {
+				t.Errorf("Query shape = Header %+v Epic %+v Parent %+v", snap.Header, snap.Epic, snap.Parent)
+			}
+			if p.DetailCalls() != 0 {
+				t.Errorf("DetailCalls = %d, want 0", p.DetailCalls())
+			}
+		})
+	}
+}
+
+func TestResolveQueryRecomputesLimitReachedOnEverySnapshot(t *testing.T) {
+	snapshot := func(count int) model.WatchlistSnapshot {
+		tickets := make([]model.Ticket, count)
+		for i := range tickets {
+			tickets[i] = model.Ticket{ID: model.TicketID(fmt.Sprintf("ticket-%d", i))}
+		}
+		return model.WatchlistSnapshot{Tickets: tickets, LimitReached: true}
+	}
+	p := fake.New(fake.WithMaxTickets(2), fake.WithSnapshots(snapshot(1), snapshot(3), snapshot(2)))
+	for i, want := range []bool{false, true, false} {
+		snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "same query"})
+		if err != nil {
+			t.Fatalf("Resolve %d: %v", i, err)
+		}
+		if snap.LimitReached != want {
+			t.Errorf("Resolve %d LimitReached = %v, want %v", i, snap.LimitReached, want)
+		}
+		if len(snap.Tickets) > 2 {
+			t.Errorf("Resolve %d returned %d Tickets, want at most 2", i, len(snap.Tickets))
+		}
+	}
+	if p.ResolveCalls() != 3 {
+		t.Errorf("ResolveCalls = %d, want 3", p.ResolveCalls())
+	}
+}
+
+func TestMaxTicketsDoesNotCapEpicOrRefList(t *testing.T) {
+	snapshot := fake.FixtureSnapshot()
+	snapshot.LimitReached = true
+	p := fake.New(fake.WithMaxTickets(1), fake.WithSnapshot(snapshot))
+
+	epic, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: testRef("111")})
+	if err != nil {
+		t.Fatalf("Epic Resolve: %v", err)
+	}
+	if len(epic.Tickets) != len(snapshot.Tickets) || epic.LimitReached {
+		t.Errorf("Epic Tickets/LimitReached = %d/%v, want %d/false", len(epic.Tickets), epic.LimitReached, len(snapshot.Tickets))
+	}
+
+	refs := []ref.Ref{fixtureRef(112), fixtureRef(115), fixtureRef(121)}
+	list, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	if err != nil {
+		t.Fatalf("Ref-list Resolve: %v", err)
+	}
+	if len(list.Tickets) != len(refs) || list.LimitReached {
+		t.Errorf("Ref-list Tickets/LimitReached = %d/%v, want %d/false", len(list.Tickets), list.LimitReached, len(refs))
+	}
+}
+
 func TestResolveQueryReturnsNonNilEmptyMembership(t *testing.T) {
 	p := fake.New(fake.WithSnapshot(model.WatchlistSnapshot{Tickets: nil}))
 	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""})

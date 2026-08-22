@@ -51,6 +51,7 @@ type Provider struct {
 	httpClient  *http.Client
 	tokenSource TokenSource
 	userAgent   string
+	maxTickets  int
 
 	tokenMu sync.Mutex
 	token   string
@@ -73,6 +74,7 @@ func New(host string, opts ...Option) *Provider {
 		httpClient:  &http.Client{Timeout: requestTimeout},
 		tokenSource: DefaultTokenSource,
 		userAgent:   buildinfo.Name + "/" + buildinfo.Version,
+		maxTickets:  provider.DefaultMaxTickets,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -115,6 +117,16 @@ func WithUserAgent(ua string) Option {
 	return func(p *Provider) {
 		if ua != "" {
 			p.userAgent = ua
+		}
+	}
+}
+
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
 		}
 	}
 }
@@ -236,52 +248,107 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 	return snap, nil
 }
 
-// resolveQuery searches only for membership identities, then re-reads every
-// member through the authoritative exact-root path. Search payload fields can
-// therefore never become rendered Ticket state.
+// resolveQuery searches for membership identities page by page up to the
+// Provider's configured budget, then re-reads every accepted member through the
+// authoritative exact-root path. Search payload fields can therefore never
+// become rendered Ticket state.
 func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
-	var response queryResponse
-	header, status, err := p.doGraphQL(ctx, queryMembershipDocument,
-		map[string]any{"query": query}, &response, true)
-	if err != nil {
-		return model.WatchlistSnapshot{}, err
-	}
-	if err := response.err(p.endpoint, header, query); err != nil {
-		return model.WatchlistSnapshot{}, err
-	}
-	if status != http.StatusOK {
-		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
-			"github: unexpected response %d from %s", status, p.endpoint)
-	}
+	initialCapacity := min(p.maxTickets, queryPageSize)
+	refs := make([]ref.Ref, 0, initialCapacity)
+	seen := make(map[string]struct{}, initialCapacity)
+	seenCursors := make(map[string]struct{})
+	cursor := ""
+	consumed := 0
+	limitReached := false
 
-	refs := make([]ref.Ref, 0, len(response.Data.Search.Nodes))
-	seen := make(map[string]struct{}, len(response.Data.Search.Nodes))
-	for _, node := range response.Data.Search.Nodes {
-		if node.TypeName != "Issue" {
-			continue
+	for {
+		remaining := p.maxTickets - consumed
+		variables := map[string]any{
+			"query": query,
+			"first": min(queryPageSize, remaining),
+			"after": nil,
 		}
-		owner, repo, ok := strings.Cut(node.Repository.NameWithOwner, "/")
-		if !ok || owner == "" || repo == "" || node.Number <= 0 {
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+
+		var response queryResponse
+		header, status, err := p.doGraphQL(ctx, queryMembershipDocument, variables, &response, true)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		if err := response.err(p.endpoint, header, query); err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		if status != http.StatusOK {
 			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
-				"github: query search returned an Issue with an invalid identity")
+				"github: unexpected response %d from %s", status, p.endpoint)
 		}
-		identity := strings.ToLower(node.Repository.NameWithOwner) + "#" + strconv.Itoa(node.Number)
-		if _, duplicate := seen[identity]; duplicate {
+
+		nodes := response.Data.Search.Nodes
+		overflow := len(nodes) > remaining
+		if overflow {
+			nodes = nodes[:remaining]
+		}
+		for _, node := range nodes {
+			if node.TypeName != "Issue" {
+				continue
+			}
+			owner, repo, ok := strings.Cut(node.Repository.NameWithOwner, "/")
+			if !ok || owner == "" || repo == "" || node.Number <= 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query search returned an Issue with an invalid identity")
+			}
+			identity := strings.ToLower(node.Repository.NameWithOwner) + "#" + strconv.Itoa(node.Number)
+			if _, duplicate := seen[identity]; duplicate {
+				continue
+			}
+			seen[identity] = struct{}{}
+			refs = append(refs, ref.Ref{
+				Tracker: ref.TrackerGitHub,
+				Host:    p.host,
+				Owner:   owner,
+				Repo:    repo,
+				Number:  node.Number,
+				Raw:     node.Repository.NameWithOwner + "#" + strconv.Itoa(node.Number),
+			})
+		}
+		consumed += len(nodes)
+		if cursor != "" && len(nodes) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"github: query pagination returned an empty continuation page")
+		}
+
+		pageInfo := response.Data.Search.PageInfo
+		switch {
+		case overflow:
+			limitReached = true
+		case consumed == p.maxTickets:
+			limitReached = pageInfo.HasNextPage
+		case !pageInfo.HasNextPage:
+		default:
+			if len(nodes) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but returned an empty page")
+			}
+			if pageInfo.EndCursor == "" {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but returned no new page cursor")
+			}
+			if _, repeated := seenCursors[pageInfo.EndCursor]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but repeated a page cursor")
+			}
+			seenCursors[pageInfo.EndCursor] = struct{}{}
+			cursor = pageInfo.EndCursor
 			continue
 		}
-		seen[identity] = struct{}{}
-		refs = append(refs, ref.Ref{
-			Tracker: ref.TrackerGitHub,
-			Host:    p.host,
-			Owner:   owner,
-			Repo:    repo,
-			Number:  node.Number,
-			Raw:     node.Repository.NameWithOwner + "#" + strconv.Itoa(node.Number),
-		})
+		break
 	}
 
 	tickets := []model.Ticket{}
 	if len(refs) > 0 {
+		var err error
 		tickets, err = p.readExactRefs(ctx, refs)
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
@@ -290,6 +357,7 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 	return model.WatchlistSnapshot{
 		Header:       provider.QueryHeader(query),
 		Tickets:      tickets,
+		LimitReached: limitReached,
 		Capabilities: p.Capabilities(),
 	}, nil
 }

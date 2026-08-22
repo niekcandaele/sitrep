@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -427,6 +428,32 @@ func TestProfileRefreshIntervalDoesNotBreakOneShotModes(t *testing.T) {
 
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+}
+
+func TestInjectedProviderKeepsItsOwnMaxTickets(t *testing.T) {
+	cfg := parseConfig(t, "profiles:\n  work:\n    provider: github\n"+
+		"    host: github.com\n    max_tickets: 1\n")
+	p := fake.New(fake.WithMaxTickets(2))
+	got := runWith([]string{"--profile", "work", "--query", "state=opened", "--json"}, cli.Deps{
+		Provider: p,
+		Config:   cfg,
+	})
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	var doc struct {
+		Watchlist struct {
+			LimitReached bool `json:"limit_reached"`
+		} `json:"watchlist"`
+		Tickets []json.RawMessage `json:"tickets"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc.Tickets) != 2 || !doc.Watchlist.LimitReached {
+		t.Errorf("injected snapshot = %d tickets, LimitReached=%t; want its own 2/true policy",
+			len(doc.Tickets), doc.Watchlist.LimitReached)
 	}
 }
 

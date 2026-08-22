@@ -206,6 +206,24 @@ func fullEpic(t *testing.T) *replayServer {
 	})
 }
 
+func jiraQueryPage(keys []string, isLast bool, token string) response {
+	issues := make([]string, len(keys))
+	for i, key := range keys {
+		issues[i] = fmt.Sprintf(`{"key":%q}`, key)
+	}
+	return response{body: fmt.Sprintf(
+		`{"issues":[%s],"isLast":%t,"nextPageToken":%q}`,
+		strings.Join(issues, ","), isLast, token)}
+}
+
+func ticketKeys(tickets []model.Ticket) []string {
+	keys := make([]string, len(tickets))
+	for i := range tickets {
+		keys[i] = tickets[i].Key
+	}
+	return keys
+}
+
 func TestName(t *testing.T) {
 	if p := jira.New(fixtureHost); p.Name() != "jira" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "jira")
@@ -455,6 +473,237 @@ func TestResolveQuerySearchesMembershipThenBulkFetchesExactTickets(t *testing.T)
 	}
 }
 
+func TestResolveQueryPaginatesBeforeBulkFetch(t *testing.T) {
+	const query = `  project = ABC AND text ~ "ready & waiting"  `
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {
+			jiraQueryPage([]string{"DEF-4", "ABC-7", "DEF-4"}, false, "page-two"),
+			jiraQueryPage([]string{"ABC-1"}, true, ""),
+		},
+		bulkFetchPath: {{file: "ref_list.json"}},
+	})
+	p := newProvider(s, jira.WithMaxTickets(5))
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true below an exhausted budget")
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1"}
+	if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("Ticket keys = %v, want %v", got, wantKeys)
+	}
+
+	searches := s.requestsTo(searchPath)
+	if len(searches) != 2 {
+		t.Fatalf("membership searches = %d, want two", len(searches))
+	}
+	for i, want := range []struct {
+		maxResults string
+		token      []string
+	}{{"5", nil}, {"2", []string{"page-two"}}} {
+		if got := searches[i].query["jql"]; len(got) != 1 || got[0] != query {
+			t.Errorf("page %d jql = %q, want exact %q", i+1, got, query)
+		}
+		if got := searches[i].query["maxResults"]; len(got) != 1 || got[0] != want.maxResults {
+			t.Errorf("page %d maxResults = %q, want %q", i+1, got, want.maxResults)
+		}
+		if got := searches[i].query["nextPageToken"]; !reflect.DeepEqual(got, want.token) {
+			t.Errorf("page %d nextPageToken = %q, want %q", i+1, got, want.token)
+		}
+	}
+	bulk := s.requestsTo(bulkFetchPath)
+	if len(bulk) != 1 {
+		t.Fatalf("bulk reads = %d, want one after all membership pages", len(bulk))
+	}
+	all := s.recorded()
+	if len(all) != 3 || all[0].path != searchPath || all[1].path != searchPath || all[2].path != bulkFetchPath {
+		t.Fatalf("request order = %v, want membership page 1, membership page 2, then bulk read", all)
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+	}
+	if err := json.Unmarshal(bulk[0].body, &body); err != nil {
+		t.Fatalf("decoding bulk body: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("bulk keys = %v, want stable membership order %v", body.IssueIDsOrKeys, wantKeys)
+	}
+}
+
+func TestResolveQueryCutoffAccounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		keys       []string
+		isLast     bool
+		maxTickets int
+		wantKeys   []string
+		wantLimit  bool
+	}{
+		{
+			name:       "exact boundary exhausted",
+			keys:       []string{"DEF-4", "ABC-7"},
+			isLast:     true,
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+		},
+		{
+			name:       "exact boundary with continuation",
+			keys:       []string{"DEF-4", "ABC-7"},
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "oversized response is clipped",
+			keys:       []string{"DEF-4", "ABC-7", "ABC-1"},
+			isLast:     true,
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "duplicate consumes native budget before de-duplication",
+			keys:       []string{"DEF-4", "DEF-4"},
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4"},
+			wantLimit:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				searchPath:    {jiraQueryPage(tt.keys, tt.isLast, "")},
+				bulkFetchPath: {{file: "ref_list.json"}},
+			})
+			snap, err := newProvider(s, jira.WithMaxTickets(tt.maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
+				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryRejectsNonProgressingPagination(t *testing.T) {
+	tests := []struct {
+		name  string
+		pages []response
+	}{
+		{
+			name:  "missing first continuation token",
+			pages: []response{jiraQueryPage([]string{"DEF-4"}, false, "")},
+		},
+		{
+			name: "repeated continuation token",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "same"),
+				jiraQueryPage([]string{"ABC-7"}, false, "same"),
+			},
+		},
+		{
+			name: "non-adjacent token cycle",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "a"),
+				jiraQueryPage([]string{"ABC-7"}, false, "b"),
+				jiraQueryPage([]string{"ABC-1"}, false, "a"),
+			},
+		},
+		{
+			name: "empty continuation page",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "next"),
+				jiraQueryPage(nil, true, ""),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{searchPath: tt.pages})
+			snap, err := newProvider(s, jira.WithMaxTickets(4)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(searchPath)); got != len(tt.pages) {
+				t.Errorf("membership requests = %d, want %d", got, len(tt.pages))
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 0 {
+				t.Errorf("bulk reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "server failure",
+			resp: response{status: http.StatusInternalServerError, body: `{"message":"down"}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"unexpected response", "500"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"issues": [`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed native query",
+			resp: response{status: http.StatusBadRequest, body: `{"errors":{"jql":"bad query"}}`},
+			want: providertest.Want{Kind: provider.KindBadRef, Contains: []string{"query rejected"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				searchPath: {
+					jiraQueryPage([]string{"DEF-4"}, false, "next"),
+					tt.resp,
+				},
+			})
+			snap, err := newProvider(s, jira.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(searchPath)); got != 2 {
+				t.Errorf("membership requests = %d, want 2", got)
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 0 {
+				t.Errorf("bulk reads = %d, want none", got)
+			}
+		})
+	}
+}
+
 func TestResolveQueryEmptyMembershipNeedsNoBulkRead(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		searchPath: {{file: "query_empty.json"}},
@@ -471,6 +720,16 @@ func TestResolveQueryEmptyMembershipNeedsNoBulkRead(t *testing.T) {
 	}
 	if len(s.recorded()) != 1 || len(s.requestsTo(bulkFetchPath)) != 0 {
 		t.Errorf("requests = %+v, want membership only", s.recorded())
+	}
+}
+
+func TestResolveQueryHugeLimitDoesNotPreallocateTheBudget(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{file: "query_empty.json"}},
+	})
+	p := newProvider(s, jira.WithMaxTickets(int(^uint(0)>>1)))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 }
 

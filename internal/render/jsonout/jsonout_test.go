@@ -168,6 +168,67 @@ func TestRenderRefListSelectorAndOmitsEpic(t *testing.T) {
 	}
 }
 
+func TestRenderQueryLimitReachedIsOptionalAndStructured(t *testing.T) {
+	const query = "state=opened&labels=ready"
+	p := fake.New(fake.WithMaxTickets(2))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	snap.FetchedAt = generatedAt
+
+	render := func(t *testing.T, snap model.WatchlistSnapshot, selector provider.Selector) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := jsonout.RenderWatchlist(&buf, snap, selector, p.Name()); err != nil {
+			t.Fatalf("RenderWatchlist: %v", err)
+		}
+		return buf.Bytes()
+	}
+
+	raw := render(t, snap, provider.QuerySelector{Query: query})
+	var doc struct {
+		SchemaVersion int `json:"schema_version"`
+		Watchlist     struct {
+			Selector struct {
+				Kind  string `json:"kind"`
+				Query string `json:"query"`
+			} `json:"selector"`
+			LimitReached *bool `json:"limit_reached"`
+		} `json:"watchlist"`
+		Progress struct {
+			Total int `json:"total"`
+		} `json:"progress"`
+		Tickets []json.RawMessage `json:"tickets"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.SchemaVersion != 2 || doc.Watchlist.Selector.Kind != "query" || doc.Watchlist.Selector.Query != query {
+		t.Errorf("schema/selector = %d/%+v, want schema 2 and exact Query", doc.SchemaVersion, doc.Watchlist.Selector)
+	}
+	if doc.Watchlist.LimitReached == nil || !*doc.Watchlist.LimitReached {
+		t.Errorf("limit_reached = %v, want present true", doc.Watchlist.LimitReached)
+	}
+	if len(doc.Tickets) != 2 || doc.Progress.Total != 2 {
+		t.Errorf("tickets/progress.total = %d/%d, want 2/2", len(doc.Tickets), doc.Progress.Total)
+	}
+	for _, forbidden := range []string{"max_tickets", `"total_matches"`, "Limit reached"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("limited Query JSON contains unsupported %q: %s", forbidden, raw)
+		}
+	}
+
+	snap.LimitReached = false
+	if raw := render(t, snap, provider.QuerySelector{Query: query}); strings.Contains(string(raw), `"limit_reached"`) {
+		t.Errorf("exhausted Query emitted limit_reached: %s", raw)
+	}
+	snap.LimitReached = true
+	if raw := render(t, snap, provider.RefListSelector{Refs: []ref.Ref{{Raw: "acme/widgets#112"}}}); strings.Contains(string(raw), `"limit_reached"`) {
+		t.Errorf("Ref-list emitted Query-only limit_reached: %s", raw)
+	}
+}
+
 func TestRenderWatchlistRejectsUnsupportedSelector(t *testing.T) {
 	var buf bytes.Buffer
 	if err := jsonout.RenderWatchlist(&buf, model.WatchlistSnapshot{}, nil, "fake"); err == nil {

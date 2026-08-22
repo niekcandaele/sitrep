@@ -63,7 +63,7 @@ func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot) error {
 	var b strings.Builder
 
 	progress := model.ComputeProgress(snap.Tickets)
-	writeHeader(&b, snap.Header, progress)
+	writeHeader(&b, snap.Header, progress, snap.LimitReached, len(snap.Tickets))
 
 	if len(snap.Tickets) == 0 {
 		if snap.Header.Key == "" {
@@ -82,6 +82,16 @@ func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot) error {
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// LimitNotice renders the shared plain/TUI cutoff sentence. The count is the
+// number of authoritative Tickets actually shown, never a guessed total.
+func LimitNotice(ticketCount int) string {
+	noun := "tickets"
+	if ticketCount == 1 {
+		noun = "ticket"
+	}
+	return fmt.Sprintf("Limit reached — showing %d %s.", ticketCount, noun)
 }
 
 // CategoryLabel returns the human display label for a Status Category
@@ -200,8 +210,9 @@ func PullRequestSummary(pr model.PullRequest, ticketRepository string) string {
 	return strings.Join(parts, " ")
 }
 
-// writeHeader writes the Watchlist identity, progress bar and optional URL.
-func writeHeader(b *strings.Builder, header model.WatchlistHeader, p model.Progress) {
+// writeHeader writes the Watchlist identity, progress bar, optional URL and
+// Query cutoff notice.
+func writeHeader(b *strings.Builder, header model.WatchlistHeader, p model.Progress, limitReached bool, ticketCount int) {
 	// Output that starts flush against a shell prompt is hard to read.
 	b.WriteString("\n")
 	if header.Key == "" {
@@ -218,6 +229,9 @@ func writeHeader(b *strings.Builder, header model.WatchlistHeader, p model.Progr
 
 	if header.URL != "" {
 		fmt.Fprintf(b, "%s\n", header.URL)
+	}
+	if limitReached {
+		fmt.Fprintf(b, "%s\n", LimitNotice(ticketCount))
 	}
 	b.WriteString("\n")
 }

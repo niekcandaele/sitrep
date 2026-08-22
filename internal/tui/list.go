@@ -31,6 +31,8 @@ type ListInput struct {
 	// Capabilities decide what a row may show; an undeclared Capability is
 	// silently absent, never an error.
 	Capabilities model.Capabilities
+	// LimitReached reports that Query membership consumed its configured budget.
+	LimitReached bool
 	// FetchedAt is when this reading was taken, from the caller's clock.
 	FetchedAt time.Time
 }
@@ -46,6 +48,7 @@ func ListFromWatchlistSnapshot(s model.WatchlistSnapshot) ListInput {
 		},
 		Tickets:      s.Tickets,
 		Capabilities: s.Capabilities,
+		LimitReached: s.LimitReached,
 		FetchedAt:    s.FetchedAt,
 	}
 }

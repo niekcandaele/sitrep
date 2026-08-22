@@ -167,6 +167,27 @@ func fullEpic(t *testing.T) *replayServer {
 	)
 }
 
+func queryMembershipPage(nodes string, hasNext bool, cursor string) response {
+	return response{body: fmt.Sprintf(
+		`{"data":{"search":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[%s]}}}`,
+		hasNext, cursor, nodes)}
+}
+
+const (
+	queryIssue5  = `{"__typename":"Issue","number":5,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`
+	queryIssue91 = `{"__typename":"Issue","number":91,"repository":{"nameWithOwner":"acme/widgets"}}`
+	queryIssue3  = `{"__typename":"Issue","number":3,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`
+	queryPR19    = `{"__typename":"PullRequest","number":19,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`
+)
+
+func ticketKeys(tickets []model.Ticket) []string {
+	keys := make([]string, len(tickets))
+	for i := range tickets {
+		keys[i] = tickets[i].Key
+	}
+	return keys
+}
+
 func TestName(t *testing.T) {
 	if p := github.New("github.com"); p.Name() != "github" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "github")
@@ -252,12 +273,18 @@ func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
 	if got := membership.variables["query"]; got != query {
 		t.Errorf("membership query variable = %q, want exact %q", got, query)
 	}
-	for _, token := range []string{"search(query:$query", "type:ISSUE", "first:100", "__typename", "number", "nameWithOwner"} {
+	if got := membership.variables["first"]; got != float64(100) {
+		t.Errorf("membership first variable = %v, want 100", got)
+	}
+	if got := membership.variables["after"]; got != nil {
+		t.Errorf("membership after variable = %v, want null on page one", got)
+	}
+	for _, token := range []string{"search(query:$query", "type:ISSUE", "first:$first", "after:$after", "pageInfo", "__typename", "number", "nameWithOwner"} {
 		if !strings.Contains(membership.query, token) {
 			t.Errorf("membership document omits %q: %s", token, membership.query)
 		}
 	}
-	for _, forbidden := range []string{"pageInfo", "after:", "title", "url", "state", "assignees", "parent", "subIssues", "comments", "body"} {
+	for _, forbidden := range []string{"title", "url", "state", "assignees", "parent", "subIssues", "comments", "body"} {
 		if strings.Contains(membership.query, forbidden) {
 			t.Errorf("membership document includes non-identity or paging field %q: %s", forbidden, membership.query)
 		}
@@ -278,6 +305,218 @@ func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
 	}
 }
 
+func TestResolveQueryPaginatesBeforeAuthoritativeRead(t *testing.T) {
+	const query = `  repo:acme/widgets label:"ready & waiting"  `
+	s := newReplayServer(t,
+		queryMembershipPage(strings.Join([]string{queryIssue5, queryPR19, queryIssue5}, ","), true, "page-two"),
+		queryMembershipPage(strings.Join([]string{queryIssue91, queryIssue3}, ","), false, ""),
+		response{file: "ref_list.json"},
+	)
+	p := newProvider(s, github.WithMaxTickets(5))
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true at an exhausted exact boundary")
+	}
+	wantKeys := []string{"niekcandaele/sitrep#5", "acme/widgets#91", "niekcandaele/sitrep#3"}
+	if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("Ticket keys = %v, want %v", got, wantKeys)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 3 {
+		t.Fatalf("requests = %d, want two membership pages then one exact read", len(requests))
+	}
+	for i, want := range []struct {
+		first float64
+		after any
+	}{{5, nil}, {2, "page-two"}} {
+		if got := requests[i].variables["query"]; got != query {
+			t.Errorf("page %d query = %q, want exact %q", i+1, got, query)
+		}
+		if got := requests[i].variables["first"]; got != want.first {
+			t.Errorf("page %d first = %v, want %v", i+1, got, want.first)
+		}
+		if got := requests[i].variables["after"]; got != want.after {
+			t.Errorf("page %d after = %v, want %v", i+1, got, want.after)
+		}
+		if !strings.Contains(requests[i].query, "search(query:$query") {
+			t.Errorf("request %d is not the membership document", i+1)
+		}
+	}
+	if strings.Contains(requests[2].query, "search(query:$query") {
+		t.Error("authoritative exact-root read happened before membership completed")
+	}
+}
+
+func TestResolveQueryCutoffAccounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		nodes      string
+		hasNext    bool
+		maxTickets int
+		wantKeys   []string
+		wantLimit  bool
+	}{
+		{
+			name:       "exact boundary exhausted",
+			nodes:      queryIssue5 + "," + queryIssue91,
+			maxTickets: 2,
+			wantKeys:   []string{"niekcandaele/sitrep#5", "acme/widgets#91"},
+		},
+		{
+			name:       "exact boundary with continuation",
+			nodes:      queryIssue5 + "," + queryIssue91,
+			hasNext:    true,
+			maxTickets: 2,
+			wantKeys:   []string{"niekcandaele/sitrep#5", "acme/widgets#91"},
+			wantLimit:  true,
+		},
+		{
+			name:       "oversized response is clipped",
+			nodes:      queryIssue5 + "," + queryIssue91 + "," + queryIssue3,
+			maxTickets: 2,
+			wantKeys:   []string{"niekcandaele/sitrep#5", "acme/widgets#91"},
+			wantLimit:  true,
+		},
+		{
+			name:       "pull request consumes native budget before filtering",
+			nodes:      queryPR19 + "," + queryIssue5,
+			hasNext:    true,
+			maxTickets: 2,
+			wantKeys:   []string{"niekcandaele/sitrep#5"},
+			wantLimit:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t,
+				queryMembershipPage(tt.nodes, tt.hasNext, ""),
+				response{file: "ref_list.json"},
+			)
+			snap, err := newProvider(s, github.WithMaxTickets(tt.maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
+				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryRejectsNonProgressingPagination(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []response
+	}{
+		{
+			name: "missing first continuation cursor",
+			responses: []response{
+				queryMembershipPage(queryIssue5, true, ""),
+			},
+		},
+		{
+			name: "repeated continuation cursor",
+			responses: []response{
+				queryMembershipPage(queryIssue5, true, "same"),
+				queryMembershipPage(queryIssue91, true, "same"),
+			},
+		},
+		{
+			name: "non-adjacent cursor cycle",
+			responses: []response{
+				queryMembershipPage(queryIssue5, true, "a"),
+				queryMembershipPage(queryIssue91, true, "b"),
+				queryMembershipPage(queryIssue3, true, "a"),
+			},
+		},
+		{
+			name: "empty continuation page",
+			responses: []response{
+				queryMembershipPage(queryIssue5, true, "next"),
+				queryMembershipPage("", false, ""),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, tt.responses...)
+			snap, err := newProvider(s, github.WithMaxTickets(4)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "github", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.recorded()); got != len(tt.responses) {
+				t.Errorf("requests = %d, want %d membership-only requests", got, len(tt.responses))
+			}
+		})
+	}
+}
+
+func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "server failure",
+			resp: response{status: http.StatusInternalServerError, body: `{"message":"down"}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"unexpected response", "500"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"data": {`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed native query",
+			resp: response{file: "query_invalid.json"},
+			want: providertest.Want{Kind: provider.KindBadRef, Contains: []string{"query rejected"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t,
+				queryMembershipPage(queryIssue5, true, "next"),
+				tt.resp,
+			)
+			snap, err := newProvider(s, github.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "github", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.recorded()); got != 2 {
+				t.Errorf("requests = %d, want two membership requests and no exact read", got)
+			}
+		})
+	}
+}
+
 func TestResolveQueryEmptyMembershipNeedsNoExactRead(t *testing.T) {
 	s := newReplayServer(t, response{file: "query_empty.json"})
 	p := newProvider(s)
@@ -293,6 +532,14 @@ func TestResolveQueryEmptyMembershipNeedsNoExactRead(t *testing.T) {
 	}
 	if got := len(s.recorded()); got != 1 {
 		t.Errorf("requests = %d, want membership only", got)
+	}
+}
+
+func TestResolveQueryHugeLimitDoesNotPreallocateTheBudget(t *testing.T) {
+	s := newReplayServer(t, response{file: "query_empty.json"})
+	p := newProvider(s, github.WithMaxTickets(int(^uint(0)>>1)))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 }
 

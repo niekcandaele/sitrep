@@ -55,7 +55,7 @@ was recorded, and the payloads contain only synthetic site and issue data.
 
 | File | What it proves |
 |---|---|
-| `query_membership.json` | minimal keys in search order, a lower-case/upper-case duplicate, stale summary/status fields that cannot reach output, and an ignored `nextPageToken` pinning first-page-only behavior |
+| `query_membership.json` | one exhausted membership page with minimal keys in search order, a lower-case/upper-case duplicate, and stale summary/status fields that cannot reach output |
 | `query_empty.json` | `issues: []` — a zero-match JQL Query succeeds without a bulk-fetch request |
 
 Malformed-JQL tests use a compact error payload emitted directly by the replay server so

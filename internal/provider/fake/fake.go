@@ -42,6 +42,7 @@ type Provider struct {
 	snapshots      []model.WatchlistSnapshot
 	details        map[model.TicketID]model.Detail
 	caps           model.Capabilities
+	maxTickets     int
 	resolveErr     error
 	detailErr      error
 	delay          time.Duration
@@ -63,6 +64,7 @@ func New(opts ...Option) *Provider {
 		snapshots:      []model.WatchlistSnapshot{FixtureSnapshot()},
 		details:        FixtureDetails(),
 		caps:           allCapabilities,
+		maxTickets:     provider.DefaultMaxTickets,
 		detailCallsFor: make(map[model.TicketID]int),
 	}
 	for _, opt := range opts {
@@ -79,6 +81,16 @@ func New(opts ...Option) *Provider {
 // capability-driven rendering rather than a label.
 func WithCapabilities(c model.Capabilities) Option {
 	return func(p *Provider) { p.caps = c }
+}
+
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
+		}
+	}
 }
 
 // WithSnapshot replaces the fixture epic with s for every Resolve call.
@@ -169,6 +181,7 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	switch s := selector.(type) {
 	case provider.EpicSelector:
 		snap.Header = provider.EpicHeader(snap.Epic)
+		snap.LimitReached = false
 	case provider.RefListSelector:
 		if len(s.Refs) == 0 {
 			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
@@ -183,6 +196,10 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		snap.Header = provider.QueryHeader(s.Query)
 		snap.Epic = model.Epic{}
 		snap.Parent = model.Parent{}
+		snap.LimitReached = len(snap.Tickets) > p.maxTickets
+		if snap.LimitReached {
+			snap.Tickets = snap.Tickets[:p.maxTickets]
+		}
 	default:
 		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}

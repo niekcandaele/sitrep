@@ -5,8 +5,11 @@ import (
 	"strings"
 )
 
-const queryMembershipDocument = `query($query:String!) {
-  search(query:$query, type:ISSUE, first:100) {
+const queryPageSize = 100
+
+const queryMembershipDocument = `query($query:String!, $first:Int!, $after:String) {
+  search(query:$query, type:ISSUE, first:$first, after:$after) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       __typename
       ... on Issue {

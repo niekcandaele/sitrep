@@ -301,7 +301,7 @@ func (m Model) cursor() *tea.Cursor {
 	}
 	// The box is drawn at column 0 of the filter line, so only the row needs
 	// shifting: past the header, past the body, and past the footer's blank
-	// spacer and any refresh error above it.
+	// spacer plus any cutoff notice or refresh error above it.
 	c.Y += headerHeight + m.bodyHeight() + m.filterLineIndex()
 	return c
 }
@@ -637,15 +637,20 @@ func (m Model) renderBody() string {
 }
 
 // footerLines is the always-visible bottom block, line by line: a blank
-// spacer, the refresh error when there is one, the filter state when there is
-// one, then the help line. The error is a single truncated line, not a modal
-// and not a stack trace — the list behind it is still the point.
+// spacer, the Query cutoff notice when there is one, the refresh error when
+// there is one, the filter state when there is one, then the help line. The
+// notice and error are single truncated lines, not modals — the list behind
+// them is still the point.
 //
 // It is returned as lines rather than a block because the footer's height is
 // what the body is measured against, and because the find box needs to know
 // which row it was drawn on to put the cursor there.
 func (m Model) footerLines() []string {
 	lines := []string{""}
+	if m.hasData && m.input.LimitReached {
+		lines = append(lines, m.styles.Muted.Render(truncateLine(
+			plain.LimitNotice(len(m.input.Tickets)), m.width)))
+	}
 	if m.lastErr != nil && m.hasData {
 		remaining := m.interval - m.now().Sub(m.lastAttempt)
 		lines = append(lines, m.styles.Error.Render(truncateLine(
@@ -712,12 +717,16 @@ func searchBoxWidth(terminalWidth int) int {
 }
 
 // filterLineIndex is which footer row the filter line occupies: after the blank
-// spacer and after the refresh error, when there is one.
+// spacer, the optional cutoff notice and the optional refresh error.
 func (m Model) filterLineIndex() int {
-	if m.lastErr != nil && m.hasData {
-		return 2
+	index := 1
+	if m.hasData && m.input.LimitReached {
+		index++
 	}
-	return 1
+	if m.lastErr != nil && m.hasData {
+		index++
+	}
+	return index
 }
 
 // helpKeys is the keyboard surface the *list's* footer describes, which is the

@@ -42,7 +42,7 @@ func TestPlainEpicReport(t *testing.T) {
 }
 
 func TestPlainRefListReport(t *testing.T) {
-	p := fake.New()
+	p := fake.New(fake.WithMaxTickets(1))
 	got := run([]string{
 		"acme/widgets#112",
 		"--plain",
@@ -83,6 +83,25 @@ func TestPlainQueryReportKeepsFullHeader(t *testing.T) {
 	}
 }
 
+func TestPlainQueryLimitNotice(t *testing.T) {
+	p := fake.New(fake.WithMaxTickets(2))
+	got := run([]string{"--query", "state=opened", "--plain"}, p)
+	if got.code != 0 || got.stderr != "" {
+		t.Fatalf("result = code %d stderr %q", got.code, got.stderr)
+	}
+
+	const notice = "Limit reached — showing 2 tickets."
+	if strings.Count(got.stdout, notice) != 1 {
+		t.Errorf("notice count = %d, want 1:\n%s", strings.Count(got.stdout, notice), got.stdout)
+	}
+	if !strings.Contains(got.stdout, notice+"\n\nIN PROGRESS (2)\n") {
+		t.Errorf("notice is not the final header line before the Ticket groups:\n%s", got.stdout)
+	}
+	if strings.Contains(got.stdout, "total") || strings.Contains(got.stdout, "max_tickets") {
+		t.Errorf("limited report claims an unknown total or configured max:\n%s", got.stdout)
+	}
+}
+
 func TestPlainEmptyQueryWatchlistUsesGenericEmptyState(t *testing.T) {
 	p := fake.New(fake.WithSnapshots(model.WatchlistSnapshot{Tickets: []model.Ticket{}}))
 
@@ -98,15 +117,15 @@ func TestPlainEmptyQueryWatchlistUsesGenericEmptyState(t *testing.T) {
 
 func TestPlainStdinRefListMatchesPositionalSelection(t *testing.T) {
 	input := "acme/widgets#112\nacme/widgets#115 acme/widgets#118\tacme/widgets#121\n"
-	before := runStdin([]string{"--plain", "-"}, input, fake.New())
-	after := runStdin([]string{"-", "--plain"}, input, fake.New())
+	before := runStdin([]string{"--plain", "-"}, input, fake.New(fake.WithMaxTickets(1)))
+	after := runStdin([]string{"-", "--plain"}, input, fake.New(fake.WithMaxTickets(1)))
 	positional := run([]string{
 		"--plain",
 		"acme/widgets#112",
 		"acme/widgets#115",
 		"acme/widgets#118",
 		"acme/widgets#121",
-	}, fake.New())
+	}, fake.New(fake.WithMaxTickets(1)))
 
 	if before.code != 0 || after.code != 0 {
 		t.Fatalf("stdin runs failed: before=%q after=%q", before.stderr, after.stderr)
@@ -118,7 +137,7 @@ func TestPlainStdinRefListMatchesPositionalSelection(t *testing.T) {
 }
 
 func TestPlainSingleStdinRefUsesOneTicketHeader(t *testing.T) {
-	got := runStdin([]string{"--plain", "-"}, "acme/widgets#112", fake.New())
+	got := runStdin([]string{"--plain", "-"}, "acme/widgets#112", fake.New(fake.WithMaxTickets(1)))
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
