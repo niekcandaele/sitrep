@@ -1,5 +1,5 @@
 // Package github is sitrep's GitHub Tracker driver: it turns an issue with
-// sub-issues into a normalized Epic with its Tickets.
+// sub-issues or an explicit list of issues into a normalized Watchlist.
 //
 // The driver speaks GraphQL over plain net/http. A GraphQL client is a POST
 // with a JSON body, and hand-rolling it keeps sitrep free of runtime
@@ -33,6 +33,11 @@ const defaultHost = "github.com"
 // with five thousand children is a bug somewhere, not a situation report, and
 // an unbounded loop against a paging API is how a polling tool hangs.
 const maxPages = 50
+
+// maxRefListAliases bounds one dynamically aliased GraphQL document. Larger
+// explicit lists are finite, known membership and are read in consecutive
+// chunks without changing their Selector order.
+const maxRefListAliases = 100
 
 // requestTimeout is the default per-request budget when the caller supplies no
 // HTTP client of its own.
@@ -139,16 +144,29 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve resolves selector and returns the named Epic and every one of its
-// sub-issues, following sub-issue pagination to the last page. Cross-repo children need no
-// special handling: they arrive as ordinary nodes carrying their own
-// repository, and are attributed to it.
+// Resolve performs the authoritative read selected by selector. An Epic
+// Selector retains the paged sub-issue path; a Ref-list Selector directly reads
+// exactly its named roots without expanding hierarchy.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	switch selected := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, selected.Ref)
+	case provider.RefListSelector:
+		return p.resolveRefList(ctx, selected.Refs)
+	default:
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"github: unsupported Watchlist selector %T", selector)
+	}
+}
+
+// resolveEpic returns the named Epic and every one of its sub-issues, following
+// sub-issue pagination to the last page. Cross-repo children need no special
+// handling: they arrive as ordinary nodes carrying their own repository.
 //
 // Only one level of the sub-issue graph is fetched — sub-issues of sub-issues
 // are not expanded — so ParentID stays empty and every Ticket hangs directly
 // off the Epic.
-func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
-	r := selector.(provider.EpicSelector).Ref
+func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistSnapshot, error) {
 	if err := checkRef(r); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
@@ -206,8 +224,86 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		cursor = next.EndCursor
 	}
 
+	snap.Header = provider.EpicHeader(snap.Epic)
 	snap.Capabilities = p.Capabilities()
 	return snap, nil
+}
+
+// resolveRefList wraps the direct authoritative read in the Ref-list snapshot
+// shape. No outer Epic or Parent is synthesized from the named members.
+func (p *Provider) resolveRefList(ctx context.Context, refs []ref.Ref) (model.WatchlistSnapshot, error) {
+	if len(refs) == 0 {
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"github: a Ref-list selector requires at least one Ref")
+	}
+
+	tickets, err := p.readExactRefs(ctx, refs)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(refs)),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+// readExactRefs authoritatively reads the named issue roots in bounded aliased
+// GraphQL batches. It validates the complete set before I/O and returns no
+// Tickets when any chunk or member fails, so callers cannot expose a partial
+// Watchlist. Query selectors can reuse this exact-root read after resolving
+// their own membership.
+func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	for _, r := range refs {
+		if err := checkExactRef(r); err != nil {
+			return nil, err
+		}
+	}
+
+	tickets := make([]model.Ticket, 0, len(refs))
+	for start := 0; start < len(refs); start += maxRefListAliases {
+		end := min(start+maxRefListAliases, len(refs))
+		chunk, err := p.readExactRefChunk(ctx, refs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		tickets = append(tickets, chunk...)
+	}
+	return tickets, nil
+}
+
+func (p *Provider) readExactRefChunk(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	variables := make(map[string]any, len(refs)*3)
+	for i, r := range refs {
+		suffix := strconv.Itoa(i)
+		variables["owner"+suffix] = r.Owner
+		variables["repo"+suffix] = r.Repo
+		variables["number"+suffix] = r.Number
+	}
+
+	var resp refListResponse
+	header, err := p.do(ctx, buildRefListQuery(len(refs)), variables, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.err(refs, p.endpoint, header); err != nil {
+		return nil, err
+	}
+
+	tickets := make([]model.Ticket, 0, len(refs))
+	for i, r := range refs {
+		repository := resp.Data["ref"+strconv.Itoa(i)]
+		if repository == nil || repository.Issue == nil {
+			if repository != nil && repository.Kind != nil && repository.Kind.TypeName == "PullRequest" {
+				return nil, provider.Errorf(provider.KindBadRef,
+					"github: %s is a pull request, not a Ticket", refKey(r))
+			}
+			return nil, provider.Errorf(provider.KindBadRef,
+				"github: %s not found (or you lack access)", refKey(r))
+		}
+		tickets = append(tickets, newTicket(*repository.Issue, ""))
+	}
+	return tickets, nil
 }
 
 // FetchDetail returns one Ticket's description, comments and blocked-by/blocks
@@ -245,6 +341,16 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 func checkRef(r ref.Ref) error {
 	if r.Tracker != ref.TrackerGitHub {
 		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Epic Ref", r.Raw)
+	}
+	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
+		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)
+	}
+	return nil
+}
+
+func checkExactRef(r ref.Ref) error {
+	if r.Tracker != ref.TrackerGitHub {
+		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Ticket Ref", r.Raw)
 	}
 	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
 		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)
@@ -301,8 +407,8 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 // returning the response headers.
 //
 // The document is a parameter so that every query this driver sends — the
-// polled epic one and the Detail one — shares exactly one place that knows about
-// auth, headers, status handling and decoding.
+// polled Epic and Ref-list reads and the Detail one — shares exactly one place
+// that knows about auth, headers, status handling and decoding.
 //
 // The headers come back because GitHub reports an exhausted GraphQL point
 // budget as an errors[] entry on a *200*, and only the headers say when it

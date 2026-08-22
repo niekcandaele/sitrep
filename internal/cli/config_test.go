@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
@@ -80,6 +82,157 @@ func TestJiraKeyRefMatchesCaseInsensitively(t *testing.T) {
 	}
 	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Key != "ABC-123" || r.Host != "acme.atlassian.net" {
 		t.Errorf("the Provider was given %+v, want ABC-123 at acme.atlassian.net", r)
+	}
+}
+
+func TestMixedTrackerListReportsBothCompletedRoutesBeforeProviderConstruction(t *testing.T) {
+	p := fake.New()
+	got := runWith([]string{"ABC-40", "38", "--json"}, cli.Deps{
+		Provider: p,
+		Config:   parseConfig(t, jiraConfig),
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
+
+	if got.code != 1 || got.stdout != "" {
+		t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
+	}
+	want := "sitrep: Refs in one Watchlist must use one Tracker; \"ABC-40\" resolves to Jira (acme.atlassian.net), while \"38\" resolves to GitHub (github.com)\n"
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
+	}
+	if p.ResolveCalls() != 0 {
+		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
+	}
+}
+
+func TestRefListRejectsDifferentInferredProfiles(t *testing.T) {
+	cfg := parseConfig(t, `
+profiles:
+  alpha:
+    provider: jira
+    host: acme.atlassian.net
+    project: ABC
+    auth:
+      token_env: JIRA_API_TOKEN
+  beta:
+    provider: jira
+    host: acme.atlassian.net
+    project: DEF
+    auth:
+      token_env: JIRA_API_TOKEN
+`)
+	p := fake.New()
+	got := runWith([]string{"ABC-1", "DEF-2", "--json"}, cli.Deps{Provider: p, Config: cfg})
+
+	if got.code != 1 || got.stdout != "" {
+		t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
+	}
+	want := "sitrep: Refs in one Watchlist resolve through different Profiles (\"alpha\" and \"beta\"); pass --profile to choose one\n"
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
+	}
+	if p.ResolveCalls() != 0 {
+		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
+	}
+}
+
+func TestExplicitProfileServesSameHostCrossProjectRefList(t *testing.T) {
+	cfg := parseConfig(t, `
+profiles:
+  alpha:
+    provider: jira
+    host: acme.atlassian.net
+    project: ABC
+    auth:
+      token_env: JIRA_API_TOKEN
+  beta:
+    provider: jira
+    host: acme.atlassian.net
+    project: DEF
+    auth:
+      token_env: JIRA_API_TOKEN
+`)
+	source := model.WatchlistSnapshot{Tickets: []model.Ticket{
+		{ID: "ABC-1", Key: "ABC-1"},
+		{ID: "DEF-2", Key: "DEF-2"},
+	}}
+	p := fake.New(fake.WithSnapshot(source))
+	got := runWith([]string{"--profile", "alpha", "ABC-1", "DEF-2", "--json"}, cli.Deps{Provider: p, Config: cfg})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 2 || selector.Refs[0].Host != "acme.atlassian.net" || selector.Refs[1].Host != "acme.atlassian.net" {
+		t.Errorf("selector = %+v, want two completed same-host Refs", selector)
+	}
+}
+
+func TestJiraRefListAcceptsKeyAndBrowseURLThroughOneProfile(t *testing.T) {
+	p := fake.New(fake.WithSnapshot(model.WatchlistSnapshot{Tickets: []model.Ticket{
+		{ID: "ABC-1", Key: "ABC-1"},
+		{ID: "ABC-2", Key: "ABC-2"},
+	}}))
+	got := runWith([]string{"ABC-1", "https://acme.atlassian.net/browse/ABC-2", "--json"}, cli.Deps{
+		Provider: p,
+		Config:   parseConfig(t, jiraConfig),
+	})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 2 {
+		t.Fatalf("Refs = %d, want 2", len(selector.Refs))
+	}
+	for i, wantKey := range []string{"ABC-1", "ABC-2"} {
+		gotRef := selector.Refs[i]
+		if gotRef.Tracker != ref.TrackerJira || gotRef.Host != "acme.atlassian.net" || gotRef.Key != wantKey {
+			t.Errorf("Refs[%d] = %+v, want Jira %s at acme.atlassian.net", i, gotRef, wantKey)
+		}
+	}
+}
+
+func TestGitLabRefListAcceptsURLAndNativeRootFamilies(t *testing.T) {
+	rawRefs := []string{
+		"https://gitlab.com/acme/widgets/-/issues/1",
+		"https://gitlab.com/groups/acme/-/epics/2",
+		"https://gitlab.com/acme/widgets/-/milestones/3",
+		"https://gitlab.com/groups/acme/-/milestones/4",
+		"acme&5",
+		"acme/widgets%6",
+	}
+	p := fake.New(fake.WithSnapshot(model.WatchlistSnapshot{Tickets: []model.Ticket{
+		{ID: "acme/widgets#1", Key: "acme/widgets#1"},
+		{ID: "acme&2", Key: "acme&2"},
+		{ID: "acme/widgets#3", Key: "acme/widgets%3"},
+		{ID: "groups/acme%4", Key: "groups/acme%4"},
+		{ID: "acme&5", Key: "acme&5"},
+		{ID: "acme/widgets#6", Key: "acme/widgets%6"},
+	}}))
+	cfg := parseConfig(t, `
+profiles:
+  work:
+    provider: gitlab
+    host: gitlab.com
+    auth:
+      token_env: GITLAB_TOKEN
+`)
+	got := runWith(append(rawRefs, "--json"), cli.Deps{Provider: p, Config: cfg})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != len(rawRefs) {
+		t.Fatalf("Refs = %d, want %d", len(selector.Refs), len(rawRefs))
+	}
+	for i, gotRef := range selector.Refs {
+		if gotRef.Tracker != ref.TrackerGitLab || gotRef.Host != "gitlab.com" || gotRef.Raw != rawRefs[i] {
+			t.Errorf("Refs[%d] = %+v, want retained GitLab spelling %q at gitlab.com", i, gotRef, rawRefs[i])
+		}
 	}
 }
 
@@ -264,7 +417,12 @@ func TestVersionAndHelpReadNoConfig(t *testing.T) {
 func TestZeroConfigGitHubIsUnchanged(t *testing.T) {
 	p := fake.New()
 
-	got := runWith([]string{"acme/widgets#111", "--json"}, cli.Deps{Provider: p})
+	got := runWith([]string{"111", "--json"}, cli.Deps{
+		Provider: p,
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
 
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)

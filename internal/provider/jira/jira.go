@@ -4,22 +4,23 @@
 //
 // The driver speaks REST/JSON over plain net/http and encoding/json. There is
 // no Jira SDK and there will not be one (ADR-0001): hand-rolling a handful of
-// GET requests keeps sitrep free of runtime dependencies and keeps the test seam
-// at the HTTP boundary, where recorded payloads can be replayed by a local
-// server.
+// requests keeps sitrep free of runtime dependencies and keeps the test seam at
+// the HTTP boundary, where fixture payloads can be replayed by a local server.
 //
-// Everything here is read-only (ADR-0002): every request this package sends is
-// a GET. No POST, PUT, PATCH or DELETE exists anywhere in it, not even behind a
-// flag.
+// Everything here is read-only (ADR-0002). Jira's authoritative bulk issue read
+// is a POST because its finite key list is a JSON body; it still only reads
+// Tracker state. No mutation endpoint exists anywhere in this package.
 //
-// # REST API v2, not v3
+// # REST API v2, with one v3 bulk read
 //
 // v3 returns descriptions and comment bodies as ADF — the Atlassian Document
 // Format, a JSON document tree — which model.Detail cannot hold: it stores raw
-// text exactly as the Tracker returned it, unrendered. v2 is fully supported on
-// Jira Cloud and returns those same fields as text, which is exactly that
-// contract. The visible consequence is that a Jira description reads as Jira
-// wiki markup rather than markdown, and sitrep displays it verbatim either way.
+// text exactly as the Tracker returned it, unrendered. Epic and Detail reads
+// therefore stay on v2. The authoritative Ref-list read uses v3's bulk fetch
+// endpoint but selects no description or comments, so ADF never enters the thin
+// Ticket model. The visible consequence for Detail is that a Jira description
+// reads as Jira wiki markup rather than markdown, and sitrep displays it
+// verbatim either way.
 //
 // # Epic membership is the modern parent field
 //
@@ -35,6 +36,7 @@
 package jira
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,24 +53,31 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// apiBase is the one place the REST API version is decided; see the package doc
-// for why it is v2 and not v3.
+// apiBase is where the existing Epic and Detail reads choose REST v2; see the
+// package doc for why those paths do not use v3.
 const apiBase = "/rest/api/2"
 
 // The paths this driver reads. searchPath is the enhanced search endpoint,
 // which pages with a nextPageToken cursor; the removed startAt/total /search
 // endpoint is deliberately not used, and there is no fallback that probes both
 // — a driver that sends two requests per refresh to find out which one works is
-// worse than one that is wrong loudly.
+// worse than one that is wrong loudly. bulkFetchPath includes its v3 API base
+// because it is the one intentional exception to apiBase.
 const (
 	searchPath    = "/search/jql"
 	linkTypesPath = "/issueLinkType"
+	bulkFetchPath = "/rest/api/3/issue/bulkfetch"
 )
 
 // epicFields is what the polled path reads: identity, status, the assignee, the
 // parent and the project, and nothing else. Descriptions, comments and links
 // belong to FetchDetail (ADR-0003).
 const epicFields = "summary,status,resolution,assignee,parent,project"
+
+// bulkFetchMaxIssues is Jira Cloud's documented bound for one bulk-fetch body.
+// Ref-list membership is already finite, so exceeding it means bounded chunks,
+// not search pagination or truncation.
+const bulkFetchMaxIssues = 1000
 
 // detailFields is what a drill-in reads. It adds the two expensive fields and
 // keeps the identity ones, so a Detail can render its own links' targets.
@@ -197,15 +206,41 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve resolves selector and returns the named Epic and every issue naming
-// it as their parent, following the search endpoint's cursor to the last page.
-// Cross-project children need no special handling: they arrive carrying their
-// own project and are attributed to it.
+// Resolve performs the authoritative read for selector. Epic selection keeps the
+// existing root-plus-children path; Ref-list selection reads only the exact
+// named issues through Jira's bulk endpoint.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	switch selected := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, selected.Ref)
+	case provider.RefListSelector:
+		if len(selected.Refs) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"jira: a Ref-list Selector must name at least one Jira issue")
+		}
+		tickets, err := p.fetchExactRefs(ctx, selected.Refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		return model.WatchlistSnapshot{
+			Header:       provider.RefListHeader(len(tickets)),
+			Tickets:      tickets,
+			Capabilities: p.Capabilities(),
+		}, nil
+	default:
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"jira: unsupported Selector %T", selector)
+	}
+}
+
+// resolveEpic returns the named Epic and every issue naming it as their parent,
+// following the search endpoint's cursor to the last page. Cross-project
+// children need no special handling: they arrive carrying their own project and
+// are attributed to it.
 //
 // Only one level of the parent graph is fetched — sub-tasks of children are not
 // expanded — exactly as the GitHub driver fetches one level of sub-issues.
-func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
-	r := selector.(provider.EpicSelector).Ref
+func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistSnapshot, error) {
 	key, err := checkRef(r)
 	if err != nil {
 		return model.WatchlistSnapshot{}, err
@@ -216,8 +251,10 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		return model.WatchlistSnapshot{}, err
 	}
 
+	epic := newEpic(issue, p.host)
 	snap := model.WatchlistSnapshot{
-		Epic: newEpic(issue, p.host),
+		Header: provider.EpicHeader(epic),
+		Epic:   epic,
 		// The fetched issue's own parent, for a Ref that turns out to name
 		// a plain Ticket. Reporting it is all this driver does about it: which
 		// screen that opens is internal/cli's decision (ADR-0003).
@@ -295,15 +332,152 @@ func checkRef(r ref.Ref) (string, error) {
 }
 
 // normalizeKey upper-cases an issue key and validates it against the Ref
-// grammar's own key shape. It is both the input check and the injection defence
-// — nothing that fails it can reach a JQL string or a URL path — which is what
-// makes "what can reach JQL" one readable predicate.
+// grammar's own key shape. It is both the input check and the injection defence:
+// nothing that fails it can reach a JQL string, URL path or bulk-fetch body.
 func normalizeKey(s string) (string, bool) {
 	key := strings.ToUpper(strings.TrimSpace(s))
 	if ref.KeyPrefix(key) == "" {
 		return "", false
 	}
 	return key, true
+}
+
+// fetchExactRefs authoritatively reads the finite, already-resolved membership
+// in refs. It is deliberately separate from Selector and Header handling so a
+// future membership selector can reuse the same direct-read path.
+func (p *Provider) fetchExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	keys := make([]string, len(refs))
+	for i, r := range refs {
+		key, err := checkExactRef(r)
+		if err != nil {
+			return nil, err
+		}
+		keys[i] = key
+	}
+
+	tickets := make([]model.Ticket, 0, len(keys))
+	for start := 0; start < len(keys); start += bulkFetchMaxIssues {
+		end := min(start+bulkFetchMaxIssues, len(keys))
+		chunk := keys[start:end]
+		request := bulkFetchRequest{
+			IssueIDsOrKeys: chunk,
+			Fields:         strings.Split(epicFields, ","),
+		}
+
+		var response bulkFetchResponse
+		if err := p.doBulkFetch(ctx, request, chunk[0], &response); err != nil {
+			return nil, err
+		}
+
+		issues := make(map[string]issueWire, len(response.Issues))
+		for _, issue := range response.Issues {
+			key, ok := normalizeKey(issue.Key)
+			if !ok {
+				return nil, provider.Errorf(provider.KindUnavailable,
+					"jira: bulk fetch returned an issue with invalid key %q", issue.Key)
+			}
+			issues[key] = issue
+		}
+
+		missingKey := ""
+		for _, key := range chunk {
+			if _, ok := issues[key]; !ok {
+				missingKey = key
+				break
+			}
+		}
+		if len(response.IssueErrors) > 0 {
+			key := missingKey
+			if key == "" {
+				// A successful issue and an error for the same request would be a
+				// contradictory response. It still cannot become partial output.
+				key = chunk[0]
+				if candidate, ok := normalizeKey(response.IssueErrors[0].ID); ok {
+					key = candidate
+				}
+			}
+			return nil, provider.Errorf(provider.KindBadRef,
+				"jira: %s not found (or you lack access)", key)
+		}
+		if missingKey != "" {
+			// Jira can omit missing or inaccessible issues without adding an
+			// issueErrors entry. Exact membership still makes that a bad Ref.
+			return nil, provider.Errorf(provider.KindBadRef,
+				"jira: %s not found (or you lack access)", missingKey)
+		}
+
+		for _, key := range chunk {
+			tickets = append(tickets, newTicket(issues[key], p.host, ""))
+		}
+	}
+	return tickets, nil
+}
+
+// checkExactRef validates every explicit member before the first request. The
+// Ref-list seam promises one completed Jira Ref per member, but validating here
+// keeps malformed or injected keys away from both JSON bodies and Tracker I/O.
+func checkExactRef(r ref.Ref) (string, error) {
+	if r.Tracker != ref.TrackerJira {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q is not a Jira issue Ref", r.Raw)
+	}
+	key, ok := normalizeKey(r.Key)
+	if !ok {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q does not name a Jira issue", r.Raw)
+	}
+	if strings.TrimSpace(r.Host) == "" {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q names no Jira site — its Profile is missing a host", r.Raw)
+	}
+	return key, nil
+}
+
+// doBulkFetch performs Jira's read-only JSON POST. Existing Epic and Detail
+// requests continue through do unchanged, retaining their v2 URLs, GET methods,
+// headers and error wording.
+func (p *Provider) doBulkFetch(
+	ctx context.Context,
+	body bulkFetchRequest,
+	resource string,
+	out *bulkFetchResponse,
+) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: encoding the bulk fetch request: %w", err)
+	}
+
+	credentials, err := p.resolveCredentials(ctx)
+	if err != nil {
+		return err
+	}
+
+	endpoint := p.baseURL + bulkFetchPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable, "jira: building the request: %w", err)
+	}
+	req.Header.Set("Authorization", credentials.header())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: requesting %s: %w", endpoint, err)
+	}
+	defer res.Body.Close()
+
+	if err := checkStatus(res, resource, bulkFetchPath, p.host); err != nil {
+		return err
+	}
+	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: decoding the response from %s: %w", bulkFetchPath, err)
+	}
+	return nil
 }
 
 // fetchIssue reads one issue with the given field selection.
@@ -328,10 +502,8 @@ func childJQL(key string) string {
 
 // fetchChildren pages the children search to the last page.
 func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticket, error) {
-	var (
-		tickets []model.Ticket
-		token   string
-	)
+	tickets := []model.Ticket{}
+	var token string
 
 	for page := 0; ; page++ {
 		if page >= maxPages {
@@ -381,10 +553,10 @@ func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticke
 	}
 }
 
-// do performs one GET and decodes the response into out. It is the single place
-// that knows about auth, headers, status handling and decoding, so every
-// request this driver sends — the two polled ones and the three a drill-in
-// makes — shares exactly one of each.
+// do performs one v2 GET and decodes the response into out. It is the single
+// place that knows about auth, headers, status handling and decoding for the
+// existing Epic and Detail requests, so those paths share exactly one of each.
+// The read-only v3 bulk POST is deliberately narrow and lives in doBulkFetch.
 //
 // resource is what the request was asking for, named in the errors that have
 // somewhere to point.

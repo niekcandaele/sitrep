@@ -319,6 +319,9 @@ func TestResolveNormalizesTheEpic(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
 	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the Epic display identity", snap.Header)
+	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the recorded epic hangs off nothing", snap.Parent)
 	}
@@ -604,6 +607,9 @@ func TestResolveOnAnIssueRef(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, wantEpic) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, wantEpic)
 	}
+	if snap.Header != provider.EpicHeader(wantEpic) {
+		t.Errorf("Header = %+v, want the decoded issue's display identity", snap.Header)
+	}
 
 	// The embedded epic object is a complete breadcrumb for no extra request.
 	wantParent := model.Parent{
@@ -681,8 +687,8 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := plain.RenderEpic(&buf, snap); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, snap); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	// The renderer is #7's and spells a pull request "#3761" whichever Tracker
 	// served it; the driver's job is only to put the data where it looks.
@@ -690,6 +696,211 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("the report does not mention %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+func TestResolveRefListReadsExactHeterogeneousRootsInOrder(t *testing.T) {
+	responses := map[string][]response{
+		groupMilestonesPath:       {{file: "milestone_group.json"}},
+		issuePath:                 {{file: "issue_with_epic.json"}, {file: "issue_detail.json"}},
+		epicPath:                  {{file: "epic.json"}},
+		projectMilestonesPath:     {{file: "milestone_project.json"}},
+		issueMRsPath:              {{file: "closed_by.json"}},
+		mergeRequestApprovalsPath: {{file: "approvals_approved.json"}},
+		issueNotesPath:            {{file: "notes_empty.json"}},
+		issueLinksPath:            {{file: "links_empty.json"}},
+		epicNotesPath:             {{file: "notes_empty.json"}},
+	}
+	s := newReplayServer(t, responses)
+	p := newProvider(s)
+	selector := provider.RefListSelector{Refs: []ref.Ref{
+		groupMilestoneRef,
+		issueRef,
+		epicRef,
+		projectMilestoneRef,
+	}}
+
+	snap, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if snap.Tickets == nil {
+		t.Fatal("Tickets is nil; every successful Ref-list must return a non-nil slice")
+	}
+	if snap.Header != (model.WatchlistHeader{Title: "4 tickets"}) {
+		t.Errorf("Header = %+v, want the four-Ticket Ref-list identity", snap.Header)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) {
+		t.Errorf("Epic = %+v, want the zero Epic for a Ref-list", snap.Epic)
+	}
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero Parent for a Ref-list", snap.Parent)
+	}
+	if snap.Capabilities != p.Capabilities() {
+		t.Errorf("Capabilities = %+v, want the Provider's %+v", snap.Capabilities, p.Capabilities())
+	}
+	if !snap.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %s, want the zero time", snap.FetchedAt)
+	}
+
+	wants := []struct {
+		id         model.TicketID
+		key        string
+		status     model.StatusCategory
+		native     string
+		repository string
+	}{
+		{"group-milestone:gitlab-org%3", "groups/gitlab-org%3", model.StatusDone, "closed", "gitlab-org"},
+		{issueTicketID, "gitlab-org/cli#8509", model.StatusInProgress, "open", "gitlab-org/cli"},
+		{epicTicketID, "gitlab-org&23356", model.StatusTodo, "open", "gitlab-org"},
+		{"project-milestone:gitlab-org/cli%3", "gitlab-org/cli%3", model.StatusTodo, "active", "gitlab-org/cli"},
+	}
+	if len(snap.Tickets) != len(wants) {
+		t.Fatalf("got %d Tickets, want %d", len(snap.Tickets), len(wants))
+	}
+	for i, want := range wants {
+		got := snap.Tickets[i]
+		if got.ID != want.id || got.Key != want.key || got.Status != want.status ||
+			got.NativeStatus != want.native || got.Repository != want.repository {
+			t.Errorf("Tickets[%d] = {%q %q %v %q %q}, want {%q %q %v %q %q}",
+				i, got.ID, got.Key, got.Status, got.NativeStatus, got.Repository,
+				want.id, want.key, want.status, want.native, want.repository)
+		}
+	}
+	if got := snap.Tickets[1].Assignees; len(got) != 1 || got[0].Login != "jay_mccure" {
+		t.Errorf("issue Assignees = %+v, want the recorded assignee", got)
+	}
+	if got := snap.Tickets[1].PullRequests; len(got) != 1 || got[0].Number != 3761 {
+		t.Errorf("issue PullRequests = %+v, want correlation on the ordered root slice", got)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if snap.Tickets[i].PullRequests != nil {
+			t.Errorf("Tickets[%d].PullRequests = %+v, want no correlation request for a non-issue ID",
+				i, snap.Tickets[i].PullRequests)
+		}
+	}
+
+	for _, path := range []string{groupMilestonesPath, issuePath, epicPath, projectMilestonesPath} {
+		if n := len(s.requestsTo(path)); n != 1 {
+			t.Errorf("%d root requests to %s, want 1", n, path)
+		}
+	}
+	for _, path := range []string{
+		issueMRsPath,
+		relatedMergeRequestsPath("gitlab-org/cli", 8509),
+		mergeRequestApprovalsPath,
+	} {
+		if n := len(s.requestsTo(path)); n != 1 {
+			t.Errorf("%d correlation requests to %s, want 1", n, path)
+		}
+	}
+	if n := len(s.recorded()); n != 7 {
+		t.Errorf("Resolve made %d HTTP requests, want four root reads and three issue-correlation reads", n)
+	}
+	for _, path := range []string{epicIssuesPath, projectMilestoneIssues, groupMilestoneIssuesPath} {
+		if n := len(s.requestsTo(path)); n != 0 {
+			t.Errorf("Resolve made %d requests to child endpoint %s, want none", n, path)
+		}
+	}
+	for _, r := range s.recorded() {
+		if strings.Contains(r.path, "/notes") || strings.Contains(r.path, "/links") {
+			t.Errorf("Resolve requested %s; Detail must stay lazy", r.path)
+		}
+	}
+
+	for _, ticket := range snap.Tickets {
+		detail, err := p.FetchDetail(context.Background(), ticket.ID)
+		if err != nil {
+			t.Fatalf("FetchDetail(%q): %v", ticket.ID, err)
+		}
+		if detail.TicketID != ticket.ID {
+			t.Errorf("FetchDetail(%q).TicketID = %q", ticket.ID, detail.TicketID)
+		}
+	}
+	for path, want := range map[string]int{
+		groupMilestonesPath:   2,
+		issuePath:             2,
+		issueNotesPath:        1,
+		issueLinksPath:        1,
+		epicPath:              2,
+		epicNotesPath:         1,
+		projectMilestonesPath: 2,
+	} {
+		if got := len(s.requestsTo(path)); got != want {
+			t.Errorf("after lazy drill-in, %s received %d requests, want %d", path, got, want)
+		}
+	}
+	for _, path := range []string{epicIssuesPath, projectMilestoneIssues, groupMilestoneIssuesPath} {
+		if n := len(s.requestsTo(path)); n != 0 {
+			t.Errorf("drill-in made %d requests to child endpoint %s, want none", n, path)
+		}
+	}
+}
+
+func TestResolveRefListRootFailureReturnsNoPartialSnapshot(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		issuePath: {{file: "issue.json"}},
+		epicPath:  {{status: http.StatusNotFound, body: `{"message":"404 Epic Not Found"}`}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{
+		issueRef,
+		epicRef,
+	}})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"gitlab-org&23356", "not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if n := len(s.requestsTo(issueMRsPath)); n != 0 {
+		t.Errorf("%d correlation requests were made after a root failed, want none", n)
+	}
+}
+
+func TestResolveRefListRejectsEmptyAndUnknownSelectorsWithoutIO(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector provider.Selector
+		contains string
+	}{
+		{"empty Ref-list", provider.RefListSelector{}, "at least one Ref"},
+		{"unknown nil Selector", nil, "unsupported Selector"},
+		{"pointer Selector", &provider.EpicSelector{Ref: epicRef}, "unsupported Selector"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{})
+			snap, err := newProvider(s).Resolve(context.Background(), tt.selector)
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.contains},
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want zero", snap)
+			}
+			if n := len(s.recorded()); n != 0 {
+				t.Errorf("%d requests were sent; selector validation must be immediate", n)
+			}
+		})
+	}
+}
+
+func TestResolveRefListValidatesEveryTargetBeforeIO(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{})
+	bad := ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"}
+
+	_, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{issueRef, bad}})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"not a GitLab Epic Ref"},
+	})
+	if n := len(s.recorded()); n != 0 {
+		t.Errorf("%d requests were sent before all exact roots were validated", n)
 	}
 }
 
@@ -1133,6 +1344,9 @@ func TestResolveOnAProjectMilestone(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
 	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the milestone display identity", snap.Header)
+	}
 	// A milestone belongs to nothing sitrep models: a project milestone's group
 	// is not its parent.
 	if !snap.Parent.IsZero() {
@@ -1252,6 +1466,9 @@ func TestResolveOnAGroupMilestone(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
+	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the group milestone display identity", snap.Header)
 	}
 	// Children of a group milestone span projects, and each says which.
 	repositories := map[string]bool{}

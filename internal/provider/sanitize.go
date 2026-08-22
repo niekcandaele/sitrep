@@ -45,6 +45,9 @@ func (s sanitized) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 }
 
 func sanitizeSnapshot(snap model.WatchlistSnapshot) model.WatchlistSnapshot {
+	snap.Header.Key = SanitizeLine(snap.Header.Key)
+	snap.Header.Title = SanitizeLine(snap.Header.Title)
+	snap.Header.URL = SanitizeLine(snap.Header.URL)
 	snap.Epic = sanitizeEpic(snap.Epic)
 	snap.Parent = sanitizeParent(snap.Parent)
 	for i := range snap.Tickets {

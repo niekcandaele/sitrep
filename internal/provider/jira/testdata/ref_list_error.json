@@ -1,0 +1,58 @@
+{
+  "issues": [
+    {
+      "id": "10001",
+      "key": "ABC-1",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/10001",
+      "fields": {
+        "summary": "Epic: sitrep v1 — cross-tracker epic monitor",
+        "status": {
+          "name": "To Do",
+          "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+        },
+        "resolution": null,
+        "assignee": null,
+        "parent": null,
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10003",
+      "key": "ABC-3",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/10003",
+      "fields": {
+        "summary": "Walking skeleton",
+        "status": {
+          "name": "In Review",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "resolution": null,
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "ABC", "name": "Acme Backlog" }
+      }
+    },
+    {
+      "id": "10011",
+      "key": "DEF-4",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/10011",
+      "fields": {
+        "summary": "A child living in another project",
+        "status": {
+          "name": "In Progress",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "resolution": null,
+        "assignee": null,
+        "parent": { "id": "10001", "key": "ABC-1", "fields": { "summary": "Epic: sitrep v1" } },
+        "project": { "key": "DEF", "name": "Platform" }
+      }
+    }
+  ],
+  "issueErrors": [
+    {
+      "id": "10007",
+      "errorMessage": "Error fetching issue"
+    }
+  ]
+}

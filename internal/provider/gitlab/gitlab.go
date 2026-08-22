@@ -84,13 +84,16 @@
 //
 // # The request budget
 //
-// One polled refresh costs 1 + ceil(N/100) + N + C + A requests, where N is the
-// Ticket count, C ≤ N is the number of Tickets something is actually closing —
-// only those pay the second correlation request — and A ≤ C is the number whose
-// lead merge request is still live. For a thirty-Ticket Epic that is roughly
-// forty to ninety requests a refresh. Correlation is bounded to
-// mergeRequestWorkers concurrent requests and is fully context-cancellable; a
-// reader deciding whether to raise --interval deserves the number.
+// An expanded Epic refresh costs 1 + ceil(N/100) + N + C + A requests,
+// where N is the Ticket count, C ≤ N is the number of Tickets something is
+// actually closing — only those pay the second correlation request — and A ≤ C
+// is the number whose lead merge request is still live. An explicit Ref-list
+// costs R + I + C + A: one direct root read for each of R Refs, then correlation
+// for its I issue roots; epic and milestone roots skip correlation. For a
+// thirty-Ticket Epic that is roughly forty to ninety requests a refresh.
+// Correlation is bounded to mergeRequestWorkers concurrent requests and is fully
+// context-cancellable; a reader deciding whether to raise --interval deserves
+// the number.
 package gitlab
 
 import (
@@ -107,6 +110,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // pageSize is GitLab's documented maximum page, and maxPages bounds the loop.
@@ -222,24 +226,26 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve resolves selector and returns the named Epic and, for a group epic or
-// a milestone, every child issue GitLab lists under it.
-//
-// A milestone is an Epic that GitLab addresses differently, and nothing after
-// the mapping knows the difference: the same children, the same pagination, the
-// same correlation, the same Detail screen.
-//
-// A project issue Ref comes back with no Tickets, the issue's own identity on
-// Epic and its epic — or, failing that, its milestone — on Parent: GitLab's
-// hierarchy in v1 is epic or milestone → issues, and an issue's own child work items
-// (tasks) are not expanded. internal/cli decodes that into a Detail screen; the
-// driver never decides which screen opens (ADR-0003).
-//
-// Child epics are not expanded either — whatever the children endpoint returns
-// is exactly what sitrep shows.
+// Resolve performs the authoritative read for selector. An EpicSelector keeps
+// the existing GitLab Epic-or-decoded-Ticket behavior. A RefListSelector reads
+// exactly the named roots as Tickets without expanding any root's children.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
-	r := selector.(provider.EpicSelector).Ref
-	t, err := targetFor(r, p.path)
+	switch s := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, s)
+	case provider.RefListSelector:
+		return p.resolveRefList(ctx, s)
+	default:
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"gitlab: unsupported Selector %T", selector)
+	}
+}
+
+// resolveEpic preserves the single-Ref behavior: a group epic or milestone
+// expands to its child issues, while a project issue comes back as the decoded
+// root with no Tickets. Child epics are not expanded.
+func (p *Provider) resolveEpic(ctx context.Context, selector provider.EpicSelector) (model.WatchlistSnapshot, error) {
+	t, err := targetFor(selector.Ref, p.path)
 	if err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
@@ -253,6 +259,7 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		if err := p.fetchIssueSnapshot(ctx, t, &snap); err != nil {
 			return model.WatchlistSnapshot{}, err
 		}
+		snap.Header = provider.EpicHeader(snap.Epic)
 		// FetchedAt is left zero for the caller to stamp.
 		return snap, nil
 
@@ -270,7 +277,78 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	if err := p.correlate(ctx, snap.Tickets); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
+	snap.Header = provider.EpicHeader(snap.Epic)
 	return snap, nil
+}
+
+func (p *Provider) resolveRefList(ctx context.Context, selector provider.RefListSelector) (model.WatchlistSnapshot, error) {
+	if len(selector.Refs) == 0 {
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"gitlab: a Ref-list Selector must contain at least one Ref")
+	}
+
+	tickets, err := p.readExactRefs(ctx, selector.Refs)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(tickets)),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+// readExactRefs authoritatively reads each named root as one thin Ticket. All
+// Refs are validated before the first request, each root uses its direct
+// resource rather than a children endpoint, and merge-request correlation runs
+// once over the complete ordered slice.
+func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	targets := make([]target, len(refs))
+	for i, r := range refs {
+		t, err := targetFor(r, p.path)
+		if err != nil {
+			return nil, err
+		}
+		targets[i] = t
+	}
+
+	tickets := make([]model.Ticket, len(targets))
+	for i, t := range targets {
+		ticket, err := p.fetchRootTicket(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		tickets[i] = ticket
+	}
+	if err := p.correlate(ctx, tickets); err != nil {
+		return nil, err
+	}
+	return tickets, nil
+}
+
+func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket, error) {
+	switch {
+	case t.kind == kindIssue:
+		var issue issueWire
+		if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromIssue(issue), nil
+
+	case t.isMilestone():
+		milestone, err := p.fetchMilestone(ctx, t)
+		if err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromEpic(newEpicFromMilestone(milestone, p.host, t)), nil
+
+	default:
+		var epic epicWire
+		if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path)), nil
+	}
 }
 
 // fetchIssueSnapshot reads the single issue a Ref turned out to name,

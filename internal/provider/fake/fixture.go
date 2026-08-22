@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // The fixture's people. One has a display name, one is a bare login, so
@@ -31,6 +32,11 @@ func fixtureTime(day, hour, min int) time.Time {
 // It is safe to mutate the returned value: each call builds a fresh copy.
 func FixtureSnapshot() model.WatchlistSnapshot {
 	return model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{
+			Key:   "#111",
+			Title: "Widget sync v2: shards, retries & telemetry",
+			URL:   "https://tracker.example.test/acme/widgets/111",
+		},
 		Epic: model.Epic{
 			ID:           "acme/widgets#111",
 			Key:          "#111",
@@ -177,6 +183,24 @@ func FixtureSnapshot() model.WatchlistSnapshot {
 	}
 }
 
+// FixtureRefListSnapshot returns four explicit fixture Tickets with varied
+// status and pull-request state. It has no outer Epic or Parent because every
+// member is an ordinary entry in the Watchlist.
+func FixtureRefListSnapshot() model.WatchlistSnapshot {
+	epic := FixtureSnapshot()
+	tickets := []model.Ticket{
+		epic.Tickets[0],
+		epic.Tickets[3],
+		epic.Tickets[6],
+		epic.Tickets[9],
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(tickets)),
+		Tickets:      tickets,
+		Capabilities: allCapabilities,
+	}
+}
+
 // FixtureTicketSnapshot returns what a batched fetch answers when the Ref
 // named a plain Ticket rather than a Watchlist: no Tickets, the Ticket's own
 // identity in the Epic field, and the Watchlist it belongs to in Parent. It is
@@ -189,6 +213,8 @@ func FixtureTicketSnapshot() model.WatchlistSnapshot {
 	epic := FixtureSnapshot()
 	t := epic.Tickets[0]
 	return model.WatchlistSnapshot{
+		Header:  model.WatchlistHeader{Key: t.Key, Title: t.Title, URL: t.URL},
+		Tickets: []model.Ticket{},
 		Epic: model.Epic{
 			ID:           t.ID,
 			Key:          t.Key,
@@ -218,6 +244,8 @@ func FixtureTicketSnapshot() model.WatchlistSnapshot {
 func FixtureOrphanTicketSnapshot() model.WatchlistSnapshot {
 	t := FixtureSnapshot().Tickets[3]
 	return model.WatchlistSnapshot{
+		Header:  model.WatchlistHeader{Key: t.Key, Title: t.Title, URL: t.URL},
+		Tickets: []model.Ticket{},
 		Epic: model.Epic{
 			ID:           t.ID,
 			Key:          t.Key,

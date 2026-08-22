@@ -39,6 +39,13 @@ var epicRef = ref.Ref{
 	Raw:     "2",
 }
 
+var refListRefs = []ref.Ref{
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 5, Raw: "niekcandaele/sitrep#5"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 91, Raw: "acme/widgets#91"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 3, Raw: "niekcandaele/sitrep#3"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
+}
+
 // response is one replayed answer: a status code and either a fixture file or a
 // literal body.
 type response struct {
@@ -180,6 +187,9 @@ func TestResolveNormalizesTheEpic(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
 	}
+	if got, wantHeader := snap.Header, provider.EpicHeader(want); got != wantHeader {
+		t.Errorf("Header = %+v, want %+v", got, wantHeader)
+	}
 	// The recorded epic hangs off nothing, and that is an ordinary state.
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent", snap.Parent)
@@ -191,6 +201,324 @@ func TestResolveNormalizesTheEpic(t *testing.T) {
 	}
 	if got, want := snap.Capabilities, p.Capabilities(); got != want {
 		t.Errorf("snapshot Capabilities = %+v, want %+v", got, want)
+	}
+}
+
+func TestResolveRefListReadsExactTicketsInSelectorOrder(t *testing.T) {
+	s := newReplayServer(t, response{file: "ref_list.json"})
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) {
+		t.Errorf("Epic = %+v, want the zero Epic", snap.Epic)
+	}
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero Parent", snap.Parent)
+	}
+	if got, want := snap.Header, provider.RefListHeader(4); got != want {
+		t.Errorf("Header = %+v, want %+v", got, want)
+	}
+	if snap.Tickets == nil {
+		t.Fatal("Tickets is nil, want the four explicitly named Tickets")
+	}
+	if !snap.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %v, want the zero time", snap.FetchedAt)
+	}
+	if got, want := snap.Capabilities, p.Capabilities(); got != want {
+		t.Errorf("Capabilities = %+v, want %+v", got, want)
+	}
+
+	wants := []struct {
+		key    string
+		status model.StatusCategory
+		repo   string
+	}{
+		{"niekcandaele/sitrep#5", model.StatusInProgress, "niekcandaele/sitrep"},
+		{"acme/widgets#91", model.StatusCancelled, "acme/widgets"},
+		{"niekcandaele/sitrep#3", model.StatusDone, "niekcandaele/sitrep"},
+		{"acme/widgets#7", model.StatusTodo, "acme/widgets"},
+	}
+	if len(snap.Tickets) != len(wants) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wants))
+	}
+	for i, want := range wants {
+		got := snap.Tickets[i]
+		if got.Key != want.key || got.Status != want.status || got.Repository != want.repo {
+			t.Errorf("Ticket %d = {%q %s %q}, want {%q %s %q}",
+				i, got.Key, got.Status, got.Repository, want.key, want.status, want.repo)
+		}
+		if got.ID == "" {
+			t.Errorf("Ticket %d has no authoritative node ID", i)
+		}
+	}
+	if got := snap.Tickets[0].PullRequests; len(got) != 1 || got[0].Number != 19 {
+		t.Errorf("first Ticket PullRequests = %+v, want recorded pull request #19", got)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want one aliased GraphQL POST for four Refs", len(requests))
+	}
+	request := requests[0]
+	if !strings.HasPrefix(strings.TrimSpace(request.query), "query") || strings.Contains(request.query, "mutation") {
+		t.Errorf("Ref-list document is not a read-only query: %s", request.query)
+	}
+	wantVariables := map[string]any{
+		"owner0": "niekcandaele", "repo0": "sitrep", "number0": float64(5),
+		"owner1": "acme", "repo1": "widgets", "number1": float64(91),
+		"owner2": "niekcandaele", "repo2": "sitrep", "number2": float64(3),
+		"owner3": "acme", "repo3": "widgets", "number3": float64(7),
+	}
+	if !reflect.DeepEqual(request.variables, wantVariables) {
+		t.Errorf("variables = %#v, want %#v", request.variables, wantVariables)
+	}
+	for i := range refListRefs {
+		suffix := fmt.Sprint(i)
+		for _, token := range []string{"ref" + suffix + ": repository", "$owner" + suffix, "$repo" + suffix, "$number" + suffix} {
+			if !strings.Contains(request.query, token) {
+				t.Errorf("query does not contain %q: %s", token, request.query)
+			}
+		}
+	}
+	for _, value := range []string{"niekcandaele", "sitrep", "acme", "widgets"} {
+		if strings.Contains(request.query, value) {
+			t.Errorf("query interpolated Ref value %q instead of using variables: %s", value, request.query)
+		}
+	}
+	for _, field := range []string{"issueOrPullRequest", "id number title url state stateReason", "repository", "assignees", "closedByPullRequestsReferences", "statusCheckRollup"} {
+		if !strings.Contains(request.query, field) {
+			t.Errorf("query omits thin Ticket field %q: %s", field, request.query)
+		}
+	}
+	for _, forbidden := range []string{"subIssues", "parent", "body", "comments", "blockedBy", "blocking"} {
+		if strings.Contains(request.query, forbidden) {
+			t.Errorf("Ref-list query contains %q, want neither Epic expansion nor Detail fields: %s", forbidden, request.query)
+		}
+	}
+}
+
+func TestResolveRefListRejectsAnyBadMemberWithoutPartialOutput(t *testing.T) {
+	tests := []struct {
+		name     string
+		fixture  string
+		contains []string
+	}{
+		{name: "missing repository", fixture: "ref_list_missing.json", contains: []string{"acme/widgets#91", "not found"}},
+		{name: "pull request", fixture: "ref_list_pull_request.json", contains: []string{"acme/widgets#91", "is a pull request, not a Ticket"}},
+		{name: "GraphQL error path names the member", fixture: "ref_list_errors.json", contains: []string{"acme/widgets#91", "not found"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, response{file: tt.fixture})
+			snap, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs[:2]})
+			if err == nil {
+				t.Fatalf("Resolve = %+v, want an error", snap)
+			}
+			providertest.CheckError(t, "github", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: tt.contains,
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial output", snap)
+			}
+			if got := len(s.recorded()); got != 1 {
+				t.Errorf("requests = %d, want one batch request", got)
+			}
+		})
+	}
+}
+
+func TestResolveRefListRejectsInvalidSelectorsBeforeIO(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector provider.Selector
+		contains string
+	}{
+		{name: "empty Ref list", selector: provider.RefListSelector{}, contains: "at least one Ref"},
+		{name: "unknown selector", selector: nil, contains: "unsupported Watchlist selector"},
+		{name: "pointer selector", selector: &provider.EpicSelector{Ref: epicRef}, contains: "unsupported Watchlist selector"},
+		{
+			name: "invalid later Ref",
+			selector: provider.RefListSelector{Refs: []ref.Ref{
+				refListRefs[0],
+				{Tracker: ref.TrackerGitLab, Raw: "https://gitlab.com/acme/widgets/-/issues/9"},
+			}},
+			contains: "not a GitHub Ticket Ref",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t)
+			tokenCalls := 0
+			p := github.New("github.com",
+				github.WithEndpoint(s.URL),
+				github.WithTokenSource(func(context.Context, string) (string, error) {
+					tokenCalls++
+					return fixtureToken, nil
+				}),
+			)
+
+			_, err := p.Resolve(context.Background(), tt.selector)
+			providertest.CheckError(t, "github", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.contains},
+			})
+			if tokenCalls != 0 {
+				t.Errorf("token source calls = %d, want no I/O", tokenCalls)
+			}
+			if got := len(s.recorded()); got != 0 {
+				t.Errorf("requests = %d, want no I/O", got)
+			}
+		})
+	}
+}
+
+func TestResolveRefListChunksAtTheAliasBoundAndPreservesGlobalOrder(t *testing.T) {
+	var (
+		mu         sync.Mutex
+		chunkSizes []int
+	)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		count := len(body.Variables) / 3
+		mu.Lock()
+		chunkSizes = append(chunkSizes, count)
+		mu.Unlock()
+
+		data := make(map[string]any, count)
+		for i := range count {
+			suffix := fmt.Sprint(i)
+			number := int(body.Variables["number"+suffix].(float64))
+			data["ref"+suffix] = map[string]any{
+				"kind": map[string]any{"__typename": "Issue"},
+				"issue": map[string]any{
+					"id":     fmt.Sprintf("issue-%d", number),
+					"number": number,
+					"title":  fmt.Sprintf("Issue %d", number),
+					"url":    fmt.Sprintf("https://github.com/acme/widgets/issues/%d", number),
+					"state":  "OPEN",
+					"repository": map[string]any{
+						"nameWithOwner": "acme/widgets",
+					},
+					"assignees": map[string]any{"nodes": []any{}},
+					"closedByPullRequestsReferences": map[string]any{
+						"totalCount": 0,
+						"nodes":      []any{},
+					},
+				},
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 101)
+	for i := range refs {
+		refs[i] = ref.Ref{
+			Tracker: ref.TrackerGitHub,
+			Host:    "github.com",
+			Owner:   "acme",
+			Repo:    "widgets",
+			Number:  i + 1,
+			Raw:     fmt.Sprintf("acme/widgets#%d", i+1),
+		}
+	}
+	p := github.New("github.com",
+		github.WithEndpoint(s.URL),
+		github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }))
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != len(refs) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(refs))
+	}
+	for i, ticket := range snap.Tickets {
+		if want := fmt.Sprintf("acme/widgets#%d", i+1); ticket.Key != want {
+			t.Errorf("Tickets[%d].Key = %q, want %q", i, ticket.Key, want)
+		}
+	}
+	mu.Lock()
+	gotSizes := append([]int(nil), chunkSizes...)
+	mu.Unlock()
+	if want := []int{100, 1}; !reflect.DeepEqual(gotSizes, want) {
+		t.Errorf("chunk sizes = %v, want %v", gotSizes, want)
+	}
+}
+
+func TestResolveRefListLaterChunkFailureReturnsNoPartialSnapshot(t *testing.T) {
+	var calls int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 2 {
+			_, _ = w.Write([]byte(`{"data":{"ref0":null},"errors":[{"type":"NOT_FOUND","message":"not found","path":["ref0"]}]}`))
+			return
+		}
+
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request: %v", err)
+			return
+		}
+		data := make(map[string]any, len(body.Variables)/3)
+		for i := range len(body.Variables) / 3 {
+			suffix := fmt.Sprint(i)
+			number := int(body.Variables["number"+suffix].(float64))
+			data["ref"+suffix] = map[string]any{
+				"kind": map[string]any{"__typename": "Issue"},
+				"issue": map[string]any{
+					"id": fmt.Sprintf("issue-%d", number), "number": number, "title": "issue", "url": "https://example.test",
+					"state": "OPEN", "repository": map[string]any{"nameWithOwner": "acme/widgets"},
+					"assignees":                      map[string]any{"nodes": []any{}},
+					"closedByPullRequestsReferences": map[string]any{"totalCount": 0, "nodes": []any{}},
+				},
+			}
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 101)
+	for i := range refs {
+		refs[i] = ref.Ref{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: i + 1}
+	}
+	p := github.New("github.com",
+		github.WithEndpoint(s.URL),
+		github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }))
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"acme/widgets#101", "not found"},
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial first chunk", snap)
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want two chunks", calls)
 	}
 }
 

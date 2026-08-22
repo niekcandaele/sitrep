@@ -84,6 +84,7 @@ func (*hostileProvider) Resolve(context.Context, provider.Selector) (model.Watch
 	user := model.User{Login: hostile, DisplayName: hostile, AvatarURL: hostile}
 	pr := model.PullRequest{Number: 1, Title: hostile, URL: hostile, Repository: hostile}
 	return model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{Key: hostile, Title: hostile, URL: hostile},
 		Epic: model.Epic{
 			ID: "e1", Key: hostile, Title: hostile, URL: hostile, NativeStatus: hostile,
 			Repository: hostile, Assignees: []model.User{user}, PullRequests: []model.PullRequest{pr},
@@ -132,6 +133,36 @@ func TestSanitizedCleansEveryField(t *testing.T) {
 
 	checkClean(t, "snapshot", reflect.ValueOf(snap), false)
 	checkClean(t, "detail", reflect.ValueOf(detail), true)
+}
+
+type selectorRecorder struct {
+	selector provider.Selector
+}
+
+func (*selectorRecorder) Name() string                     { return "recorder" }
+func (*selectorRecorder) Capabilities() model.Capabilities { return model.Capabilities{} }
+func (*selectorRecorder) FetchDetail(context.Context, model.TicketID) (model.Detail, error) {
+	return model.Detail{}, nil
+}
+func (p *selectorRecorder) Resolve(_ context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	p.selector = selector
+	return model.WatchlistSnapshot{Tickets: []model.Ticket{}}, nil
+}
+
+func TestSanitizedForwardsRefListSelectorUnchanged(t *testing.T) {
+	inner := &selectorRecorder{}
+	wrapped := provider.Sanitized(inner)
+	want := provider.RefListSelector{Refs: []ref.Ref{
+		{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "one", Number: 1},
+		{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "two", Number: 2},
+	}}
+
+	if _, err := wrapped.Resolve(context.Background(), want); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(inner.selector, want) {
+		t.Errorf("selector = %+v, want %+v", inner.selector, want)
+	}
 }
 
 // checkClean walks every string in a value and asserts it carries no control

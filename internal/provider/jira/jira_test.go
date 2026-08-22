@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,11 +42,12 @@ const fixtureHost = "acme.atlassian.net"
 // sent" compares against literals rather than against the driver's own
 // constants.
 const (
-	epicPath     = "/rest/api/2/issue/ABC-1"
-	ticketPath   = "/rest/api/2/issue/ABC-12"
-	commentsPath = "/rest/api/2/issue/ABC-12/comment"
-	searchPath   = "/rest/api/2/search/jql"
-	linkTypePath = "/rest/api/2/issueLinkType"
+	epicPath      = "/rest/api/2/issue/ABC-1"
+	ticketPath    = "/rest/api/2/issue/ABC-12"
+	commentsPath  = "/rest/api/2/issue/ABC-12/comment"
+	searchPath    = "/rest/api/2/search/jql"
+	linkTypePath  = "/rest/api/2/issueLinkType"
+	bulkFetchPath = "/rest/api/3/issue/bulkfetch"
 )
 
 // epicRef is the Ref the fixtures were written for.
@@ -54,6 +56,14 @@ var epicRef = ref.Ref{
 	Host:    fixtureHost,
 	Key:     "ABC-1",
 	Raw:     "ABC-1",
+}
+
+// refListRefs deliberately differs from Jira's ascending-id response order.
+var refListRefs = []ref.Ref{
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "DEF-4", Raw: "DEF-4"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-7", Raw: "ABC-7"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-1", Raw: "ABC-1"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-3", Raw: "ABC-3"},
 }
 
 // response is one replayed answer: a status code and either a fixture file or a
@@ -73,6 +83,7 @@ type recordedRequest struct {
 	path    string
 	query   map[string][]string
 	headers http.Header
+	body    []byte
 }
 
 // replayServer serves recorded payloads, routed by request path. Jira answers
@@ -97,12 +108,20 @@ func newReplayServer(t *testing.T, responses map[string][]response) *replayServe
 
 	s := &replayServer{responses: responses, served: map[string]int{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading the request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
 		s.mu.Lock()
 		s.requests = append(s.requests, recordedRequest{
 			method:  r.Method,
 			path:    r.URL.Path,
 			query:   r.URL.Query(),
 			headers: r.Header.Clone(),
+			body:    body,
 		})
 		queue, ok := s.responses[r.URL.Path]
 		n := s.served[r.URL.Path]
@@ -210,6 +229,9 @@ func TestResolveNormalizesTheEpic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
+	}
+	if got, headerWant := snap.Header, provider.EpicHeader(want); got != headerWant {
+		t.Errorf("Header = %+v, want the Epic identity %+v", got, headerWant)
 	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the fixture epic hangs off nothing", snap.Parent)
@@ -348,19 +370,258 @@ func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	}
 }
 
-// ADR-0002 with teeth: this driver reads and never writes.
-func TestEveryRequestIsAGet(t *testing.T) {
+func TestResolveRefListUsesAuthoritativeBulkFetch(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
-		epicPath:     {{file: "epic_issue.json"}},
-		searchPath:   {{file: "epic_children_page1.json"}, {file: "epic_children_page2.json"}},
-		ticketPath:   {{file: "detail_full.json"}},
-		commentsPath: {{file: "comments_page.json"}},
-		linkTypePath: {{file: "issue_link_types.json"}},
+		bulkFetchPath: {{file: "ref_list.json"}},
+	})
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if snap.Tickets == nil {
+		t.Fatal("Tickets = nil, want a successful non-nil Ticket slice")
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1", "ABC-3"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("got %d Tickets, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	wantParents := []model.TicketID{"ABC-1", "ABC-1", "", "ABC-1"}
+	wantRepositories := []string{"DEF", "ABC", "ABC", "ABC"}
+	wantStatuses := []model.StatusCategory{
+		model.StatusInProgress, model.StatusCancelled, model.StatusTodo, model.StatusInProgress,
+	}
+	for i, key := range wantKeys {
+		got := snap.Tickets[i]
+		if got.Key != key || got.ParentID != wantParents[i] ||
+			got.Repository != wantRepositories[i] || got.Status != wantStatuses[i] {
+			t.Errorf("Tickets[%d] = {%s parent=%s project=%s status=%s}, want {%s parent=%s project=%s status=%s}",
+				i, got.Key, got.ParentID, got.Repository, got.Status,
+				key, wantParents[i], wantRepositories[i], wantStatuses[i])
+		}
+	}
+	if got, want := snap.Header, provider.RefListHeader(4); got != want {
+		t.Errorf("Header = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) {
+		t.Errorf("Epic = %+v, want the zero Epic", snap.Epic)
+	}
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero outer Parent", snap.Parent)
+	}
+	if snap.Capabilities != p.Capabilities() {
+		t.Errorf("Capabilities = %+v, want %+v", snap.Capabilities, p.Capabilities())
+	}
+	if !snap.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %s, want the zero time", snap.FetchedAt)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("got %d requests, want exactly one bulk fetch", len(requests))
+	}
+	request := requests[0]
+	if request.path != bulkFetchPath || request.method != http.MethodPost {
+		t.Errorf("request = %s %s, want POST %s", request.method, request.path, bulkFetchPath)
+	}
+	if len(request.query) != 0 {
+		t.Errorf("bulk fetch query = %v, want none", request.query)
+	}
+	var rawBody map[string]json.RawMessage
+	if err := json.Unmarshal(request.body, &rawBody); err != nil {
+		t.Fatalf("decoding the bulk fetch request body: %v", err)
+	}
+	if len(rawBody) != 2 || rawBody["issueIdsOrKeys"] == nil || rawBody["fields"] == nil {
+		t.Errorf("bulk fetch body keys = %v, want exactly issueIdsOrKeys and fields", reflect.ValueOf(rawBody).MapKeys())
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		Fields         []string `json:"fields"`
+	}
+	if err := json.Unmarshal(request.body, &body); err != nil {
+		t.Fatalf("decoding the bulk fetch request body fields: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("issueIdsOrKeys = %v, want %v", body.IssueIDsOrKeys, wantKeys)
+	}
+	wantFields := []string{"summary", "status", "resolution", "assignee", "parent", "project"}
+	if !reflect.DeepEqual(body.Fields, wantFields) {
+		t.Errorf("fields = %v, want exactly %v", body.Fields, wantFields)
+	}
+	if got := request.headers.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := request.headers.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got)
+	}
+	if got := request.headers.Get("User-Agent"); got != "sitrep/test" {
+		t.Errorf("User-Agent = %q, want sitrep/test", got)
+	}
+	wantAuthorization := "Basic " + base64.StdEncoding.EncodeToString(
+		[]byte(fixtureEmail+":"+fixtureToken))
+	if got := request.headers.Get("Authorization"); got != wantAuthorization {
+		t.Error("Authorization does not carry the configured Basic email:token credential")
+	}
+}
+
+func TestResolveRefListIssueErrorPreventsPartialOutput(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		bulkFetchPath: {{file: "ref_list_error.json"}},
+	})
+
+	snap, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refListRefs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("Resolve returned a partial snapshot %+v, want the zero snapshot", snap)
+	}
+	if n := len(s.requestsTo(bulkFetchPath)); n != 1 {
+		t.Errorf("got %d bulk requests, want 1", n)
+	}
+}
+
+func TestResolveRefListValidatesEveryKeyBeforeIO(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{})
+	refs := append([]ref.Ref(nil), refListRefs[:1]...)
+	refs = append(refs, ref.Ref{
+		Tracker: ref.TrackerJira,
+		Host:    fixtureHost,
+		Key:     `ABC-7" OR "1`,
+		Raw:     `ABC-7" OR "1`,
+	})
+
+	_, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"does not name a Jira issue"},
+	})
+	if n := len(s.recorded()); n != 0 {
+		t.Errorf("%d requests reached the server; every key must validate before I/O", n)
+	}
+}
+
+func TestResolveRejectsEmptyAndUnknownSelectorsBeforeIO(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector provider.Selector
+		want     string
+	}{
+		{name: "empty Ref list", selector: provider.RefListSelector{}, want: "must name at least one"},
+		{name: "nil Selector", selector: nil, want: "unsupported Selector"},
+		{name: "pointer Selector", selector: &provider.EpicSelector{Ref: epicRef}, want: "unsupported Selector"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{})
+			_, err := newProvider(s).Resolve(context.Background(), tt.selector)
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.want},
+			})
+			if n := len(s.recorded()); n != 0 {
+				t.Errorf("%d requests reached the server; an unsupported Selector must fail immediately", n)
+			}
+		})
+	}
+}
+
+func TestResolveRefListChunksOnlyAtTheBulkFetchBound(t *testing.T) {
+	var (
+		mu         sync.Mutex
+		chunkSizes []int
+	)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != bulkFetchPath {
+			t.Errorf("request = %s %s, want POST %s", r.Method, r.URL.Path, bulkFetchPath)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+			Fields         []string `json:"fields"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		chunkSizes = append(chunkSizes, len(body.IssueIDsOrKeys))
+		mu.Unlock()
+
+		issues := make([]map[string]any, 0, len(body.IssueIDsOrKeys))
+		for _, key := range body.IssueIDsOrKeys {
+			issues = append(issues, map[string]any{
+				"key": key,
+				"fields": map[string]any{
+					"summary":    "Bulk member " + key,
+					"status":     map[string]any{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
+					"resolution": nil,
+					"assignee":   nil,
+					"parent":     nil,
+					"project":    map[string]any{"key": "ABC"},
+				},
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"issues": issues, "issueErrors": []any{},
+		}); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 1001)
+	for i := range refs {
+		key := fmt.Sprintf("ABC-%d", i+1)
+		refs[i] = ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: key, Raw: key}
+	}
+	p := jira.New(fixtureHost,
+		jira.WithBaseURL(s.URL),
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != len(refs) {
+		t.Errorf("got %d Tickets, want %d", len(snap.Tickets), len(refs))
+	}
+	mu.Lock()
+	gotSizes := append([]int(nil), chunkSizes...)
+	mu.Unlock()
+	if want := []int{1000, 1}; !reflect.DeepEqual(gotSizes, want) {
+		t.Errorf("bulk request sizes = %v, want %v", gotSizes, want)
+	}
+}
+
+// ADR-0002 with teeth: every operation reads. Jira requires POST for the bulk
+// read body, but no request may target a mutation endpoint.
+func TestEveryRequestIsARead(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		epicPath:      {{file: "epic_issue.json"}},
+		searchPath:    {{file: "epic_children_page1.json"}, {file: "epic_children_page2.json"}},
+		bulkFetchPath: {{file: "ref_list.json"}},
+		ticketPath:    {{file: "detail_full.json"}},
+		commentsPath:  {{file: "comments_page.json"}},
+		linkTypePath:  {{file: "issue_link_types.json"}},
 	})
 	p := newProvider(s)
 
 	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("resolving the Epic: %v", err)
+	}
+	if _, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs}); err != nil {
+		t.Fatalf("resolving the Ref list: %v", err)
 	}
 	if _, err := p.FetchDetail(context.Background(), "ABC-12"); err != nil {
 		t.Fatalf("FetchDetail: %v", err)
@@ -371,8 +632,16 @@ func TestEveryRequestIsAGet(t *testing.T) {
 		t.Fatal("no requests were recorded")
 	}
 	for _, r := range recorded {
-		if r.method != http.MethodGet {
-			t.Errorf("a %s went to %s; every request this driver sends is a GET", r.method, r.path)
+		wantMethod := http.MethodGet
+		if r.path == bulkFetchPath {
+			wantMethod = http.MethodPost
+		}
+		if r.method != wantMethod {
+			t.Errorf("request to %s used %s, want read method %s", r.path, r.method, wantMethod)
+		}
+		switch r.method {
+		case http.MethodPut, http.MethodPatch, http.MethodDelete:
+			t.Errorf("a mutation method %s reached %s", r.method, r.path)
 		}
 	}
 }
@@ -400,8 +669,8 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := plain.RenderEpic(&buf, snap); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, snap); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	for _, unwanted := range []string{"pull request", "PR ", "#pr"} {
 		if strings.Contains(strings.ToLower(buf.String()), strings.ToLower(unwanted)) {

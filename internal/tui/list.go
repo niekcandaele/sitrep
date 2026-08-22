@@ -36,15 +36,13 @@ type ListInput struct {
 }
 
 // ListFromWatchlistSnapshot adapts one Watchlist snapshot to the list-view
-// contract. It is the only place in the TUI that knows how the snapshot's Epic
-// identifies the current Watchlist; the Model and frame renderer see only a
-// Header and Tickets.
+// contract. The Model and frame renderer see only a Header and Tickets.
 func ListFromWatchlistSnapshot(s model.WatchlistSnapshot) ListInput {
 	return ListInput{
 		Header: Header{
-			Key:   s.Epic.Key,
-			Title: s.Epic.Title,
-			URL:   s.Epic.URL,
+			Key:   s.Header.Key,
+			Title: s.Header.Title,
+			URL:   s.Header.URL,
 		},
 		Tickets:      s.Tickets,
 		Capabilities: s.Capabilities,

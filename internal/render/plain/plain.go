@@ -13,7 +13,7 @@
 // it is given: no clock, no environment, no map iteration reaching the output,
 // no sorting beyond the display order the model already defines. That purity
 // is what makes a golden test at the terminal seam a total test of the
-// renderer, and it is why RenderEpic takes a snapshot and an io.Writer and
+// renderer, and it is why RenderWatchlist takes a snapshot and an io.Writer and
 // nothing else. RenderTicket, the report a Ref that named a Ticket
 // produces, obeys the same rules on the same terms.
 //
@@ -56,17 +56,21 @@ const (
 	ellipsis = "…"
 )
 
-// RenderEpic writes the one-shot text snapshot of snap to w: a header block
-// with the Epic's identity and progress, then its Tickets grouped by Status
+// RenderWatchlist writes the one-shot text snapshot of snap: a header block
+// with the Watchlist identity and progress, then its Tickets grouped by Status
 // Category in the model's display order.
-func RenderEpic(w io.Writer, snap model.WatchlistSnapshot) error {
+func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot) error {
 	var b strings.Builder
 
 	progress := model.ComputeProgress(snap.Tickets)
-	writeHeader(&b, snap.Epic, progress)
+	writeHeader(&b, snap.Header, progress)
 
 	if len(snap.Tickets) == 0 {
-		b.WriteString("This Epic has no Tickets.\n\n")
+		if snap.Header.Key == "" {
+			b.WriteString("This Watchlist has no Tickets.\n\n")
+		} else {
+			b.WriteString("This Epic has no Tickets.\n\n")
+		}
 		_, err := io.WriteString(w, b.String())
 		return err
 	}
@@ -196,15 +200,15 @@ func PullRequestSummary(pr model.PullRequest, ticketRepository string) string {
 	return strings.Join(parts, " ")
 }
 
-// writeHeader writes the Epic's identity, its progress bar and its URL. The
-// Epic's own Native Status is deliberately absent: the header is about its
-// children's progress, and its own "open" adds nothing.
-func writeHeader(b *strings.Builder, epic model.Epic, p model.Progress) {
+// writeHeader writes the Watchlist identity, progress bar and optional URL.
+func writeHeader(b *strings.Builder, header model.WatchlistHeader, p model.Progress) {
 	// Output that starts flush against a shell prompt is hard to read.
 	b.WriteString("\n")
-	// Epic.Key is printed verbatim: the Provider decides whether it is
-	// repo-qualified, and reformatting it here would guess wrong.
-	fmt.Fprintf(b, "Epic %s  %s\n", epic.Key, epic.Title)
+	if header.Key == "" {
+		fmt.Fprintf(b, "Watchlist  %s\n", header.Title)
+	} else {
+		fmt.Fprintf(b, "Epic %s  %s\n", header.Key, header.Title)
+	}
 
 	progress := fmt.Sprintf("%s  %d/%d done", ProgressBar(p, barWidth), p.Done, p.Denominator)
 	if p.Cancelled > 0 {
@@ -212,8 +216,8 @@ func writeHeader(b *strings.Builder, epic model.Epic, p model.Progress) {
 	}
 	fmt.Fprintf(b, "%s  %d%%\n", progress, p.PercentDone)
 
-	if epic.URL != "" {
-		fmt.Fprintf(b, "%s\n", epic.URL)
+	if header.URL != "" {
+		fmt.Fprintf(b, "%s\n", header.URL)
 	}
 	b.WriteString("\n")
 }

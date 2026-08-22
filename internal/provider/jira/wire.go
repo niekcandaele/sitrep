@@ -101,6 +101,25 @@ type searchResponse struct {
 	IsLast        bool        `json:"isLast"`
 }
 
+// bulkFetchRequest and bulkFetchResponse are Jira v3's authoritative finite
+// issue read. IssueError.ID is Jira's issue id (not reliably the requested key),
+// so the driver identifies a failed member by comparing returned issue keys with
+// the requested chunk.
+type bulkFetchRequest struct {
+	IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+	Fields         []string `json:"fields"`
+}
+
+type bulkFetchResponse struct {
+	Issues      []issueWire      `json:"issues"`
+	IssueErrors []issueErrorWire `json:"issueErrors"`
+}
+
+type issueErrorWire struct {
+	ID           string `json:"id"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
 type commentsResponse struct {
 	Comments []commentWire `json:"comments"`
 }

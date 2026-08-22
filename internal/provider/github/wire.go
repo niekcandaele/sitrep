@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,9 +32,22 @@ type graphQLResponse struct {
 	Errors []graphQLError `json:"errors"`
 }
 
+type refListResponse struct {
+	Data   map[string]*refListRepository `json:"data"`
+	Errors []graphQLError                `json:"errors"`
+}
+
+type refListRepository struct {
+	Issue *issueNode `json:"issue"`
+	Kind  *struct {
+		TypeName string `json:"__typename"`
+	} `json:"kind"`
+}
+
 type graphQLError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+	Path    []any  `json:"path"`
 }
 
 type repositoryRef struct {
@@ -131,6 +145,29 @@ type actorNode struct {
 // err turns a GraphQL errors[] payload into one line. A NOT_FOUND entry is the
 // same situation as a null issue and reads better said plainly.
 func (r graphQLResponse) err(target ref.Ref, endpoint string, header http.Header) error {
+	return graphQLErrors(r.Errors,
+		fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint, header)
+}
+
+// err applies the existing GraphQL classification while naming the Ref whose
+// alias GitHub attached to a NOT_FOUND error. If GitHub omits a path, the first
+// Ref is the stable fallback rather than an unordered response-map member.
+func (r refListResponse) err(targets []ref.Ref, endpoint string, header http.Header) error {
+	target := targets[0]
+	for _, graphErr := range r.Errors {
+		if !strings.EqualFold(graphErr.Type, "NOT_FOUND") || len(graphErr.Path) == 0 {
+			continue
+		}
+		alias, ok := graphErr.Path[0].(string)
+		if !ok || !strings.HasPrefix(alias, "ref") {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(alias, "ref"))
+		if err == nil && index >= 0 && index < len(targets) {
+			target = targets[index]
+			break
+		}
+	}
 	return graphQLErrors(r.Errors,
 		fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint, header)
 }
