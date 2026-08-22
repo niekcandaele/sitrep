@@ -95,7 +95,7 @@ func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 	p provider.Provider, r ref.Ref, snap model.WatchlistSnapshot, interval time.Duration) int {
 	open, source := decodedMonitorOptions(p, r, snap, deps.clock())
 
-	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
+	return runMonitor(ctx, stdout, stderr, deps, false, tui.Options{
 		Source:       source,
 		DetailSource: tui.TicketDetailSource(p),
 		Open:         &open,

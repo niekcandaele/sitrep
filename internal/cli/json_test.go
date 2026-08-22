@@ -32,6 +32,17 @@ func run(args []string, p *fake.Provider) result {
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
+func runStdin(args []string, input string, p *fake.Provider) result {
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith(args, &stdout, &stderr, cli.Deps{
+		Provider: p,
+		Now:      fixedClock,
+		Stdin:    strings.NewReader(input),
+		OpenTTY:  panicTTY,
+	})
+	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
 // The headline test: the whole program, run against the fake Provider, emits a
 // document that is byte-for-byte what the golden says.
 func TestJSONEpicDocument(t *testing.T) {
@@ -149,6 +160,153 @@ func TestJSONRefListDocumentAndSelector(t *testing.T) {
 	}
 	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
 		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestStdinSentinelAfterFlagSeparator(t *testing.T) {
+	got := runStdin([]string{"--json", "--", "-"}, "acme/widgets#112", fake.New())
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+}
+
+func TestStdinJSONRefListMatchesPositionalSelection(t *testing.T) {
+	p := fake.New()
+	input := "  acme/widgets#112\tacme/widgets#115\r\n\nacme/widgets#118 acme/widgets#121  "
+	got := runStdin([]string{"-", "--json"}, input, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	checkGolden(t, "ref_list.golden.json", []byte(got.stdout))
+
+	positional := run([]string{
+		"--json",
+		"acme/widgets#112",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}, fake.New())
+	if got.stdout != positional.stdout {
+		t.Error("stdin and positional Refs produced different JSON Watchlists")
+	}
+
+	selector, ok := p.LastSelector().(provider.RefListSelector)
+	if !ok {
+		t.Fatalf("selector = %T, want provider.RefListSelector", p.LastSelector())
+	}
+	wantRaw := []string{
+		"acme/widgets#112",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}
+	gotRaw := make([]string, len(selector.Refs))
+	for i, r := range selector.Refs {
+		gotRaw[i] = r.Raw
+	}
+	if !reflect.DeepEqual(gotRaw, wantRaw) {
+		t.Errorf("selector Refs = %v, want %v", gotRaw, wantRaw)
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestSingleStdinRefRemainsARefList(t *testing.T) {
+	p := fake.New()
+	got := runStdin([]string{"--json", "-"}, "acme/widgets#112\n", p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector, ok := p.LastSelector().(provider.RefListSelector)
+	if !ok {
+		t.Fatalf("selector = %T, want provider.RefListSelector", p.LastSelector())
+	}
+	if len(selector.Refs) != 1 || selector.Refs[0].Raw != "acme/widgets#112" {
+		t.Fatalf("selector Refs = %+v, want one stdin Ref", selector.Refs)
+	}
+	if p.DetailCalls() != 0 {
+		t.Errorf("DetailCalls = %d, want 0: a one-Ref Watchlist must not decode", p.DetailCalls())
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
+		t.Fatalf("unmarshal document: %v", err)
+	}
+	var watchlist struct {
+		Epic     json.RawMessage `json:"epic"`
+		Selector struct {
+			Kind string   `json:"kind"`
+			Refs []string `json:"refs"`
+		} `json:"selector"`
+	}
+	if err := json.Unmarshal(doc["watchlist"], &watchlist); err != nil {
+		t.Fatalf("unmarshal watchlist: %v", err)
+	}
+	if len(watchlist.Epic) != 0 {
+		t.Error("one-Ref stdin Watchlist unexpectedly carries an outer epic")
+	}
+	if watchlist.Selector.Kind != "ref_list" ||
+		!reflect.DeepEqual(watchlist.Selector.Refs, []string{"acme/widgets#112"}) {
+		t.Errorf("watchlist = %+v, want one-ticket Ref-list", watchlist)
+	}
+	var tickets []json.RawMessage
+	if err := json.Unmarshal(doc["tickets"], &tickets); err != nil {
+		t.Fatalf("unmarshal tickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Errorf("tickets = %d, want 1", len(tickets))
+	}
+}
+
+func TestStdinDuplicateRefsKeepFirstSpelling(t *testing.T) {
+	p := fake.New()
+	got := runStdin([]string{"--json", "-"},
+		"acme/widgets#112 https://github.com/acme/widgets/issues/112", p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 1 || selector.Refs[0].Raw != "acme/widgets#112" {
+		t.Fatalf("selector Refs = %+v, want first spelling only", selector.Refs)
+	}
+}
+
+func TestStdinMixedTrackerRefListFailsBeforeProvider(t *testing.T) {
+	p := fake.New()
+	got := runStdin([]string{"--json", "-"},
+		"https://github.com/acme/widgets/issues/112\nhttps://gitlab.com/acme/widgets/-/issues/39", p)
+	if got.code != 1 || got.stdout != "" {
+		t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
+	}
+	if !strings.Contains(got.stderr, "must use one Tracker") {
+		t.Errorf("stderr = %q, want mixed-Tracker error", got.stderr)
+	}
+	if p.ResolveCalls() != 0 {
+		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
+	}
+}
+
+func TestStdinSameHostCrossRepositoryRefListSucceeds(t *testing.T) {
+	p := fake.New()
+	got := runStdin([]string{"--json", "-"}, "acme/widgets#112 acme/gadgets#7", p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 2 || selector.Refs[0].Repo != "widgets" || selector.Refs[1].Repo != "gadgets" {
+		t.Errorf("selector Refs = %+v, want ordered cross-repository Refs", selector.Refs)
+	}
+}
+
+func TestMalformedStdinMemberProducesNoPartialDocument(t *testing.T) {
+	p := fake.New()
+	got := runStdin([]string{"--json", "-"}, "acme/widgets#112 not-a-ref", p)
+	if got.code != 1 || got.stdout != "" {
+		t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
+	}
+	if p.ResolveCalls() != 0 {
+		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
 	}
 }
 

@@ -120,8 +120,12 @@ type Deps struct {
 	// GitLabTokenSource discovers the GitLab API token. When nil it is
 	// gitlab.DefaultTokenSource.
 	GitLabTokenSource gitlab.TokenSource
-	// Stdin is the monitor's input. When nil it is os.Stdin.
+	// Stdin carries selector bytes for a sole "-" argument and otherwise remains
+	// the monitor's key input. When nil it is os.Stdin.
 	Stdin io.Reader
+	// OpenTTY opens the controlling terminal used for monitor keys after Stdin
+	// carried selector bytes. When nil it opens /dev/tty read-only.
+	OpenTTY func() (io.ReadCloser, error)
 	// Config is the loaded global config. When non-nil it wins outright and no
 	// file is read: tests inject it, and so does any caller that has already
 	// read one.
@@ -255,6 +259,17 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
 	}
 
+	stdinSelected, err := stdinSelection(positional)
+	if err != nil {
+		return usageError(stderr, err.Error())
+	}
+	if stdinSelected {
+		positional, err = readStdinRefs(deps.stdin())
+		if err != nil {
+			return runtimeError(stderr, err)
+		}
+	}
+
 	// The command line was fine, so everything from here on is a runtime
 	// failure rather than a usage error — starting with a config file that does
 	// not parse.
@@ -269,7 +284,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	selection, err := deps.resolveSelection(ctx, cfg, positional, *providerName, *profileName)
+	selection, err := deps.resolveSelection(ctx, cfg, positional, stdinSelected, *providerName, *profileName)
 	if err != nil {
 		return runtimeError(stderr, err)
 	}
@@ -317,7 +332,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		// must not exit on one bad DNS lookup, and one wasted
 		// request in an already-failing situation is the right price for keeping
 		// that.
-		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
+		return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
 			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
 			Interval:     refresh,
@@ -349,7 +364,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	}
 
 	initial := tui.ListFromWatchlistSnapshot(snap)
-	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
+	return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
 		Source:       tui.SelectorSource(p, selector, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
 		Initial:      &initial,
@@ -357,13 +372,55 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	})
 }
 
+// stdinSelection recognizes the transport sentinel only in argv. It must be
+// exclusive so command-line and streamed membership can never be merged.
+func stdinSelection(positional []string) (bool, error) {
+	for _, arg := range positional {
+		if arg != "-" {
+			continue
+		}
+		if len(positional) != 1 {
+			return false, errors.New(`"-" reads Refs from stdin and must be the only positional argument`)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func readStdinRefs(input io.Reader) ([]string, error) {
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return nil, fmt.Errorf("reading Refs from stdin: %w", err)
+	}
+	refs := strings.Fields(string(data))
+	if len(refs) == 0 {
+		return nil, errors.New("no Refs were provided on stdin")
+	}
+	return refs, nil
+}
+
 // runMonitor opens the live monitor and blocks until the user quits. The
 // caller's Options carry the run's seams; the terminal and the clock are this
-// function's to fill in, so no call site can forget one.
-func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, opts tui.Options) int {
+// function's to fill in, so no call site can forget one. A stdin-selected
+// monitor has already consumed Stdin as selector data, so its keys come from
+// the controlling terminal instead.
+func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, stdinSelected bool, opts tui.Options) int {
 	opts.Now = deps.clock()
 	opts.Input = deps.stdin()
 	opts.Output = stdout
+
+	if stdinSelected {
+		input, err := deps.openTTY()
+		if err != nil {
+			code, failure := monitorExit(ctx, fmt.Errorf("opening controlling terminal: %w", err))
+			if failure != nil {
+				return runtimeError(stderr, failure)
+			}
+			return code
+		}
+		defer input.Close()
+		opts.Input = input
+	}
 
 	code, failure := monitorExit(ctx, tui.Run(ctx, opts))
 	if failure != nil {
@@ -450,10 +507,11 @@ type resolvedSelection struct {
 	profile  *config.Profile
 }
 
-// resolveSelection resolves every command-line Ref once and turns the invocation
+// resolveSelection resolves every supplied Ref once and turns the invocation
 // form into the Selector reused by preflight and every refresh. Routing stays a
-// startup concern: Providers never read git remotes or Profiles.
-func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs []string,
+// startup concern: Providers never read git remotes or Profiles. forceRefList
+// preserves stdin's explicit-list meaning when it carries only one Ref.
+func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs []string, forceRefList bool,
 	providerName, profileName string) (resolvedSelection, error) {
 	refs := make([]ref.Ref, len(rawRefs))
 	for i, raw := range rawRefs {
@@ -502,7 +560,7 @@ func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs [
 	}
 
 	selection := resolvedSelection{first: refs[0], profile: profiles[0]}
-	if len(rawRefs) == 1 {
+	if len(rawRefs) == 1 && !forceRefList {
 		selection.selector = provider.EpicSelector{Ref: refs[0]}
 		return selection, nil
 	}
@@ -808,12 +866,20 @@ func (d Deps) clock() func() time.Time {
 	return d.Now
 }
 
-// stdin returns the monitor's input.
+// stdin returns selector input for a sole "-" argument and otherwise the
+// monitor's key input.
 func (d Deps) stdin() io.Reader {
 	if d.Stdin == nil {
 		return os.Stdin
 	}
 	return d.Stdin
+}
+
+func (d Deps) openTTY() (io.ReadCloser, error) {
+	if d.OpenTTY != nil {
+		return d.OpenTTY()
+	}
+	return os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 }
 
 // The --provider names. The default auto-detects the Tracker from the Epic

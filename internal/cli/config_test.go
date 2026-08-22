@@ -138,6 +138,63 @@ profiles:
 	}
 }
 
+func TestStdinRefListUsesTheSameProfileRouting(t *testing.T) {
+	cfg := parseConfig(t, `
+profiles:
+  alpha:
+    provider: jira
+    host: acme.atlassian.net
+    project: ABC
+    auth:
+      token_env: JIRA_API_TOKEN
+  beta:
+    provider: jira
+    host: acme.atlassian.net
+    project: DEF
+    auth:
+      token_env: JIRA_API_TOKEN
+`)
+
+	t.Run("different inferred Profiles fail before Resolve", func(t *testing.T) {
+		p := fake.New()
+		got := runWith([]string{"--json", "-"}, cli.Deps{
+			Provider: p,
+			Config:   cfg,
+			Stdin:    strings.NewReader("ABC-1\nDEF-2"),
+		})
+		if got.code != 1 || got.stdout != "" {
+			t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
+		}
+		want := "sitrep: Refs in one Watchlist resolve through different Profiles (\"alpha\" and \"beta\"); pass --profile to choose one\n"
+		if got.stderr != want {
+			t.Errorf("stderr = %q, want %q", got.stderr, want)
+		}
+		if p.ResolveCalls() != 0 {
+			t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
+		}
+	})
+
+	t.Run("an explicit Profile serves every same-host member", func(t *testing.T) {
+		p := fake.New(fake.WithSnapshot(model.WatchlistSnapshot{Tickets: []model.Ticket{
+			{ID: "ABC-1", Key: "ABC-1"},
+			{ID: "DEF-2", Key: "DEF-2"},
+		}}))
+		got := runWith([]string{"--profile", "alpha", "-", "--json"}, cli.Deps{
+			Provider: p,
+			Config:   cfg,
+			Stdin:    strings.NewReader("ABC-1\tDEF-2"),
+		})
+		if got.code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+		}
+		selector := p.LastSelector().(provider.RefListSelector)
+		if len(selector.Refs) != 2 || selector.Refs[0].Host != "acme.atlassian.net" ||
+			selector.Refs[1].Host != "acme.atlassian.net" {
+			t.Errorf("selector = %+v, want two completed same-host Refs", selector)
+		}
+	})
+}
+
 func TestExplicitProfileServesSameHostCrossProjectRefList(t *testing.T) {
 	cfg := parseConfig(t, `
 profiles:
