@@ -797,8 +797,9 @@ func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
 func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
 
 // responsiveHelpKeys keeps compact help actionable and expanded help complete.
-// It shortens capture guidance only when the first three actions do not fit,
-// and stacks full-help columns rather than letting bubbles omit a column.
+// Detail condenses its priority actions as a group; list and search shorten
+// capture guidance when their first three actions do not fit. Expanded columns
+// stack rather than letting bubbles omit one.
 func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 	short := append([]key.Binding(nil), keys.ShortHelp()...)
 	groups := keys.FullHelp()
