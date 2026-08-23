@@ -49,9 +49,8 @@
 // Ticket has no list behind it. u clears the Trail and jumps to the root Watchlist.
 //
 // None of those Detail transitions touches the list's reading, rows, selection,
-// scroll offset, or Filter, which is why the list position and filters survive the
-// round trip without restoration code. The golden that proves it is a byte-for-byte
-// comparison against the unfiltered list frame, not a golden of its own.
+// scroll offset, or Filter. The original list therefore resumes exactly where it
+// was without restoration code.
 //
 // A Ticket's Detail is fetched only when a seated Ticket misses the session cache
 // or r explicitly re-reads it: re-opening a cached Ticket costs the Tracker
