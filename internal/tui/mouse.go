@@ -30,6 +30,7 @@ type detailMouseWheelMsg struct {
 
 type detailMouseLinkMsg struct {
 	sourceID model.TicketID
+	epoch    int
 	identity detailLinkIdentity
 }
 
@@ -94,7 +95,7 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
 	bodyHeight, offset := m.detailBodyHeight(), m.detail.offset
-	sourceID := m.detail.ticket.ID
+	sourceID, epoch := m.detail.ticket.ID, m.detailMouseEpoch
 	rows := make(map[int]detailLinkIdentity, len(doc.LinkRows))
 	for _, row := range doc.LinkRows {
 		rows[row.Line] = row.Identity
@@ -113,7 +114,11 @@ func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd
 			if !ok {
 				return nil
 			}
-			return mouseCmd(detailMouseLinkMsg{sourceID: sourceID, identity: identity})
+			return mouseCmd(detailMouseLinkMsg{
+				sourceID: sourceID,
+				epoch:    epoch,
+				identity: identity,
+			})
 
 		case tea.MouseWheelMsg:
 			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
@@ -171,7 +176,7 @@ func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
 }
 
 func (m Model) onDetailMouseLink(msg detailMouseLinkMsg) (tea.Model, tea.Cmd) {
-	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
 		return m, nil
 	}
 
@@ -201,6 +206,7 @@ func (m Model) toggleMouse() Model {
 		}
 	}
 
+	m.detailMouseEpoch++
 	m.mouseEnabled = !m.mouseEnabled
 	m = m.clearPendingClick().syncMouseKeys()
 	if !m.ready {

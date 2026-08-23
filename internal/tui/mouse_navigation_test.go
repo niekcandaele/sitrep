@@ -39,9 +39,10 @@ func TestDetailMouseHitMapUsesRenderedDocumentLines(t *testing.T) {
 		if !ok {
 			t.Fatalf("x=%d translated to %T", x, cmd())
 		}
-		if msg.sourceID != m.detail.ticket.ID || msg.identity != doc.LinkRows[0].Identity {
-			t.Errorf("x=%d message = %+v, want source %q identity %+v",
-				x, msg, m.detail.ticket.ID, doc.LinkRows[0].Identity)
+		if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch ||
+			msg.identity != doc.LinkRows[0].Identity {
+			t.Errorf("x=%d message = %+v, want source %q epoch %d identity %+v",
+				x, msg, m.detail.ticket.ID, m.detailMouseEpoch, doc.LinkRows[0].Identity)
 		}
 	}
 
@@ -90,6 +91,7 @@ func TestDetailMouseClickAndKeyboardFollowShareTransition(t *testing.T) {
 	if !reflect.DeepEqual(mouseChild.detail.ticket, keyboardChild.detail.ticket) ||
 		mouseChild.detail.linkFocus != keyboardChild.detail.linkFocus ||
 		mouseChild.detailGeneration != keyboardChild.detailGeneration ||
+		mouseChild.detailMouseEpoch != keyboardChild.detailMouseEpoch ||
 		len(mouseChild.trail) != len(keyboardChild.trail) {
 		t.Errorf("mouse/keyboard seats differ:\nmouse: %+v\nkeyboard: %+v", mouseChild.detail, keyboardChild.detail)
 	}
@@ -164,6 +166,22 @@ func TestDetailMouseDomainMessageRevalidatesLastFrameFacts(t *testing.T) {
 		}
 	})
 
+	t.Run("same source after seat round trip", func(t *testing.T) {
+		childModel, _ := base.followDetailLink(captured.Identity)
+		restored := childModel.(Model).popDetailTrail()
+		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.detailMouseEpoch == base.detailMouseEpoch {
+			t.Fatalf("round trip source=%q epoch=%d, want source %q and epoch after %d",
+				restored.detail.ticket.ID, restored.detailMouseEpoch,
+				base.detail.ticket.ID, base.detailMouseEpoch)
+		}
+
+		next, cmd := restored.Update(msg)
+		got := next.(Model)
+		if cmd != nil || got.detail.ticket.ID != base.detail.ticket.ID || len(got.trail) != 0 {
+			t.Error("old-seat callback followed after returning to the same Ticket")
+		}
+	})
+
 	t.Run("removed relationship", func(t *testing.T) {
 		m := base
 		m.detail.input.Detail.Links = m.detail.input.Detail.Links[1:]
@@ -201,6 +219,19 @@ func TestDetailMouseDomainMessageRevalidatesLastFrameFacts(t *testing.T) {
 		got := next.(Model)
 		if cmd != nil || len(got.trail) != 0 {
 			t.Error("queued click followed after mouse capture was disabled")
+		}
+	})
+
+	t.Run("mouse toggled off and on after queue", func(t *testing.T) {
+		m := base.toggleMouse().toggleMouse()
+		if !m.mouseEnabled || m.detailMouseEpoch == base.detailMouseEpoch {
+			t.Fatalf("mouse toggle state enabled=%t epoch=%d, want enabled and epoch after %d",
+				m.mouseEnabled, m.detailMouseEpoch, base.detailMouseEpoch)
+		}
+		next, cmd := m.Update(msg)
+		got := next.(Model)
+		if cmd != nil || len(got.trail) != 0 {
+			t.Error("queued click followed after mouse was toggled off and on")
 		}
 	})
 
@@ -243,6 +274,7 @@ func TestRawDetailMouseMessagesNeverMutate(t *testing.T) {
 	m, _ := navigableDetailModel(t)
 	beforeDetail := m.detail
 	beforeGeneration := m.detailGeneration
+	beforeMouseEpoch := m.detailMouseEpoch
 	for _, msg := range []tea.Msg{
 		tea.MouseClickMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseLeft},
 		tea.MouseWheelMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseWheelDown},
@@ -250,7 +282,8 @@ func TestRawDetailMouseMessagesNeverMutate(t *testing.T) {
 		next, cmd := m.Update(msg)
 		got := next.(Model)
 		if cmd != nil || !reflect.DeepEqual(got.detail, beforeDetail) ||
-			got.detailGeneration != beforeGeneration || len(got.trail) != 0 || got.mode != modeDetail {
+			got.detailGeneration != beforeGeneration || got.detailMouseEpoch != beforeMouseEpoch ||
+			len(got.trail) != 0 || got.mode != modeDetail {
 			t.Errorf("raw %T mutated Model or issued command", msg)
 		}
 	}

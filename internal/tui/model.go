@@ -75,6 +75,11 @@ type Model struct {
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
+	// detailMouseEpoch identifies the currently seated Detail for queued Link
+	// clicks. Rereads leave it stable so a callback can re-resolve the same
+	// relationship after a same-seat reorder; navigation and mouse toggles advance
+	// it so an older frame cannot act after leaving and returning to the same ID.
+	detailMouseEpoch int
 	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
 
 	width, height int
