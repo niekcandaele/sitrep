@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -131,11 +133,12 @@ func DefaultStyles(isDark bool) Styles {
 }
 
 // renderHyperlink is the TUI's only OSC 8 creation seam. Provider.Sanitized
-// applies the same single-line policy at ingestion; repeating that policy here
-// also protects direct Options inputs and keeps controls out of both URI and text.
+// applies the same single-line policy at ingestion; repeating it here protects
+// direct Options inputs too. Normalizing malformed UTF-8 first keeps raw C1
+// bytes from bypassing the rune-based policy and reaching either URI or text.
 func renderHyperlink(style lipgloss.Style, text, url string) string {
-	text = provider.SanitizeLine(text)
-	url = provider.SanitizeLine(url)
+	text = provider.SanitizeLine(strings.ToValidUTF8(text, ""))
+	url = provider.SanitizeLine(strings.ToValidUTF8(url, ""))
 	if url == "" {
 		return style.Render(text)
 	}

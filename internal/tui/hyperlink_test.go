@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -135,6 +138,130 @@ func TestRenderHyperlinkSanitizesVisibleTextAndDropsControlOnlyURL(t *testing.T)
 	}
 	if got, want := raw, provider.SanitizeLine(text); got != want {
 		t.Errorf("sanitized plain fragment = %q, want %q", got, want)
+	}
+}
+
+func TestRenderHyperlinkNormalizesMalformedUTF8BeforeControlSanitizing(t *testing.T) {
+	rawC1 := make([]byte, 0, 0x20)
+	for b := 0x80; b <= 0x9f; b++ {
+		rawC1 = append(rawC1, byte(b))
+	}
+
+	tests := []struct {
+		name  string
+		bytes []byte
+	}{
+		{name: "lone continuation", bytes: []byte{0x80}},
+		{name: "raw C1 range", bytes: rawC1},
+		{name: "truncated two-byte", bytes: []byte{0xc2}},
+		{name: "truncated three-byte", bytes: []byte{0xe2, 0x82}},
+		{name: "truncated four-byte", bytes: []byte{0xf0, 0x9f, 0x92}},
+		{name: "overlong escape", bytes: []byte{0xc0, 0x9b}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text := "界text-" + string(tt.bytes) + "-safe"
+			url := "https://example.test/界/" + string(tt.bytes) + "/safe"
+			wantText := provider.SanitizeLine(strings.ToValidUTF8(text, ""))
+			wantURL := provider.SanitizeLine(strings.ToValidUTF8(url, ""))
+
+			raw := renderHyperlink(lipgloss.NewStyle(), text, url)
+			if !utf8.ValidString(raw) {
+				t.Errorf("rendered hyperlink contains malformed UTF-8: % x", []byte(raw))
+			}
+			assertBalancedHyperlink(t, raw, wantURL, 1)
+			if got := ansi.Strip(raw); got != wantText {
+				t.Errorf("visible text = %q, want %q", got, wantText)
+			}
+			if !strings.Contains(raw, "界") {
+				t.Errorf("valid Unicode was removed: %q", raw)
+			}
+		})
+	}
+}
+
+func TestDirectOptionsAndDetailSourceCannotInjectRawC1OSC(t *testing.T) {
+	rawOSC52 := string([]byte{0x9d}) + "52;c;YXR0YWNr\a"
+	rawST := string([]byte{0x9c})
+	hostileURL := "https://safe.example/界/" + rawOSC52 + rawST +
+		"\x1b]8;;https://evil.example/\aend"
+	cleanURL := provider.SanitizeLine(strings.ToValidUTF8(hostileURL, ""))
+
+	tests := []struct {
+		name          string
+		open          OpenTicket
+		detail        model.Detail
+		caps          model.Capabilities
+		visibleMarker string
+		wantText      string
+		wantScopes    int
+	}{
+		{
+			name: "direct Open Ticket header",
+			open: OpenTicket{Ticket: model.Ticket{
+				ID: "ROOT", Key: "ROOT-" + rawOSC52 + "界", Title: "Root", URL: hostileURL,
+			}},
+			detail:        model.Detail{Description: "DIRECT OPEN READY"},
+			visibleMarker: "DIRECT OPEN READY",
+			wantText:      "ROOT-52;c;YXR0YWNr界",
+			wantScopes:    2,
+		},
+		{
+			name: "injectable DetailSource Link",
+			open: OpenTicket{Ticket: model.Ticket{
+				ID: "ROOT", Key: "ROOT", Title: "Root",
+			}},
+			detail: model.Detail{
+				Description: "DETAIL SOURCE READY",
+				Links: []model.Link{{
+					Kind: model.LinkRelates, NativeLabel: "relates to",
+					Target: model.LinkTarget{
+						ID: "TARGET", Key: "TARGET-" + rawOSC52 + "界",
+						Title: "Target-" + rawST + rawOSC52 + "界", URL: hostileURL,
+					},
+				}},
+			},
+			caps:          model.Capabilities{BlockingLinks: true},
+			visibleMarker: "DETAIL SOURCE READY",
+			wantText:      "TARGET-52;c;YXR0YWNr界",
+			wantScopes:    2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newClock()
+			s := startWith(t, c, Options{
+				Open: &tt.open,
+				DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+					return tt.detail, tt.caps, nil
+				},
+				Interval: time.Minute,
+				Now:      c.now,
+			})
+			s.waitFor(t, tt.visibleMarker)
+			m, _ := s.finish(t)
+			raw := m.View().Content
+
+			if !utf8.ValidString(raw) {
+				t.Errorf("frame contains malformed UTF-8: % x", []byte(raw))
+			}
+			assertBalancedHyperlink(t, raw, cleanURL, tt.wantScopes)
+			if strings.Contains(raw, "\x1b]52;") || strings.Contains(raw, string([]byte{0x9d})) ||
+				strings.Contains(raw, string([]byte{0x9c})) {
+				t.Errorf("raw C1/OSC 52 payload reached frame: %q", raw)
+			}
+			if got := strings.Count(raw, "\x1b]"); got != tt.wantScopes*2 {
+				t.Errorf("OSC sequence count = %d, want %d intended OSC 8 open/resets", got, tt.wantScopes*2)
+			}
+			if got := strings.Count(raw, "\a"); got != tt.wantScopes*2 {
+				t.Errorf("OSC terminator count = %d, want %d", got, tt.wantScopes*2)
+			}
+			if !strings.Contains(ansi.Strip(raw), tt.wantText) {
+				t.Errorf("sanitized visible text missing from frame: %q", ansi.Strip(raw))
+			}
+		})
 	}
 }
 
