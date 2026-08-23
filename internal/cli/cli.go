@@ -58,45 +58,58 @@ func interrupted(ctx context.Context) (int, bool) {
 	return exitFailure, false
 }
 
-const usage = `sitrep - a read-only terminal situation report on a delegated epic.
+const usage = `sitrep - a read-only terminal ticket viewer.
 
 Usage:
   sitrep [flags] <ref>
+  sitrep [flags] <ref> <ref>...
+  sitrep [flags] -
+  sitrep [flags] --query <query>
 
-Arguments:
-  <ref>   the Epic Ref to report on, in any of these forms:
-            111                                        a bare issue number
-            acme/widgets#111                           owner, repository, number
-            https://github.com/acme/widgets/issues/111  a full issue URL
-            ABC-123                                    a Jira-style key, matched
-                                                       to a Profile by its key
-                                                       prefix
-            acme&12                                    a GitLab epic reference
-            https://gitlab.com/groups/acme/-/epics/12  a GitLab group epic URL
-            acme/widgets%3                             a GitLab milestone
-                                                       reference — a milestone is
-                                                       how GitLab Free spells an
-                                                       Epic
-            https://gitlab.com/acme/widgets/-/milestones/3
-                                                       a GitLab milestone URL
-          A bare number is resolved through the origin remote of the current
-          directory's git clone; the other forms work anywhere.
-          A Ref with sub-tickets is an Epic; one without is a Ticket, which
-          sitrep reports on directly — press u there to open its Epic.
+Selectors:
+  One Ref selects an Epic Watchlist. If it resolves to a plain Ticket instead,
+  sitrep opens that Ticket's Detail.
+
+  Two or more positional Refs select exact Tickets in order. They need no common
+  Epic, but must use one Tracker and connection.
+
+  A sole "-" reads whitespace-separated Refs from stdin. It must be the only
+  positional argument; even one stdin Ref keeps exact Ref-list semantics.
+
+  --query passes the exact, opaque tracker-native Query to the selected Tracker.
+  It cannot be combined with positional Refs or stdin. Use an explicit Profile,
+  or an unambiguous supported GitHub/GitLab origin in the current clone.
+
+Ref forms:
+  111                                        bare issue number
+  #111                                       bare issue number
+  acme/widgets#111                           owner, repository, number
+  https://github.com/acme/widgets/issues/111  GitHub issue URL
+  ABC-123                                    Jira key; its prefix matches a Profile
+  https://acme.atlassian.net/browse/ABC-123   Jira browse URL
+  https://gitlab.com/acme/widgets/-/issues/7  GitLab issue/work-item URL
+  acme&12                                    GitLab native epic Ref
+  https://gitlab.com/groups/acme/-/epics/12  GitLab native epic URL
+  acme/widgets%3                             GitLab milestone Ref
+  https://gitlab.com/acme/widgets/-/milestones/3
+                                             GitLab milestone URL
+
+  A bare number is resolved through the current clone's origin remote; the other
+  forms work anywhere. GitLab's &N names a native Epic; %N is the milestone-as-
+  Epic fallback available on GitLab Free.
 
 Flags:
   -h, --help              show this help and exit
       --interval <dur>    how often the monitor refreshes (default 60s)
       --no-mouse          start the monitor without mouse capture
-      --json              print the epic as a JSON document and exit
-      --plain             print a one-shot text snapshot of the epic and exit
-      --profile <name>    the Profile to connect with, from
-                          ~/.config/sitrep/config.yml (default: matched from the
-                          ref)
-      --provider <name>   Provider to read from: "auto" (the default) picks one
-                          from the Epic Ref, "github" forces the GitHub driver,
-                          "gitlab" the GitLab driver, "jira" the Jira driver,
-                          "fake" serves a built-in fixture epic
+      --json              print a one-shot JSON report and exit
+      --plain             print a one-shot Watchlist or Ticket report and exit
+      --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
+                          matched from the route or Refs)
+      --provider <name>   Provider to read from: "auto" (the default) detects
+                          from the route or Refs; "github", "gitlab", or "jira"
+                          forces that driver; "fake" serves a fixture Watchlist
+      --query <query>     exact tracker-native Query selecting a Watchlist
       --version           show version information and exit
 `
 
@@ -225,8 +238,8 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	fs.Usage = func() {}
 
 	showVersion := fs.Bool("version", false, "show version information and exit")
-	asJSON := fs.Bool("json", false, "print the epic as a JSON document and exit")
-	asPlain := fs.Bool("plain", false, "print a one-shot text snapshot of the epic and exit")
+	asJSON := fs.Bool("json", false, "print a one-shot JSON report and exit")
+	asPlain := fs.Bool("plain", false, "print a one-shot Watchlist or Ticket report and exit")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
@@ -271,7 +284,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return usageError(stderr, `--query cannot be combined with positional Refs or "-"`)
 	}
 	if !querySelected && len(positional) == 0 {
-		return usageError(stderr, "an Epic Ref is required")
+		return usageError(stderr, `a Selector is required: pass one or more Refs, "-" for stdin, or --query`)
 	}
 
 	stdinSelected := false
@@ -905,11 +918,11 @@ func gitLabProfileForHostlessRef(cfg config.Config, r ref.Ref) (*config.Profile,
 		if needsProject {
 			return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on, "+
 				"and which group or project it names — add a gitlab profile with a host and a "+
-				"project to %s, or pass the epic's full URL",
+				"project to %s, or pass the Ref's full URL",
 				r.Raw, configLocation(cfg.Path))
 		}
 		return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on — "+
-			"add a gitlab profile to %s, or pass the epic's full URL",
+			"add a gitlab profile to %s, or pass the Ref's full URL",
 			r.Raw, configLocation(cfg.Path))
 	default:
 		names := make([]string, len(matches))
@@ -1083,9 +1096,9 @@ func (d Deps) runTUI(ctx context.Context, opts tui.Options) error {
 	return tui.Run(ctx, opts)
 }
 
-// The --provider names. The default auto-detects the Tracker from the Epic
-// Ref; the others force one driver, which is how a development run reaches the
-// fake and how a GitHub Enterprise ref can be pinned to the GitHub driver.
+// The --provider names. The default auto-detects the Tracker from the route or
+// Refs; the others force one driver, which is how a development run reaches the
+// fake and how a GitHub Enterprise Ref can be pinned to the GitHub driver.
 const (
 	providerAuto   = "auto"
 	providerGitHub = "github"
@@ -1167,7 +1180,7 @@ func forceTracker(name string, r ref.Ref) (ref.Tracker, error) {
 	known := ref.HostTracker(r.Host)
 	keyed := ref.KeyPrefix(r.Key) != "" && forced != ref.TrackerJira
 	if (known != ref.TrackerUnknown && known != forced) || keyed {
-		return "", fmt.Errorf("%q is not a %s Epic Ref", r.Raw, providerDisplayName(name))
+		return "", fmt.Errorf("%q is not a %s Ref", r.Raw, providerDisplayName(name))
 	}
 	return forced, nil
 }

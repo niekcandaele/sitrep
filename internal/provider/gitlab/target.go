@@ -52,7 +52,7 @@ func (t target) isMilestone() bool {
 // after a round trip.
 func targetFor(r ref.Ref, defaultPath string) (target, error) {
 	if r.Tracker != ref.TrackerGitLab {
-		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Epic Ref", r.Raw)
+		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Ref", r.Raw)
 	}
 
 	t := target{kind: kindIssue, iid: r.Number}

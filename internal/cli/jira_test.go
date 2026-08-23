@@ -192,7 +192,7 @@ func TestProviderJiraRejectsAGitHubRef(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"is not a Jira Epic Ref", "acme/widgets#111"} {
+	for _, want := range []string{"is not a Jira Ref", "acme/widgets#111"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}

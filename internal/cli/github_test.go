@@ -250,7 +250,7 @@ func TestRefResolutionFailures(t *testing.T) {
 		{
 			name:       "a GitLab URL forced onto the GitHub driver",
 			args:       []string{"--provider", "github", "https://gitlab.com/acme/widgets/-/issues/7", "--json"},
-			wantStderr: []string{"is not a GitHub Epic Ref"},
+			wantStderr: []string{"is not a GitHub Ref"},
 		},
 	}
 

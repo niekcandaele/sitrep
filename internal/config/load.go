@@ -298,14 +298,14 @@ func (c Config) validateProject(p Profile) error {
 		// every shape a GitHub Ref can take. Rejecting it is honest;
 		// accepting and ignoring it is the worst thing a config file can do.
 		return c.profileErrorf(p.Name,
-			"project is not used by a github profile (a GitHub Epic Ref carries its own owner/repo)")
+			"project is not used by a github profile (a GitHub Ref carries its own owner/repo)")
 	}
 	if p.Provider != providerJira {
 		return nil
 	}
 	if p.Project == "" {
 		return c.profileErrorf(p.Name,
-			"project is required for a jira profile: it is the key prefix Epic Refs match on")
+			"project is required for a jira profile: it is the key prefix Refs match on")
 	}
 	// The project key is the prefix of every Ref key in the project, so it
 	// has to be a shape the Ref grammar can produce.

@@ -1,4 +1,4 @@
-// Command sitrep prints a read-only situation report on a delegated epic.
+// Command sitrep is a read-only terminal ticket viewer over a resolved Watchlist.
 package main
 
 import (

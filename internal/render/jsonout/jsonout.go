@@ -185,8 +185,7 @@ type detailDocument struct {
 type TicketDocument struct {
 	// Ticket is the decoded Ticket in list-model form.
 	Ticket model.Ticket
-	// Parent is the Watchlist it belongs to. The zero Parent emits no parent
-	// key at all.
+	// Parent is the Ticket's parent. The zero Parent emits no parent key at all.
 	Parent model.Parent
 	// Detail is the expensive per-ticket data, exactly as the Provider returned
 	// it.
@@ -195,8 +194,7 @@ type TicketDocument struct {
 	Capabilities model.Capabilities
 	// ProviderName is the serving Provider's Name.
 	ProviderName string
-	// GeneratedAt is the caller's clock reading, matching generated_at in the
-	// epic document.
+	// GeneratedAt is the caller's clock reading for the wire document.
 	GeneratedAt time.Time
 }
 
@@ -263,7 +261,7 @@ func selectorRef(r ref.Ref) string {
 
 // RenderDetail writes the detail document for one Ticket to w. caps decides
 // which optional sections appear at all, and generatedAt is the caller's clock
-// reading, matching generated_at in the epic document.
+// reading for the wire document.
 func RenderDetail(w io.Writer, d model.Detail, caps model.Capabilities, providerName string, generatedAt time.Time) error {
 	return encode(w, newDetailDocument(d, caps, providerName, generatedAt))
 }

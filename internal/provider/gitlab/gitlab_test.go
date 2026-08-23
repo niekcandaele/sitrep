@@ -1424,7 +1424,7 @@ func TestResolveRefListValidatesEveryTargetBeforeIO(t *testing.T) {
 	_, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{issueRef, bad}})
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindBadRef,
-		Contains: []string{"not a GitLab Epic Ref"},
+		Contains: []string{"not a GitLab Ref"},
 	})
 	if n := len(s.recorded()); n != 0 {
 		t.Errorf("%d requests were sent before all exact roots were validated", n)
@@ -1442,7 +1442,7 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 		{
 			name: "a GitHub Ref",
 			r:    ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
-			want: "is not a GitLab Epic Ref",
+			want: "is not a GitLab Ref",
 		},
 		{
 			name: "no path and no Profile project",

@@ -131,7 +131,7 @@ func Parse(ctx context.Context, raw string, opts ...Option) (Ref, error) {
 
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return Ref{}, errors.New("an Epic Ref is required")
+		return Ref{}, errors.New("a Ref is required")
 	}
 
 	if strings.Contains(trimmed, "://") {
@@ -838,7 +838,7 @@ func pathSegments(p string) []string {
 }
 
 func unparseable(raw string) error {
-	return fmt.Errorf(`cannot parse %q as an Epic Ref — pass an issue URL, "owner/repo#123", `+
+	return fmt.Errorf(`cannot parse %q as a Ref — pass an issue URL, "owner/repo#123", `+
 		`"PROJ-123" or a bare number inside a clone (run "sitrep --help" for every accepted form)`,
 		strings.TrimSpace(raw))
 }
