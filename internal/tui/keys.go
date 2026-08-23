@@ -213,18 +213,13 @@ func DefaultDetailKeyMap() DetailKeyMap {
 // Parent appears only when a root Watchlist context is available. This footer
 // line is the complete walk-up affordance: no second help line and no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	links := k.NextLink
-	links.SetHelp("tab/⇧tab", "links")
-	return []key.Binding{k.ToggleMouse, k.Back, k.Quit, k.Follow, links, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
+	return detailHelpRolesFrom(k).defaultShortBindings()
 }
 
 // FullHelp keeps the mouse escape hatch and essential Detail actions together;
 // the model stacks both groups when the terminal cannot show them side by side.
 func (k DetailKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.ToggleMouse, k.Back, k.Follow, k.NextLink, k.PreviousLink, k.Parent, k.Refresh, k.Help, k.Quit},
-		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-	}
+	return detailHelpRolesFrom(k).fullGroups()
 }
 
 // SearchKeyMap is the keyboard while the find box is open. It is deliberately

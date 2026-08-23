@@ -782,12 +782,6 @@ func (m Model) helpKeys() help.KeyMap {
 	return m.responsiveHelpKeys(m.keys)
 }
 
-// detailHelpKeys applies the same responsive help layout to Detail without
-// making list body measurements depend on the screen currently in front.
-func (m Model) detailHelpKeys() help.KeyMap {
-	return m.responsiveHelpKeys(m.detailKeys)
-}
-
 type responsiveHelpKeyMap struct {
 	short []key.Binding
 	full  [][]key.Binding
@@ -796,10 +790,8 @@ type responsiveHelpKeyMap struct {
 func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
 func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
 
-// responsiveHelpKeys keeps compact help actionable and expanded help complete.
-// Detail condenses its priority actions as a group; list and search shorten
-// capture guidance when their first three actions do not fit. Expanded columns
-// stack rather than letting bubbles omit one.
+// responsiveHelpKeys keeps list and search help actionable at narrow widths.
+// Detail owns its richer role-aware layout in detailhelp.go.
 func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 	short := append([]key.Binding(nil), keys.ShortHelp()...)
 	groups := keys.FullHelp()
@@ -810,19 +802,15 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 
 	unbounded := m.help
 	unbounded.SetWidth(0)
-	if _, detail := keys.(DetailKeyMap); detail {
-		short = compactDetailShortHelp(unbounded, short, m.width)
-	} else {
-		if len(short) >= 3 && short[0].Help().Key == "m" &&
-			short[0].Help().Desc == mouseEnabledHelp &&
-			lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-			short[0].SetHelp("m", mouseEnabledCompactHelp)
-		}
-		if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
-			short[0].Help().Desc == searchMouseHintHelp &&
-			lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-			short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
-		}
+	if len(short) >= 3 && short[0].Help().Key == "m" &&
+		short[0].Help().Desc == mouseEnabledHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("m", mouseEnabledCompactHelp)
+	}
+	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
+		short[0].Help().Desc == searchMouseHintHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
 	}
 	if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
 		stacked := make([]key.Binding, 0)
@@ -832,263 +820,6 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 		full = [][]key.Binding{stacked}
 	}
 	return responsiveHelpKeyMap{short: short, full: full}
-}
-
-// detailHelpDiscoveryWidth is the narrowest supported Detail layout. From this
-// boundary onward the short footer always names how to expand the remaining keys.
-const detailHelpDiscoveryWidth = 42
-
-func compactDetailShortHelp(renderer help.Model, bindings []key.Binding, width int) []key.Binding {
-	if width <= 0 {
-		return bindings
-	}
-	bindings = prioritizedDetailShortHelp(bindings)
-	priorityCount := 7
-	budget := max(width, 1)
-	fits := func() bool {
-		return lipgloss.Width(renderer.ShortHelpView(bindings[:priorityCount])) <= budget
-	}
-	if fits() {
-		return fittingShortHelpPrefix(renderer, bindings, priorityCount, budget)
-	}
-	if descriptive, ok := descriptiveDetailShortBinding(bindings, budget); ok {
-		return []key.Binding{descriptive}
-	}
-	if !bindings[4].Enabled() {
-		return []key.Binding{compactDetailShortBinding(bindings, width)}
-	}
-
-	bindings[4].SetHelp("tab/⇧", "")
-	if fits() {
-		return bindings[:priorityCount]
-	}
-	bindings[4].SetHelp("tab/⇧tab", "links")
-
-	if bindings[0].Help().Desc == mouseEnabledHelp {
-		bindings[0].SetHelp("m", "off/⇧drag")
-	}
-	if fits() {
-		return bindings[:priorityCount]
-	}
-
-	bindings[2].SetHelp("q", "")
-	bindings[3].SetHelp("↵", "follow")
-	if fits() {
-		return bindings[:priorityCount]
-	}
-
-	return []key.Binding{compactDetailShortBinding(bindings, width)}
-}
-
-func fittingShortHelpPrefix(renderer help.Model, bindings []key.Binding, minimum, budget int) []key.Binding {
-	end := minimum
-	for end < len(bindings) {
-		if lipgloss.Width(renderer.ShortHelpView(bindings[:end+1])) > budget {
-			break
-		}
-		end++
-	}
-	return bindings[:end]
-}
-
-func descriptiveDetailShortBinding(bindings []key.Binding, budget int) (key.Binding, bool) {
-	mouse := "m on"
-	if bindings[0].Help().Desc != "on" {
-		mouse = "m off · shift-drag to select text"
-	}
-	parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q quit"}
-	if bindings[3].Enabled() {
-		parts = append(parts, "enter follow")
-	}
-	linkIndex := -1
-	if bindings[4].Enabled() {
-		linkIndex = len(parts)
-		parts = append(parts, "tab/⇧tab links")
-	}
-	if budget >= detailHelpDiscoveryWidth {
-		parts = append(parts, "? help")
-	}
-	parentIndex := -1
-	if bindings[5].Enabled() {
-		parentIndex = len(parts)
-		parts = append(parts, "u watchlist")
-	}
-	fit := func() (key.Binding, bool) {
-		for _, separator := range []string{" · ", "·"} {
-			text := strings.Join(parts, separator)
-			if lipgloss.Width(text) <= budget {
-				return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(text, "")), true
-			}
-		}
-		return key.Binding{}, false
-	}
-	if binding, ok := fit(); ok {
-		return binding, true
-	}
-	if parentIndex >= 0 {
-		parts[parentIndex] = "u↑"
-		if binding, ok := fit(); ok {
-			return binding, true
-		}
-	}
-	if linkIndex >= 0 {
-		parts[linkIndex] = "tab/⇧"
-		if binding, ok := fit(); ok {
-			return binding, true
-		}
-	}
-	return key.Binding{}, false
-}
-
-func prioritizedDetailShortHelp(bindings []key.Binding) []key.Binding {
-	prioritized := append([]key.Binding(nil), bindings[:5]...)
-	if bindings[7].Enabled() {
-		prioritized = append(prioritized, bindings[7])
-	} else {
-		prioritized = append(prioritized, key.Binding{})
-	}
-	prioritized = append(prioritized, bindings[9], bindings[5], bindings[6], bindings[8])
-	return prioritized
-}
-
-func compactDetailShortBinding(bindings []key.Binding, width int) key.Binding {
-	budget := max(width, 1)
-	join := func(parts []string) string {
-		spaced := strings.Join(parts, " · ")
-		if lipgloss.Width(spaced) <= budget {
-			return spaced
-		}
-		return strings.Join(parts, "·")
-	}
-	fitWhole := func(parts []string) string {
-		text := join(parts)
-		for len(parts) > 1 && lipgloss.Width(text) > budget {
-			parts = parts[:len(parts)-1]
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[0] = "m"
-			text = join(parts)
-		}
-		return text
-	}
-	showHelp := func(parts []string) []string {
-		if budget >= detailHelpDiscoveryWidth {
-			return append(parts, "? help")
-		}
-		return parts
-	}
-	mouseEnabled := bindings[0].Help().Desc != "on"
-	parentEnabled := bindings[5].Enabled()
-
-	if bindings[4].Enabled() && !bindings[3].Enabled() {
-		mouse := "m on"
-		if mouseEnabled {
-			mouse = "m off, shift-drag"
-		}
-		parts := showHelp([]string{mouse, "esc " + bindings[1].Help().Desc, "q quit", "tab/⇧"})
-		parentIndex := -1
-		if parentEnabled {
-			parentIndex = len(parts)
-			parts = append(parts, "u watchlist")
-		}
-		text := join(parts)
-		if lipgloss.Width(text) > budget && parentEnabled {
-			parts[parentIndex] = "u↑"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[1] = "esc"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget && mouseEnabled {
-			parts[0] = "m/⇧drag"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget && mouseEnabled {
-			parts[0] = "m/⇧"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[2] = "q"
-		}
-		return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(fitWhole(parts), ""))
-	}
-
-	if !bindings[4].Enabled() {
-		mouse := "m on"
-		if mouseEnabled {
-			mouse = "m off, shift-drag"
-		}
-		parts := showHelp([]string{mouse, "esc " + bindings[1].Help().Desc, "q quit"})
-		parentIndex := -1
-		if parentEnabled {
-			parentIndex = len(parts)
-			parts = append(parts, "u watchlist")
-		}
-		text := join(parts)
-		if lipgloss.Width(text) > budget && parentEnabled {
-			parts[parentIndex] = "u↑"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget && mouseEnabled {
-			parts[0] = "m/⇧drag"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[2] = "q"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[1] = "esc"
-			text = join(parts)
-		}
-		if lipgloss.Width(text) > budget {
-			parts[0] = "m"
-		}
-		return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(fitWhole(parts), ""))
-	}
-
-	mouse := "m on"
-	if mouseEnabled {
-		mouse = "m/⇧drag"
-	}
-	parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q"}
-	if bindings[3].Enabled() {
-		parts = append(parts, "follow↵")
-	}
-	parts = append(parts, "tab/⇧ links")
-	parts = showHelp(parts)
-	parentIndex := -1
-	if parentEnabled {
-		parentIndex = len(parts)
-		parts = append(parts, "u watchlist")
-	}
-	text := join(parts)
-	if lipgloss.Width(text) > budget && parentEnabled {
-		parts[parentIndex] = "u↑"
-		text = join(parts)
-	}
-	if lipgloss.Width(text) > budget && mouseEnabled {
-		parts[0] = "m/⇧"
-		text = join(parts)
-	}
-	if lipgloss.Width(text) > budget {
-		parts[4] = "tab/⇧"
-		text = join(parts)
-	}
-	if lipgloss.Width(text) > budget {
-		parts[3] = "↵"
-		text = join(parts)
-	}
-	if lipgloss.Width(text) > budget {
-		parts[1] = "esc"
-		text = join(parts)
-	}
-	if lipgloss.Width(text) > budget {
-		parts[0] = "m"
-	}
-	return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(fitWhole(parts), ""))
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is

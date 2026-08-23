@@ -625,50 +625,6 @@ func (m Model) detailFrame(doc detailDocument) string {
 	return strings.Join(append([]string{header, body}, footer...), "\n")
 }
 
-// detailHelpView keeps the complete text-selection recovery wording reachable in
-// narrow expanded help without forcing every action into one vertical column.
-// Footer rendering and body measurement both consume this exact output.
-func (m Model) detailHelpView() string {
-	keys := m.detailHelpKeys()
-	if !m.help.ShowAll {
-		short := keys.ShortHelp()
-		if len(short) == 1 {
-			unbounded := m.help
-			unbounded.SetWidth(0)
-			return truncateLine(unbounded.ShortHelpView(short), m.width)
-		}
-		return m.help.View(keys)
-	}
-	if m.width <= 0 {
-		return m.help.View(keys)
-	}
-
-	groups := m.detailKeys.FullHelp()
-	unbounded := m.help
-	unbounded.SetWidth(0)
-	if lipgloss.Width(unbounded.FullHelpView(groups)) <= m.width {
-		return m.help.View(keys)
-	}
-
-	mouse := groups[0][0]
-	mouseLines := truncateLine(unbounded.ShortHelpView([]key.Binding{mouse}), m.width)
-	if mouse.Help().Desc == mouseEnabledHelp {
-		// Separate the capture-recovery affordance from the action grid. The extra
-		// row also keeps enabled and disabled mouse-help geometry distinct, so a
-		// capture toggle follows the normal body-height re-clamp path.
-		mouseLines += "\n"
-	}
-	remaining := [][]key.Binding{groups[0][1:], groups[1]}
-	if lipgloss.Width(unbounded.FullHelpView(remaining)) > m.width {
-		stacked := append([]key.Binding(nil), remaining[0]...)
-		stacked = append(stacked, remaining[1]...)
-		remaining = [][]key.Binding{stacked}
-	}
-	columns := m.help
-	columns.SetWidth(m.width)
-	return mouseLines + "\n" + columns.FullHelpView(remaining)
-}
-
 // detailFooterLines is the Detail screen's bottom block, line by line: a
 // spacer, the failed-re-read line when there is one, then the help. The scroll
 // position uses the last help line when it fits and otherwise the spacer, so it
