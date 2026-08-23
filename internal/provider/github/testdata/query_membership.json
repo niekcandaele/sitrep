@@ -1,6 +1,7 @@
 {
   "data": {
     "search": {
+      "issueCount": 5,
       "nodes": [
         {
           "__typename": "Issue",

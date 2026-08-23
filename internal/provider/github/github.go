@@ -253,16 +253,18 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 // authoritative exact-root path. Search payload fields can therefore never
 // become rendered Ticket state.
 func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
-	initialCapacity := min(p.maxTickets, queryPageSize)
+	membershipLimit := min(p.maxTickets, querySearchResultLimit)
+	initialCapacity := min(membershipLimit, queryPageSize)
 	refs := make([]ref.Ref, 0, initialCapacity)
 	seen := make(map[string]struct{}, initialCapacity)
 	seenCursors := make(map[string]struct{})
 	cursor := ""
 	consumed := 0
+	strongestIssueCount := 0
 	limitReached := false
 
 	for {
-		remaining := p.maxTickets - consumed
+		remaining := membershipLimit - consumed
 		variables := map[string]any{
 			"query": query,
 			"first": min(queryPageSize, remaining),
@@ -285,6 +287,7 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 				"github: unexpected response %d from %s", status, p.endpoint)
 		}
 
+		strongestIssueCount = max(strongestIssueCount, response.Data.Search.IssueCount)
 		nodes := response.Data.Search.Nodes
 		overflow := len(nodes) > remaining
 		if overflow {
@@ -323,9 +326,10 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 		switch {
 		case overflow:
 			limitReached = true
-		case consumed == p.maxTickets:
-			limitReached = pageInfo.HasNextPage
+		case consumed == membershipLimit:
+			limitReached = pageInfo.HasNextPage || strongestIssueCount > consumed
 		case !pageInfo.HasNextPage:
+			limitReached = strongestIssueCount > consumed
 		default:
 			if len(nodes) == 0 {
 				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,

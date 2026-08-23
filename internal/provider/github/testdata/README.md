@@ -70,7 +70,7 @@ those issue payloads.
 
 | Fixture | deliberate shape and purpose |
 |---|---|
-| `query_membership.json` | cross-repository Issue identities in search order, a PullRequest node to ignore, a case-varied duplicate identity, and stale title data that cannot reach output |
+| `query_membership.json` | cross-repository Issue identities in search order, `issueCount` evidence, a PullRequest node to ignore, a case-varied duplicate identity, and stale title data that cannot reach output |
 | `query_empty.json` | an empty `search.nodes` array, proving a zero-match Query succeeds without an exact-root request |
 | `query_invalid.json` | a documented GraphQL error envelope carrying `SEARCH_QUERY_ERROR` and an unclosed-quotation explanation, proving malformed native Query classification and prose |
 
