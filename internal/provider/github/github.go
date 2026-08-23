@@ -159,9 +159,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve performs the authoritative read selected by selector. An Epic
-// Selector retains the paged sub-issue path; a Ref-list Selector directly reads
-// exactly its named roots without expanding hierarchy.
+// Resolve performs the authoritative read selected by selector. An Epic Selector
+// expands paged sub-issues, a Ref-list Selector reads its exact roots, and a Query
+// Selector chooses membership before authoritatively reading those roots.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err

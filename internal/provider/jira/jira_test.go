@@ -216,6 +216,20 @@ func jiraQueryPage(keys []string, isLast bool, token string) response {
 		strings.Join(issues, ","), isLast, token)}
 }
 
+func jiraBulkIssue(key string) map[string]any {
+	return map[string]any{
+		"key": key,
+		"fields": map[string]any{
+			"summary":    "Bulk member " + key,
+			"status":     map[string]any{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
+			"resolution": nil,
+			"assignee":   nil,
+			"parent":     nil,
+			"project":    map[string]any{"key": "ABC"},
+		},
+	}
+}
+
 func ticketKeys(tickets []model.Ticket) []string {
 	keys := make([]string, len(tickets))
 	for i := range tickets {
@@ -973,6 +987,144 @@ func TestResolveRefListIssueErrorPreventsPartialOutput(t *testing.T) {
 	}
 	if n := len(s.requestsTo(bulkFetchPath)); n != 1 {
 		t.Errorf("got %d bulk requests, want 1", n)
+	}
+}
+
+func TestResolveRefListSilentBulkOmissionPreventsPartialOutput(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		bulkFetchPath: {{body: `{"issues":[{"key":"DEF-4"},{"key":"ABC-1"}],"issueErrors":[]}`}},
+	})
+
+	snap, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refListRefs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("Resolve returned a partial snapshot %+v, want the zero snapshot", snap)
+	}
+	if n := len(s.requestsTo(bulkFetchPath)); n != 1 {
+		t.Errorf("got %d bulk requests, want 1", n)
+	}
+}
+
+func TestResolveRefListBulkFailureBoundariesReturnNoPartialSnapshot(t *testing.T) {
+	t.Run("transport", func(t *testing.T) {
+		cause := errors.New("bulk transport failed")
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, cause
+		})}
+		p := jira.New(fixtureHost,
+			jira.WithBaseURL("https://jira.example.test"),
+			jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}),
+			jira.WithHTTPClient(client))
+		snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs[:1]})
+		providertest.CheckError(t, "jira", err, providertest.Want{
+			Kind: provider.KindUnavailable, Contains: []string{"requesting", bulkFetchPath}, Secret: fixtureToken,
+		})
+		if !errors.Is(err, cause) {
+			t.Errorf("errors.Is(%v, cause) = false", err)
+		}
+		if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+			t.Errorf("snapshot = %+v, want zero", snap)
+		}
+	})
+
+	for _, tt := range []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "non-2xx",
+			resp: response{status: http.StatusServiceUnavailable, body: `{"errorMessages":["temporarily unavailable"]}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"API error", "temporarily unavailable"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed success body",
+			resp: response{body: `{"issues":[`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response", bulkFetchPath}, Secret: fixtureToken},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{bulkFetchPath: {tt.resp}})
+			snap, err := newProvider(s).Resolve(
+				context.Background(), provider.RefListSelector{Refs: refListRefs[:1]})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want zero", snap)
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 1 {
+				t.Errorf("bulk requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestResolveRefListSecondBulkChunkFailureReturnsNoPartialSnapshot(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		chunks [][]string
+	)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode bulk request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		chunks = append(chunks, append([]string(nil), body.IssueIDsOrKeys...))
+		requestNumber := len(chunks)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if requestNumber == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errorMessages":["second chunk failed"]}`))
+			return
+		}
+		issues := make([]map[string]any, len(body.IssueIDsOrKeys))
+		for i, key := range body.IssueIDsOrKeys {
+			issues[i] = jiraBulkIssue(key)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"issues": issues, "issueErrors": []any{}}); err != nil {
+			t.Errorf("encode bulk response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 1001)
+	for i := range refs {
+		key := fmt.Sprintf("ABC-%d", i+1)
+		refs[i] = ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: key, Raw: key}
+	}
+	p := jira.New(fixtureHost,
+		jira.WithBaseURL(s.URL),
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind: provider.KindUnavailable, Contains: []string{"API error", "second chunk failed"}, Secret: fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want zero after later-chunk failure", snap)
+	}
+	mu.Lock()
+	gotChunks := append([][]string(nil), chunks...)
+	mu.Unlock()
+	sizes := make([]int, len(gotChunks))
+	for i := range gotChunks {
+		sizes[i] = len(gotChunks[i])
+	}
+	if !reflect.DeepEqual(sizes, []int{1000, 1}) {
+		t.Fatalf("bulk chunk sizes = %v, want [1000 1]", sizes)
+	}
+	if gotChunks[0][0] != "ABC-1" || gotChunks[0][999] != "ABC-1000" || gotChunks[1][0] != "ABC-1001" {
+		t.Errorf("bulk chunk order = first %q..%q second %q, want Selector order",
+			gotChunks[0][0], gotChunks[0][999], gotChunks[1][0])
 	}
 }
 

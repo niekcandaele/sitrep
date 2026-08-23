@@ -420,10 +420,15 @@ func stdinSelection(positional []string) (bool, error) {
 	return false, nil
 }
 
+const maxStdinSelectorBytes = 1 << 20
+
 func readStdinRefs(input io.Reader) ([]string, error) {
-	data, err := io.ReadAll(input)
+	data, err := io.ReadAll(io.LimitReader(input, maxStdinSelectorBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading Refs from stdin: %w", err)
+	}
+	if len(data) > maxStdinSelectorBytes {
+		return nil, fmt.Errorf("stdin Selector input exceeds the %d-byte limit", maxStdinSelectorBytes)
 	}
 	refs := strings.Fields(string(data))
 	if len(refs) == 0 {
@@ -596,7 +601,7 @@ func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs [
 	}
 
 	if left, right, ok := firstRouteConflict(refs); ok {
-		return resolvedSelection{}, mixedTrackerError(refs[left], refs[right])
+		return resolvedSelection{}, routeConflictError(refs[left], refs[right])
 	}
 	if left, right, ok := firstProfileConflict(profiles); ok {
 		//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
@@ -767,6 +772,13 @@ func mixedTrackerError(left, right ref.Ref) error {
 		selectorRefLabel(right), trackerDisplayName(right.Tracker), right.Host)
 }
 
+func routeConflictError(left, right ref.Ref) error {
+	//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+	return fmt.Errorf("Refs in one Watchlist must use one Tracker connection and host; %q resolves to the %s Provider at %s, while %q resolves to the %s Provider at %s",
+		selectorRefLabel(left), trackerDisplayName(left.Tracker), left.Host,
+		selectorRefLabel(right), trackerDisplayName(right.Tracker), right.Host)
+}
+
 func selectorRefLabel(r ref.Ref) string {
 	if raw := strings.TrimSpace(r.Raw); raw != "" {
 		return raw
@@ -808,18 +820,27 @@ type refIdentity struct {
 	key     string
 }
 
+func deduplicationIdentity(r ref.Ref) refIdentity {
+	identity := refIdentity{
+		tracker: r.Tracker,
+		host:    strings.ToLower(r.Host),
+		owner:   r.Owner,
+		repo:    r.Repo,
+		number:  r.Number,
+		key:     r.Key,
+	}
+	if r.Tracker == ref.TrackerGitHub {
+		identity.owner = strings.ToLower(identity.owner)
+		identity.repo = strings.ToLower(identity.repo)
+	}
+	return identity
+}
+
 func deduplicateRefs(refs []ref.Ref) []ref.Ref {
 	unique := make([]ref.Ref, 0, len(refs))
 	seen := make(map[refIdentity]struct{}, len(refs))
 	for _, r := range refs {
-		identity := refIdentity{
-			tracker: r.Tracker,
-			host:    strings.ToLower(r.Host),
-			owner:   r.Owner,
-			repo:    r.Repo,
-			number:  r.Number,
-			key:     r.Key,
-		}
+		identity := deduplicationIdentity(r)
 		if _, ok := seen[identity]; ok {
 			continue
 		}

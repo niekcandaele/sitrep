@@ -15,6 +15,8 @@ func namedDetailHelpKeyMap() DetailKeyMap {
 		binding.SetHelp(name, name+" action")
 	}
 	set(&keys.ToggleMouse, "mouse")
+	set(&keys.MouseWheel, "mouse-wheel")
+	set(&keys.MouseFollow, "mouse-follow")
 	set(&keys.Back, "back")
 	set(&keys.Quit, "quit")
 	set(&keys.Follow, "follow")
@@ -44,6 +46,8 @@ func TestDetailHelpRolesMapEveryBindingByName(t *testing.T) {
 	roles := detailHelpRolesFrom(namedDetailHelpKeyMap())
 	got := map[string]string{
 		"mouse":         roles.mouse.Help().Key,
+		"mouse-wheel":   roles.mouseWheel.Help().Key,
+		"mouse-follow":  roles.mouseFollow.Help().Key,
 		"back":          roles.back.Help().Key,
 		"quit":          roles.quit.Help().Key,
 		"follow":        roles.follow.Help().Key,
@@ -88,7 +92,7 @@ func TestDetailHelpGroupsAreBuiltFromNamedRoles(t *testing.T) {
 	}
 	groups := roles.fullGroups()
 	if got, want := detailHelpKeysOf(groups[0]), []string{
-		"mouse", "back", "follow", "next-link", "previous-link",
+		"mouse", "mouse-wheel", "mouse-follow", "back", "follow", "next-link", "previous-link",
 		"parent", "refresh", "help", "quit",
 	}; !reflect.DeepEqual(got, want) {
 		t.Errorf("action roles = %v, want %v", got, want)

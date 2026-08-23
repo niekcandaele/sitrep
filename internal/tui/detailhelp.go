@@ -13,6 +13,8 @@ import (
 // single adapter from commands to presentation roles.
 type detailHelpRoles struct {
 	mouse        key.Binding
+	mouseWheel   key.Binding
+	mouseFollow  key.Binding
 	back         key.Binding
 	quit         key.Binding
 	follow       key.Binding
@@ -35,6 +37,8 @@ func detailHelpRolesFrom(keys DetailKeyMap) detailHelpRoles {
 	links.SetHelp("tab/⇧tab", "links")
 	return detailHelpRoles{
 		mouse:        keys.ToggleMouse,
+		mouseWheel:   keys.MouseWheel,
+		mouseFollow:  keys.MouseFollow,
 		back:         keys.Back,
 		quit:         keys.Quit,
 		follow:       keys.Follow,
@@ -76,7 +80,7 @@ func (r detailHelpRoles) supplementalShortBindings() []key.Binding {
 
 func (r detailHelpRoles) actionBindings() []key.Binding {
 	return []key.Binding{
-		r.mouse, r.back, r.follow, r.nextLink, r.previousLink,
+		r.mouse, r.mouseWheel, r.mouseFollow, r.back, r.follow, r.nextLink, r.previousLink,
 		r.parent, r.refresh, r.help, r.quit,
 	}
 }
@@ -99,6 +103,32 @@ func (r detailHelpRoles) fullGroups() [][]key.Binding {
 func (r detailHelpRoles) stackedFullBindings() []key.Binding {
 	stacked := r.actionBindings()
 	return append(stacked, r.scrollBindings()...)
+}
+
+func compactDetailFullHelp(r detailHelpRoles) [][]key.Binding {
+	mouse := r.mouse
+	if mouse.Help().Desc == mouseEnabledHelp {
+		mouse.SetHelp("m", mouseEnabledCompactHelp)
+	}
+	bindings := []key.Binding{mouse, r.mouseWheel, r.mouseFollow}
+	if r.parent.Enabled() {
+		bindings = append(bindings, helpOnlyBinding("esc/u", "back/watchlist"))
+	} else {
+		bindings = append(bindings, r.back)
+	}
+	if r.links.Enabled() {
+		bindings = append(bindings, helpOnlyBinding("tab/⇧tab", "links"))
+	}
+	if r.follow.Enabled() {
+		bindings = append(bindings, r.follow)
+	}
+	bindings = append(bindings,
+		helpOnlyBinding("r/?/q", "refresh/help/quit"),
+		helpOnlyBinding("↑/↓/k/j", "scroll"),
+		helpOnlyBinding("pgup/pgdn", "page"),
+		helpOnlyBinding("g/G", "first/last"),
+	)
+	return [][]key.Binding{bindings}
 }
 
 // detailHelpDiscoveryWidth is the narrowest supported Detail layout. From this
@@ -413,6 +443,11 @@ func (m Model) detailHelpView() string {
 		}
 		return m.help.View(keys)
 	}
+	if m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
+		compact := m.help
+		compact.SetWidth(m.width)
+		return compact.FullHelpView(compactDetailFullHelp(detailHelpRolesFrom(m.detailKeys)))
+	}
 	if m.width <= 0 {
 		return m.help.View(keys)
 	}
@@ -431,9 +466,11 @@ func (m Model) detailHelpView() string {
 		// capture toggle follows the normal body-height re-clamp path.
 		mouseLines += "\n"
 	}
-	remaining := [][]key.Binding{roles.actionsWithoutMouse(), roles.scrollBindings()}
+	actions := []key.Binding{roles.mouseWheel, roles.mouseFollow}
+	actions = append(actions, roles.actionsWithoutMouse()...)
+	remaining := [][]key.Binding{actions, roles.scrollBindings()}
 	if lipgloss.Width(unbounded.FullHelpView(remaining)) > m.width {
-		stacked := roles.actionsWithoutMouse()
+		stacked := actions
 		stacked = append(stacked, roles.scrollBindings()...)
 		remaining = [][]key.Binding{stacked}
 	}

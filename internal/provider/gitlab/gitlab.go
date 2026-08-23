@@ -244,9 +244,10 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve performs the authoritative read for selector. An EpicSelector keeps
-// the existing GitLab Epic-or-decoded-Ticket behavior. A RefListSelector reads
-// exactly the named roots as Tickets without expanding any root's children.
+// Resolve performs the authoritative read for selector. An Epic Selector expands
+// its GitLab root according to resolveEpic, a Ref-list Selector reads its exact
+// roots, and a Query Selector chooses membership before authoritatively reading
+// those roots.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
@@ -263,9 +264,8 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	}
 }
 
-// resolveEpic preserves the single-Ref behavior: a group epic or milestone
-// expands to its child issues, while a project issue comes back as the decoded
-// root with no Tickets. Child epics are not expanded.
+// resolveEpic expands a group Epic or milestone by one child level. A project
+// issue returns as the decoded root with no child Tickets.
 func (p *Provider) resolveEpic(ctx context.Context, selector provider.EpicSelector) (model.WatchlistSnapshot, error) {
 	t, err := targetFor(selector.Ref, p.path)
 	if err != nil {
@@ -428,7 +428,7 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 					"gitlab: query reports more results but returned an empty page")
 			}
 			nextRawQuery, identity, err := p.validateQueryContinuation(
-				membershipPath, rawQuery, next, membershipPageSize)
+				membershipPath, rawQuery, query, next, membershipPageSize)
 			if err != nil {
 				return model.WatchlistSnapshot{}, err
 			}
@@ -495,8 +495,18 @@ func (p *Provider) searchQueryMembership(
 	return issues, header, nil
 }
 
+var queryPaginationParameters = map[string]struct{}{
+	"cursor":     {},
+	"id_after":   {},
+	"id_before":  {},
+	"order_by":   {},
+	"page":       {},
+	"pagination": {},
+	"sort":       {},
+}
+
 func (p *Provider) validateQueryContinuation(
-	membershipPath, currentRawQuery, next string,
+	membershipPath, currentRawQuery, originalQuery, next string,
 	perPage int,
 ) (string, string, error) {
 	current, err := url.Parse(p.baseURL + apiBase + membershipPath)
@@ -522,12 +532,56 @@ func (p *Provider) validateQueryContinuation(
 	if err != nil {
 		return "", "", malformedQueryPaginationError()
 	}
-	perPageValues := values["per_page"]
-	if len(perPageValues) == 0 || perPageValues[len(perPageValues)-1] != strconv.Itoa(perPage) {
+	membership, err := url.ParseQuery(originalQuery)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	remaining := cloneQueryValues(values)
+	for name, expected := range membership {
+		for _, value := range expected {
+			actual := remaining[name]
+			match := -1
+			for i := range actual {
+				if actual[i] == value {
+					match = i
+					break
+				}
+			}
+			if match < 0 {
+				return "", "", changedQueryMembershipError()
+			}
+			remaining[name] = append(actual[:match], actual[match+1:]...)
+		}
+	}
+
+	perPageValues := remaining["per_page"]
+	if len(perPageValues) != 1 || perPageValues[0] != strconv.Itoa(perPage) {
 		return "", "", provider.Errorf(provider.KindUnavailable,
 			"gitlab: query pagination changed the Provider page size")
 	}
+	delete(remaining, "per_page")
+	for name, entries := range remaining {
+		if len(entries) == 0 {
+			continue
+		}
+		if _, paging := queryPaginationParameters[name]; !paging {
+			return "", "", changedQueryMembershipError()
+		}
+	}
 	return candidate.RawQuery, membershipPath + "?" + values.Encode(), nil
+}
+
+func cloneQueryValues(values url.Values) url.Values {
+	clone := make(url.Values, len(values))
+	for name, entries := range values {
+		clone[name] = append([]string(nil), entries...)
+	}
+	return clone
+}
+
+func changedQueryMembershipError() error {
+	return provider.Errorf(provider.KindUnavailable,
+		"gitlab: query pagination changed the Selector membership")
 }
 
 func malformedQueryPaginationError() error {

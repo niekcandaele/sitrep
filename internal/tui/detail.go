@@ -230,7 +230,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 // target. Every seat advances the generation, including cache hits and cycles.
 func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities) (tea.Model, tea.Cmd) {
 	m.detailGeneration++
-	m.detailMouseEpoch++
+	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
 		ticket: t,
@@ -288,6 +288,7 @@ func (m Model) syncDetailKeysFor(doc detailDocument) Model {
 	hasLinks := len(doc.LinkRows) > 0
 	m.detailKeys.NextLink.SetEnabled(hasLinks)
 	m.detailKeys.PreviousLink.SetEnabled(hasLinks)
+	m.detailKeys.MouseFollow.SetEnabled(m.mouseEnabled && hasLinks)
 	_, focused := detailLinkRowByIdentity(doc, m.detail.linkFocus)
 	focused = focused && m.detail.hasLinkFocus
 	if !focused {
@@ -395,7 +396,7 @@ func (m Model) popDetailTrail() Model {
 	entry := m.trail[len(m.trail)-1]
 	m.trail = m.trail[:len(m.trail)-1]
 	m.detailGeneration++
-	m.detailMouseEpoch++
+	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
 		ticket:       entry.ticket,
@@ -419,7 +420,7 @@ func (m Model) popDetailTrail() Model {
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
 	m.detailGeneration++
-	m.detailMouseEpoch++
+	m.mouseEpoch++
 	m.trail = nil
 	m.mode = modeList
 	m.detail = detailState{}
@@ -513,7 +514,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.popDetailTrail(), nil
 		}
 		m.detailGeneration++
-		m.detailMouseEpoch++
+		m.mouseEpoch++
 		if !m.listArmed {
 			// The esc ladder's last rung: a decoded Ticket has no list behind it,
 			// so "one level up" is out of the program. q and ctrl+c still quit

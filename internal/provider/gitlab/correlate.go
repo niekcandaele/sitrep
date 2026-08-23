@@ -236,9 +236,8 @@ func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr mode
 //     Free tier, and normalizeReview falls through to a weaker but not wrong
 //     answer rather than to an absent one.
 //
-// A swallowed 404 is still indistinguishable from a Ticket that genuinely has
-// no merge requests. Closing that gap needs vocabulary for partial data that
-// neither model.Ticket nor model.WatchlistSnapshot has today, and is separate work.
+// A swallowed 404 and a genuine no-merge-request result are indistinguishable:
+// neither model.Ticket nor model.WatchlistSnapshot represents partial data.
 func isTicketScopedFailure(err error, swallow ...int) bool {
 	var status *statusError
 	if !errors.As(err, &status) {

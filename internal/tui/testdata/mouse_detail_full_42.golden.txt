@@ -26,15 +26,15 @@ DESCRIPTION
 
 
 COMMENTS (3)
-
-@mara-vos · 2026-01-12 09:14 UTC
-
+                                        0%
 m off · shift-drag to select text
 
-esc  back             ↑/k  up
-tab  next link        ↓/j  down
-⇧tab previous link    pgup page up
-u    watchlist        pgdn page down
-r    refresh          g    first
-?    help             G    last
-q    quit                               0%
+wheel      scroll body      ↑/k  up
+click Link follow           ↓/j  down
+esc        back             pgup page up
+tab        next link        pgdn page down
+⇧tab       previous link    g    first
+u          watchlist        G    last
+r          refresh
+?          help
+q          quit

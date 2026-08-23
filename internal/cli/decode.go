@@ -22,7 +22,7 @@ import (
 // type a site can rename, and GitLab's depends on the tier. The cost is that an
 // Epic created but not yet populated opens as its own Detail — which shows the
 // plan the agent is about to work from, and is a better screen than "This
-// Watchlist has no Tickets.". Changing that decision is changing this line.
+// Watchlist has no Tickets.".
 func decodesToTicket(snap model.WatchlistSnapshot) bool { return len(snap.Tickets) == 0 }
 
 // decodedTicket reads the snapshot's root node as the Ticket it turned out to

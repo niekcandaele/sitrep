@@ -17,10 +17,12 @@ const (
 )
 
 type listMouseClickMsg struct {
-	id model.TicketID
+	epoch int
+	id    model.TicketID
 }
 
 type listMouseWheelMsg struct {
+	epoch int
 	delta int
 }
 
@@ -46,6 +48,7 @@ func mouseCmd(msg tea.Msg) tea.Cmd {
 func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
 	bodyHeight, offset := m.bodyHeight(), m.offset
+	epoch := m.mouseEpoch
 	heights := rowHeights(m.rows, m.input.Capabilities)
 	ids := make([]model.TicketID, len(m.rows))
 	for i, row := range m.rows {
@@ -58,7 +61,7 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
 			if msg.Button != tea.MouseLeft {
-				return mouseCmd(listMouseClickMsg{})
+				return mouseCmd(listMouseClickMsg{epoch: epoch})
 			}
 			// Modified primary clicks are reserved for terminal gestures such as
 			// Shift-drag text selection. They are transparent to both selection and
@@ -68,13 +71,13 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 			}
 			if msg.X < 0 || msg.X >= width ||
 				msg.Y < headerHeight || msg.Y >= headerHeight+bodyHeight {
-				return mouseCmd(listMouseClickMsg{})
+				return mouseCmd(listMouseClickMsg{epoch: epoch})
 			}
 			row, ok := rowAt(heights, offset, msg.Y-headerHeight)
 			if !ok || ids[row] == "" {
-				return mouseCmd(listMouseClickMsg{})
+				return mouseCmd(listMouseClickMsg{epoch: epoch})
 			}
-			return mouseCmd(listMouseClickMsg{id: ids[row]})
+			return mouseCmd(listMouseClickMsg{epoch: epoch, id: ids[row]})
 
 		case tea.MouseWheelMsg:
 			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
@@ -82,9 +85,9 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 			}
 			switch msg.Button {
 			case tea.MouseWheelUp:
-				return mouseCmd(listMouseWheelMsg{delta: -1})
+				return mouseCmd(listMouseWheelMsg{epoch: epoch, delta: -1})
 			case tea.MouseWheelDown:
-				return mouseCmd(listMouseWheelMsg{delta: 1})
+				return mouseCmd(listMouseWheelMsg{epoch: epoch, delta: 1})
 			}
 		}
 		return nil
@@ -97,7 +100,7 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
 	bodyHeight, offset := m.detailBodyHeight(), m.detail.offset
-	sourceID, epoch := m.detail.ticket.ID, m.detailMouseEpoch
+	sourceID, epoch := m.detail.ticket.ID, m.mouseEpoch
 	rows := make(map[int]detailLinkIdentity, len(doc.LinkRows))
 	for _, row := range doc.LinkRows {
 		rows[row.Line] = row.Identity
@@ -173,7 +176,7 @@ func (m Model) onListMouseWheel(msg listMouseWheelMsg) Model {
 }
 
 func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
-	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.mouseEpoch {
 		return m
 	}
 	m = m.clearPendingClick()
@@ -181,7 +184,7 @@ func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
 }
 
 func (m Model) onDetailMouseLink(msg detailMouseLinkMsg) (tea.Model, tea.Cmd) {
-	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.mouseEpoch {
 		return m, nil
 	}
 
@@ -211,7 +214,7 @@ func (m Model) toggleMouse() Model {
 		}
 	}
 
-	m.detailMouseEpoch++
+	m.mouseEpoch++
 	m.mouseEnabled = !m.mouseEnabled
 	m = m.clearPendingClick().syncMouseKeys()
 	if !m.ready {
@@ -233,12 +236,22 @@ func (m Model) toggleMouse() Model {
 func (m Model) syncMouseKeys() Model {
 	if m.mouseEnabled {
 		m.keys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
+		m.keys.MouseSelect.SetEnabled(true)
+		m.keys.MouseOpen.SetEnabled(true)
+		m.keys.MouseWheel.SetEnabled(true)
 		m.detailKeys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
+		m.detailKeys.MouseWheel.SetEnabled(true)
+		m.detailKeys.MouseFollow.SetEnabled(m.detailKeys.NextLink.Enabled())
 		m.searchKeys.MouseHint.SetEnabled(true)
 		return m
 	}
 	m.keys.ToggleMouse.SetHelp("m", "on")
+	m.keys.MouseSelect.SetEnabled(false)
+	m.keys.MouseOpen.SetEnabled(false)
+	m.keys.MouseWheel.SetEnabled(false)
 	m.detailKeys.ToggleMouse.SetHelp("m", "on")
+	m.detailKeys.MouseWheel.SetEnabled(false)
+	m.detailKeys.MouseFollow.SetEnabled(false)
 	m.searchKeys.MouseHint.SetEnabled(false)
 	return m
 }

@@ -30,11 +30,11 @@ CANCELLED (1)
            [not planned]
 
 
-m     off · shift-drag to select text    ↑/k  up
-enter open                               ↓/j  down
-r     refresh                            pgup page up
-?     help                               pgdn page down
-q     quit                               g    first
-                                         G    last
-                                         d    hide finished
-                                         /    find
+m            off · shift-drag to select text    ↑/k  up
+click        select Ticket                      ↓/j  down
+double-click open Ticket                        pgup page up
+wheel        move selection                     pgdn page down
+enter        open                               g    first
+r            refresh                            G    last
+?            help                               d    hide finished
+q            quit                               /    find

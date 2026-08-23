@@ -761,9 +761,8 @@ func TestResolveOnAnIssueWithNoEpic(t *testing.T) {
 	}
 }
 
-// The capability-on acceptance criterion, executable — the mirror image of the
-// assertion #14 made while correlation was unimplemented: the Capability is
-// declared, the data behind it is served, and it reaches the renderer.
+// The PullRequests Capability contract is executable: the declared Capability,
+// served merge-request data, and renderer-visible output agree.
 func TestMergeRequestInformationIsServed(t *testing.T) {
 	responses := map[string][]response{
 		epicPath:       {{file: "epic.json"}},
@@ -1098,7 +1097,7 @@ func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
 	first.headers = map[string]string{
 		"X-Next-Cursor": "part,second",
 		"Link": "</api/v4/issues?per_page=4&cursor=before>; rel=\"prev\", " +
-			"</api/v4/issues?pagination=keyset&per_page=4&cursor=part,second>; rel=\"next\"",
+			"</api/v4/issues?search=rea%64y&pagination=keyset&state=opened&per_page=4&cursor=part%2Csecond>; rel=\"next\"",
 	}
 	s := newReplayServer(t, queryResponses(first, queryPage(queryIssueCore7, "")))
 
@@ -1124,7 +1123,7 @@ func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
 		t.Errorf("first membership query = %q, want %q", got, want)
 	}
 	if got, want := searches[1].rawQuery,
-		"pagination=keyset&per_page=4&cursor=part,second"; got != want {
+		"search=rea%64y&pagination=keyset&state=opened&per_page=4&cursor=part%2Csecond"; got != want {
 		t.Errorf("keyset continuation query = %q, want Tracker-supplied %q", got, want)
 	}
 	all := s.recorded()
@@ -1133,11 +1132,55 @@ func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
 	}
 }
 
+func TestResolveQueryRejectsContinuationMembershipChanges(t *testing.T) {
+	const query = "state=opened&search=SECRET_QUERY_47"
+	tests := []struct {
+		name      string
+		nextQuery string
+	}{
+		{name: "dropped filter", nextQuery: "state=opened&per_page=4&cursor=next"},
+		{name: "changed value", nextQuery: "state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "duplicate changed value", nextQuery: "state=opened&state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "added filter", nextQuery: "state=opened&search=SECRET_QUERY_47&milestone=7&per_page=4&cursor=next"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			first := queryPage(queryIssueCLI101, "")
+			first.headers = map[string]string{
+				"X-Next-Cursor": "next",
+				"Link":          "</api/v4/issues?" + tt.nextQuery + ">; rel=\"next\"",
+			}
+			s := newReplayServer(t, map[string][]response{queryGlobalIssues: {first}})
+
+			snap, err := newProvider(s, gitlab.WithMaxTickets(4)).Resolve(
+				context.Background(), provider.QuerySelector{Query: query})
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"pagination", "Selector membership"},
+				Secret:   query,
+			})
+			if strings.Contains(err.Error(), fixtureToken) {
+				t.Errorf("error = %q, leaked credential", err)
+			}
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != 1 {
+				t.Errorf("membership requests = %d, want 1", got)
+			}
+			if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+				t.Errorf("exact reads = %d, want none", got)
+			}
+		})
+	}
+}
+
 func TestResolveQueryReportsUnusedKeysetContinuationAtBudget(t *testing.T) {
 	first := queryPage(queryIssueCLI101, "")
 	first.headers = map[string]string{
 		"X-Next-Cursor": "unused",
-		"Link":          "<?per_page=1&cursor=unused>; rel=\"next\"",
+		"Link":          "<?search=SECRET_QUERY_47&per_page=1&cursor=unused>; rel=\"next\"",
 	}
 	s := newReplayServer(t, queryResponses(first))
 
@@ -1185,26 +1228,26 @@ func TestResolveQueryRejectsMalformedOrCyclicKeysetContinuation(t *testing.T) {
 		{
 			name: "changed Provider page size",
 			pages: []response{keysetPage(queryIssueCLI101, "cursor",
-				"<?per_page=1&cursor=x>; rel=\"next\"")},
+				"<?search=SECRET_QUERY_47&per_page=1&cursor=x>; rel=\"next\"")},
 		},
 		{
 			name: "fragment",
 			pages: []response{keysetPage(queryIssueCLI101, "cursor",
-				"<?per_page=3&cursor=x#fragment>; rel=\"next\"")},
+				"<?search=SECRET_QUERY_47&per_page=3&cursor=x#fragment>; rel=\"next\"")},
 		},
 		{
 			name: "repeated continuation",
 			pages: []response{
-				keysetPage(queryIssueCLI101, "a", "<?per_page=3&cursor=a>; rel=\"next\""),
-				keysetPage(queryIssueCore7, "a", "<?per_page=3&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=3&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCore7, "a", "<?search=SECRET_QUERY_47&per_page=3&cursor=a>; rel=\"next\""),
 			},
 		},
 		{
 			name: "non-adjacent cycle",
 			pages: []response{
-				keysetPage(queryIssueCLI101, "a", "<?per_page=4&cursor=a>; rel=\"next\""),
-				keysetPage(queryIssueCore7, "b", "<?per_page=4&cursor=b>; rel=\"next\""),
-				keysetPage(queryIssueCLI101, "a", "<?per_page=4&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=4&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCore7, "b", "<?search=SECRET_QUERY_47&per_page=4&cursor=b>; rel=\"next\""),
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=4&cursor=a>; rel=\"next\""),
 			},
 		},
 	}
