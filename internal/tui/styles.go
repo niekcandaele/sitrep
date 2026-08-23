@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"strings"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // Styles is every Lip Gloss style the monitor draws with, in one place, so a
@@ -56,7 +59,7 @@ type Styles struct {
 	// EmptyFilter styles the notice that stands in for a list a filter has
 	// emptied.
 	EmptyFilter lipgloss.Style
-	// Breadcrumb styles the Detail screen's parent Watchlist line.
+	// Breadcrumb styles the root Watchlist and prior Trail Tickets in Detail.
 	Breadcrumb lipgloss.Style
 	// SectionHeader styles a Detail section heading, e.g. "COMMENTS (3)".
 	SectionHeader lipgloss.Style
@@ -127,6 +130,23 @@ func DefaultStyles(isDark bool) Styles {
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 	}
+}
+
+// sanitizeTerminalText repeats the Provider's single-line policy at direct TUI
+// input seams. Normalizing malformed UTF-8 first keeps raw C1 bytes from
+// bypassing the rune-based policy.
+func sanitizeTerminalText(text string) string {
+	return provider.SanitizeLine(strings.ToValidUTF8(text, ""))
+}
+
+// renderHyperlink is the TUI's only OSC 8 creation seam.
+func renderHyperlink(style lipgloss.Style, text, url string) string {
+	text = sanitizeTerminalText(text)
+	url = sanitizeTerminalText(url)
+	if url == "" {
+		return style.Render(text)
+	}
+	return style.Hyperlink(url).Render(text)
 }
 
 // groupHeader returns the style for a Status Category heading, falling back to

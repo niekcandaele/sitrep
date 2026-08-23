@@ -56,22 +56,29 @@ type Model struct {
 	// separate so that esc can drop both in one move.
 	search textinput.Model
 
-	// mode is which screen owns the terminal. Opening and closing Detail
-	// touches nothing above this line — which is why the selection, the scroll
-	// offset and the filters survive it without any code restoring them.
+	// mode is which screen owns the terminal. Detail Trail navigation leaves the
+	// list state above untouched. Returning from a Detail root to the list may
+	// reconcile its selection and scroll geometry before drawing.
 	//
-	// A later caller may start the program in modeDetail by seating a
-	// DetailInput before the first frame — a bare Ticket Ref decoded straight
-	// into Detail — which is why detailState is a struct and why the Detail
-	// screen takes its breadcrumb as a Header field rather than reading the
-	// list's.
+	// Decoder startup can seat modeDetail before the first frame, with no list
+	// behind it. detailState therefore carries the Detail's own rendering context,
+	// including its breadcrumb, rather than reading list state.
 	mode   mode
 	detail detailState
+	// trail is the ordered path of prior Detail seats followed through explicit
+	// Links. It is session-local and deliberately permits cycles and repeats.
+	trail []detailTrailEntry
 	// details caches the Details read this session, per Ticket. It holds Detail
 	// and nothing else: no list data migrates in here, and nothing here migrates
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
+	// detailMouseEpoch identifies the currently seated Detail for queued mouse
+	// callbacks. Rereads leave it stable so a Link callback can re-resolve the same
+	// relationship after a same-seat reorder and a wheel callback can still scroll;
+	// navigation and mouse toggles advance it so an older frame cannot act after
+	// leaving and returning to the same ID.
+	detailMouseEpoch int
 	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
 
 	width, height int
@@ -176,23 +183,15 @@ func New(ctx context.Context, opts Options) Model {
 	}
 
 	if opts.Open != nil {
-		// Decoder mode: the screen is the Ticket's Detail from the first frame,
-		// and the read for it is already on its way out of Init the same way the
-		// list's first refresh normally is.
-		m.mode = modeDetail
-		m.detail = detailState{
-			ticket: opts.Open.Ticket,
-			input: DetailFromTicket(opts.Open.Ticket, model.Detail{}, opts.Open.Capabilities,
-				opts.Open.Parent, time.Time{}),
-			loading: true,
-		}
-		m.detailGeneration = 1
+		// Decoder mode seats the same Detail state as a list-open, but leaves the
+		// command for Init so Bubble Tea owns startup I/O.
 		if opts.Initial == nil {
 			m.refreshing = false
 			m.generation = 0
 			m.listArmed = false
 		}
-		m = m.syncDetailKeys()
+		next, _ := m.seatDetail(opts.Open.Ticket, opts.Open.Parent, opts.Open.Capabilities)
+		m = next.(Model)
 	}
 	return m
 }
@@ -211,7 +210,7 @@ var errNoSource = errors.New("this monitor was opened without a collection to wa
 // decoded Ticket's Detail, or — for a seeded monitor — neither.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{heartbeat(), requestBackgroundColor}
-	if m.mode == modeDetail {
+	if m.mode == modeDetail && m.detail.loading {
 		cmds = append(cmds, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID))
 	}
 	if m.refreshing {
@@ -229,11 +228,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
-		// The Detail body is a function of width, so a resize re-wraps it and
-		// the offset has to come back inside the re-wrapped document. A resize
-		// that scrolls the reader into the void is the bug this clamp exists
-		// for.
-		m.detail.offset = m.clampDetail(m.detail.offset)
+		if m.mode == modeDetail {
+			m = m.reconcileDetail(true)
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -266,6 +263,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.onDetailMouseWheel(msg), nil
+
+	case detailMouseLinkMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseLink(msg)
 
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
@@ -307,9 +310,10 @@ func (m Model) View() tea.View {
 	}
 
 	if m.mode == modeDetail {
-		v.SetContent(m.detailFrame())
+		doc := m.detailDocument()
+		v.SetContent(m.detailFrame(doc))
 		if m.mouseEnabled {
-			v.OnMouse = m.detailMouseHandler()
+			v.OnMouse = m.detailMouseHandler(doc)
 		}
 		return v
 	}
@@ -778,12 +782,6 @@ func (m Model) helpKeys() help.KeyMap {
 	return m.responsiveHelpKeys(m.keys)
 }
 
-// detailHelpKeys applies the same responsive help layout to Detail without
-// making list body measurements depend on the screen currently in front.
-func (m Model) detailHelpKeys() help.KeyMap {
-	return m.responsiveHelpKeys(m.detailKeys)
-}
-
 type responsiveHelpKeyMap struct {
 	short []key.Binding
 	full  [][]key.Binding
@@ -792,12 +790,15 @@ type responsiveHelpKeyMap struct {
 func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
 func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
 
-// responsiveHelpKeys keeps compact help actionable and expanded help complete.
-// It shortens capture guidance only when the first three actions do not fit,
-// and stacks full-help columns rather than letting bubbles omit a column.
+// responsiveHelpKeys keeps list and search help actionable at narrow widths.
+// Detail owns its richer role-aware layout in detailhelp.go.
 func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 	short := append([]key.Binding(nil), keys.ShortHelp()...)
-	full := keys.FullHelp()
+	groups := keys.FullHelp()
+	full := make([][]key.Binding, len(groups))
+	for i := range groups {
+		full[i] = append([]key.Binding(nil), groups[i]...)
+	}
 
 	unbounded := m.help
 	unbounded.SetWidth(0)

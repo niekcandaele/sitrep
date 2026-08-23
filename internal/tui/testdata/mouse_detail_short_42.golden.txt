@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & t
+#111 · Widget sync current · read just now
 #112  Draft the shard sync protocol
 [In Review]  @mara-vos  #501 open ci ok ch
 
@@ -37,4 +37,4 @@ COMMENTS (3)
   Version byte it is. Updating the draft.
 
 
-m off, shift-drag • esc back • q quit … 0%
+m/⇧drag·esc·q quit·tab/⇧·? help·u↑      0%

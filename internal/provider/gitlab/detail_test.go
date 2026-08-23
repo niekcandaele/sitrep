@@ -110,6 +110,10 @@ func TestFetchDetailMapsTheLinks(t *testing.T) {
 			t.Errorf("Links[%d] = {%v %q %s}, want {%v %q %s}",
 				i, got.Kind, got.NativeLabel, got.Target.Key, w.kind, w.native, w.key)
 		}
+		wantID := model.TicketID("issue:" + w.key)
+		if got.Target.ID != wantID {
+			t.Errorf("Links[%d].Target.ID = %q, want FetchDetail identity %q", i, got.Target.ID, wantID)
+		}
 	}
 
 	// A target carries everything the links table shows, including its own

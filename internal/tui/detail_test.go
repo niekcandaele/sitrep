@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -396,7 +400,7 @@ func TestDetailFrameFromAHandBuiltInput(t *testing.T) {
 		Capabilities: allCaps,
 	}
 
-	header := ansi.Strip(renderDetailHeader(in, "read just now", 80, Styles{}))
+	header := ansi.Strip(renderDetailHeader(in, "read just now", 80, Styles{}, nil))
 	body := strings.Join(plainLines(detailLines(in, 80, Styles{})), "\n")
 
 	if strings.Count(header, "\n") != detailHeaderHeight-1 {
@@ -438,5 +442,452 @@ func TestDetailStaleness(t *testing.T) {
 				t.Errorf("detailStaleness = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetailDocumentRecordsVisibleLinkRows(t *testing.T) {
+	wantLines := map[int][]int{
+		40:  {38, 39, 40},
+		60:  {33, 34, 35},
+		120: {26, 27, 28},
+	}
+	for _, width := range []int{40, 60, 120} {
+		doc := composeDetailDocument(fixtureDetailInput(allCaps), width, Styles{}, detailLinkIdentity{}, false)
+		if len(doc.LinkRows) != 3 {
+			t.Fatalf("width %d: got %d Link rows, want 3", width, len(doc.LinkRows))
+		}
+		for i, row := range doc.LinkRows {
+			if row.Line != wantLines[width][i] {
+				t.Errorf("width %d Link %d line = %d, want exact document line %d",
+					width, i, row.Line, wantLines[width][i])
+			}
+			if row.Line < 0 || row.Line >= len(doc.Lines) {
+				t.Fatalf("width %d Link %d points outside the document: %+v", width, i, row)
+			}
+			line := ansi.Strip(doc.Lines[row.Line])
+			if !strings.HasPrefix(line, unselectedMarker) {
+				t.Errorf("width %d Link %d has no fixed gutter: %q", width, i, line)
+			}
+			if !strings.Contains(line, row.Link.Target.Key) {
+				t.Errorf("width %d Link %d metadata points at %q", width, i, line)
+			}
+		}
+	}
+
+	hidden := composeDetailDocument(fixtureDetailInput(model.Capabilities{Comments: true}), 80, Styles{}, detailLinkIdentity{}, false)
+	if len(hidden.LinkRows) != 1 || hidden.LinkRows[0].Link.Kind != model.LinkRelates {
+		t.Fatalf("capability-filtered Link rows = %+v, want only Relates", hidden.LinkRows)
+	}
+}
+
+func TestDetailDocumentPinsSectionOrderAndLinkGeometry(t *testing.T) {
+	input := DetailInput{
+		Capabilities: model.Capabilities{Comments: true, BlockingLinks: true},
+		Detail: model.Detail{
+			Description: "alpha beta gamma delta",
+			Comments: []model.Comment{{
+				Author:    model.User{Login: "ann"},
+				CreatedAt: time.Date(2026, time.January, 2, 3, 4, 0, 0, time.UTC),
+				Body:      "comment words wrap here",
+			}},
+			Links: []model.Link{{
+				Kind:        model.LinkBlocks,
+				NativeLabel: "blocks",
+				Target:      model.LinkTarget{ID: "K-2", Key: "K-2", Title: "Linked target"},
+			}},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		width    int
+		caps     model.Capabilities
+		wantRows []string
+		linkLine int
+	}{
+		{
+			name: "wrapped at twelve", width: 12, caps: input.Capabilities, linkLine: 14,
+			wantRows: []string{
+				"DESCRIPTION", "", "alpha beta", "gamma delta", "",
+				"COMMENTS (1)", "", "@ann · 2026-", "  comment", "  words wrap", "  here", "",
+				"LINKS (1)", "", "<LINK>",
+			},
+		},
+		{
+			name: "wrapped at twenty", width: 20, caps: input.Capabilities, linkLine: 13,
+			wantRows: []string{
+				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "  comment words wrap", "  here", "",
+				"LINKS (1)", "", "<LINK>",
+			},
+		},
+		{
+			name: "single-line content at thirty", width: 30, caps: input.Capabilities, linkLine: 11,
+			wantRows: []string{
+				"DESCRIPTION", "", "alpha beta gamma delta", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03:04 UTC", "  comment words wrap here", "",
+				"LINKS (1)", "", "<LINK>",
+			},
+		},
+		{
+			name: "comments capability hidden", width: 20,
+			caps: model.Capabilities{BlockingLinks: true}, linkLine: 7,
+			wantRows: []string{
+				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
+				"LINKS (1)", "", "<LINK>",
+			},
+		},
+		{
+			name: "blocking links capability hidden", width: 20,
+			caps: model.Capabilities{Comments: true}, linkLine: -1,
+			wantRows: []string{
+				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "  comment words wrap", "  here",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := input
+			in.Capabilities = tt.caps
+			doc := composeDetailDocument(in, tt.width, Styles{}, detailLinkIdentity{}, false)
+			got := plainLines(doc.Lines)
+			if len(doc.LinkRows) == 1 {
+				if doc.LinkRows[0].Line != tt.linkLine {
+					t.Fatalf("Link line = %d, want %d", doc.LinkRows[0].Line, tt.linkLine)
+				}
+				got[tt.linkLine] = "<LINK>"
+			} else if tt.linkLine >= 0 {
+				t.Fatalf("Link rows = %d, want one at %d", len(doc.LinkRows), tt.linkLine)
+			} else if len(doc.LinkRows) != 0 {
+				t.Fatalf("hidden Links produced metadata: %+v", doc.LinkRows)
+			}
+			if !reflect.DeepEqual(got, tt.wantRows) {
+				t.Errorf("document rows = %#v\nwant          = %#v", got, tt.wantRows)
+			}
+		})
+	}
+}
+
+func TestDetailLinkTitleUsesCellWidthAndPreservesStatus(t *testing.T) {
+	in := DetailInput{
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		Detail: model.Detail{Links: []model.Link{{
+			Kind:        model.LinkBlocks,
+			NativeLabel: "blocks",
+			Target: model.LinkTarget{
+				ID: "K-2", Key: "K-2", Title: strings.Repeat("界", 20), NativeStatus: "Open",
+			},
+		}}},
+	}
+	const width = 40
+	doc := composeDetailDocument(in, width, Styles{}, detailLinkIdentity{}, false)
+	if len(doc.LinkRows) != 1 {
+		t.Fatalf("Link rows = %d, want one", len(doc.LinkRows))
+	}
+	line := ansi.Strip(doc.Lines[doc.LinkRows[0].Line])
+	if !strings.Contains(line, "[Open]") {
+		t.Errorf("cell-truncated Unicode title displaced Native Status: %q", line)
+	}
+	if got := ansi.StringWidth(line); got > width {
+		t.Errorf("Link line width = %d, budget %d: %q", got, width, line)
+	}
+}
+
+func TestDetailLongUnicodeLinkLabelPreservesTargetIdentity(t *testing.T) {
+	longLabel := strings.Repeat("界", 20)
+	in := DetailInput{
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		Detail: model.Detail{Links: []model.Link{
+			{
+				Kind:        model.LinkBlocks,
+				NativeLabel: longLabel,
+				Target: model.LinkTarget{
+					ID: "K-2", Key: "K-2", Title: "Target identity remains visible", NativeStatus: "Open",
+				},
+			},
+			{
+				Kind:        model.LinkBlocks,
+				NativeLabel: "blocks",
+				Target: model.LinkTarget{
+					ID: "K-3", Key: "K-3", Title: "Target identity stays aligned", NativeStatus: "Open",
+				},
+			},
+		}},
+	}
+
+	for _, width := range []int{40, 42} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			doc := composeDetailDocument(in, width, Styles{}, detailLinkIdentity{}, false)
+			if len(doc.LinkRows) != len(in.Detail.Links) {
+				t.Fatalf("Link rows = %d, want %d", len(doc.LinkRows), len(in.Detail.Links))
+			}
+			for i, row := range doc.LinkRows {
+				line := ansi.Strip(doc.Lines[row.Line])
+				if got := ansi.StringWidth(line); got > width {
+					t.Errorf("Link %d width = %d, budget %d: %q", i, got, width, line)
+				}
+				if !strings.HasPrefix(line, unselectedMarker) {
+					t.Errorf("Link %d lost fixed focus gutter: %q", i, line)
+				}
+				if !strings.Contains(line, row.Link.Target.Key) || !strings.Contains(line, "Target") {
+					t.Errorf("Link %d lost target identity behind relationship label: %q", i, line)
+				}
+			}
+			longLine := ansi.Strip(doc.Lines[doc.LinkRows[0].Line])
+			if strings.Contains(longLine, longLabel) {
+				t.Errorf("long relationship label was not cell-truncated at width %d: %q", width, longLine)
+			}
+		})
+	}
+}
+
+func TestDetailDocumentsStayWidthBoundedAtExtremeWidths(t *testing.T) {
+	loaded := detailModel(t)
+	loaded.detail.input.Detail.Description = "界面界面 a-long-token-without-breaks"
+	loaded.detail.input.Detail.Comments = []model.Comment{{Body: "éclair 界面"}}
+	loaded.detail.input.Detail.Links[0].Target.Title = "界面 relationship target"
+
+	empty := loaded
+	empty.detail.input.Detail = model.Detail{}
+	empty.detail.input.Capabilities = model.Capabilities{Comments: true}
+
+	loading := loaded
+	loading.detail.loaded = false
+	loading.detail.loading = true
+	loading.detail.lastErr = nil
+
+	failed := loading
+	failed.detail.loading = false
+	failed.detail.lastErr = errors.New("échec 界面 with a long diagnostic")
+
+	states := []struct {
+		name  string
+		model Model
+	}{
+		{name: "loaded Unicode", model: loaded},
+		{name: "loaded empty sections", model: empty},
+		{name: "loading", model: loading},
+		{name: "initial error", model: failed},
+	}
+	for _, width := range []int{0, 1, 2, 3, 5, 9} {
+		for _, state := range states {
+			t.Run(fmt.Sprintf("%s/width-%d", state.name, width), func(t *testing.T) {
+				m := state.model
+				m.width = width
+				doc := m.detailDocument()
+				for i, line := range doc.Lines {
+					if got := ansi.StringWidth(line); got > max(width, 0) {
+						t.Errorf("document line %d width = %d, budget %d: %q", i, got, width, line)
+					}
+				}
+				for i, row := range doc.LinkRows {
+					if row.Line < 0 || row.Line >= len(doc.Lines) {
+						t.Errorf("Link row %d points outside %d document lines: %+v", i, len(doc.Lines), row)
+					}
+				}
+
+				const bodyHeight = 4
+				rendered := strings.Split(renderDetailBody(doc.Lines, 0, bodyHeight, width), "\n")
+				if len(rendered) != bodyHeight {
+					t.Fatalf("rendered body height = %d, want %d", len(rendered), bodyHeight)
+				}
+				for i, line := range rendered {
+					if got := ansi.StringWidth(line); got > max(width, 0) {
+						t.Errorf("rendered line %d width = %d, budget %d", i, got, width)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDetailDocumentDistinguishesDuplicateRelationships(t *testing.T) {
+	base := model.Link{
+		Kind:        model.LinkRelates,
+		NativeLabel: "duplicates",
+		Target:      model.LinkTarget{ID: "T-2", Key: "T-2", Title: "Second"},
+	}
+	links := []model.Link{
+		base,
+		base,
+		base,
+		{Kind: model.LinkBlocks, NativeLabel: base.NativeLabel, Target: base.Target},
+		{Kind: base.Kind, NativeLabel: "is related to", Target: base.Target},
+	}
+	in := DetailInput{Capabilities: model.Capabilities{BlockingLinks: true}, Detail: model.Detail{Description: "body", Links: links}}
+	doc := composeDetailDocument(in, 80, Styles{}, detailLinkIdentity{}, false)
+	if len(doc.LinkRows) != len(links) {
+		t.Fatalf("got %d Link rows, want %d", len(doc.LinkRows), len(links))
+	}
+	for i, want := range []int{0, 1, 2} {
+		if got := doc.LinkRows[i].Identity.Occurrence; got != want {
+			t.Errorf("duplicate %d occurrence = %d, want %d", i, got, want)
+		}
+	}
+	for i := 1; i < len(doc.LinkRows); i++ {
+		if doc.LinkRows[i].Identity == doc.LinkRows[0].Identity {
+			t.Errorf("Link %d collapsed onto the first relationship identity", i)
+		}
+	}
+	focused := composeDetailDocument(in, 80, Styles{}, doc.LinkRows[2].Identity, true)
+	selected := 0
+	for _, row := range focused.LinkRows {
+		if strings.HasPrefix(ansi.Strip(focused.Lines[row.Line]), selectedMarker) {
+			selected++
+			if row.Identity != doc.LinkRows[2].Identity {
+				t.Errorf("focus marker landed on %+v, want third duplicate %+v", row.Identity, doc.LinkRows[2].Identity)
+			}
+		}
+	}
+	if selected != 1 {
+		t.Errorf("third exact duplicate rendered %d focus markers, want 1", selected)
+	}
+
+	bodyText := "https://tracker.example/T-2 [T-2](https://example.test) #115 \x1b]8;;https://example.test\x1b\\text\x1b]8;;\x1b\\"
+	in.Detail.Description = bodyText
+	in.Detail.Comments = []model.Comment{{Author: model.User{Login: "ann"}, Body: bodyText}}
+	in.Detail.Links = nil
+	in.Capabilities.Comments = true
+	if got := composeDetailDocument(in, 80, Styles{}, detailLinkIdentity{}, false).LinkRows; len(got) != 0 {
+		t.Errorf("description/comment text synthesized Link metadata: %+v", got)
+	}
+}
+
+func TestDetailLinkFocusCyclesAcrossThreeExactDuplicates(t *testing.T) {
+	m, _ := navigableDetailModel(t)
+	duplicate := model.Link{
+		Kind:        model.LinkRelates,
+		NativeLabel: "duplicates",
+		Target:      model.LinkTarget{ID: "DUP-1", Key: "DUP-1", Title: "same"},
+	}
+	m.detail.input.Detail.Links = []model.Link{duplicate, duplicate, duplicate}
+	m.detail.input.Capabilities.BlockingLinks = true
+	m = m.reconcileDetail(true)
+
+	for want := range 3 {
+		next, _ := m.onDetailKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = next.(Model)
+		if got := m.detail.linkFocus.Occurrence; got != want {
+			t.Fatalf("Tab %d focused duplicate occurrence %d, want %d", want+1, got, want)
+		}
+	}
+	next, _ := m.onDetailKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = next.(Model)
+	if got := m.detail.linkFocus.Occurrence; got != 0 {
+		t.Errorf("forward wrap focused occurrence %d, want 0", got)
+	}
+	next, _ = m.onDetailKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if got := next.(Model).detail.linkFocus.Occurrence; got != 2 {
+		t.Errorf("backward wrap focused occurrence %d, want 2", got)
+	}
+}
+
+func TestDetailLinkFocusCyclesAcrossOneRelationship(t *testing.T) {
+	m, _ := navigableDetailModel(t)
+	m.detail.input.Detail.Links = m.detail.input.Detail.Links[:1]
+	m = m.reconcileDetail(true)
+	identity := m.detailDocument().LinkRows[0].Identity
+
+	for _, keyMsg := range []tea.KeyPressMsg{
+		{Code: tea.KeyTab},
+		{Code: tea.KeyTab},
+		{Code: tea.KeyTab, Mod: tea.ModShift},
+	} {
+		next, _ := m.onDetailKey(keyMsg)
+		m = next.(Model)
+		if !m.detail.hasLinkFocus || m.detail.linkFocus != identity {
+			t.Fatalf("one-Link cycle focused %+v, want %+v", m.detail.linkFocus, identity)
+		}
+	}
+}
+
+func TestDetailDocumentFocusGutterDoesNotMoveLayout(t *testing.T) {
+	in := fixtureDetailInput(allCaps)
+	unfocused := composeDetailDocument(in, 60, Styles{}, detailLinkIdentity{}, false)
+	focus := unfocused.LinkRows[1].Identity
+	focused := composeDetailDocument(in, 60, Styles{}, focus, true)
+
+	if len(focused.Lines) != len(unfocused.Lines) {
+		t.Fatalf("focus changed line count from %d to %d", len(unfocused.Lines), len(focused.Lines))
+	}
+	for i := range focused.Lines {
+		got, want := ansi.Strip(focused.Lines[i]), ansi.Strip(unfocused.Lines[i])
+		if i == focused.LinkRows[1].Line {
+			if !strings.HasPrefix(got, selectedMarker) ||
+				strings.TrimPrefix(got, selectedMarker) != strings.TrimPrefix(want, unselectedMarker) {
+				t.Errorf("focused row = %q, unfocused = %q", got, want)
+			}
+		} else if got != want {
+			t.Errorf("focus changed unrelated line %d: %q != %q", i, got, want)
+		}
+		if ansi.StringWidth(got) > 60 {
+			t.Errorf("focused line %d is wider than the frame: %q", i, got)
+		}
+	}
+}
+
+func TestDetailLinkFocusCyclesWithoutOwningBodyScroll(t *testing.T) {
+	m := detailModel(t)
+	m.width, m.height = 60, 12
+	m = m.reconcileDetail(true)
+	if m.detail.hasLinkFocus {
+		t.Fatal("a newly opened Detail started with a Link focused")
+	}
+
+	tab := tea.KeyPressMsg{Code: tea.KeyTab}
+	shiftTab := tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	next, _ := m.onDetailKey(tab)
+	m = next.(Model)
+	first := m.detail.linkFocus
+	if !m.detail.hasLinkFocus || first != m.detailDocument().LinkRows[0].Identity {
+		t.Fatalf("Tab focus = %+v, want first Link", first)
+	}
+
+	for range len(m.detailDocument().LinkRows) {
+		next, _ = m.onDetailKey(tab)
+		m = next.(Model)
+	}
+	if m.detail.linkFocus != first {
+		t.Errorf("Tab did not wrap to the first Link: %+v", m.detail.linkFocus)
+	}
+
+	m.detail.hasLinkFocus = false
+	m.detail.linkFocus = detailLinkIdentity{}
+	next, _ = m.onDetailKey(shiftTab)
+	m = next.(Model)
+	rows := m.detailDocument().LinkRows
+	if m.detail.linkFocus != rows[len(rows)-1].Identity {
+		t.Errorf("initial Shift-Tab focus = %+v, want last Link", m.detail.linkFocus)
+	}
+
+	focus := m.detail.linkFocus
+	offset := m.detail.offset
+	next, _ = m.onDetailKey(upKey)
+	m = next.(Model)
+	if m.detail.linkFocus != focus {
+		t.Errorf("body scrolling moved Link focus from %+v to %+v", focus, m.detail.linkFocus)
+	}
+	if m.detail.offset > offset {
+		t.Errorf("up moved body offset from %d to %d", offset, m.detail.offset)
+	}
+}
+
+func TestEnsureDocumentLineVisibleMovesMinimally(t *testing.T) {
+	tests := []struct {
+		target, offset, count, height, want int
+	}{
+		{5, 3, 20, 5, 3},
+		{2, 3, 20, 5, 2},
+		{8, 3, 20, 5, 4},
+		{19, 3, 20, 5, 15},
+		{0, 99, 3, 10, 0},
+	}
+	for _, tt := range tests {
+		if got := ensureDocumentLineVisible(tt.target, tt.offset, tt.count, tt.height); got != tt.want {
+			t.Errorf("ensureDocumentLineVisible(%d, %d, %d, %d) = %d, want %d",
+				tt.target, tt.offset, tt.count, tt.height, got, tt.want)
+		}
 	}
 }

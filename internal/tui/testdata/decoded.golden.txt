@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & telemetry                                                           read 3m ago
+#111 · Widget sync v2: shards, retries & telemetry                                                 current · read 3m ago
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
 [In Review]  @mara-vos  #501 open ci ok changes req
 
@@ -28,13 +28,13 @@ COMMENTS (3)
 
 LINKS (3)
 
-is blocked by     #115  Reconcile widget IDs across shards       [open]
-blocks            #116  Protocol conformance tests               [Selected for Development]
-is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
+  is blocked by     #115  Reconcile widget IDs across shards       [open]
+  blocks            #116  Protocol conformance tests               [Selected for Development]
+  is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
 
 
 
 
 
 
-m off · shift-drag to select text • esc quit • q quit • ↑/k up • ↓/j down • u epic • r refresh • ? help
+m off · shift-drag to select text • esc quit • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down

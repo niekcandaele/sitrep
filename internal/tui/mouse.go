@@ -25,7 +25,15 @@ type listMouseWheelMsg struct {
 }
 
 type detailMouseWheelMsg struct {
-	delta int
+	sourceID model.TicketID
+	epoch    int
+	delta    int
+}
+
+type detailMouseLinkMsg struct {
+	sourceID model.TicketID
+	epoch    int
+	identity detailLinkIdentity
 }
 
 func mouseCmd(msg tea.Msg) tea.Cmd {
@@ -83,23 +91,49 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	}
 }
 
-// detailMouseHandler owns only vertical wheel translation. Clicks deliberately
-// remain unclaimed until Detail navigation has its own interaction contract.
-func (m Model) detailMouseHandler() func(tea.MouseMsg) tea.Cmd {
+// detailMouseHandler translates clicks and wheel movement against the exact
+// document and geometry of the last rendered Detail frame. Every domain message
+// captures the source seat; Link data is still re-resolved in Update.
+func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
+	bodyHeight, offset := m.detailBodyHeight(), m.detail.offset
+	sourceID, epoch := m.detail.ticket.ID, m.detailMouseEpoch
+	rows := make(map[int]detailLinkIdentity, len(doc.LinkRows))
+	for _, row := range doc.LinkRows {
+		rows[row.Line] = row.Identity
+	}
+
 	return func(msg tea.MouseMsg) tea.Cmd {
-		wheel, ok := msg.(tea.MouseWheelMsg)
-		if !ok || wheel.X < 0 || wheel.X >= width || wheel.Y < 0 || wheel.Y >= height {
-			return nil
+		switch msg := msg.(type) {
+		case tea.MouseClickMsg:
+			if msg.Button != tea.MouseLeft || msg.Mod != 0 ||
+				msg.X < 0 || msg.X >= width ||
+				msg.Y < detailHeaderHeight || msg.Y >= height ||
+				msg.Y >= detailHeaderHeight+bodyHeight {
+				return nil
+			}
+			identity, ok := rows[offset+msg.Y-detailHeaderHeight]
+			if !ok {
+				return nil
+			}
+			return mouseCmd(detailMouseLinkMsg{
+				sourceID: sourceID,
+				epoch:    epoch,
+				identity: identity,
+			})
+
+		case tea.MouseWheelMsg:
+			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
+				return nil
+			}
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				return mouseCmd(detailMouseWheelMsg{sourceID: sourceID, epoch: epoch, delta: -3})
+			case tea.MouseWheelDown:
+				return mouseCmd(detailMouseWheelMsg{sourceID: sourceID, epoch: epoch, delta: 3})
+			}
 		}
-		switch wheel.Button {
-		case tea.MouseWheelUp:
-			return mouseCmd(detailMouseWheelMsg{delta: -3})
-		case tea.MouseWheelDown:
-			return mouseCmd(detailMouseWheelMsg{delta: 3})
-		default:
-			return nil
-		}
+		return nil
 	}
 }
 
@@ -139,8 +173,32 @@ func (m Model) onListMouseWheel(msg listMouseWheelMsg) Model {
 }
 
 func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
+		return m
+	}
 	m = m.clearPendingClick()
 	return m.scrollDetail(msg.delta)
+}
+
+func (m Model) onDetailMouseLink(msg detailMouseLinkMsg) (tea.Model, tea.Cmd) {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
+		return m, nil
+	}
+
+	doc := m.detailDocument()
+	row, ok := detailLinkRowByIdentity(doc, msg.identity)
+	if !ok {
+		return m.syncDetailKeysFor(doc), nil
+	}
+	previousBodyHeight := m.detailBodyHeight()
+	m.detail.linkFocus = msg.identity
+	m.detail.hasLinkFocus = true
+	m = m.syncDetailKeysFor(doc)
+	if m.detailBodyHeight() != previousBodyHeight {
+		m.detail.offset = ensureDocumentLineVisible(
+			row.Line, m.detail.offset, len(doc.Lines), m.detailBodyHeight())
+	}
+	return m.followDetailLink(msg.identity)
 }
 
 func (m Model) toggleMouse() Model {
@@ -153,6 +211,7 @@ func (m Model) toggleMouse() Model {
 		}
 	}
 
+	m.detailMouseEpoch++
 	m.mouseEnabled = !m.mouseEnabled
 	m = m.clearPendingClick().syncMouseKeys()
 	if !m.ready {
@@ -163,10 +222,7 @@ func (m Model) toggleMouse() Model {
 	// expanded-help column. Reconcile the active screen only when that changes
 	// the body geometry; an unchanged footer must not move either scroll owner.
 	if m.mode == modeDetail {
-		if m.detailBodyHeight() != previousBodyHeight {
-			m.detail.offset = m.clampDetail(m.detail.offset)
-		}
-		return m
+		return m.reconcileDetail(m.detailBodyHeight() != previousBodyHeight)
 	}
 	if m.bodyHeight() != previousBodyHeight {
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
