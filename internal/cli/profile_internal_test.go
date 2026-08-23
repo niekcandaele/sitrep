@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
+	"github.com/niekcandaele/sitrep/internal/provider/jira"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -100,6 +105,121 @@ func TestNewFakeProviderUsesProfileMaxTicketsIndependentlyOfCadence(t *testing.T
 	if got := effectiveInterval(false, 0, profile.RefreshInterval); got != time.Hour {
 		t.Errorf("effective interval = %s, want 1h", got)
 	}
+}
+
+type captureRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestNewProviderForwardsProfileMaxTicketsToConcreteProviders(t *testing.T) {
+	const maxTickets = 7
+	stop := errors.New("stop after first membership request")
+	client := func(capture func(*http.Request)) *http.Client {
+		return &http.Client{Transport: captureRoundTripper(func(req *http.Request) (*http.Response, error) {
+			capture(req)
+			return nil, stop
+		})}
+	}
+	assertStopped := func(t *testing.T, err error, requests int) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("Resolve unexpectedly succeeded")
+		}
+		if requests != 1 {
+			t.Errorf("membership requests = %d, want 1", requests)
+		}
+	}
+
+	t.Run("GitHub GraphQL first", func(t *testing.T) {
+		profile := &config.Profile{MaxTickets: maxTickets}
+		deps := Deps{TokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
+		constructed, err := deps.newProvider(providerAuto, connectionRoute{
+			tracker: ref.TrackerGitHub, host: "github.com", raw: "--query",
+		}, profile, "")
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		p, ok := constructed.(*github.Provider)
+		if !ok {
+			t.Fatalf("provider = %T, want *github.Provider", constructed)
+		}
+		requests := 0
+		github.WithEndpoint("https://github.example.test/graphql")(p)
+		github.WithHTTPClient(client(func(req *http.Request) {
+			requests++
+			var payload struct {
+				Variables struct {
+					First int `json:"first"`
+				} `json:"variables"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Errorf("decode GraphQL request: %v", err)
+			}
+			if payload.Variables.First != maxTickets {
+				t.Errorf("GraphQL first = %d, want %d", payload.Variables.First, maxTickets)
+			}
+		}))(p)
+		_, err = p.Resolve(context.Background(), provider.QuerySelector{Query: "is:issue"})
+		assertStopped(t, err, requests)
+	})
+
+	t.Run("GitLab per_page", func(t *testing.T) {
+		profile := &config.Profile{MaxTickets: maxTickets}
+		deps := Deps{GitLabTokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
+		constructed, err := deps.newProvider(providerAuto, connectionRoute{
+			tracker: ref.TrackerGitLab, host: "gitlab.com", raw: "--query",
+		}, profile, "")
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		p, ok := constructed.(*gitlab.Provider)
+		if !ok {
+			t.Fatalf("provider = %T, want *gitlab.Provider", constructed)
+		}
+		requests := 0
+		gitlab.WithBaseURL("https://gitlab.example.test")(p)
+		gitlab.WithHTTPClient(client(func(req *http.Request) {
+			requests++
+			if got := req.URL.Query().Get("per_page"); got != "7" {
+				t.Errorf("per_page = %q, want 7", got)
+			}
+		}))(p)
+		_, err = p.Resolve(context.Background(), provider.QuerySelector{Query: "state=opened"})
+		assertStopped(t, err, requests)
+	})
+
+	t.Run("Jira maxResults", func(t *testing.T) {
+		profile := &config.Profile{
+			MaxTickets: maxTickets,
+			Auth:       config.Auth{User: "reader@example.test", TokenEnv: "JIRA_TOKEN"},
+		}
+		deps := Deps{Env: func(name string) string {
+			if name == "JIRA_TOKEN" {
+				return "test-token"
+			}
+			return ""
+		}}
+		constructed, err := deps.newProvider(providerAuto, connectionRoute{
+			tracker: ref.TrackerJira, host: "acme.atlassian.net", raw: "--query",
+		}, profile, "/tmp/config.yml")
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		p, ok := constructed.(*jira.Provider)
+		if !ok {
+			t.Fatalf("provider = %T, want *jira.Provider", constructed)
+		}
+		requests := 0
+		jira.WithBaseURL("https://jira.example.test")(p)
+		jira.WithHTTPClient(client(func(req *http.Request) {
+			requests++
+			if got := req.URL.Query().Get("maxResults"); got != "7" {
+				t.Errorf("maxResults = %q, want 7", got)
+			}
+		}))(p)
+		_, err = p.Resolve(context.Background(), provider.QuerySelector{Query: "project = ABC"})
+		assertStopped(t, err, requests)
+	})
 }
 
 // parseArgs calls Parse repeatedly, once per positional argument. The claim
@@ -362,6 +482,66 @@ func TestResolveQuerySelectionRoutesFromOriginOnce(t *testing.T) {
 			}
 			if selection.route.tracker != tt.wantTracker || selection.route.host != tt.wantHost || selection.route.gitLabPath != tt.wantPath {
 				t.Errorf("route = %+v, want tracker=%s host=%q path=%q", selection.route, tt.wantTracker, tt.wantHost, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestResolveQuerySelectionUsesMatchingProfileForKnownOrigin(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      string
+		profile     config.Profile
+		wantTracker ref.Tracker
+		wantHost    string
+		wantPath    string
+	}{
+		{
+			name:   "GitHub",
+			remote: "git@github.com:acme/widgets.git",
+			profile: config.Profile{
+				Name: "work-github", Provider: providerGitHub,
+				Auth:            config.Auth{TokenEnv: "GITHUB_TOKEN_REF"},
+				RefreshInterval: 45 * time.Second, MaxTickets: 17,
+			},
+			wantTracker: ref.TrackerGitHub, wantHost: "github.com",
+		},
+		{
+			name:   "GitLab",
+			remote: "https://gitlab.com/checkout/widgets.git",
+			profile: config.Profile{
+				Name: "work-gitlab", Provider: providerGitLab, Host: "gitlab.com",
+				Project:         "configured/group/widgets",
+				Auth:            config.Auth{TokenEnv: "GITLAB_TOKEN_REF"},
+				RefreshInterval: 45 * time.Second, MaxTickets: 17,
+			},
+			wantTracker: ref.TrackerGitLab, wantHost: "gitlab.com", wantPath: "configured/group/widgets",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Config{Profiles: map[string]config.Profile{tt.profile.Name: tt.profile}}
+			deps := Deps{RemoteLookup: func(context.Context, string, string) (string, error) {
+				return tt.remote, nil
+			}}
+			selection, err := deps.resolveQuerySelection(context.Background(), cfg, "q", providerAuto, "")
+			if err != nil {
+				t.Fatalf("resolveQuerySelection: %v", err)
+			}
+			if selection.profile == nil || !reflect.DeepEqual(*selection.profile, tt.profile) {
+				t.Fatalf("profile = %#v, want complete matching Profile %#v", selection.profile, tt.profile)
+			}
+			if selection.route.tracker != tt.wantTracker || selection.route.host != tt.wantHost ||
+				selection.route.gitLabPath != tt.wantPath {
+				t.Errorf("route = %+v, want tracker=%s host=%q path=%q",
+					selection.route, tt.wantTracker, tt.wantHost, tt.wantPath)
+			}
+			if got := effectiveInterval(false, 0, profileInterval(selection.profile)); got != 45*time.Second {
+				t.Errorf("effective interval = %s, want 45s", got)
+			}
+			if got := effectiveMaxTickets(selection.profile); got != 17 {
+				t.Errorf("effective max_tickets = %d, want 17", got)
 			}
 		})
 	}

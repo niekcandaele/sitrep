@@ -73,18 +73,18 @@ type pullRequestNode struct {
 }
 
 // newPullRequests unions GitHub's two native PR relationships before mapping
-// them onto sitrep's model. Closing references retain their existing order and
-// precedence; usable PR-sourced timeline mentions append in GitHub's retained
-// timeline order. GitHub cannot distinguish an implementation reference from
-// an incidental PR mention when willCloseTarget is false, so every PullRequest
-// source with stable repository-plus-number identity is deliberately included.
-// Issue, null, inaccessible, and identity-less timeline sources are ignored.
+// them onto sitrep's model. Closing references precede usable PR-sourced timeline
+// mentions, and each source preserves its API order. GitHub cannot distinguish an
+// implementation reference from an incidental PR mention when willCloseTarget is
+// false, so every PullRequest source with stable repository-plus-number identity
+// is included. Issue, null, inaccessible, and identity-less timeline sources are
+// ignored.
 //
-// Stable identities deduplicate case-insensitively across and within both paths,
-// first occurrence wins. Legacy closing nodes without repository identity still
-// map exactly as before, but cannot prove equivalence to another candidate.
-// leadFirst runs once after the union. A Ticket with no candidates gets nil, the
-// model's documented "none", rather than an empty slice.
+// Stable identities deduplicate case-insensitively across and within both paths;
+// first occurrence wins. Closing nodes without repository identity cannot prove
+// equivalence to another candidate. leadFirst runs once after the union. A Ticket
+// with no candidates gets nil, the model's documented "none", rather than an
+// empty slice.
 func newPullRequests(
 	closing *pullRequestConnection,
 	crossReferences *crossReferenceConnection,

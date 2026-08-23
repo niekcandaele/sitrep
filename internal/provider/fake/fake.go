@@ -93,7 +93,7 @@ func WithMaxTickets(maxTickets int) Option {
 	}
 }
 
-// WithSnapshot replaces the fixture epic with s for every Resolve call.
+// WithSnapshot replaces the Watchlist fixture served by every Resolve call.
 func WithSnapshot(s model.WatchlistSnapshot) Option {
 	return func(p *Provider) { p.snapshots = []model.WatchlistSnapshot{s} }
 }

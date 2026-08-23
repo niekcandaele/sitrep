@@ -96,3 +96,41 @@ func TestReadStdinRefsUsesUnicodeWhitespaceOnly(t *testing.T) {
 		t.Errorf("Refs = %#v, want %#v", got, want)
 	}
 }
+
+func TestReadStdinRefsEnforcesByteBoundary(t *testing.T) {
+	exact := strings.Repeat("x", maxStdinSelectorBytes)
+	got, err := readStdinRefs(strings.NewReader(exact))
+	if err != nil {
+		t.Fatalf("exact-boundary read: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{exact}) {
+		t.Errorf("exact-boundary Refs = %#v, want the one complete token", got)
+	}
+
+	got, err = readStdinRefs(strings.NewReader(exact + "x"))
+	if err == nil || !strings.Contains(err.Error(), "stdin Selector input exceeds the 1048576-byte limit") {
+		t.Fatalf("one-byte-over error = %v, want the stdin Selector byte boundary", err)
+	}
+	if got != nil {
+		t.Errorf("one-byte-over Refs = %#v, want nil", got)
+	}
+
+	if _, err := readStdinRefs(strings.NewReader(" \n\t\r")); err == nil || err.Error() != "no Refs were provided on stdin" {
+		t.Errorf("whitespace-only error = %v, want the empty-input contract", err)
+	}
+}
+
+type selectorReadError struct{ err error }
+
+func (r selectorReadError) Read([]byte) (int, error) { return 0, r.err }
+
+func TestReadStdinRefsWrapsReaderFailure(t *testing.T) {
+	cause := errors.New("selector stream failed")
+	refs, err := readStdinRefs(selectorReadError{err: cause})
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "reading Refs from stdin") {
+		t.Fatalf("error = %v, want wrapped reader cause", err)
+	}
+	if refs != nil {
+		t.Errorf("Refs = %#v, want nil", refs)
+	}
+}

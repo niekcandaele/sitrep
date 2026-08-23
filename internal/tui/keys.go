@@ -38,6 +38,12 @@ type KeyMap struct {
 	ClearFilter key.Binding
 	// ToggleMouse enables or disables terminal mouse capture.
 	ToggleMouse key.Binding
+	// MouseSelect describes list click selection in expanded help only.
+	MouseSelect key.Binding
+	// MouseOpen describes list double-click opening in expanded help only.
+	MouseOpen key.Binding
+	// MouseWheel describes list wheel selection in expanded help only.
+	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -96,6 +102,9 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", mouseEnabledHelp),
 		),
+		MouseSelect: helpOnlyBinding("click", "select Ticket"),
+		MouseOpen:   helpOnlyBinding("double-click", "open Ticket"),
+		MouseWheel:  helpOnlyBinding("wheel", "move selection"),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -120,9 +129,36 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.Open, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Refresh, k.Help, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
+}
+
+func compactListFullHelp(k KeyMap) [][]key.Binding {
+	mouse := k.ToggleMouse
+	if mouse.Help().Desc == mouseEnabledHelp {
+		mouse.SetHelp("m", mouseEnabledCompactHelp)
+	}
+	bindings := []key.Binding{
+		mouse,
+		k.MouseSelect,
+		k.MouseOpen,
+		k.MouseWheel,
+		helpOnlyBinding("↑/↓/k/j", "move"),
+		helpOnlyBinding("pgup/pgdn", "page"),
+		helpOnlyBinding("g/G", "first/last"),
+		helpOnlyBinding("enter/r", "open/refresh"),
+		helpOnlyBinding("d /", "hide finished/find"),
+		helpOnlyBinding("?/q", "help/quit"),
+	}
+	if k.ClearFilter.Enabled() {
+		bindings = append(bindings, k.ClearFilter)
+	}
+	return [][]key.Binding{bindings}
+}
+
+func helpOnlyBinding(keyText, description string) key.Binding {
+	return key.NewBinding(key.WithKeys("__help_only"), key.WithHelp(keyText, description))
 }
 
 // DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses list
@@ -159,6 +195,10 @@ type DetailKeyMap struct {
 	Parent key.Binding
 	// ToggleMouse enables or disables terminal mouse capture.
 	ToggleMouse key.Binding
+	// MouseWheel describes body scrolling in expanded help only.
+	MouseWheel key.Binding
+	// MouseFollow describes clicking a visible Link in expanded help only.
+	MouseFollow key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -201,6 +241,8 @@ func DefaultDetailKeyMap() DetailKeyMap {
 			key.WithDisabled(),
 		),
 		ToggleMouse: list.ToggleMouse,
+		MouseWheel:  helpOnlyBinding("wheel", "scroll body"),
+		MouseFollow: helpOnlyBinding("click Link", "follow"),
 		Help:        list.Help,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),

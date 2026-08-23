@@ -40,10 +40,10 @@ func TestDetailMouseHitMapUsesRenderedDocumentLines(t *testing.T) {
 		if !ok {
 			t.Fatalf("x=%d translated to %T", x, cmd())
 		}
-		if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch ||
+		if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.mouseEpoch ||
 			msg.identity != doc.LinkRows[0].Identity {
 			t.Errorf("x=%d message = %+v, want source %q epoch %d identity %+v",
-				x, msg, m.detail.ticket.ID, m.detailMouseEpoch, doc.LinkRows[0].Identity)
+				x, msg, m.detail.ticket.ID, m.mouseEpoch, doc.LinkRows[0].Identity)
 		}
 	}
 
@@ -102,9 +102,9 @@ func queuedDetailWheel(t *testing.T, m Model) detailMouseWheelMsg {
 	if !ok {
 		t.Fatalf("Detail wheel translated to %T", cmd())
 	}
-	if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch || msg.delta != 3 {
+	if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.mouseEpoch || msg.delta != 3 {
 		t.Fatalf("Detail wheel message = %+v, want source %q epoch %d delta 3",
-			msg, m.detail.ticket.ID, m.detailMouseEpoch)
+			msg, m.detail.ticket.ID, m.mouseEpoch)
 	}
 	return msg
 }
@@ -125,8 +125,8 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 	t.Run("same-seat resize remains valid", func(t *testing.T) {
 		next, _ := base.Update(tea.WindowSizeMsg{Width: 72, Height: 10})
 		resized := next.(Model)
-		if resized.detailMouseEpoch != base.detailMouseEpoch {
-			t.Fatalf("resize advanced mouse epoch from %d to %d", base.detailMouseEpoch, resized.detailMouseEpoch)
+		if resized.mouseEpoch != base.mouseEpoch {
+			t.Fatalf("resize advanced mouse epoch from %d to %d", base.mouseEpoch, resized.mouseEpoch)
 		}
 		got := applyDetailWheel(t, resized, msg)
 		if got.detail.offset != resized.detail.offset+3 {
@@ -154,8 +154,8 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 			detail:     base.detail.input.Detail,
 			caps:       base.detail.input.Capabilities,
 		})
-		if reread.detailMouseEpoch != base.detailMouseEpoch {
-			t.Fatalf("reread advanced mouse epoch from %d to %d", base.detailMouseEpoch, reread.detailMouseEpoch)
+		if reread.mouseEpoch != base.mouseEpoch {
+			t.Fatalf("reread advanced mouse epoch from %d to %d", base.mouseEpoch, reread.mouseEpoch)
 		}
 		got := applyDetailWheel(t, reread, msg)
 		if got.detail.offset != reread.detail.offset+3 {
@@ -182,9 +182,9 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 		doc := base.detailDocument()
 		childModel, _ := base.followDetailLink(doc.LinkRows[0].Identity)
 		restored := childModel.(Model).popDetailTrail()
-		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.detailMouseEpoch == base.detailMouseEpoch {
+		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.mouseEpoch == base.mouseEpoch {
 			t.Fatalf("pop restored source %q epoch %d, want source %q with epoch after %d",
-				restored.detail.ticket.ID, restored.detailMouseEpoch, base.detail.ticket.ID, base.detailMouseEpoch)
+				restored.detail.ticket.ID, restored.mouseEpoch, base.detail.ticket.ID, base.mouseEpoch)
 		}
 		got := applyDetailWheel(t, restored, msg)
 		if got.detail.offset != restored.detail.offset {
@@ -216,9 +216,9 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 
 	t.Run("mouse off and on rejects prior-epoch wheel", func(t *testing.T) {
 		retoggled := base.toggleMouse().toggleMouse()
-		if !retoggled.mouseEnabled || retoggled.detailMouseEpoch == base.detailMouseEpoch {
+		if !retoggled.mouseEnabled || retoggled.mouseEpoch == base.mouseEpoch {
 			t.Fatalf("retoggle enabled=%t epoch=%d, want enabled with epoch after %d",
-				retoggled.mouseEnabled, retoggled.detailMouseEpoch, base.detailMouseEpoch)
+				retoggled.mouseEnabled, retoggled.mouseEpoch, base.mouseEpoch)
 		}
 		got := applyDetailWheel(t, retoggled, msg)
 		if got.detail.offset != retoggled.detail.offset {
@@ -244,7 +244,7 @@ func TestDetailMouseClickAndKeyboardFollowShareTransition(t *testing.T) {
 	if !reflect.DeepEqual(mouseChild.detail.ticket, keyboardChild.detail.ticket) ||
 		mouseChild.detail.linkFocus != keyboardChild.detail.linkFocus ||
 		mouseChild.detailGeneration != keyboardChild.detailGeneration ||
-		mouseChild.detailMouseEpoch != keyboardChild.detailMouseEpoch ||
+		mouseChild.mouseEpoch != keyboardChild.mouseEpoch ||
 		len(mouseChild.trail) != len(keyboardChild.trail) {
 		t.Errorf("mouse/keyboard seats differ:\nmouse: %+v\nkeyboard: %+v", mouseChild.detail, keyboardChild.detail)
 	}
@@ -322,10 +322,10 @@ func TestDetailMouseDomainMessageRevalidatesLastFrameFacts(t *testing.T) {
 	t.Run("same source after seat round trip", func(t *testing.T) {
 		childModel, _ := base.followDetailLink(captured.Identity)
 		restored := childModel.(Model).popDetailTrail()
-		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.detailMouseEpoch == base.detailMouseEpoch {
+		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.mouseEpoch == base.mouseEpoch {
 			t.Fatalf("round trip source=%q epoch=%d, want source %q and epoch after %d",
-				restored.detail.ticket.ID, restored.detailMouseEpoch,
-				base.detail.ticket.ID, base.detailMouseEpoch)
+				restored.detail.ticket.ID, restored.mouseEpoch,
+				base.detail.ticket.ID, base.mouseEpoch)
 		}
 
 		next, cmd := restored.Update(msg)
@@ -377,9 +377,9 @@ func TestDetailMouseDomainMessageRevalidatesLastFrameFacts(t *testing.T) {
 
 	t.Run("mouse toggled off and on after queue", func(t *testing.T) {
 		m := base.toggleMouse().toggleMouse()
-		if !m.mouseEnabled || m.detailMouseEpoch == base.detailMouseEpoch {
+		if !m.mouseEnabled || m.mouseEpoch == base.mouseEpoch {
 			t.Fatalf("mouse toggle state enabled=%t epoch=%d, want enabled and epoch after %d",
-				m.mouseEnabled, m.detailMouseEpoch, base.detailMouseEpoch)
+				m.mouseEnabled, m.mouseEpoch, base.mouseEpoch)
 		}
 		next, cmd := m.Update(msg)
 		got := next.(Model)
@@ -489,8 +489,8 @@ func TestDetailCompositeIdentitySurvivesRereadReorderAndMutableTargetFields(t *t
 		detail:     updated,
 		caps:       rereading.detail.input.Capabilities,
 	})
-	if reread.detailMouseEpoch != m.detailMouseEpoch {
-		t.Fatalf("same-seat reread advanced mouse epoch from %d to %d", m.detailMouseEpoch, reread.detailMouseEpoch)
+	if reread.mouseEpoch != m.mouseEpoch {
+		t.Fatalf("same-seat reread advanced mouse epoch from %d to %d", m.mouseEpoch, reread.mouseEpoch)
 	}
 	if !reread.detail.hasLinkFocus || reread.detail.linkFocus != wantB || !reread.detailKeys.Follow.Enabled() {
 		t.Fatalf("B focus after reread = focused:%t identity:%+v follow:%t, want %+v",
@@ -555,7 +555,7 @@ func TestRawDetailMouseMessagesNeverMutate(t *testing.T) {
 	m, _ := navigableDetailModel(t)
 	beforeDetail := m.detail
 	beforeGeneration := m.detailGeneration
-	beforeMouseEpoch := m.detailMouseEpoch
+	beforeMouseEpoch := m.mouseEpoch
 	for _, msg := range []tea.Msg{
 		tea.MouseClickMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseLeft},
 		tea.MouseWheelMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseWheelDown},
@@ -563,7 +563,7 @@ func TestRawDetailMouseMessagesNeverMutate(t *testing.T) {
 		next, cmd := m.Update(msg)
 		got := next.(Model)
 		if cmd != nil || !reflect.DeepEqual(got.detail, beforeDetail) ||
-			got.detailGeneration != beforeGeneration || got.detailMouseEpoch != beforeMouseEpoch ||
+			got.detailGeneration != beforeGeneration || got.mouseEpoch != beforeMouseEpoch ||
 			len(got.trail) != 0 || got.mode != modeDetail {
 			t.Errorf("raw %T mutated Model or issued command", msg)
 		}

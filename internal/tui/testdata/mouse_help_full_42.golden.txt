@@ -21,20 +21,20 @@ DONE (3)
   #118     Cache shard lookups
            [closed]  @mara-vos  #504 merg…
   #119     Emit sync telemetry
-           [Done]  @tobias
-  #120     Write the sync v2 runbook
-           [closed]
 
-m     off · shift-drag to select text
-enter open
-r     refresh
-?     help
-q     quit
-↑/k   up
-↓/j   down
-pgup  page up
-pgdn  page down
-g     first
-G     last
-d     hide finished
-/     find
+m            off, shift-drag
+click        select Ticket
+double-click open Ticket
+wheel        move selection
+enter        open
+r            refresh
+?            help
+q            quit
+↑/k          up
+↓/j          down
+pgup         page up
+pgdn         page down
+g            first
+G            last
+d            hide finished
+/            find

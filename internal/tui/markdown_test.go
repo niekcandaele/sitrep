@@ -200,6 +200,127 @@ func TestGitHubReferenceContextDoesNotGuessTrackerSemantics(t *testing.T) {
 	}
 }
 
+func TestGitHubReferenceBoundaryHelpers(t *testing.T) {
+	t.Run("Ticket URL context", func(t *testing.T) {
+		ctx, ok := githubContext("https://github.com/acme/%77idgets/issues/40")
+		if !ok || ctx.owner != "acme" || ctx.repo != "widgets" {
+			t.Fatalf("safe escaped path context = %+v, %t; want acme/widgets", ctx, ok)
+		}
+		if got := ctx.issueURL("12"); got != "https://github.com/acme/widgets/issues/12" {
+			t.Errorf("issue URL = %q", got)
+		}
+		for _, rawURL := range []string{
+			"https://github.com/acme%2Fcorp/widgets/issues/40",
+			"https://github.com/%2E/widgets/issues/40",
+			"https://github.com/%2E%2E/widgets/issues/40",
+			"https://reader@github.com/acme/widgets/issues/40",
+		} {
+			if _, ok := githubContext(rawURL); ok {
+				t.Errorf("githubContext(%q) accepted an unsafe context", rawURL)
+			}
+		}
+	})
+
+	t.Run("decimal issue references", func(t *testing.T) {
+		for _, tt := range []struct {
+			value string
+			want  bool
+		}{
+			{value: "0"},
+			{value: "01"},
+			{value: "18446744073709551615", want: true},
+			{value: "18446744073709551616"},
+		} {
+			if got := decimalReference(tt.value); got != tt.want {
+				t.Errorf("decimalReference(%q) = %t, want %t", tt.value, got, tt.want)
+			}
+		}
+	})
+
+	t.Run("backslash parity", func(t *testing.T) {
+		for count := 1; count <= 4; count++ {
+			source := strings.Repeat("\\", count) + "#12"
+			if got, want := escapedAt(source, count), count%2 == 1; got != want {
+				t.Errorf("escapedAt(%q, %d) = %t, want %t", source, count, got, want)
+			}
+		}
+	})
+
+	t.Run("username grammar", func(t *testing.T) {
+		for _, tt := range []struct {
+			username string
+			want     bool
+		}{
+			{username: strings.Repeat("a", 39), want: true},
+			{username: strings.Repeat("a", 40)},
+			{username: "-alice"},
+			{username: "alice-"},
+			{username: "ali--ce"},
+		} {
+			if got := validGitHubUsername(tt.username); got != tt.want {
+				t.Errorf("validGitHubUsername(%q) = %t, want %t", tt.username, got, tt.want)
+			}
+		}
+	})
+}
+
+func TestRewriteGitHubReferenceBoundaries(t *testing.T) {
+	const ticketURL = "https://github.com/acme/widgets/issues/40"
+	issueTarget := func(number string) string {
+		return "[#" + number + "](https://github.com/acme/widgets/issues/" + number + ")"
+	}
+	userTarget := func(username string) string {
+		return "[@" + username + "](https://github.com/" + username + ")"
+	}
+	validUser := strings.Repeat("a", 39)
+	tests := []struct {
+		name      string
+		source    string
+		context   string
+		want      string
+		unchanged bool
+	}{
+		{name: "safe escaped path", source: "#12", context: "https://github.com/acme/%77idgets/issues/40", want: issueTarget("12")},
+		{name: "escaped slash context", source: "#12", context: "https://github.com/acme%2Fcorp/widgets/issues/40", unchanged: true},
+		{name: "escaped dot context", source: "#12", context: "https://github.com/%2E/widgets/issues/40", unchanged: true},
+		{name: "escaped dot-dot context", source: "#12", context: "https://github.com/%2E%2E/widgets/issues/40", unchanged: true},
+		{name: "userinfo context", source: "#12", context: "https://reader@github.com/acme/widgets/issues/40", unchanged: true},
+		{name: "issue zero", source: "#0", unchanged: true},
+		{name: "issue leading zero", source: "#01", unchanged: true},
+		{name: "issue uint64 max", source: "#18446744073709551615", want: issueTarget("18446744073709551615")},
+		{name: "issue uint64 overflow", source: "#18446744073709551616", unchanged: true},
+		{name: "one backslash", source: strings.Repeat("\\", 1) + "#12", unchanged: true},
+		{name: "two backslashes", source: strings.Repeat("\\", 2) + "#12", want: strings.Repeat("\\", 2) + issueTarget("12")},
+		{name: "three backslashes", source: strings.Repeat("\\", 3) + "#12", unchanged: true},
+		{name: "four backslashes", source: strings.Repeat("\\", 4) + "#12", want: strings.Repeat("\\", 4) + issueTarget("12")},
+		{name: "username 39 characters", source: "@" + validUser, want: userTarget(validUser)},
+		{name: "username 40 characters", source: "@" + strings.Repeat("a", 40), unchanged: true},
+		{name: "username leading hyphen", source: "@-alice", unchanged: true},
+		{name: "username trailing hyphen", source: "@alice-", unchanged: true},
+		{name: "username double hyphen", source: "@ali--ce", unchanged: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			context := tt.context
+			if context == "" {
+				context = ticketURL
+			}
+			got := rewriteGitHubReferences(tt.source, context)
+			want := tt.want
+			if tt.unchanged {
+				want = tt.source
+			}
+			if got != want {
+				t.Errorf("rewriteGitHubReferences(%q, %q) = %q, want %q", tt.source, context, got, want)
+			}
+			if tt.unchanged && strings.Contains(got, "](https://") {
+				t.Errorf("rejected source synthesized a hyperlink target: %q", got)
+			}
+		})
+	}
+}
+
 func TestMarkdownReferencesAreTerminalLinksNotTrailLinks(t *testing.T) {
 	t.Setenv("GLAMOUR_STYLE", "dark")
 	in := DetailInput{

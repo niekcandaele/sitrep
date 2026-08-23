@@ -365,7 +365,7 @@ func TestSingleStdinRefRemainsARefList(t *testing.T) {
 func TestStdinDuplicateRefsKeepFirstSpelling(t *testing.T) {
 	p := fake.New()
 	got := runStdin([]string{"--json", "-"},
-		"acme/widgets#112 https://github.com/acme/widgets/issues/112", p)
+		"acme/widgets#112 https://github.com/ACME/WIDGETS/issues/112", p)
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
@@ -426,7 +426,7 @@ func TestJSONRefListFlagsBeforeAndBetweenRefs(t *testing.T) {
 
 func TestDuplicateRefsKeepFirstSpellingAndRemainARefList(t *testing.T) {
 	p := fake.New()
-	got := run([]string{"--json", "acme/widgets#112", "https://github.com/acme/widgets/issues/112"}, p)
+	got := run([]string{"--json", "acme/widgets#112", "https://github.com/ACME/WIDGETS/issues/112"}, p)
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
@@ -483,8 +483,9 @@ func TestSameTrackerDifferentHostsFailsBeforeProvider(t *testing.T) {
 	if got.code != 1 || got.stdout != "" {
 		t.Fatalf("result = code %d stdout %q stderr %q", got.code, got.stdout, got.stderr)
 	}
-	if !strings.Contains(got.stderr, "GitHub (github.com)") || !strings.Contains(got.stderr, "GitHub (ghe.acme.test)") {
-		t.Errorf("stderr = %q, want both effective hosts", got.stderr)
+	want := "sitrep: Refs in one Watchlist must use one Tracker connection and host; \"https://github.com/acme/widgets/issues/112\" resolves to the GitHub Provider at github.com, while \"https://ghe.acme.test/acme/widgets/issues/115\" resolves to the GitHub Provider at ghe.acme.test\n"
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
 	}
 	if p.ResolveCalls() != 0 {
 		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())

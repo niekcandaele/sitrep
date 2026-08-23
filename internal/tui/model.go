@@ -73,13 +73,12 @@ type Model struct {
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
-	// detailMouseEpoch identifies the currently seated Detail for queued mouse
-	// callbacks. Rereads leave it stable so a Link callback can re-resolve the same
-	// relationship after a same-seat reorder and a wheel callback can still scroll;
-	// navigation and mouse toggles advance it so an older frame cannot act after
-	// leaving and returning to the same ID.
-	detailMouseEpoch int
-	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
+	// mouseEpoch identifies the current capture lifetime and Detail seat for queued
+	// mouse callbacks. Rereads leave it stable so callbacks can re-resolve facts
+	// from the same seat; navigation and mouse toggles advance it so an older frame
+	// cannot act after capture changes or after leaving and returning to the same ID.
+	mouseEpoch  int
+	fetchDetail func(model.TicketID) (model.Detail, model.Capabilities, error)
 
 	width, height int
 	ready         bool
@@ -262,13 +261,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onDetailFetched(msg), nil
 
 	case listMouseClickMsg:
-		if m.mode != modeList {
+		if m.mode != modeList || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
 			return m, nil
 		}
 		return m.onListMouseClick(msg)
 
 	case listMouseWheelMsg:
-		if m.mode != modeList {
+		if m.mode != modeList || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
 			return m, nil
 		}
 		return m.onListMouseWheel(msg), nil
@@ -815,6 +814,17 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 		full[i] = append([]key.Binding(nil), groups[i]...)
 	}
 
+	if m.width > 0 && m.width <= 42 {
+		for i := range full {
+			for j := range full[i] {
+				help := full[i][j].Help()
+				if help.Key == "m" && help.Desc == mouseEnabledHelp {
+					full[i][j].SetHelp("m", mouseEnabledCompactHelp)
+				}
+			}
+		}
+	}
+
 	unbounded := m.help
 	unbounded.SetWidth(0)
 	if len(short) >= 3 && short[0].Help().Key == "m" &&
@@ -827,7 +837,10 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
 		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
 	}
-	if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
+	if listKeys, ok := keys.(KeyMap); ok && m.help.ShowAll &&
+		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
+		full = compactListFullHelp(listKeys)
+	} else if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
 		stacked := make([]key.Binding, 0)
 		for _, group := range full {
 			stacked = append(stacked, group...)

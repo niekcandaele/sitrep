@@ -1,14 +1,21 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 )
 
 func TestDocumentationContract(t *testing.T) {
@@ -89,13 +96,49 @@ func TestREADMEStructuredExamplesUseRealContracts(t *testing.T) {
 	}
 
 	jsonBlocks := fencedBlocks(readme, "json")
-	if len(jsonBlocks) == 0 {
-		t.Fatal("README has no JSON contract example")
+	if len(jsonBlocks) != 1 {
+		t.Fatalf("README JSON contract examples = %d, want exactly 1", len(jsonBlocks))
 	}
-	for i, block := range jsonBlocks {
-		if !json.Valid([]byte(block)) {
-			t.Errorf("JSON block %d is not valid JSON", i+1)
+	var documented any
+	if err := json.Unmarshal([]byte(jsonBlocks[0]), &documented); err != nil {
+		t.Fatalf("README JSON contract example does not unmarshal: %v", err)
+	}
+
+	fixture := fake.FixtureSnapshot()
+	var ticket model.Ticket
+	for _, candidate := range fixture.Tickets {
+		if candidate.ID == "acme/widgets#115" {
+			ticket = candidate
+			break
 		}
+	}
+	if ticket.ID == "" {
+		t.Fatal("fake fixture no longer contains the README Ticket acme/widgets#115")
+	}
+	snapshot := model.WatchlistSnapshot{
+		Tickets:      []model.Ticket{ticket},
+		Capabilities: fixture.Capabilities,
+		FetchedAt:    time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
+	}
+	selector := provider.RefListSelector{Refs: []ref.Ref{{
+		Tracker: ref.TrackerGitHub,
+		Host:    "github.com",
+		Owner:   "acme",
+		Repo:    "widgets",
+		Number:  115,
+		Raw:     "acme/widgets#115",
+	}}}
+	var rendered bytes.Buffer
+	if err := jsonout.RenderWatchlist(&rendered, snapshot, selector, "fake"); err != nil {
+		t.Fatalf("render deterministic README Watchlist: %v", err)
+	}
+	var authoritative any
+	if err := json.Unmarshal(rendered.Bytes(), &authoritative); err != nil {
+		t.Fatalf("real Watchlist renderer produced invalid JSON: %v", err)
+	}
+	if !reflect.DeepEqual(documented, authoritative) {
+		t.Errorf("README JSON contract differs from jsonout.RenderWatchlist\nREADME: %s\nrendered: %s",
+			jsonBlocks[0], rendered.String())
 	}
 }
 

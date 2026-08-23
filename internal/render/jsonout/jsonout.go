@@ -36,8 +36,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// Watchlist selection became explicit in schema v2. Detail and decoded-Ticket
-// documents retain their unchanged schema-v1 shape.
+// Watchlist documents use schema v2; Detail and decoded-Ticket documents use schema v1.
 const (
 	watchlistSchemaVersion = 2
 	detailSchemaVersion    = 1

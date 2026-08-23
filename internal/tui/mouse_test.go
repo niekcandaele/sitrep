@@ -142,12 +142,12 @@ func requireHelpText(t *testing.T, view string, wants ...string) {
 func TestMouseHelpLayoutContracts(t *testing.T) {
 	const (
 		enabledMouseHelp    = "m off · shift-drag to select text"
-		compactMouseHelp    = "m off, shift-drag"
 		searchMouseHelp     = "shift-drag select text"
 		fullSearchMouseHelp = "shift-drag to select text"
 	)
 	listHelp := []string{
-		enabledMouseHelp, "enter open", "r refresh", "? help", "q quit",
+		enabledMouseHelp, "click select Ticket", "double-click open Ticket", "wheel move selection",
+		"enter open", "r refresh", "? help", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down",
 		"g first", "G last", "d hide finished", "/ find", "esc clear filter",
 	}
@@ -161,7 +161,7 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 
 		next, _ := m.Update(keyPress("m"))
 		m = next.(Model)
-		disabledHelp := append([]string(nil), listHelp[1:]...)
+		disabledHelp := append([]string(nil), listHelp[4:]...)
 		disabledHelp = append([]string{"m on"}, disabledHelp...)
 		requireHelpText(t, m.help.View(m.helpKeys()), disabledHelp...)
 	})
@@ -170,10 +170,12 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 40, 40)
 		m.help.SetWidth(40)
 		m.keys.ClearFilter.SetEnabled(true)
-		requireHelpText(t, m.help.View(m.helpKeys()), compactMouseHelp, "enter open", "q quit")
+		requireHelpText(t, m.help.View(m.helpKeys()), "m off, shift-drag", "enter open", "q quit")
 
 		m.help.ShowAll = true
-		requireHelpText(t, m.help.View(m.helpKeys()), listHelp...)
+		narrowListHelp := append([]string(nil), listHelp...)
+		narrowListHelp[0] = "m off, shift-drag"
+		requireHelpText(t, m.help.View(m.helpKeys()), narrowListHelp...)
 
 		next, _ := m.Update(keyPress("m"))
 		m = next.(Model)
@@ -194,16 +196,16 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m.help.SetWidth(80)
 		m.help.ShowAll = true
 		requireHelpText(t, m.detailHelpView(),
-			enabledMouseHelp, "esc back", "u watchlist", "r refresh", "? help", "q quit",
+			enabledMouseHelp, "wheel scroll body", "esc back", "u watchlist", "r refresh", "? help", "q quit",
 			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
 
 		m.width = 40
 		m.help.SetWidth(40)
 		m.help.ShowAll = false
-		requireHelpText(t, m.detailHelpView(), compactMouseHelp, "esc back", "q quit")
+		requireHelpText(t, m.detailHelpView(), "m off, shift-drag", "esc back", "q quit")
 		m.help.ShowAll = true
 		requireHelpText(t, m.detailHelpView(),
-			enabledMouseHelp, "esc back", "u watchlist", "r refresh", "? help", "q quit",
+			enabledMouseHelp, "wheel scroll body", "esc back", "u watchlist", "r refresh", "? help", "q quit",
 			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
 	})
 
@@ -216,6 +218,95 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		requireHelpText(t, m.help.View(m.helpKeys()),
 			fullSearchMouseHelp, "esc cancel", "enter apply", "↑/↓ move", "ctrl+c quit")
 	})
+}
+
+func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
+	for _, noMouse := range []bool{false, true} {
+		state := "enabled"
+		if noMouse {
+			state = "disabled"
+		}
+		for _, size := range []struct{ width, height int }{{80, 24}, {42, 16}} {
+			name := fmt.Sprintf("%s/%dx%d", state, size.width, size.height)
+			t.Run("list/"+name, func(t *testing.T) {
+				m := mouseListModel(t, Options{NoMouse: noMouse}, fixtureTickets(), size.width, size.height)
+				m.help.SetWidth(size.width)
+				m.help.ShowAll = true
+				content := m.View().Content
+				if got := len(strings.Split(content, "\n")); got != size.height {
+					t.Errorf("list frame height = %d, want %d", got, size.height)
+				}
+				if size.width == 80 {
+					requireHelpText(t, content,
+						"enter open", "r refresh", "? help", "q quit", "↑/k up", "↓/j down",
+						"pgup page up", "pgdn page down", "g first", "G last",
+						"d hide finished", "/ find")
+				} else {
+					requireHelpText(t, content,
+						"↑/↓/k/j move", "pgup/pgdn page", "g/G first/last",
+						"enter/r open/refresh", "d / hide finished/find", "?/q help/quit")
+				}
+				if noMouse {
+					requireHelpText(t, content, "m on")
+					for _, forbidden := range []string{"shift-drag", "click select Ticket", "double-click open Ticket", "wheel move selection"} {
+						if strings.Contains(content, forbidden) {
+							t.Errorf("disabled list help advertises %q:\n%s", forbidden, content)
+						}
+					}
+				} else {
+					mouseRecovery := "m off · shift-drag to select text"
+					if size.width == 42 {
+						mouseRecovery = "m off, shift-drag"
+					}
+					requireHelpText(t, content,
+						mouseRecovery, "click select Ticket",
+						"double-click open Ticket", "wheel move selection")
+				}
+			})
+
+			t.Run("Detail/"+name, func(t *testing.T) {
+				m, _ := navigableDetailModel(t)
+				m.hasSource = true
+				m.width, m.height = size.width, size.height
+				m.help.SetWidth(size.width)
+				if noMouse {
+					m = m.toggleMouse()
+				}
+				m.help.ShowAll = true
+				m = focusLinkAt(m, 0)
+				m = m.reconcileDetail(true)
+				content := m.View().Content
+				if got := len(strings.Split(content, "\n")); got != size.height {
+					t.Errorf("Detail frame height = %d, want %d", got, size.height)
+				}
+				if size.width == 80 {
+					requireHelpText(t, content,
+						"esc back", "enter follow", "tab next link", "⇧tab previous link",
+						"u watchlist", "r refresh", "? help", "q quit", "↑/k up", "↓/j down",
+						"pgup page up", "pgdn page down", "g first", "G last")
+				} else {
+					requireHelpText(t, content,
+						"esc/u back/watchlist", "tab/⇧tab links", "enter follow",
+						"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
+				}
+				if noMouse {
+					requireHelpText(t, content, "m on")
+					for _, forbidden := range []string{"shift-drag", "wheel scroll body", "click Link follow"} {
+						if strings.Contains(content, forbidden) {
+							t.Errorf("disabled Detail help advertises %q:\n%s", forbidden, content)
+						}
+					}
+				} else {
+					mouseRecovery := "m off · shift-drag to select text"
+					if size.width == 42 {
+						mouseRecovery = "m off, shift-drag"
+					}
+					requireHelpText(t, content,
+						mouseRecovery, "wheel scroll body", "click Link follow")
+				}
+			})
+		}
+	}
 }
 
 func TestDetailResponsiveShortHelpKeepsPriorityActions(t *testing.T) {
@@ -620,9 +711,9 @@ func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
 			t.Errorf("frame height = %d, want terminal height %d", got, m.height)
 		}
 		requireHelpText(t, content,
-			"m off · shift-drag to select text", "esc back", "enter follow", "tab next link", "⇧tab previous link",
-			"u watchlist", "r refresh", "? help", "q quit", "↑/k up", "↓/j down",
-			"pgup page up", "pgdn page down", "g first", "G last")
+			"m off, shift-drag", "wheel scroll body", "click Link follow",
+			"esc/u back/watchlist", "tab/⇧tab links", "enter follow",
+			"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
 	})
 
 	t.Run("readable initial error at 42x16", func(t *testing.T) {
@@ -799,8 +890,9 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		"g first", "G last", "d hide finished", "/ find",
 	}
 	detailFull := []string{
-		"esc back", "u watchlist", "r refresh", "? help", "q quit",
-		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last",
+		"esc back", "tab next link", "⇧tab previous link", "u watchlist",
+		"r refresh", "? help", "q quit", "↑/k up", "↓/j down",
+		"pgup page up", "pgdn page down", "g first", "G last",
 	}
 	tests := []struct {
 		name     string
@@ -816,7 +908,10 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		{
 			name: "complete expanded list help at 80", width: 80, expanded: true,
 			golden: "mouse_help_full_80.golden.txt",
-			wants:  append([]string{"m off · shift-drag to select text"}, listFull...),
+			wants: append([]string{
+				"m off · shift-drag to select text", "click select Ticket",
+				"double-click open Ticket", "wheel move selection",
+			}, listFull...),
 		},
 		{
 			name: "actionable enabled list short help at 42", width: 42,
@@ -831,7 +926,10 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		{
 			name: "complete enabled list full help at 42", width: 42, expanded: true,
 			golden: "mouse_help_full_42.golden.txt",
-			wants:  append([]string{"m off · shift-drag to select text"}, listFull...),
+			wants: append([]string{
+				"m off, shift-drag", "click select Ticket",
+				"double-click open Ticket", "wheel move selection",
+			}, listFull...),
 		},
 		{
 			name: "complete disabled list full help at 42", width: 42, expanded: true, noMouse: true,
@@ -851,7 +949,9 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		{
 			name: "complete enabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true,
 			golden: "mouse_detail_full_42.golden.txt",
-			wants:  append([]string{"m off · shift-drag to select text"}, detailFull...),
+			wants: append([]string{
+				"m off · shift-drag to select text", "wheel scroll body", "click Link follow",
+			}, detailFull...),
 		},
 		{
 			name: "complete disabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true, noMouse: true,
@@ -929,6 +1029,97 @@ func TestMouseToggleDoesNotStealSearchText(t *testing.T) {
 	}
 	if content := m.View().Content; !strings.Contains(content, "shift-drag") || strings.Contains(content, "m off") {
 		t.Errorf("search help does not own the keyboard honestly:\n%s", content)
+	}
+}
+
+func TestQueuedListMouseMessagesAreRejectedAfterCaptureChanges(t *testing.T) {
+	transitions := []struct {
+		name  string
+		apply func(Model) Model
+	}{
+		{name: "disabled", apply: func(m Model) Model { return m.toggleMouse() }},
+		{name: "off and on", apply: func(m Model) Model { return m.toggleMouse().toggleMouse() }},
+	}
+	newModel := func(t *testing.T, detailCalls *int) Model {
+		t.Helper()
+		return mouseListModel(t, Options{
+			DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+				*detailCalls = *detailCalls + 1
+				return model.Detail{Description: "loaded"}, model.Capabilities{}, nil
+			},
+		}, []model.Ticket{ticket("#1", model.StatusTodo), ticket("#2", model.StatusTodo)}, 80, 20)
+	}
+	queue := func(t *testing.T, m Model, msg tea.MouseMsg) tea.Msg {
+		t.Helper()
+		handler := m.View().OnMouse
+		if handler == nil {
+			t.Fatal("list view has no mouse handler")
+		}
+		cmd := handler(msg)
+		if cmd == nil {
+			t.Fatal("mouse event produced no domain message")
+		}
+		return cmd()
+	}
+	applyStale := func(t *testing.T, m Model, msg tea.Msg) Model {
+		t.Helper()
+		next, cmd := m.Update(msg)
+		if cmd != nil {
+			t.Fatalf("stale %T issued command %v", msg, cmd)
+		}
+		return next.(Model)
+	}
+
+	for _, transition := range transitions {
+		t.Run(transition.name, func(t *testing.T) {
+			t.Run("click cannot select or mutate pending click", func(t *testing.T) {
+				detailCalls := 0
+				m := newModel(t, &detailCalls)
+				domain := queue(t, m, tea.MouseClickMsg{
+					X: 1, Y: ticketLineY(t, m, "#2", 0), Button: tea.MouseLeft,
+				})
+				changed := transition.apply(m)
+				changed.searching = true
+				changed.lastClickID = "#1"
+				changed.lastClickAt = time.Unix(1, 0)
+				got := applyStale(t, changed, domain)
+				if got.selectedID != changed.selectedID || got.lastClickID != changed.lastClickID ||
+					!got.lastClickAt.Equal(changed.lastClickAt) || !got.searching ||
+					got.mode != modeList || detailCalls != 0 {
+					t.Errorf("stale click mutated list: selected=%q pending=%q mode=%v calls=%d",
+						got.selectedID, got.lastClickID, got.mode, detailCalls)
+				}
+			})
+
+			t.Run("second click cannot open", func(t *testing.T) {
+				detailCalls := 0
+				m := newModel(t, &detailCalls)
+				click := tea.MouseClickMsg{X: 1, Y: ticketLineY(t, m, "#1", 0), Button: tea.MouseLeft}
+				m, _, _ = dispatchMouse(t, m, click)
+				if m.lastClickID != "#1" {
+					t.Fatalf("first click did not arm #1: %q", m.lastClickID)
+				}
+				domain := queue(t, m, click)
+				changed := transition.apply(m)
+				got := applyStale(t, changed, domain)
+				if got.mode != modeList || got.lastClickID != "" || !got.lastClickAt.IsZero() || detailCalls != 0 {
+					t.Errorf("stale second click opened or re-armed: mode=%v pending=%q calls=%d",
+						got.mode, got.lastClickID, detailCalls)
+				}
+			})
+
+			t.Run("wheel cannot move selection", func(t *testing.T) {
+				detailCalls := 0
+				m := newModel(t, &detailCalls)
+				domain := queue(t, m, tea.MouseWheelMsg{X: 1, Y: headerHeight, Button: tea.MouseWheelDown})
+				changed := transition.apply(m)
+				got := applyStale(t, changed, domain)
+				if got.selectedID != changed.selectedID || got.lastClickID != changed.lastClickID || detailCalls != 0 {
+					t.Errorf("stale wheel moved selection or pending click: selected=%q pending=%q calls=%d",
+						got.selectedID, got.lastClickID, detailCalls)
+				}
+			})
+		})
 	}
 }
 

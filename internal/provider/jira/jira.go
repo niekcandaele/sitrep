@@ -221,9 +221,9 @@ func (p *Provider) Capabilities() model.Capabilities {
 	}
 }
 
-// Resolve performs the authoritative read for selector. Epic selection keeps the
-// existing root-plus-children path; Ref-list selection reads only the exact
-// named issues through Jira's bulk endpoint.
+// Resolve performs the authoritative read for selector. An Epic Selector reads
+// the root and its children, a Ref-list Selector bulk-reads exact issues, and a
+// Query Selector chooses membership before authoritatively bulk-reading it.
 func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
@@ -588,9 +588,8 @@ func checkExactRef(r ref.Ref) (string, error) {
 	return key, nil
 }
 
-// doBulkFetch performs Jira's read-only JSON POST. Existing Epic and Detail
-// requests continue through do unchanged, retaining their v2 URLs, GET methods,
-// headers and error wording.
+// doBulkFetch performs the authenticated read-only v3 JSON POST. do performs
+// the v2 GET reads used by Epic and Detail operations.
 func (p *Provider) doBulkFetch(
 	ctx context.Context,
 	body bulkFetchRequest,

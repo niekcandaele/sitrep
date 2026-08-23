@@ -146,9 +146,8 @@ type errorResponse struct {
 	Errors        map[string]string `json:"errors"`
 }
 
-// message joins Jira's general error messages into one line, or returns ""
-// when it carries nothing worth saying. Existing non-Query requests deliberately
-// ignore per-field form errors, as they submit no form fields.
+// message joins Jira's general error messages for non-Query errors and omits
+// per-field entries. queryMessage adds deterministic per-field Query explanations.
 func (e errorResponse) message() string {
 	messages := make([]string, 0, len(e.ErrorMessages))
 	for _, m := range e.ErrorMessages {
