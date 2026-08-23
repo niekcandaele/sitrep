@@ -526,6 +526,71 @@ func TestDetailResponsiveShortHelpAtDecoderRoot(t *testing.T) {
 	})
 }
 
+func TestInitialDetailErrorGuidanceMatchesEscapeDestination(t *testing.T) {
+	base, _ := navigableDetailModel(t)
+	base.width, base.height = 42, 16
+	base.help.SetWidth(base.width)
+	base.listArmed = false
+	base.hasSource = false
+	base.detail.input.Parent = Header{}
+	base.detail.loaded = false
+	base.detail.loading = false
+	base.detail.lastErr = errors.New("permission denied while reading Ticket")
+	base = base.reconcileDetail(false)
+
+	frameText := func(m Model) string {
+		return strings.Join(strings.Fields(string(frame(m.View().Content))), " ")
+	}
+
+	t.Run("decoded root quits", func(t *testing.T) {
+		text := frameText(base)
+		if !strings.Contains(text, "Press r to try again, esc to quit.") || strings.Contains(text, "esc to go back") {
+			t.Errorf("decoded-root error guidance does not name quit: %q", text)
+		}
+		next, cmd := base.onDetailKey(keyPress("esc"))
+		if cmd == nil {
+			t.Fatal("decoded-root error Esc issued no quit command")
+		}
+		quitMsg := cmd()
+		if _, ok := quitMsg.(tea.QuitMsg); !ok {
+			t.Fatalf("decoded-root error Esc command produced %T, want tea.QuitMsg", quitMsg)
+		}
+		if got := next.(Model); got.mode != modeDetail || len(got.trail) != 0 {
+			t.Errorf("decoded-root error Esc left mode %v Trail %d before quit", got.mode, len(got.trail))
+		}
+	})
+
+	t.Run("list root goes back", func(t *testing.T) {
+		root := base
+		root.listArmed = true
+		root = root.reconcileDetail(false)
+		text := frameText(root)
+		if !strings.Contains(text, "Press r to try again, esc to go back.") || strings.Contains(text, "esc to quit") {
+			t.Errorf("list-root error guidance does not name back: %q", text)
+		}
+		next, cmd := root.onDetailKey(keyPress("esc"))
+		if got := next.(Model); cmd != nil || got.mode != modeList {
+			t.Errorf("list-root error Esc = cmd nil:%t mode:%v, want no command and list", cmd == nil, got.mode)
+		}
+	})
+
+	t.Run("Trail seat goes back", func(t *testing.T) {
+		child := base
+		child.trail = []detailTrailEntry{child.detailTrailSnapshot()}
+		child = child.reconcileDetail(false)
+		text := frameText(child)
+		if !strings.Contains(text, "Press r to try again, esc to go back.") || strings.Contains(text, "esc to quit") {
+			t.Errorf("Trail error guidance does not name back: %q", text)
+		}
+		next, cmd := child.onDetailKey(keyPress("esc"))
+		got := next.(Model)
+		if cmd != nil || got.mode != modeDetail || len(got.trail) != 0 {
+			t.Errorf("Trail error Esc = cmd nil:%t mode:%v Trail:%d, want no command, Detail, empty Trail",
+				cmd == nil, got.mode, len(got.trail))
+		}
+	})
+}
+
 func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
 	t.Run("focused short help at 60x16", func(t *testing.T) {
 		m, _ := navigableDetailModel(t)

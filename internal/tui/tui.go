@@ -40,21 +40,24 @@
 // a q — because a find box that quits when you search for "queue" is worse
 // than no find box.
 //
-// # The Detail screen is a second mode over the same model
+// # Detail seats and Trail share a second mode
 //
-// enter opens one Ticket's Detail; esc closes it. Both are a change to one mode
-// field: the list's state — the reading, the rows, the selection, the scroll
-// offset, the Filter — is never touched while Detail is open, which is why the
-// position and the filters survive the round trip without any code restoring
-// them. The golden that proves it is a byte-for-byte comparison against the
-// unfiltered list frame, not a golden of its own.
+// Enter on the list changes mode and seats the selected Ticket's Detail. Inside
+// Detail, following a focused Link archives the current seat in the session-local
+// Trail and seats the target without leaving Detail mode. esc first pops one Trail
+// seat; only an untrailed root returns to its armed list or quits when a decoded
+// Ticket has no list behind it. u clears the Trail and jumps to the root Watchlist.
 //
-// Detail is fetched on drill-in and at no other moment, and is cached per Ticket
-// for the session: re-opening a Ticket costs the Tracker nothing, r in Detail
-// re-reads that one Ticket, and no list refresh — automatic or forced — ever
-// calls FetchDetail (ADR-0003). A cached Detail carries its own "read Ns ago"
-// stamp so a stale reading is visible rather than looking as fresh as the list
-// beside it.
+// None of those Detail transitions touches the list's reading, rows, selection,
+// scroll offset, or Filter, which is why the list position and filters survive the
+// round trip without restoration code. The golden that proves it is a byte-for-byte
+// comparison against the unfiltered list frame, not a golden of its own.
+//
+// A Ticket's Detail is fetched only when a seated Ticket misses the session cache
+// or r explicitly re-reads it: re-opening a cached Ticket costs the Tracker
+// nothing, and no list refresh — automatic or forced — ever calls FetchDetail
+// (ADR-0003). A cached Detail carries its own "read Ns ago" stamp so a stale
+// reading is visible rather than looking as fresh as the list beside it.
 //
 // The screen consumes a DetailInput — a Ticket header, an optional parent
 // breadcrumb and the Detail itself — the same way the list consumes a ListInput.
@@ -116,9 +119,9 @@ type Options struct {
 	// nil when Open is set and the decoded Ticket has no Watchlist behind it:
 	// there is then nothing to monitor, and the walk-up key is not offered.
 	Source Source
-	// DetailSource reads one Ticket's Detail when the user opens it, and at no
-	// other moment (ADR-0003). A monitor without one still lists Tickets; enter
-	// then says why it cannot open them.
+	// DetailSource reads one seated Ticket's Detail on a session-cache miss and
+	// when the user explicitly re-reads it. A monitor without one still lists
+	// Tickets; enter then says why it cannot open them.
 	DetailSource DetailSource
 	// Open, when non-nil, starts the program on one Ticket's Detail instead of
 	// the list: the decoder entry point for a Ref that named a Ticket. The

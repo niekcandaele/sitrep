@@ -274,13 +274,16 @@ func (m Model) syncDetailKeys() Model {
 	return m.syncDetailKeysFor(m.detailDocument())
 }
 
+func (m Model) detailBackDescription() string {
+	if len(m.trail) > 0 || m.listArmed {
+		return "back"
+	}
+	return "quit"
+}
+
 func (m Model) syncDetailKeysFor(doc detailDocument) Model {
 	m.detailKeys.Parent.SetEnabled(m.hasSource && m.detail.input.Parent != (Header{}))
-	if len(m.trail) > 0 || m.listArmed {
-		m.detailKeys.Back.SetHelp("esc", "back")
-	} else {
-		m.detailKeys.Back.SetHelp("esc", "quit")
-	}
+	m.detailKeys.Back.SetHelp("esc", m.detailBackDescription())
 
 	hasLinks := len(doc.LinkRows) > 0
 	m.detailKeys.NextLink.SetEnabled(hasLinks)
@@ -576,14 +579,14 @@ func (m Model) detailDocument() detailDocument {
 	case m.detail.loaded:
 		return composeDetailDocument(m.detail.input, m.width, m.styles, m.detail.linkFocus, m.detail.hasLinkFocus)
 	case m.detail.lastErr != nil:
-		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles)
+		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles, m.detailBackDescription())
 	default:
 		return detailDocument{Lines: truncateDocumentLines(
 			[]string{m.styles.Muted.Render("Reading Ticket detail…")}, m.width)}
 	}
 }
 
-func initialDetailErrorDocument(err error, width int, styles Styles) detailDocument {
+func initialDetailErrorDocument(err error, width int, styles Styles, backDescription string) detailDocument {
 	message := "Could not read this Ticket's detail: " + err.Error()
 	messageLines := wrapText(message, width)
 	if len(messageLines) == 0 {
@@ -595,7 +598,11 @@ func initialDetailErrorDocument(err error, width int, styles Styles) detailDocum
 	}
 	lines = append(lines, "")
 
-	guidance := "Press r to try again, esc to go back."
+	exitAction := backDescription
+	if exitAction == "back" {
+		exitAction = "go back"
+	}
+	guidance := "Press r to try again, esc to " + exitAction + "."
 	for _, line := range wrapText(guidance, width) {
 		lines = append(lines, styles.Muted.Render(line))
 	}
