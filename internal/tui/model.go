@@ -67,6 +67,9 @@ type Model struct {
 	// list's.
 	mode   mode
 	detail detailState
+	// trail is the ordered path of prior Detail seats followed through explicit
+	// Links. It is session-local and deliberately permits cycles and repeats.
+	trail []detailTrailEntry
 	// details caches the Details read this session, per Ticket. It holds Detail
 	// and nothing else: no list data migrates in here, and nothing here migrates
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
@@ -176,23 +179,15 @@ func New(ctx context.Context, opts Options) Model {
 	}
 
 	if opts.Open != nil {
-		// Decoder mode: the screen is the Ticket's Detail from the first frame,
-		// and the read for it is already on its way out of Init the same way the
-		// list's first refresh normally is.
-		m.mode = modeDetail
-		m.detail = detailState{
-			ticket: opts.Open.Ticket,
-			input: DetailFromTicket(opts.Open.Ticket, model.Detail{}, opts.Open.Capabilities,
-				opts.Open.Parent, time.Time{}),
-			loading: true,
-		}
-		m.detailGeneration = 1
+		// Decoder mode seats the same Detail state as a list-open, but leaves the
+		// command for Init so Bubble Tea owns startup I/O exactly as before.
 		if opts.Initial == nil {
 			m.refreshing = false
 			m.generation = 0
 			m.listArmed = false
 		}
-		m = m.syncDetailKeys()
+		next, _ := m.seatDetail(opts.Open.Ticket, opts.Open.Parent, opts.Open.Capabilities)
+		m = next.(Model)
 	}
 	return m
 }
@@ -211,7 +206,7 @@ var errNoSource = errors.New("this monitor was opened without a collection to wa
 // decoded Ticket's Detail, or — for a seeded monitor — neither.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{heartbeat(), requestBackgroundColor}
-	if m.mode == modeDetail {
+	if m.mode == modeDetail && m.detail.loading {
 		cmds = append(cmds, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID))
 	}
 	if m.refreshing {
@@ -229,11 +224,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
-		// The Detail body is a function of width, so a resize re-wraps it and
-		// the offset has to come back inside the re-wrapped document. A resize
-		// that scrolls the reader into the void is the bug this clamp exists
-		// for.
-		m.detail.offset = m.clampDetail(m.detail.offset)
+		if m.mode == modeDetail {
+			m = m.reconcileDetail(true)
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -266,6 +259,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.onDetailMouseWheel(msg), nil
+
+	case detailMouseLinkMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseLink(msg)
 
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
@@ -307,9 +306,10 @@ func (m Model) View() tea.View {
 	}
 
 	if m.mode == modeDetail {
-		v.SetContent(m.detailFrame())
+		doc := m.detailDocument()
+		v.SetContent(m.detailFrame(doc))
 		if m.mouseEnabled {
-			v.OnMouse = m.detailMouseHandler()
+			v.OnMouse = m.detailMouseHandler(doc)
 		}
 		return v
 	}
@@ -797,19 +797,27 @@ func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
 // and stacks full-help columns rather than letting bubbles omit a column.
 func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 	short := append([]key.Binding(nil), keys.ShortHelp()...)
-	full := keys.FullHelp()
+	groups := keys.FullHelp()
+	full := make([][]key.Binding, len(groups))
+	for i := range groups {
+		full[i] = append([]key.Binding(nil), groups[i]...)
+	}
 
 	unbounded := m.help
 	unbounded.SetWidth(0)
-	if len(short) >= 3 && short[0].Help().Key == "m" &&
-		short[0].Help().Desc == mouseEnabledHelp &&
-		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-		short[0].SetHelp("m", mouseEnabledCompactHelp)
-	}
-	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
-		short[0].Help().Desc == searchMouseHintHelp &&
-		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
+	if _, detail := keys.(DetailKeyMap); detail {
+		short = compactDetailShortHelp(unbounded, short, m.width)
+	} else {
+		if len(short) >= 3 && short[0].Help().Key == "m" &&
+			short[0].Help().Desc == mouseEnabledHelp &&
+			lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+			short[0].SetHelp("m", mouseEnabledCompactHelp)
+		}
+		if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
+			short[0].Help().Desc == searchMouseHintHelp &&
+			lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+			short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
+		}
 	}
 	if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
 		stacked := make([]key.Binding, 0)
@@ -819,6 +827,190 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 		full = [][]key.Binding{stacked}
 	}
 	return responsiveHelpKeyMap{short: short, full: full}
+}
+
+func compactDetailShortHelp(renderer help.Model, bindings []key.Binding, width int) []key.Binding {
+	if width <= 0 {
+		return bindings
+	}
+	bindings = prioritizedDetailShortHelp(bindings)
+	priorityCount := 5
+	if bindings[5].Help().Key == "u" {
+		priorityCount++
+	}
+	budget := max(width, 1)
+	fits := func() bool {
+		return lipgloss.Width(renderer.ShortHelpView(bindings[:priorityCount])) <= budget
+	}
+	if fits() {
+		return bindings
+	}
+	if descriptive, ok := descriptiveDetailShortBinding(bindings, budget); ok {
+		return []key.Binding{descriptive}
+	}
+	if !bindings[4].Enabled() {
+		return []key.Binding{compactDetailShortBinding(bindings, width)}
+	}
+
+	bindings[4].SetHelp("tab/⇧", "")
+	if fits() {
+		return bindings[:priorityCount]
+	}
+	bindings[4].SetHelp("tab/⇧tab", "links")
+
+	if bindings[0].Help().Desc == mouseEnabledHelp {
+		bindings[0].SetHelp("m", "off/⇧drag")
+	}
+	if fits() {
+		return bindings[:priorityCount]
+	}
+
+	bindings[2].SetHelp("q", "")
+	bindings[3].SetHelp("↵", "follow")
+	if fits() {
+		return bindings[:priorityCount]
+	}
+
+	return []key.Binding{compactDetailShortBinding(bindings, width)}
+}
+
+func descriptiveDetailShortBinding(bindings []key.Binding, budget int) (key.Binding, bool) {
+	mouse := "m on"
+	if bindings[0].Help().Desc != "on" {
+		mouse = "m off · shift-drag to select text"
+	}
+	parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q quit"}
+	if bindings[3].Enabled() {
+		parts = append(parts, "enter follow")
+	}
+	linkIndex := -1
+	if bindings[4].Enabled() {
+		linkIndex = len(parts)
+		parts = append(parts, "tab/⇧tab links")
+	}
+	parentIndex := -1
+	if bindings[5].Enabled() {
+		parentIndex = len(parts)
+		parts = append(parts, "u watchlist")
+	}
+	fit := func() (key.Binding, bool) {
+		for _, separator := range []string{" · ", "·"} {
+			text := strings.Join(parts, separator)
+			if lipgloss.Width(text) <= budget {
+				return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(text, "")), true
+			}
+		}
+		return key.Binding{}, false
+	}
+	if binding, ok := fit(); ok {
+		return binding, true
+	}
+	if parentIndex >= 0 {
+		parts[parentIndex] = "u↑"
+		if binding, ok := fit(); ok {
+			return binding, true
+		}
+	}
+	if linkIndex >= 0 {
+		parts[linkIndex] = "tab/⇧"
+		if binding, ok := fit(); ok {
+			return binding, true
+		}
+	}
+	return key.Binding{}, false
+}
+
+func prioritizedDetailShortHelp(bindings []key.Binding) []key.Binding {
+	prioritized := append([]key.Binding(nil), bindings[:5]...)
+	if bindings[7].Enabled() {
+		prioritized = append(prioritized, bindings[7])
+	} else {
+		prioritized = append(prioritized, key.Binding{})
+	}
+	prioritized = append(prioritized, bindings[5], bindings[6], bindings[8], bindings[9])
+	return prioritized
+}
+
+func compactDetailShortBinding(bindings []key.Binding, width int) key.Binding {
+	budget := max(width, 1)
+	join := func(parts []string) string {
+		spaced := strings.Join(parts, " · ")
+		if lipgloss.Width(spaced) <= budget {
+			return spaced
+		}
+		return strings.Join(parts, "·")
+	}
+	mouseEnabled := bindings[0].Help().Desc != "on"
+	parentEnabled := bindings[5].Enabled()
+
+	if bindings[4].Enabled() && !bindings[3].Enabled() {
+		mouse := "m on"
+		if mouseEnabled {
+			mouse = "m off, shift-drag"
+		}
+		parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q quit", "tab/⇧"}
+		if parentEnabled {
+			parts = append(parts, "u watchlist")
+		}
+		text := join(parts)
+		if lipgloss.Width(text) > budget && parentEnabled {
+			parts[4] = "u↑"
+			text = join(parts)
+		}
+		if lipgloss.Width(text) > budget {
+			parts[2] = "q"
+			text = join(parts)
+		}
+		if lipgloss.Width(text) > budget {
+			parts[1] = "esc"
+			text = join(parts)
+		}
+		if lipgloss.Width(text) > budget && mouseEnabled {
+			parts[0] = "m/⇧drag"
+			text = join(parts)
+		}
+		return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(text, ""))
+	}
+
+	if !bindings[4].Enabled() {
+		mouse := "m on"
+		if mouseEnabled {
+			mouse = "m off, shift-drag"
+		}
+		parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q quit"}
+		if parentEnabled {
+			parts = append(parts, "u watchlist")
+		}
+		text := join(parts)
+		if lipgloss.Width(text) > budget && parentEnabled {
+			parts[len(parts)-1] = "u↑"
+			text = join(parts)
+		}
+		return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(text, ""))
+	}
+
+	mouse := "m on"
+	if mouseEnabled {
+		mouse = "m/⇧drag"
+	}
+	parts := []string{mouse, "esc←", "q"}
+	if bindings[3].Enabled() {
+		parts = append(parts, "follow↵")
+	}
+	parts = append(parts, "tab/⇧ links")
+	if parentEnabled {
+		parts = append(parts, "u watchlist")
+	}
+	text := join(parts)
+	if lipgloss.Width(text) > budget && parentEnabled {
+		parts[len(parts)-1] = "u↑"
+		text = join(parts)
+	}
+	if lipgloss.Width(text) > budget && mouseEnabled {
+		parts[0] = "m/⇧"
+		text = join(parts)
+	}
+	return key.NewBinding(key.WithKeys("__detail_help"), key.WithHelp(text, ""))
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is

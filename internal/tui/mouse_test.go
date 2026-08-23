@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -190,17 +192,17 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m.detailKeys.Parent.SetEnabled(true)
 		m.help.SetWidth(80)
 		m.help.ShowAll = true
-		requireHelpText(t, m.help.View(m.detailHelpKeys()),
-			enabledMouseHelp, "esc back", "u epic", "r refresh", "? help", "q quit",
+		requireHelpText(t, m.detailHelpView(),
+			enabledMouseHelp, "esc back", "u watchlist", "r refresh", "? help", "q quit",
 			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
 
 		m.width = 40
 		m.help.SetWidth(40)
 		m.help.ShowAll = false
-		requireHelpText(t, m.help.View(m.detailHelpKeys()), compactMouseHelp, "esc back", "q quit")
+		requireHelpText(t, m.detailHelpView(), compactMouseHelp, "esc back", "q quit")
 		m.help.ShowAll = true
-		requireHelpText(t, m.help.View(m.detailHelpKeys()),
-			enabledMouseHelp, "esc back", "u epic", "r refresh", "? help", "q quit",
+		requireHelpText(t, m.detailHelpView(),
+			enabledMouseHelp, "esc back", "u watchlist", "r refresh", "? help", "q quit",
 			"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last")
 	})
 
@@ -212,6 +214,119 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m.help.ShowAll = true
 		requireHelpText(t, m.help.View(m.helpKeys()),
 			fullSearchMouseHelp, "esc cancel", "enter apply", "↑/↓ move", "ctrl+c quit")
+	})
+}
+
+func TestDetailResponsiveShortHelpKeepsPriorityActions(t *testing.T) {
+	for _, width := range []int{40, 42, 45, 50, 60, 80, 120} {
+		for _, focused := range []bool{false, true} {
+			name := fmt.Sprintf("width-%d/unfocused", width)
+			if focused {
+				name = fmt.Sprintf("width-%d/focused", width)
+			}
+			t.Run(name, func(t *testing.T) {
+				m, _ := navigableDetailModel(t)
+				m.width, m.height = width, 16
+				m.help.SetWidth(width)
+				m = m.reconcileDetail(true)
+				if focused {
+					m = focusLinkAt(m, 0)
+				}
+				m.detailKeys.Parent.SetEnabled(true)
+				helpText := strings.TrimSpace(string(frame(m.detailHelpView())))
+				normalized := strings.Join(strings.Fields(helpText), " ")
+				for _, want := range []string{"m", "esc", "q", "tab", "⇧", "u"} {
+					if !strings.Contains(normalized, want) {
+						t.Errorf("priority help at width %d omitted %q: %q", width, want, normalized)
+					}
+				}
+				if focused && !strings.Contains(normalized, "follow") {
+					t.Errorf("focused help at width %d omitted follow meaning: %q", width, normalized)
+				}
+				if strings.HasSuffix(normalized, "·") || strings.HasSuffix(normalized, "•") ||
+					strings.Contains(normalized, "· ·") || strings.Contains(normalized, "• •") {
+					t.Errorf("compact help has a dangling/doubled separator: %q", normalized)
+				}
+			})
+		}
+	}
+}
+
+func TestDetailResponsiveShortHelpAtDecoderRoot(t *testing.T) {
+	m, _ := navigableDetailModel(t)
+	m.width, m.height = 42, 16
+	m.help.SetWidth(m.width)
+	m.listArmed = false
+	m.hasSource = false
+	m.detail.input.Parent = Header{}
+	m = m.reconcileDetail(true)
+
+	helpText := strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
+	for _, want := range []string{"m off, shift-drag", "esc quit", "q quit", "tab/⇧"} {
+		if !strings.Contains(helpText, want) {
+			t.Errorf("decoder-root help omitted %q: %q", want, helpText)
+		}
+	}
+	if strings.Contains(helpText, "watchlist") || strings.Contains(helpText, "u↑") {
+		t.Errorf("decoder-root help advertises unavailable Parent: %q", helpText)
+	}
+}
+
+func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
+	t.Run("focused short help at 60x16", func(t *testing.T) {
+		m, _ := navigableDetailModel(t)
+		m.width, m.height = 60, 16
+		m.help.SetWidth(m.width)
+		m = focusLinkAt(m, len(m.detailDocument().LinkRows)-1)
+		m.detailKeys.Parent.SetEnabled(true)
+		m.detail.offset = m.clampDetail(1 << 20)
+		content := m.View().Content
+		checkGolden(t, "detail_short_60x16.golden.txt", frame(content))
+		if got := len(strings.Split(content, "\n")); got != m.height {
+			t.Errorf("frame height = %d, want terminal height %d", got, m.height)
+		}
+		requireHelpText(t, content, "follow", "tab/⇧", "u watchlist", "100%")
+	})
+
+	t.Run("focused full help at 42x16", func(t *testing.T) {
+		m, _ := navigableDetailModel(t)
+		m.width, m.height = 42, 16
+		m.help.SetWidth(m.width)
+		m.help.ShowAll = true
+		m = focusLinkAt(m, 0)
+		m.detailKeys.Parent.SetEnabled(true)
+		content := m.View().Content
+		checkGolden(t, "detail_full_42x16.golden.txt", frame(content))
+		if got := len(strings.Split(content, "\n")); got != m.height {
+			t.Errorf("frame height = %d, want terminal height %d", got, m.height)
+		}
+		requireHelpText(t, content,
+			"m off · shift-drag to select text", "esc back", "enter follow", "tab next link", "⇧tab previous link",
+			"u watchlist", "r refresh", "? help", "q quit", "↑/k up", "↓/j down",
+			"pgup page up", "pgdn page down", "g first", "G last")
+	})
+
+	t.Run("readable initial error at 42x16", func(t *testing.T) {
+		m, _ := navigableDetailModel(t)
+		m.width, m.height = 42, 16
+		m.help.SetWidth(m.width)
+		m.detail.loaded = false
+		m.detail.loading = false
+		m.detail.lastErr = errors.New("permission denied while reading a private project that no longer exists")
+		m = m.reconcileDetail(false)
+		content := m.View().Content
+		checkGolden(t, "detail_error_42x16.golden.txt", frame(content))
+		if got := len(strings.Split(content, "\n")); got != m.height {
+			t.Errorf("frame height = %d, want terminal height %d", got, m.height)
+		}
+		normalized := strings.Join(strings.Fields(string(frame(content))), " ")
+		if !strings.Contains(normalized, "permission denied while reading a private project that no longer exists") {
+			t.Errorf("wrapped error lost its reason: %q", normalized)
+		}
+		if !strings.Contains(normalized, "current · never read") {
+			t.Errorf("narrow error does not identify current Detail staleness: %q", normalized)
+		}
+		requireHelpText(t, content, "m off, shift-drag", "esc back", "q quit")
 	})
 }
 
@@ -260,6 +375,53 @@ func TestMouseToggleReclampsChangedHelpGeometry(t *testing.T) {
 		selectedY = ticketLineY(t, m, m.selectedID, 0)
 		if selectedY >= headerHeight+m.bodyHeight() {
 			t.Errorf("selected Ticket y=%d is below grown body ending at %d", selectedY, headerHeight+m.bodyHeight()-1)
+		}
+	})
+
+	t.Run("unchanged Detail help keeps an offscreen focused Link offscreen", func(t *testing.T) {
+		m, _ := navigableDetailModel(t)
+		m.help.SetWidth(m.width)
+		m = focusLinkAt(m, len(m.detailDocument().LinkRows)-1)
+		m = m.scrollDetailTo(0)
+		row, _ := detailLinkRowByIdentity(m.detailDocument(), m.detail.linkFocus)
+		if row.Line < m.detail.offset+m.detailBodyHeight() {
+			t.Fatal("test focus is still visible")
+		}
+		beforeHeight, beforeOffset := m.detailBodyHeight(), m.detail.offset
+
+		next, _ := m.Update(keyPress("m"))
+		m = next.(Model)
+		if m.detailBodyHeight() != beforeHeight {
+			t.Fatalf("toggle changed Detail body height from %d to %d", beforeHeight, m.detailBodyHeight())
+		}
+		if m.detail.offset != beforeOffset || !m.detail.hasLinkFocus || m.detail.linkFocus != row.Identity {
+			t.Errorf("unchanged toggle moved offscreen focus: offset=%d focus=%+v", m.detail.offset, m.detail.linkFocus)
+		}
+	})
+
+	t.Run("changed Detail help brings an offscreen focused Link into view", func(t *testing.T) {
+		m, _ := navigableDetailModel(t)
+		m.width, m.height = 42, 20
+		m.help.SetWidth(m.width)
+		m.help.ShowAll = true
+		m = m.reconcileDetail(true)
+		m = focusLinkAt(m, len(m.detailDocument().LinkRows)-1)
+		m = m.scrollDetailTo(0)
+		row, _ := detailLinkRowByIdentity(m.detailDocument(), m.detail.linkFocus)
+		if row.Line < m.detail.offset+m.detailBodyHeight() {
+			t.Fatal("test focus is still visible")
+		}
+		beforeHeight := m.detailBodyHeight()
+
+		next, _ := m.Update(keyPress("m"))
+		m = next.(Model)
+		if m.detailBodyHeight() <= beforeHeight {
+			t.Fatalf("disabled body height = %d, want greater than enabled height %d", m.detailBodyHeight(), beforeHeight)
+		}
+		if row.Line < m.detail.offset || row.Line >= m.detail.offset+m.detailBodyHeight() ||
+			!m.detail.hasLinkFocus || m.detail.linkFocus != row.Identity {
+			t.Errorf("geometry-changing toggle did not reveal focus: row=%d offset=%d body=%d focus=%+v",
+				row.Line, m.detail.offset, m.detailBodyHeight(), m.detail.linkFocus)
 		}
 	})
 
@@ -318,7 +480,7 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		"g first", "G last", "d hide finished", "/ find",
 	}
 	detailFull := []string{
-		"esc back", "u epic", "r refresh", "? help", "q quit",
+		"esc back", "u watchlist", "r refresh", "? help", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last",
 	}
 	tests := []struct {
@@ -906,20 +1068,97 @@ func TestDetailMouseWheelAndClicks(t *testing.T) {
 	}
 
 	before = m.detail.offset
+	clicked, clickCmd, applied := dispatchMouse(t, m, tea.MouseClickMsg{X: 0, Y: linkY, Button: tea.MouseLeft})
+	if !applied || clicked.mode != modeDetail || len(clicked.trail) != 1 || clickCmd == nil {
+		t.Errorf("Detail Link click applied=%t mode=%v depth=%d cmd nil=%t",
+			applied, clicked.mode, len(clicked.trail), clickCmd == nil)
+	}
 	for _, click := range []tea.MouseMsg{
-		tea.MouseClickMsg{X: 0, Y: linkY, Button: tea.MouseLeft},
 		tea.MouseClickMsg{X: 0, Y: detailHeaderHeight + 1, Button: tea.MouseRight},
 		tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelRight},
 	} {
 		got, _, applied := dispatchMouse(t, m, click)
 		if applied || got.detail.offset != before || got.mode != modeDetail {
-			t.Errorf("Detail click/horizontal wheel changed state: applied=%t offset=%d", applied, got.detail.offset)
+			t.Errorf("Detail non-Link event changed state: applied=%t offset=%d", applied, got.detail.offset)
 		}
 	}
 
 	next, cmd := m.Update(tea.MouseWheelMsg{X: 1, Y: 1, Button: tea.MouseWheelDown})
 	if cmd != nil || next.(Model).detail.offset != m.detail.offset {
 		t.Error("raw mouse message was applied in Update as well as through OnMouse")
+	}
+}
+
+func TestDetailMouseWheelAcrossDocumentStates(t *testing.T) {
+	loaded := detailModel(t)
+	loaded.width, loaded.height = 26, 10
+	loaded.help.SetWidth(loaded.width)
+	loaded.trail = []detailTrailEntry{{ticket: model.Ticket{ID: "TRAIL", Key: "TRAIL"}}}
+	loaded = focusLinkAt(loaded, 0)
+	loaded.detail.offset = clampDetailOffset(1, len(loaded.detailDocument().Lines), loaded.detailBodyHeight())
+
+	loading := loaded
+	loading.detail = detailState{ticket: loaded.detail.ticket, input: loaded.detail.input, loading: true}
+	loading = loading.reconcileDetail(false)
+
+	failed := loading
+	failed.detail.loading = false
+	failed.detail.lastErr = errors.New("permission denied while reading a deliberately long private project diagnostic")
+	failed = failed.reconcileDetail(false)
+	failed.detail.offset = clampDetailOffset(1, len(failed.detailDocument().Lines), failed.detailBodyHeight())
+
+	cached := loaded
+	cached.details[cached.detail.ticket.ID] = detailEntry{
+		detail: cached.detail.input.Detail, caps: cached.detail.input.Capabilities, fetchedAt: cached.detail.input.FetchedAt,
+	}
+	cached.detail.offset = cached.clampDetail(1 << 20)
+
+	resized := loaded
+	resized.width = 60
+	resized.help.SetWidth(resized.width)
+	resized.detail.offset = resized.clampDetail(4)
+	resized.width = 26
+	resized.help.SetWidth(resized.width)
+	resized = resized.reconcileDetail(false)
+
+	states := []struct {
+		name  string
+		model Model
+	}{
+		{name: "loaded", model: loaded},
+		{name: "loading", model: loading},
+		{name: "initial error", model: failed},
+		{name: "cached", model: cached},
+		{name: "resized", model: resized},
+	}
+	for _, state := range states {
+		t.Run(state.name, func(t *testing.T) {
+			before := state.model
+			doc := before.detailDocument()
+			wantDown := clampDetailOffset(before.detail.offset+3, len(doc.Lines), before.detailBodyHeight())
+			down, cmd, applied := dispatchMouse(t, before, tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
+			if !applied || cmd != nil || down.detail.offset != wantDown {
+				t.Fatalf("wheel down = applied:%t cmd:%v offset:%d, want true/nil/%d",
+					applied, cmd, down.detail.offset, wantDown)
+			}
+			wantUp := clampDetailOffset(wantDown-3, len(doc.Lines), down.detailBodyHeight())
+			up, cmd, applied := dispatchMouse(t, down, tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp})
+			if !applied || cmd != nil || up.detail.offset != wantUp {
+				t.Errorf("wheel up = applied:%t cmd:%v offset:%d, want true/nil/%d",
+					applied, cmd, up.detail.offset, wantUp)
+			}
+
+			for _, got := range []Model{down, up} {
+				if got.detail.ticket.ID != before.detail.ticket.ID ||
+					got.detail.linkFocus != before.detail.linkFocus ||
+					got.detail.hasLinkFocus != before.detail.hasLinkFocus ||
+					got.detailKeys.Follow.Enabled() != before.detailKeys.Follow.Enabled() ||
+					got.detailGeneration != before.detailGeneration ||
+					!reflect.DeepEqual(got.trail, before.trail) || !reflect.DeepEqual(got.details, before.details) {
+					t.Errorf("wheel mutated focus, follow, Trail, generation, or cache")
+				}
+			}
+		})
 	}
 }
 

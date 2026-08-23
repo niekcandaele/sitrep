@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & t
+#111 · Widget sync current · read just now
 #112  Draft the shard sync protocol
 [In Review]  @mara-vos  #501 open ci ok ch
 
@@ -29,12 +29,12 @@ COMMENTS (3)
   path is the one that bites.
 
 @tobias · 2026-01-12 16:02 UTC
-  Agreed on an explicit version byte.
-  Costs nothing now, saves a migration
 
-m   on         ↑/k  up
-esc back       ↓/j  down
-u   epic       pgup page up
-r   refresh    pgdn page down
-?   help       g    first
-q   quit       G    last                0%
+m    on               ↑/k  up
+esc  back             ↓/j  down
+tab  next link        pgup page up
+⇧tab previous link    pgdn page down
+u    watchlist        g    first
+r    refresh          G    last
+?    help
+q    quit                               0%

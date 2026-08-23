@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & telemetry                                                         read just now
+#111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
 [In Review]  @mara-vos  #501 open ci ok changes req
 
@@ -17,7 +17,7 @@ explicit version — see the linked ticket.
 
 LINKS (1)
 
-is duplicated by  #7  Teach the gadget agent to speak sync v2  [In Progress]
+  is duplicated by  #7  Teach the gadget agent to speak sync v2  [In Progress]
 
 
 
@@ -37,4 +37,4 @@ is duplicated by  #7  Teach the gadget agent to speak sync v2  [In Progress]
 
 
 
-m off · shift-drag to select text • esc back • q quit • ↑/k up • ↓/j down • u epic • r refresh • ? help
+m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ↑/k up • ↓/j down • r refresh …

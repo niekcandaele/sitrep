@@ -66,7 +66,7 @@ func TestDecodedFrame(t *testing.T) {
 	if !m.detailKeys.Parent.Enabled() {
 		t.Error("the walk-up binding is disabled with a parent and a Source")
 	}
-	if !strings.Contains(string(got), "u epic") {
+	if !strings.Contains(string(got), "u watchlist") {
 		t.Errorf("the footer does not make the walk-up discoverable:\n%s", got)
 	}
 }
@@ -93,7 +93,7 @@ func TestDecodedFrameWithNoParent(t *testing.T) {
 	if n := p.ResolveCalls(); n != 0 {
 		t.Errorf("ResolveCalls() = %d, want 0", n)
 	}
-	if strings.Contains(string(got), "u epic") {
+	if strings.Contains(string(got), "u watchlist") {
 		t.Errorf("the footer offers a walk-up this Ticket has no parent for:\n%s", got)
 	}
 	// The breadcrumb line is the zero-Parent one: staleness and nothing else.

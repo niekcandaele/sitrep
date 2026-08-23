@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & t
+#111 · Widget sync current · read just now
 #112  Draft the shard sync protocol
 [In Review]  @mara-vos  #501 open ci ok ch
 
@@ -25,16 +25,16 @@ version — see the linked ticket.
 COMMENTS (3)
 
 @mara-vos · 2026-01-12 09:14 UTC
+  Sketched the state machine; the abort
+  path is the one that bites.
 
-m    off · shift-drag to select text
-esc  back
-u    epic
-r    refresh
-?    help
-q    quit
-↑/k  up
-↓/j  down
-pgup page up
-pgdn page down
-g    first
-G    last                               0%
+
+m off · shift-drag to select text
+
+esc  back             ↑/k  up
+tab  next link        ↓/j  down
+⇧tab previous link    pgup page up
+u    watchlist        pgdn page down
+r    refresh          g    first
+?    help             G    last
+q    quit                               0%

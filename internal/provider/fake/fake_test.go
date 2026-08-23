@@ -495,10 +495,30 @@ func TestFetchDetailServesTheFixture(t *testing.T) {
 	}
 
 	kinds := map[model.LinkKind]bool{}
+	wantIDs := map[string]model.TicketID{
+		"#115": "acme/widgets#115",
+		"#116": "acme/widgets#116",
+		"#7":   "acme/gadgets#7",
+	}
+	seenTargets := make(map[string]bool, len(detail.Links))
 	for _, link := range detail.Links {
 		kinds[link.Kind] = true
 		if link.NativeLabel == "" {
 			t.Errorf("link to %s has no native label", link.Target.Key)
+		}
+		wantID, ok := wantIDs[link.Target.Key]
+		if !ok {
+			t.Errorf("unexpected Link target %q with ID %q", link.Target.Key, link.Target.ID)
+			continue
+		}
+		seenTargets[link.Target.Key] = true
+		if link.Target.ID != wantID {
+			t.Errorf("link to %s ID = %q, want FetchDetail identity %q", link.Target.Key, link.Target.ID, wantID)
+		}
+	}
+	for key := range wantIDs {
+		if !seenTargets[key] {
+			t.Errorf("rich fixture has no Link target %s", key)
 		}
 	}
 	for _, kind := range []model.LinkKind{model.LinkRelates, model.LinkBlockedBy, model.LinkBlocks} {

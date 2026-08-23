@@ -41,12 +41,16 @@ The user-supplied pointer to an epic: a bare number (resolved via the cwd's git 
 **Detail**:
 The expensive, per-ticket data (description, comments, links) fetched only when a ticket is opened — never during list rendering.
 
+**Trail**:
+The ordered, session-local path of Tickets followed through explicit Links in Detail. Following a Link pushes the current Ticket; Esc returns to the preceding Ticket.
+
 ## Relationships
 
 - An **Epic** has many **Tickets**; a **Ticket** has at most one parent (tree-shaped data, rendered flat in v1)
 - A **Provider** serves one **Tracker** and declares its **Capabilities**
 - A **Ticket** carries a **Status Category** plus a **Native Status**; filtering and progress counts use only the Category
 - A **Ticket**'s **Links** and comments live in its **Detail**, not in the list model
+- Following an explicit **Link** appends to the **Trail**; Esc removes one Trail step and restores the preceding Ticket
 - A **Profile** selects a **Provider** and supplies what it needs to connect
 
 ## Example dialogue

@@ -518,7 +518,7 @@ func TestRefreshUnderAnOpenDetail(t *testing.T) {
 		t.Error("the refreshed list still holds the vanished Ticket")
 	}
 	// The frame still renders, which is the thing that must not panic.
-	if after.detailFrame() == "" {
+	if after.detailFrame(after.detailDocument()) == "" {
 		t.Error("the Detail screen rendered nothing after the Ticket vanished")
 	}
 }
@@ -541,7 +541,7 @@ func TestFailedReReadKeepsTheCachedDetail(t *testing.T) {
 	if !failed.detail.loaded {
 		t.Error("the failed re-read blanked the Detail that was already on screen")
 	}
-	footer := strings.Join(failed.detailFooterLines(), "\n")
+	footer := strings.Join(failed.detailFooterLines(failed.detailDocument()), "\n")
 	if !strings.Contains(footer, "could not re-read") {
 		t.Errorf("the failed re-read is not in the footer:\n%s", footer)
 	}

@@ -1,0 +1,16 @@
+#111 · Widget sync v2 current · never read
+#112  Draft the shard sync protocol
+[In Review]  @mara-vos  #501 open ci ok ch
+
+
+
+m off · shift-drag to select text
+
+esc   back             ↑/k  up
+enter follow           ↓/j  down
+tab   next link        pgup page up
+⇧tab  previous link    pgdn page down
+u     watchlist        g    first
+r     refresh          G    last
+?     help
+q     quit                             92%

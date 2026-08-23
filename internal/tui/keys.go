@@ -125,10 +125,9 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	}
 }
 
-// DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses the
-// list's bindings wherever the key and the meaning are the same, so the two
-// screens cannot come to disagree about what pgdn does, and adds exactly one of
-// its own: Back.
+// DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses list
+// bindings where key and meaning match, adds relationship focus/follow actions,
+// and gives Esc the Detail-specific meaning of one level back through the Trail.
 //
 // Quit is deliberately not the list's: there esc is the last rung of the filter
 // ladder, and here esc means "one level up" — back to the list. q and ctrl+c
@@ -148,9 +147,14 @@ type DetailKeyMap struct {
 	End key.Binding
 	// Refresh re-reads this Ticket's Detail, and only this Ticket's.
 	Refresh key.Binding
-	// Back returns to the list, leaving it exactly as it was. With no list
-	// behind the screen — a Ticket decoded straight into Detail — there is
-	// nowhere to go back to and esc is the ladder's last rung: it quits.
+	// NextLink moves focus to the next capability-visible relationship.
+	NextLink key.Binding
+	// PreviousLink moves focus to the previous capability-visible relationship.
+	PreviousLink key.Binding
+	// Follow opens the focused Link target in Detail.
+	Follow key.Binding
+	// Back pops one Trail entry first. At the root it returns to the armed list,
+	// or quits when a directly decoded Ticket has no list behind it.
 	Back key.Binding
 	// Parent opens the Watchlist this Ticket belongs to in the monitor. It is
 	// enabled only when there is one to walk up into.
@@ -174,13 +178,28 @@ func DefaultDetailKeyMap() DetailKeyMap {
 		Home:     list.Home,
 		End:      list.End,
 		Refresh:  list.Refresh,
+		NextLink: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "next link"),
+			key.WithDisabled(),
+		),
+		PreviousLink: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("⇧tab", "previous link"),
+			key.WithDisabled(),
+		),
+		Follow: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "follow"),
+			key.WithDisabled(),
+		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "back"),
 		),
 		Parent: key.NewBinding(
 			key.WithKeys("u"),
-			key.WithHelp("u", "epic"),
+			key.WithHelp("u", "watchlist"),
 			key.WithDisabled(),
 		),
 		ToggleMouse: list.ToggleMouse,
@@ -197,14 +216,16 @@ func DefaultDetailKeyMap() DetailKeyMap {
 // Watchlist this Ticket has none of — and that footer line is the whole
 // affordance for the walk-up: no second help line, no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.ToggleMouse, k.Back, k.Quit, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
+	links := k.NextLink
+	links.SetHelp("tab/⇧tab", "links")
+	return []key.Binding{k.ToggleMouse, k.Back, k.Quit, k.Follow, links, k.Up, k.Down, k.Parent, k.Refresh, k.Help}
 }
 
 // FullHelp keeps the mouse escape hatch and essential Detail actions together;
 // the model stacks both groups when the terminal cannot show them side by side.
 func (k DetailKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.Back, k.Parent, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.Back, k.Follow, k.NextLink, k.PreviousLink, k.Parent, k.Refresh, k.Help, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }

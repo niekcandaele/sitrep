@@ -56,7 +56,7 @@ type Styles struct {
 	// EmptyFilter styles the notice that stands in for a list a filter has
 	// emptied.
 	EmptyFilter lipgloss.Style
-	// Breadcrumb styles the Detail screen's parent Watchlist line.
+	// Breadcrumb styles the root Watchlist and prior Trail Tickets in Detail.
 	Breadcrumb lipgloss.Style
 	// SectionHeader styles a Detail section heading, e.g. "COMMENTS (3)".
 	SectionHeader lipgloss.Style
@@ -127,6 +127,13 @@ func DefaultStyles(isDark bool) Styles {
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 	}
+}
+
+func renderHyperlink(style lipgloss.Style, text, url string) string {
+	if url == "" {
+		return style.Render(text)
+	}
+	return style.Hyperlink(url).Render(text)
 }
 
 // groupHeader returns the style for a Status Category heading, falling back to
