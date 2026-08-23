@@ -210,9 +210,8 @@ func DefaultDetailKeyMap() DetailKeyMap {
 }
 
 // ShortHelp returns the bindings the Detail screen's one-line footer shows.
-// Parent appears only when it is enabled, so the footer never offers to open a
-// Watchlist this Ticket has none of — and that footer line is the whole
-// affordance for the walk-up: no second help line, no box.
+// Parent appears only when a root Watchlist context is available. This footer
+// line is the complete walk-up affordance: no second help line and no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
 	links := k.NextLink
 	links.SetHelp("tab/⇧tab", "links")
