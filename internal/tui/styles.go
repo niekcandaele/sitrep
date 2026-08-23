@@ -132,13 +132,17 @@ func DefaultStyles(isDark bool) Styles {
 	}
 }
 
-// renderHyperlink is the TUI's only OSC 8 creation seam. Provider.Sanitized
-// applies the same single-line policy at ingestion; repeating it here protects
-// direct Options inputs too. Normalizing malformed UTF-8 first keeps raw C1
-// bytes from bypassing the rune-based policy and reaching either URI or text.
+// sanitizeTerminalText repeats the Provider's single-line policy at direct TUI
+// input seams. Normalizing malformed UTF-8 first keeps raw C1 bytes from
+// bypassing the rune-based policy.
+func sanitizeTerminalText(text string) string {
+	return provider.SanitizeLine(strings.ToValidUTF8(text, ""))
+}
+
+// renderHyperlink is the TUI's only OSC 8 creation seam.
 func renderHyperlink(style lipgloss.Style, text, url string) string {
-	text = provider.SanitizeLine(strings.ToValidUTF8(text, ""))
-	url = provider.SanitizeLine(strings.ToValidUTF8(url, ""))
+	text = sanitizeTerminalText(text)
+	url = sanitizeTerminalText(url)
 	if url == "" {
 		return style.Render(text)
 	}

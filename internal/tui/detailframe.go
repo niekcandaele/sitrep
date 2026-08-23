@@ -280,15 +280,17 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 	}
 
 	labels := make([]string, len(links))
+	statuses := make([]string, len(links))
 	identities := make([]detailLinkIdentity, len(links))
 	seen := make(map[detailLinkIdentity]int, len(links))
 	labelWidth, keyWidth, titleWidth, statusWidth := 0, 0, 0, 0
 	for i, l := range links {
-		labels[i] = linkLabel(l)
+		labels[i] = sanitizeTerminalText(linkLabel(l))
+		statuses[i] = sanitizeTerminalText(nativeStatusTag(l.Target.NativeStatus))
 		labelWidth = max(labelWidth, lipgloss.Width(labels[i]))
 		keyWidth = max(keyWidth, lipgloss.Width(l.Target.Key))
 		titleWidth = max(titleWidth, lipgloss.Width(l.Target.Title))
-		statusWidth = max(statusWidth, lipgloss.Width(nativeStatusTag(l.Target.NativeStatus)))
+		statusWidth = max(statusWidth, lipgloss.Width(statuses[i]))
 
 		identity := detailLinkIdentity{TargetID: l.Target.ID, Kind: l.Kind, NativeLabel: l.NativeLabel}
 		occurrence := seen[identity]
@@ -314,7 +316,7 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 
 		title := ansi.Truncate(l.Target.Title, titleWidth, "…")
 		styledTitle := renderHyperlink(s.TicketTitle, title, l.Target.URL)
-		if tag := nativeStatusTag(l.Target.NativeStatus); tag != "" {
+		if tag := statuses[i]; tag != "" {
 			line += column(styledTitle, title, titleWidth) + s.NativeStatus.Render(tag)
 		} else {
 			line += styledTitle

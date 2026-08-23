@@ -265,6 +265,65 @@ func TestDirectOptionsAndDetailSourceCannotInjectRawC1OSC(t *testing.T) {
 	}
 }
 
+func TestLinkPlainTextFieldsCannotInjectTerminalControls(t *testing.T) {
+	hostile := func(marker string) string {
+		return "visible-" + marker + "\x00\t\n\r\x7f " +
+			"\x1b]52;c;YXR0YWNr\a " +
+			"\x1b]8;;https://evil.example/" + marker + "\x1b\\scope\x1b]8;;\x1b\\ " +
+			string([]byte{0x9d}) + "52;c;c1" + string([]byte{0x9c, 0xff}) + " café 東京"
+	}
+	label := hostile("label")
+	status := hostile("status")
+	url := "https://tracker.example/TARGET"
+	lines, _ := linkDocument(DetailInput{
+		Detail: model.Detail{Links: []model.Link{{
+			Kind:        model.LinkRelates,
+			NativeLabel: label,
+			Target: model.LinkTarget{
+				ID: "TARGET", Key: "TARGET", Title: "Target",
+				URL: url, NativeStatus: status,
+			},
+		}}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+	}, 600, Styles{}, detailLinkIdentity{}, false)
+	raw := strings.Join(lines, "\n")
+
+	if !utf8.ValidString(raw) {
+		t.Errorf("Link row contains malformed UTF-8: % x", []byte(raw))
+	}
+	assertBalancedHyperlink(t, raw, url, 2)
+	if got := strings.Count(raw, "\x1b]8;"); got != 4 {
+		t.Errorf("OSC 8 sequence count = %d, want four intended opens/resets", got)
+	}
+	if got := strings.Count(raw, "\x1b"); got != 4 {
+		t.Errorf("ESC count = %d, want four intended OSC 8 sequences", got)
+	}
+	if got := strings.Count(raw, "\a"); got != 4 {
+		t.Errorf("BEL count = %d, want four intended OSC 8 terminators", got)
+	}
+	for _, injected := range []string{
+		"\x1b]52;", hyperlinkOpen("https://evil.example/"),
+	} {
+		if strings.Contains(raw, injected) {
+			t.Errorf("Link row retained injected terminal bytes % x: %q", []byte(injected), raw)
+		}
+	}
+	for _, control := range []rune{0x9c, 0x9d} {
+		if strings.ContainsRune(raw, control) {
+			t.Errorf("Link row retained C1 control U+%04X: %q", control, raw)
+		}
+	}
+	visible := ansi.Strip(raw)
+	safeLabel := sanitizeTerminalText(label)
+	if !strings.Contains(visible, safeLabel) {
+		t.Errorf("sanitized NativeLabel missing from %q", visible)
+	}
+	safeStatus := sanitizeTerminalText(status)
+	if !strings.Contains(visible, "["+safeStatus+"]") {
+		t.Errorf("sanitized Native Status missing from %q", visible)
+	}
+}
+
 func TestListTicketKeyHyperlinkExcludesMarkerPaddingAndTitle(t *testing.T) {
 	url := "https://example.test/T-1"
 	rows := []Row{{Kind: RowTicket, Ticket: model.Ticket{
