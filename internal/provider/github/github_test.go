@@ -47,6 +47,13 @@ var refListRefs = []ref.Ref{
 	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
 }
 
+var crossReferenceRefs = []ref.Ref{
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 44, Raw: "niekcandaele/sitrep#44"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 144, Raw: "niekcandaele/sitrep#144"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 244, Raw: "niekcandaele/sitrep#244"},
+	{Tracker: ref.TrackerGitHub, Host: "github.com", Owner: "niekcandaele", Repo: "sitrep", Number: 344, Raw: "niekcandaele/sitrep#344"},
+}
+
 // response is one replayed answer: a status code and either a fixture file or a
 // literal body.
 type response struct {
@@ -285,7 +292,10 @@ func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
 			t.Errorf("membership document omits %q: %s", token, membership.query)
 		}
 	}
-	for _, forbidden := range []string{"title", "url", "state", "assignees", "parent", "subIssues", "comments", "body"} {
+	for _, forbidden := range []string{
+		"title", "url", "state", "assignees", "parent", "subIssues", "comments", "body",
+		"timelineItems", "crossReferences", "closedByPullRequestsReferences", "PullRequestListFields",
+	} {
 		if strings.Contains(membership.query, forbidden) {
 			t.Errorf("membership document includes non-identity or paging field %q: %s", forbidden, membership.query)
 		}
@@ -299,10 +309,64 @@ func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
 	if !reflect.DeepEqual(exact.variables, wantVariables) {
 		t.Errorf("exact-root variables = %#v, want %#v", exact.variables, wantVariables)
 	}
+	for _, token := range []string{
+		"...IssuePullRequestRelationships",
+		"closedByPullRequestsReferences(first:20, includeClosedPrs:true)",
+		"crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT])",
+		"fragment PullRequestListFields",
+	} {
+		if !strings.Contains(exact.query, token) {
+			t.Errorf("authoritative exact-root query omits correlation field %q: %s", token, exact.query)
+		}
+	}
 	for _, forbidden := range []string{"subIssues", "body", "comments", "blockedBy", "blocking"} {
 		if strings.Contains(exact.query, forbidden) {
 			t.Errorf("exact-root query contains Detail/Epic field %q: %s", forbidden, exact.query)
 		}
+	}
+}
+
+func TestResolveQueryCorrelatesAfterAuthoritativeExactRead(t *testing.T) {
+	membership := strings.Join([]string{
+		`{"__typename":"Issue","number":44,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`,
+		`{"__typename":"Issue","number":144,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`,
+		`{"__typename":"Issue","number":244,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`,
+		`{"__typename":"Issue","number":344,"repository":{"nameWithOwner":"niekcandaele/sitrep"}}`,
+	}, ",")
+	s := newReplayServer(t,
+		queryMembershipPage(membership, false, ""),
+		response{file: "cross_reference_prs.json"},
+	)
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "is:issue integration"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != 4 {
+		t.Fatalf("Tickets = %+v, want four authoritative exact-read Tickets", snap.Tickets)
+	}
+	wantPRs := []int{50, 150, 250, 350}
+	wantStatuses := []model.StatusCategory{
+		model.StatusInProgress, model.StatusInProgress, model.StatusDone, model.StatusInProgress,
+	}
+	for i := range snap.Tickets {
+		if len(snap.Tickets[i].PullRequests) != 1 || snap.Tickets[i].PullRequests[0].Number != wantPRs[i] {
+			t.Errorf("Tickets[%d].PullRequests = %+v, want #%d from exact-read cross-reference data",
+				i, snap.Tickets[i].PullRequests, wantPRs[i])
+		}
+		if snap.Tickets[i].Status != wantStatuses[i] {
+			t.Errorf("Tickets[%d].Status = %s, want %s", i, snap.Tickets[i].Status, wantStatuses[i])
+		}
+	}
+
+	requests := s.recorded()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want one identity search and one aliased exact read", len(requests))
+	}
+	if strings.Contains(requests[0].query, "timelineItems") ||
+		!strings.Contains(requests[1].query, "crossReferences: timelineItems") {
+		t.Errorf("correlation fields belong only to the authoritative exact read: search=%s exact=%s",
+			requests[0].query, requests[1].query)
 	}
 }
 
@@ -935,15 +999,156 @@ func TestResolveRefListReadsExactTicketsInSelectorOrder(t *testing.T) {
 			t.Errorf("query interpolated Ref value %q instead of using variables: %s", value, request.query)
 		}
 	}
-	for _, field := range []string{"issueOrPullRequest", "id number title url state stateReason", "repository", "assignees", "closedByPullRequestsReferences", "statusCheckRollup"} {
+	for _, field := range []string{
+		"issueOrPullRequest", "id number title url state stateReason", "repository", "assignees",
+		"closedByPullRequestsReferences", "crossReferences", "timelineItems", "CROSS_REFERENCED_EVENT", "statusCheckRollup",
+	} {
 		if !strings.Contains(request.query, field) {
 			t.Errorf("query omits thin Ticket field %q: %s", field, request.query)
 		}
+	}
+	if strings.Count(request.query, "fragment IssuePullRequestRelationships") != 1 ||
+		strings.Count(request.query, "fragment PullRequestListFields") != 1 {
+		t.Errorf("query does not define each shared correlation fragment exactly once: %s", request.query)
 	}
 	for _, forbidden := range []string{"subIssues", "parent", "body", "comments", "blockedBy", "blocking"} {
 		if strings.Contains(request.query, forbidden) {
 			t.Errorf("Ref-list query contains %q, want neither Epic expansion nor Detail fields: %s", forbidden, request.query)
 		}
+	}
+}
+
+func TestResolveRefListCorrelatesCrossReferencePullRequests(t *testing.T) {
+	s := newReplayServer(t, response{file: "cross_reference_prs.json"})
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: crossReferenceRefs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != 4 {
+		t.Fatalf("Tickets = %+v, want all four aliased exact-read Tickets", snap.Tickets)
+	}
+
+	wants := []struct {
+		key    string
+		status model.StatusCategory
+		pr     model.PullRequest
+	}{
+		{
+			key: "niekcandaele/sitrep#44", status: model.StatusInProgress,
+			pr: model.PullRequest{
+				Number: 50, Title: "Rename the Epic seam to Watchlists",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/50",
+				Repository: "niekcandaele/sitrep", State: model.PROpen,
+				Review: model.ReviewPending, Checks: model.ChecksPassing,
+			},
+		},
+		{
+			key: "niekcandaele/sitrep#144", status: model.StatusInProgress,
+			pr: model.PullRequest{
+				Number: 150, Title: "Synthetic cross-repository draft",
+				URL:        "https://github.com/acme/integration/pull/150",
+				Repository: "acme/integration", State: model.PRDraft,
+				Review: model.ReviewNone, Checks: model.ChecksPending,
+			},
+		},
+		{
+			key: "niekcandaele/sitrep#244", status: model.StatusDone,
+			pr: model.PullRequest{
+				Number: 250, Title: "Synthetic merged integration work",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/250",
+				Repository: "niekcandaele/sitrep", State: model.PRMerged,
+				Review: model.ReviewApproved, Checks: model.ChecksPassing,
+			},
+		},
+		{
+			key: "niekcandaele/sitrep#344", status: model.StatusInProgress,
+			pr: model.PullRequest{
+				Number: 350, Title: "Closing relationship payload wins",
+				URL:        "https://github.com/niekcandaele/sitrep/pull/350",
+				Repository: "niekcandaele/sitrep", State: model.PROpen,
+				Review: model.ReviewApproved, Checks: model.ChecksPassing,
+			},
+		},
+	}
+	for i, want := range wants {
+		got := snap.Tickets[i]
+		if got.Key != want.key || got.Status != want.status {
+			t.Errorf("Tickets[%d] = {%q %s}, want {%q %s}", i, got.Key, got.Status, want.key, want.status)
+		}
+		if got.NativeStatus != map[model.StatusCategory]string{
+			model.StatusInProgress: "open",
+			model.StatusDone:       "closed",
+		}[want.status] {
+			t.Errorf("Tickets[%d].NativeStatus = %q, want the Issue's authoritative state", i, got.NativeStatus)
+		}
+		if len(got.PullRequests) != 1 || got.PullRequests[0] != want.pr {
+			t.Errorf("Tickets[%d].PullRequests = %+v, want exactly %+v", i, got.PullRequests, want.pr)
+		}
+	}
+
+	requests := s.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want one aliased exact-read POST and no per-Ticket/event calls", len(requests))
+	}
+	document := requests[0].query
+	for _, token := range []string{
+		"closedByPullRequestsReferences(first:20, includeClosedPrs:true)",
+		"crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT])",
+		"pageInfo { hasPreviousPage startCursor }",
+		"source {", "__typename", "... on PullRequest { ...PullRequestListFields }",
+	} {
+		if !strings.Contains(document, token) {
+			t.Errorf("exact-read document omits %q: %s", token, document)
+		}
+	}
+	if strings.Count(document, "fragment RefListTicketFields") != 1 ||
+		strings.Count(document, "fragment IssuePullRequestRelationships") != 1 ||
+		strings.Count(document, "fragment PullRequestListFields") != 1 {
+		t.Errorf("exact-read document does not define each shared fragment exactly once: %s", document)
+	}
+	for _, forbidden := range []string{
+		"willCloseTarget", "baseRefName", "headRefName", "body", "comments", "blockedBy", "blocking",
+	} {
+		if strings.Contains(document, forbidden) {
+			t.Errorf("exact-read document contains forbidden branch/Detail field %q: %s", forbidden, document)
+		}
+	}
+}
+
+func TestResolveRefListCrossReferenceGraphQLErrorReturnsNoPartialSnapshot(t *testing.T) {
+	body := `{
+		"data": {
+			"ref0": {
+				"kind": {"__typename": "Issue"},
+				"issue": {
+					"id": "I_44", "number": 44, "title": "Ticket", "state": "OPEN",
+					"repository": {"nameWithOwner": "niekcandaele/sitrep"},
+					"crossReferences": null
+				}
+			}
+		},
+		"errors": [{
+			"type": "FORBIDDEN",
+			"message": "Resource not accessible by integration",
+			"path": ["ref0", "issue", "crossReferences"]
+		}]
+	}`
+	s := newReplayServer(t, response{body: body})
+
+	snap, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: crossReferenceRefs[:1]})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindAuth,
+		Contains: []string{"Resource not accessible by integration"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial Ticket after a nested GraphQL error", snap)
+	}
+	if got := len(s.recorded()); got != 1 {
+		t.Errorf("requests = %d, want one failed batch and no fallback calls", got)
 	}
 }
 
@@ -1540,6 +1745,54 @@ func TestOpenPullRequestsMakeTicketsInProgress(t *testing.T) {
 	}
 }
 
+func TestCrossReferencePullRequestsMapOnEpicRootAndChild(t *testing.T) {
+	body := `{
+		"data": {"repository": {
+			"kind": {"__typename": "Issue"},
+			"issue": {
+				"id": "I_root", "number": 44, "title": "Root", "url": "https://github.com/acme/widgets/issues/44",
+				"state": "OPEN", "repository": {"nameWithOwner": "acme/widgets"},
+				"assignees": {"nodes": []},
+				"closedByPullRequestsReferences": {"totalCount": 0, "nodes": []},
+				"crossReferences": {"totalCount": 1, "nodes": [{"source": {
+					"__typename": "PullRequest", "number": 50, "title": "Root work",
+					"url": "https://github.com/acme/widgets/pull/50", "state": "OPEN", "isDraft": false,
+					"createdAt": "2026-08-22T08:00:00Z", "repository": {"nameWithOwner": "acme/widgets"}
+				}}]},
+				"subIssues": {"totalCount": 1, "pageInfo": {"hasNextPage": false, "endCursor": ""}, "nodes": [{
+					"id": "I_child", "number": 45, "title": "Child", "url": "https://github.com/acme/widgets/issues/45",
+					"state": "OPEN", "repository": {"nameWithOwner": "acme/widgets"},
+					"assignees": {"nodes": []},
+					"closedByPullRequestsReferences": {"totalCount": 0, "nodes": []},
+					"crossReferences": {"totalCount": 1, "nodes": [{"source": {
+						"__typename": "PullRequest", "number": 150, "title": "Child work",
+						"url": "https://github.com/acme/integration/pull/150", "state": "OPEN", "isDraft": true,
+						"createdAt": "2026-08-22T09:00:00Z", "repository": {"nameWithOwner": "acme/integration"}
+					}}]}
+				}]}
+			}
+		}}
+	}`
+	s := newReplayServer(t, response{body: body})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Epic.Status != model.StatusInProgress || len(snap.Epic.PullRequests) != 1 ||
+		snap.Epic.PullRequests[0].Number != 50 {
+		t.Errorf("Epic = %+v, want root cross-reference PR #50 to derive InProgress", snap.Epic)
+	}
+	if len(snap.Tickets) != 1 || snap.Tickets[0].Status != model.StatusInProgress ||
+		len(snap.Tickets[0].PullRequests) != 1 || snap.Tickets[0].PullRequests[0].Number != 150 ||
+		snap.Tickets[0].PullRequests[0].Repository != "acme/integration" {
+		t.Errorf("Tickets = %+v, want child cross-repository draft PR #150", snap.Tickets)
+	}
+	if got := len(s.recorded()); got != 1 {
+		t.Errorf("requests = %d, want root and child correlation in the same Epic-page POST", got)
+	}
+}
+
 // ADR-0003: pull request data rides on the same request as the sub-issues. One
 // logical fetch per refresh, whatever the epic contains.
 func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
@@ -1554,8 +1807,26 @@ func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
 		t.Fatalf("the driver made %d requests, want 2: one per sub-issue page and none per Ticket", len(requests))
 	}
 	for i, r := range requests {
-		if !strings.Contains(r.query, "closedByPullRequestsReferences") {
-			t.Errorf("request %d does not ask for pull requests: %q", i, r.query)
+		for _, token := range []string{
+			"closedByPullRequestsReferences(first:20, includeClosedPrs:true)",
+			"crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT])",
+			"source {", "__typename", "statusCheckRollup",
+		} {
+			if !strings.Contains(r.query, token) {
+				t.Errorf("request %d omits pull request correlation shape %q: %s", i, token, r.query)
+			}
+		}
+		if strings.Count(r.query, "...IssuePullRequestRelationships") != 2 {
+			t.Errorf("request %d does not apply correlation to both root and child Issue shapes: %s", i, r.query)
+		}
+		if strings.Count(r.query, "fragment IssuePullRequestRelationships") != 1 ||
+			strings.Count(r.query, "fragment PullRequestListFields") != 1 {
+			t.Errorf("request %d does not define each correlation fragment exactly once: %s", i, r.query)
+		}
+		for _, forbidden := range []string{"willCloseTarget", "baseRefName", "headRefName", "body", "comments"} {
+			if strings.Contains(r.query, forbidden) {
+				t.Errorf("request %d contains forbidden correlation/Detail field %q: %s", i, forbidden, r.query)
+			}
 		}
 	}
 }

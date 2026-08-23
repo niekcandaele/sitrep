@@ -152,7 +152,7 @@ func (p *Provider) Capabilities() model.Capabilities {
 		Hierarchy:     true, // sub-issues are how an Epic is assembled
 		BlockingLinks: true, // blockedBy / blocking on the detail query
 		Comments:      true, // comments on the detail query
-		PullRequests:  true, // closedByPullRequestsReferences on the epic query
+		PullRequests:  true, // closing references and PR-sourced cross-reference events
 		Selectors: model.SelectorCapabilities{
 			Epic: true, RefList: true, Query: true,
 		},

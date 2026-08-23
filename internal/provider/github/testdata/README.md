@@ -57,6 +57,27 @@ The shapes and what each one proves:
 | #100 | one with `commits.nodes: []`, one with `statusCheckRollup: null` | no CI, no panic |
 | #101 | an unknown `state`, `reviewDecision` and rollup, and a null `repository` | unknown never reads as green |
 
+### Cross-referenced pull requests
+
+`cross_reference_prs.json` was added on **2026-08-23** and is a small,
+**hand-written** aliased exact-Ref response, not a live recording. Its recognizable
+row reproduces the observed relationship between `niekcandaele/sitrep#44` and PR
+`#50`: the closing connection was empty while a PR-sourced
+`CrossReferencedEvent` linked the two. In the observed case, PR #50 targeted
+`epic/sitrep-v0.2`, a non-default integration branch. The fixture deliberately
+omits `baseRefName` and every other branch field because the native relationship,
+not a branch-name heuristic, is the behavior under test.
+
+The #44/#50 payload is deliberately edited to an open, review-required state so
+list normalization can be asserted after the historical PR merged. The remaining
+rows (#144/#150, #244/#250, and #344/#350) are clearly numbered synthetic copies:
+they add a cross-repository draft PR, an explicitly closed Ticket with a merged
+PR, and the same PR in both relationships with repository casing changed. An
+Issue-sourced event beside #50 proves non-PR sources are ignored. Aggregate
+checks, review values, timestamps, timeline `totalCount`, and retained-window
+`pageInfo` are all deliberate test values; no credentials or personal payloads
+were captured.
+
 `epic_empty.json` is the same real epic node with an empty `subIssues` page: an issue with
 no sub-issues is not an error, it is a Ticket someone pointed sitrep at.
 
