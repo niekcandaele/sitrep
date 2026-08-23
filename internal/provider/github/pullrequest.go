@@ -1,6 +1,7 @@
 package github
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +27,29 @@ type pullRequestConnection struct {
 	Nodes      []pullRequestNode `json:"nodes"`
 }
 
+// crossReferenceConnection is the retained last-twenty window of GitHub
+// CrossReferencedEvent timeline items. The bound counts every event, including
+// Issue sources newPullRequests later ignores. PageInfo records that an older
+// window exists; truncation is intentionally Provider-local and is not rendered.
+type crossReferenceConnection struct {
+	TotalCount int `json:"totalCount"`
+	PageInfo   struct {
+		HasPreviousPage bool   `json:"hasPreviousPage"`
+		StartCursor     string `json:"startCursor"`
+	} `json:"pageInfo"`
+	Nodes []crossReferencedEventNode `json:"nodes"`
+}
+
+type crossReferencedEventNode struct {
+	// Source is modeled as nullable even though GitHub's public schema declares
+	// it non-null: deleted or inaccessible sources must contribute no invented PR.
+	// A non-PR source decodes only TypeName because the query selects the remaining
+	// fields inside a PullRequest fragment.
+	Source *pullRequestNode `json:"source"`
+}
+
 type pullRequestNode struct {
+	TypeName       string         `json:"__typename"`
 	Number         int            `json:"number"`
 	Title          string         `json:"title"`
 	URL            string         `json:"url"`
@@ -49,25 +72,87 @@ type pullRequestNode struct {
 	} `json:"commits"`
 }
 
-// newPullRequests maps a Ticket's linked pull requests onto sitrep's model, in
-// GitHub's own order but with the lead pull request moved to the front. Index 0
-// is the Provider's contract with renderers that show one pull request per row;
-// see the doc comment on model.Ticket.PullRequests.
+// newPullRequests unions GitHub's two native PR relationships before mapping
+// them onto sitrep's model. Closing references retain their existing order and
+// precedence; usable PR-sourced timeline mentions append in GitHub's retained
+// timeline order. GitHub cannot distinguish an implementation reference from
+// an incidental PR mention when willCloseTarget is false, so every PullRequest
+// source with stable repository-plus-number identity is deliberately included.
+// Issue, null, inaccessible, and identity-less timeline sources are ignored.
 //
-// A Ticket with no linked pull requests gets nil, the model's documented
-// "none", rather than an empty slice.
-func newPullRequests(conn *pullRequestConnection) []model.PullRequest {
-	if conn == nil || len(conn.Nodes) == 0 {
+// Stable identities deduplicate case-insensitively across and within both paths,
+// first occurrence wins. Legacy closing nodes without repository identity still
+// map exactly as before, but cannot prove equivalence to another candidate.
+// leadFirst runs once after the union. A Ticket with no candidates gets nil, the
+// model's documented "none", rather than an empty slice.
+func newPullRequests(
+	closing *pullRequestConnection,
+	crossReferences *crossReferenceConnection,
+) []model.PullRequest {
+	closingCount := 0
+	if closing != nil {
+		closingCount = len(closing.Nodes)
+	}
+	crossReferenceCount := 0
+	if crossReferences != nil {
+		crossReferenceCount = len(crossReferences.Nodes)
+	}
+	if closingCount+crossReferenceCount == 0 {
 		return nil
 	}
 
-	prs := make([]model.PullRequest, 0, len(conn.Nodes))
-	created := make([]time.Time, 0, len(conn.Nodes))
-	for _, n := range conn.Nodes {
-		prs = append(prs, newPullRequest(n))
-		created = append(created, n.CreatedAt)
+	candidates := make([]pullRequestNode, 0, closingCount+crossReferenceCount)
+	seen := make(map[string]struct{}, closingCount+crossReferenceCount)
+	if closing != nil {
+		for _, candidate := range closing.Nodes {
+			if identity, ok := stablePullRequestIdentity(candidate); ok {
+				if _, duplicate := seen[identity]; duplicate {
+					continue
+				}
+				seen[identity] = struct{}{}
+			}
+			candidates = append(candidates, candidate)
+		}
+	}
+	if crossReferences != nil {
+		for _, event := range crossReferences.Nodes {
+			if event.Source == nil || event.Source.TypeName != "PullRequest" {
+				continue
+			}
+			candidate := *event.Source
+			identity, ok := stablePullRequestIdentity(candidate)
+			if !ok {
+				continue
+			}
+			if _, duplicate := seen[identity]; duplicate {
+				continue
+			}
+			seen[identity] = struct{}{}
+			candidates = append(candidates, candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	prs := make([]model.PullRequest, 0, len(candidates))
+	created := make([]time.Time, 0, len(candidates))
+	for _, candidate := range candidates {
+		prs = append(prs, newPullRequest(candidate))
+		created = append(created, candidate.CreatedAt)
 	}
 	return leadFirst(prs, created)
+}
+
+func stablePullRequestIdentity(n pullRequestNode) (string, bool) {
+	if n.Number <= 0 || n.Repository == nil {
+		return "", false
+	}
+	repository := strings.TrimSpace(n.Repository.NameWithOwner)
+	if repository == "" {
+		return "", false
+	}
+	return strings.ToLower(repository) + "#" + strconv.Itoa(n.Number), true
 }
 
 // newPullRequest maps one pull request node. Every pull request is reported as

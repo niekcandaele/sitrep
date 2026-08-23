@@ -228,11 +228,226 @@ func TestPullRequestConnectionDecodesTotalCountAndCreatedAt(t *testing.T) {
 	if conn.TotalCount != 25 {
 		t.Errorf("TotalCount = %d, want 25: the Ticket has more than the cap", conn.TotalCount)
 	}
-	if got := len(newPullRequests(&conn)); got != 20 {
+	if got := len(newPullRequests(&conn, nil)); got != 20 {
 		t.Errorf("newPullRequests returned %d pull requests, want the 20 the cap allowed", got)
 	}
 	if conn.Nodes[0].CreatedAt.IsZero() {
 		t.Error("createdAt did not decode; lead selection would silently fall back to the number")
+	}
+}
+
+func pullRequestWire(number int, repository, state string, draft bool, created time.Time) pullRequestNode {
+	node := pullRequestNode{
+		TypeName:  "PullRequest",
+		Number:    number,
+		Title:     fmt.Sprintf("PR %d", number),
+		URL:       fmt.Sprintf("https://github.com/%s/pull/%d", repository, number),
+		State:     state,
+		IsDraft:   draft,
+		CreatedAt: created,
+	}
+	if repository != "" {
+		node.Repository = &repositoryRef{NameWithOwner: repository}
+	}
+	return node
+}
+
+func crossReferenceEvents(nodes ...*pullRequestNode) *crossReferenceConnection {
+	events := make([]crossReferencedEventNode, len(nodes))
+	for i, node := range nodes {
+		events[i].Source = node
+	}
+	return &crossReferenceConnection{Nodes: events}
+}
+
+func TestPullRequestsDeduplicateStableIdentityFirstOccurrenceWins(t *testing.T) {
+	closingNode := pullRequestWire(51, "Acme/Widgets", "CLOSED", false, time.Time{})
+	closingNode.Title = "closing relationship payload"
+	timelineNode := pullRequestWire(51, "acme/widgets", "OPEN", false, time.Now())
+	timelineNode.Title = "timeline payload"
+
+	got := newPullRequests(
+		&pullRequestConnection{Nodes: []pullRequestNode{closingNode}},
+		crossReferenceEvents(&timelineNode, &timelineNode),
+	)
+
+	if len(got) != 1 {
+		t.Fatalf("PullRequests = %+v, want one case-insensitively deduplicated PR", got)
+	}
+	if got[0].Title != closingNode.Title || got[0].State != model.PRClosed {
+		t.Errorf("PullRequests[0] = %+v, want the closing relationship's first payload", got[0])
+	}
+}
+
+func TestPullRequestsDeduplicateRepeatedTimelineEvents(t *testing.T) {
+	first := pullRequestWire(51, "acme/widgets", "OPEN", false, time.Time{})
+	first.Title = "first event payload"
+	repeated := first
+	repeated.Title = "later event payload"
+
+	got := newPullRequests(nil, crossReferenceEvents(&first, &repeated))
+
+	if len(got) != 1 || got[0].Title != "first event payload" {
+		t.Errorf("PullRequests = %+v, want one PR retaining the first timeline event payload", got)
+	}
+}
+
+func TestPullRequestsKeepEqualNumbersFromDifferentRepositories(t *testing.T) {
+	first := pullRequestWire(7, "acme/widgets", "MERGED", false, time.Time{})
+	second := pullRequestWire(7, "niekcandaele/sitrep", "MERGED", false, time.Time{})
+
+	got := newPullRequests(
+		&pullRequestConnection{Nodes: []pullRequestNode{first}},
+		crossReferenceEvents(&second),
+	)
+
+	if len(got) != 2 {
+		t.Fatalf("PullRequests = %+v, want both repository-qualified identities", got)
+	}
+	if got[0].Repository != "acme/widgets" || got[1].Repository != "niekcandaele/sitrep" {
+		t.Errorf("PullRequest repositories = %q, %q, want closing first then timeline",
+			got[0].Repository, got[1].Repository)
+	}
+}
+
+func TestPullRequestsPreserveRelationshipOrderBeforeLeadSelection(t *testing.T) {
+	closingOne := pullRequestWire(1, "acme/widgets", "MERGED", false, time.Time{})
+	closingTwo := pullRequestWire(2, "acme/widgets", "MERGED", false, time.Time{})
+	timelineOne := pullRequestWire(3, "acme/widgets", "MERGED", false, time.Time{})
+	timelineTwo := pullRequestWire(4, "acme/widgets", "MERGED", false, time.Time{})
+
+	got := newPullRequests(
+		&pullRequestConnection{Nodes: []pullRequestNode{closingOne, closingTwo}},
+		crossReferenceEvents(&timelineOne, &timelineTwo),
+	)
+
+	want := []int{1, 2, 3, 4}
+	for i, number := range want {
+		if len(got) <= i || got[i].Number != number {
+			t.Fatalf("PullRequest order = %+v, want closing candidates then timeline candidates %v", got, want)
+		}
+	}
+}
+
+func TestPullRequestsChooseLeadAfterUnion(t *testing.T) {
+	older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	closingMerged := pullRequestWire(500, "acme/widgets", "MERGED", false, older)
+	closingClosed := pullRequestWire(20, "acme/widgets", "CLOSED", false, newer)
+	timelineOpen := pullRequestWire(900, "other/large-numbers", "OPEN", false, older)
+	timelineDraft := pullRequestWire(4, "niekcandaele/sitrep", "OPEN", true, newer)
+	timelineClosed := pullRequestWire(5, "niekcandaele/sitrep", "CLOSED", false, newer.Add(time.Hour))
+
+	got := newPullRequests(
+		&pullRequestConnection{Nodes: []pullRequestNode{closingMerged, closingClosed}},
+		crossReferenceEvents(&timelineOpen, &timelineDraft, &timelineClosed),
+	)
+
+	want := []struct {
+		number     int
+		repository string
+	}{
+		{4, "niekcandaele/sitrep"},
+		{500, "acme/widgets"},
+		{20, "acme/widgets"},
+		{900, "other/large-numbers"},
+		{5, "niekcandaele/sitrep"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("PullRequests = %+v, want %d candidates after union", got, len(want))
+	}
+	for i, expected := range want {
+		if got[i].Number != expected.number || got[i].Repository != expected.repository {
+			t.Errorf("PullRequests[%d] = %+v, want #%d in %s", i, got[i], expected.number, expected.repository)
+		}
+	}
+	if got[0].State != model.PRDraft {
+		t.Errorf("lead State = %s, want the newer in-flight draft", got[0].State)
+	}
+}
+
+func TestPullRequestsPreserveLegacyIdentitylessClosingNode(t *testing.T) {
+	legacyClosing := pullRequestWire(51, "", "MERGED", false, time.Time{})
+	timeline := pullRequestWire(51, "acme/widgets", "MERGED", false, time.Time{})
+
+	got := newPullRequests(
+		&pullRequestConnection{Nodes: []pullRequestNode{legacyClosing}},
+		crossReferenceEvents(&timeline),
+	)
+
+	if len(got) != 2 {
+		t.Fatalf("PullRequests = %+v, want the legacy closing payload and separately identified timeline PR", got)
+	}
+	if got[0].Number != 51 || got[0].Repository != "" || got[1].Repository != "acme/widgets" {
+		t.Errorf("PullRequests = %+v, want identity-less closing data preserved without unsafe deduplication", got)
+	}
+}
+
+func TestCrossReferenceSourcesRequirePullRequestIdentity(t *testing.T) {
+	issueSource := pullRequestWire(8, "acme/widgets", "OPEN", false, time.Time{})
+	issueSource.TypeName = "Issue"
+	missingRepository := pullRequestWire(9, "", "OPEN", false, time.Time{})
+	missingNumber := pullRequestWire(0, "acme/widgets", "OPEN", false, time.Time{})
+	wrongCaseType := pullRequestWire(10, "acme/widgets", "OPEN", false, time.Time{})
+	wrongCaseType.TypeName = "pullrequest"
+
+	tests := []struct {
+		name       string
+		connection *crossReferenceConnection
+	}{
+		{name: "absent connection"},
+		{name: "null source", connection: crossReferenceEvents(nil)},
+		{name: "Issue source", connection: crossReferenceEvents(&issueSource)},
+		{name: "missing repository", connection: crossReferenceEvents(&missingRepository)},
+		{name: "non-positive number", connection: crossReferenceEvents(&missingNumber)},
+		{name: "typename is exact", connection: crossReferenceEvents(&wrongCaseType)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := newPullRequests(nil, tt.connection); got != nil {
+				t.Errorf("PullRequests = %+v, want nil without a usable PullRequest source", got)
+			}
+		})
+	}
+}
+
+// GitHub exposes no implementation-specific discriminator for a PR-sourced
+// mention whose willCloseTarget is false. Including every valid PullRequest
+// source deliberately admits incidental mentions rather than guessing from a
+// branch name, PR text, or any unrequested field.
+func TestCrossReferenceIncludesAmbiguousPullRequestMention(t *testing.T) {
+	mention := pullRequestWire(51, "acme/integration", "OPEN", false, time.Time{})
+
+	got := newPullRequests(nil, crossReferenceEvents(&mention))
+
+	if len(got) != 1 || got[0].Number != 51 || got[0].Repository != "acme/integration" {
+		t.Errorf("PullRequests = %+v, want the valid PR-sourced mention included", got)
+	}
+}
+
+func TestCrossReferenceConnectionDecodesBoundedWindowMetadata(t *testing.T) {
+	payload := `{
+		"totalCount": 27,
+		"pageInfo": {"hasPreviousPage": true, "startCursor": "oldest-retained"},
+		"nodes": [
+			{"source": null},
+			{"source": {"__typename": "Issue"}},
+			{"source": {"__typename": "PullRequest", "number": 51,
+				"repository": {"nameWithOwner": "acme/widgets"}}}
+		]
+	}`
+
+	var connection crossReferenceConnection
+	if err := json.Unmarshal([]byte(payload), &connection); err != nil {
+		t.Fatalf("decoding cross-reference connection: %v", err)
+	}
+	if connection.TotalCount != 27 || !connection.PageInfo.HasPreviousPage ||
+		connection.PageInfo.StartCursor != "oldest-retained" {
+		t.Errorf("connection metadata = %+v, want explicit retained-window evidence", connection)
+	}
+	got := newPullRequests(nil, &connection)
+	if len(got) != 1 || got[0].Number != 51 {
+		t.Errorf("PullRequests = %+v, want only the usable PullRequest source", got)
 	}
 }
 

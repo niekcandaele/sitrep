@@ -118,7 +118,8 @@ type issueNode struct {
 	Assignees   struct {
 		Nodes []assigneeNode `json:"nodes"`
 	} `json:"assignees"`
-	ClosedByPullRequestsReferences *pullRequestConnection `json:"closedByPullRequestsReferences"`
+	ClosedByPullRequestsReferences *pullRequestConnection    `json:"closedByPullRequestsReferences"`
+	CrossReferences                *crossReferenceConnection `json:"crossReferences"`
 	SubIssues                      struct {
 		TotalCount int `json:"totalCount"`
 		PageInfo   struct {
@@ -305,7 +306,7 @@ func isAuthErrorType(t string) bool {
 // itself two different ways depending on which Ref reached it.
 func newEpic(n issueNode) model.Epic {
 	status, native := normalizeStatus(n.State, n.StateReason)
-	prs := newPullRequests(n.ClosedByPullRequestsReferences)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences, n.CrossReferences)
 	return model.Epic{
 		ID:           model.TicketID(n.ID),
 		Key:          issueKey(n, ""),
@@ -349,7 +350,7 @@ func newParent(p *parentNode, issueRepo string) model.Parent {
 // yet.
 func newTicket(n issueNode, epicRepo string) model.Ticket {
 	status, native := normalizeStatus(n.State, n.StateReason)
-	prs := newPullRequests(n.ClosedByPullRequestsReferences)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences, n.CrossReferences)
 	return model.Ticket{
 		ID:    model.TicketID(n.ID),
 		Key:   issueKey(n, epicRepo),
