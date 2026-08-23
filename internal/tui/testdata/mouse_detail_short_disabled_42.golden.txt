@@ -37,4 +37,4 @@ COMMENTS (3)
   Version byte it is. Updating the draft.
 
 
-m on·esc back·q quit·tab/⇧tab links·u↑  0%
+m on·esc back·q quit·tab/⇧·? help·u↑    0%

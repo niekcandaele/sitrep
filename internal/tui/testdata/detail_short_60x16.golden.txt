@@ -13,4 +13,4 @@ LINKS (3)
   blocks            #116  Protocol co…  [Selected for Develo
 ▸ is duplicated by  #7    Teach the g…  [In Progress]
                                                         100%
-m/⇧drag · esc← · q · follow↵ · tab/⇧ links · u watchlist
+m/⇧drag·esc back·q·follow↵·tab/⇧ links·? help·u watchlist

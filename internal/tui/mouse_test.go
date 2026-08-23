@@ -253,13 +253,19 @@ func TestDetailResponsiveShortHelpKeepsPriorityActions(t *testing.T) {
 	}
 }
 
-func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) {
+func TestDetailResponsiveShortHelpKeepsAtomicActionsAcrossSeats(t *testing.T) {
 	input := ListInput{
 		Header:       Header{Key: "#111", Title: "Widget sync v2"},
 		Tickets:      fixtureTickets(),
 		Capabilities: allCaps,
 	}
-	newChild := func(noMouse bool) Model {
+	type detailHelpSeat int
+	const (
+		noLinks detailHelpSeat = iota
+		unfocusedLinks
+		focusedLink
+	)
+	newSeat := func(noMouse bool, kind detailHelpSeat) Model {
 		t.Helper()
 		m := New(t.Context(), Options{
 			Source: func(context.Context) (ListInput, error) {
@@ -283,27 +289,45 @@ func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) 
 			caps:   allCaps,
 		}
 		rootModel, _ := m.openDetail()
-		root := focusLinkAt(rootModel.(Model), 0)
-		childModel, _ := root.followFocusedDetailLink()
-		child := childModel.(Model)
-		if !child.hasSource || child.detail.input.Parent == (Header{}) {
-			t.Fatal("post-follow fixture has no root Watchlist context")
+		seat := rootModel.(Model)
+		switch kind {
+		case noLinks:
+			seat = focusLinkAt(seat, 0)
+			childModel, _ := seat.followFocusedDetailLink()
+			seat = childModel.(Model)
+		case focusedLink:
+			seat = focusLinkAt(seat, 0)
 		}
-		return child
+		if !seat.hasSource || seat.detail.input.Parent == (Header{}) {
+			t.Fatal("Detail help fixture has no root Watchlist context")
+		}
+		return seat
 	}
 
 	states := []struct {
-		name      string
-		mouseHelp string
-		noMouse   bool
+		name          string
+		mouseSegments []string
+		noMouse       bool
+		kind          detailHelpSeat
+		hasLinks      bool
+		focused       bool
 	}{
-		{name: "mouse-enabled", mouseHelp: "m off"},
-		{name: "no-mouse", mouseHelp: "m on", noMouse: true},
+		{name: "no-links/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: noLinks},
+		{name: "no-links/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: noLinks},
+		{name: "unfocused/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: unfocusedLinks, hasLinks: true},
+		{name: "unfocused/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: unfocusedLinks, hasLinks: true},
+		{name: "focused/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: focusedLink, hasLinks: true, focused: true},
+		{name: "focused/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: focusedLink, hasLinks: true, focused: true},
 	}
+	widths := make([]int, 0, 48)
+	for width := 21; width <= 66; width++ {
+		widths = append(widths, width)
+	}
+	widths = append(widths, 80, 120)
 	for _, state := range states {
 		t.Run(state.name, func(t *testing.T) {
-			base := newChild(state.noMouse)
-			for width := 54; width <= 66; width++ {
+			base := newSeat(state.noMouse, state.kind)
+			for _, width := range widths {
 				t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
 					m := base
 					m.width, m.height = width, 16
@@ -312,18 +336,82 @@ func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) 
 
 					helpText := strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
 					if helpText == "" {
-						t.Fatal("post-follow help is empty")
+						t.Fatal("Detail help is empty")
 					}
-					for _, want := range []string{state.mouseHelp, "esc back", "q quit"} {
-						if !strings.Contains(helpText, want) {
-							t.Errorf("post-follow help omitted %q: %q", want, helpText)
+					segments := strings.FieldsFunc(helpText, func(r rune) bool {
+						return r == '•' || r == '·'
+					})
+					for i := range segments {
+						segments[i] = strings.TrimSpace(segments[i])
+					}
+					countExact := func(approved ...string) int {
+						count := 0
+						for _, segment := range segments {
+							for _, want := range approved {
+								if segment == want {
+									count++
+									break
+								}
+							}
+						}
+						return count
+					}
+					type segmentRequirement struct {
+						name     string
+						approved []string
+					}
+					requiredSegments := []segmentRequirement{
+						{name: "mouse toggle", approved: state.mouseSegments},
+						{name: "Back", approved: []string{"esc back", "esc"}},
+						{name: "Quit", approved: []string{"q quit", "q"}},
+						{name: "Parent", approved: []string{"u watchlist", "u↑"}},
+					}
+					followSegments := []string{"enter follow", "follow↵", "↵"}
+					linkSegments := []string{"tab/⇧tab links", "tab/⇧ links", "tab/⇧"}
+					if state.hasLinks {
+						requiredSegments = append(requiredSegments,
+							segmentRequirement{name: "Links", approved: linkSegments})
+					}
+					if state.focused {
+						requiredSegments = append(requiredSegments,
+							segmentRequirement{name: "Follow", approved: followSegments})
+					}
+					if width >= detailHelpDiscoveryWidth {
+						requiredSegments = append(requiredSegments,
+							segmentRequirement{name: "Help", approved: []string{"? help"}})
+					}
+					for _, required := range requiredSegments {
+						if count := countExact(required.approved...); count != 1 {
+							t.Errorf("Detail help has %d exact %s segments, want 1: %q",
+								count, required.name, helpText)
 						}
 					}
 					if !m.detailKeys.Parent.Enabled() {
-						t.Error("post-follow Parent binding is disabled despite root Watchlist context")
+						t.Error("Detail Parent binding is disabled despite root Watchlist context")
 					}
-					if !strings.Contains(helpText, "u watchlist") && !strings.Contains(helpText, "u↑") {
-						t.Errorf("post-follow help omitted the complete Parent binding: %q", helpText)
+					if state.hasLinks {
+						if !m.detailKeys.NextLink.Enabled() || !m.detailKeys.PreviousLink.Enabled() {
+							t.Error("Detail with Links has a disabled Link-cycle binding")
+						}
+					} else {
+						if m.detailKeys.NextLink.Enabled() || m.detailKeys.PreviousLink.Enabled() {
+							t.Error("no-Link Detail has an enabled Link-cycle binding")
+						}
+						if count := countExact(linkSegments...); count != 0 {
+							t.Errorf("no-Link Detail help has %d Links segments, want 0: %q", count, helpText)
+						}
+					}
+					if state.focused {
+						if !m.detailKeys.Follow.Enabled() {
+							t.Error("focused Detail has a disabled Follow binding")
+						}
+					} else {
+						if m.detailKeys.Follow.Enabled() {
+							t.Error("unfocused Detail has an enabled Follow binding")
+						}
+						if count := countExact(followSegments...); count != 0 {
+							t.Errorf("unfocused Detail help has %d Follow segments, want 0: %q", count, helpText)
+						}
 					}
 					if state.noMouse && strings.Contains(helpText, "shift-drag") {
 						t.Errorf("no-mouse help advertises capture recovery: %q", helpText)
@@ -334,10 +422,10 @@ func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) 
 						strings.Contains(compact, "••") || strings.Contains(compact, "··") ||
 						strings.Contains(compact, "•·") || strings.Contains(compact, "·•") ||
 						strings.Contains(helpText, "…") {
-						t.Errorf("post-follow help has a partial binding or dangling/doubled separator: %q", helpText)
+						t.Errorf("Detail help has a partial binding or dangling/doubled separator: %q", helpText)
 					}
 					if got := ansi.StringWidth(helpText); got > width {
-						t.Errorf("post-follow help width = %d, budget %d: %q", got, width, helpText)
+						t.Errorf("Detail help width = %d, budget %d: %q", got, width, helpText)
 					}
 				})
 			}
@@ -355,10 +443,20 @@ func TestDetailResponsiveShortHelpAtDecoderRoot(t *testing.T) {
 	m = m.reconcileDetail(true)
 
 	helpText := strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
-	for _, want := range []string{"m off, shift-drag", "esc quit", "q quit", "tab/⇧"} {
+	for _, want := range []string{"m off, shift-drag", "q quit", "tab/⇧", "? help"} {
 		if !strings.Contains(helpText, want) {
 			t.Errorf("decoder-root help omitted %q: %q", want, helpText)
 		}
+	}
+	backCount := 0
+	for _, segment := range strings.FieldsFunc(helpText, func(r rune) bool { return r == '•' || r == '·' }) {
+		segment = strings.TrimSpace(segment)
+		if segment == "esc quit" || segment == "esc" {
+			backCount++
+		}
+	}
+	if backCount != 1 {
+		t.Errorf("decoder-root help has %d complete Back segments, want 1: %q", backCount, helpText)
 	}
 	if strings.Contains(helpText, "watchlist") || strings.Contains(helpText, "u↑") {
 		t.Errorf("decoder-root help advertises unavailable Parent: %q", helpText)
@@ -615,12 +713,12 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		{
 			name: "actionable enabled Detail short help at 42", screen: modeDetail, width: 42,
 			golden: "mouse_detail_short_42.golden.txt",
-			wants:  []string{"m off, shift-drag", "esc back", "q quit"},
+			wants:  []string{"m/⇧drag", "q quit", "tab/⇧", "? help", "u↑"},
 		},
 		{
 			name: "actionable disabled Detail short help at 42", screen: modeDetail, width: 42, noMouse: true,
 			golden: "mouse_detail_short_disabled_42.golden.txt",
-			wants:  []string{"m on", "esc back", "q quit"}, forbids: []string{"shift-drag"},
+			wants:  []string{"m on", "esc back", "q quit", "tab/⇧", "? help", "u↑"}, forbids: []string{"shift-drag"},
 		},
 		{
 			name: "complete enabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true,

@@ -595,6 +595,54 @@ func TestDetailLinkTitleUsesCellWidthAndPreservesStatus(t *testing.T) {
 	}
 }
 
+func TestDetailLongUnicodeLinkLabelPreservesTargetIdentity(t *testing.T) {
+	longLabel := strings.Repeat("界", 20)
+	in := DetailInput{
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		Detail: model.Detail{Links: []model.Link{
+			{
+				Kind:        model.LinkBlocks,
+				NativeLabel: longLabel,
+				Target: model.LinkTarget{
+					ID: "K-2", Key: "K-2", Title: "Target identity remains visible", NativeStatus: "Open",
+				},
+			},
+			{
+				Kind:        model.LinkBlocks,
+				NativeLabel: "blocks",
+				Target: model.LinkTarget{
+					ID: "K-3", Key: "K-3", Title: "Target identity stays aligned", NativeStatus: "Open",
+				},
+			},
+		}},
+	}
+
+	for _, width := range []int{40, 42} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			doc := composeDetailDocument(in, width, Styles{}, detailLinkIdentity{}, false)
+			if len(doc.LinkRows) != len(in.Detail.Links) {
+				t.Fatalf("Link rows = %d, want %d", len(doc.LinkRows), len(in.Detail.Links))
+			}
+			for i, row := range doc.LinkRows {
+				line := ansi.Strip(doc.Lines[row.Line])
+				if got := ansi.StringWidth(line); got > width {
+					t.Errorf("Link %d width = %d, budget %d: %q", i, got, width, line)
+				}
+				if !strings.HasPrefix(line, unselectedMarker) {
+					t.Errorf("Link %d lost fixed focus gutter: %q", i, line)
+				}
+				if !strings.Contains(line, row.Link.Target.Key) || !strings.Contains(line, "Target") {
+					t.Errorf("Link %d lost target identity behind relationship label: %q", i, line)
+				}
+			}
+			longLine := ansi.Strip(doc.Lines[doc.LinkRows[0].Line])
+			if strings.Contains(longLine, longLabel) {
+				t.Errorf("long relationship label was not cell-truncated at width %d: %q", width, longLine)
+			}
+		})
+	}
+}
+
 func TestDetailDocumentsStayWidthBoundedAtExtremeWidths(t *testing.T) {
 	loaded := detailModel(t)
 	loaded.detail.input.Detail.Description = "界面界面 a-long-token-without-breaks"

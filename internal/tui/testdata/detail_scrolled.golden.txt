@@ -36,5 +36,5 @@ LINKS (3)
   is blocked by     #115  Reconcile widget IDs across shards       [open]
   blocks            #116  Protocol conformance tests               [Selected for Development]
   is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
-                                                                                                                    100%
-m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ↑/k up • ↓/j down • r refresh
+
+m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down   100%

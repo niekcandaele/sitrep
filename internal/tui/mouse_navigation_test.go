@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -72,6 +73,158 @@ func TestDetailMouseHitMapUsesRenderedDocumentLines(t *testing.T) {
 			}
 		})
 	}
+}
+
+func scrollableDetailMouseModel(t *testing.T) Model {
+	t.Helper()
+	m, _ := navigableDetailModel(t)
+	m.width, m.height = 80, 12
+	m.help.SetWidth(m.width)
+	m.detail.input.Detail.Description = strings.Repeat("scrollable Detail body line\n", 50)
+	m = m.reconcileDetail(true)
+	if doc := m.detailDocument(); len(doc.Lines) <= m.detailBodyHeight() {
+		t.Fatalf("wheel fixture has %d lines for body height %d", len(doc.Lines), m.detailBodyHeight())
+	}
+	return m
+}
+
+func queuedDetailWheel(t *testing.T, m Model) detailMouseWheelMsg {
+	t.Helper()
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("Detail view has no mouse handler")
+	}
+	cmd := handler(tea.MouseWheelMsg{X: 0, Y: detailHeaderHeight, Button: tea.MouseWheelDown})
+	if cmd == nil {
+		t.Fatal("in-frame Detail wheel produced no domain message")
+	}
+	msg, ok := cmd().(detailMouseWheelMsg)
+	if !ok {
+		t.Fatalf("Detail wheel translated to %T", cmd())
+	}
+	if msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch || msg.delta != 3 {
+		t.Fatalf("Detail wheel message = %+v, want source %q epoch %d delta 3",
+			msg, m.detail.ticket.ID, m.detailMouseEpoch)
+	}
+	return msg
+}
+
+func applyDetailWheel(t *testing.T, m Model, msg detailMouseWheelMsg) Model {
+	t.Helper()
+	next, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Fatalf("Detail wheel issued command %v", cmd)
+	}
+	return next.(Model)
+}
+
+func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
+	base := scrollableDetailMouseModel(t)
+	msg := queuedDetailWheel(t, base)
+
+	t.Run("same-seat resize remains valid", func(t *testing.T) {
+		next, _ := base.Update(tea.WindowSizeMsg{Width: 72, Height: 10})
+		resized := next.(Model)
+		if resized.detailMouseEpoch != base.detailMouseEpoch {
+			t.Fatalf("resize advanced mouse epoch from %d to %d", base.detailMouseEpoch, resized.detailMouseEpoch)
+		}
+		got := applyDetailWheel(t, resized, msg)
+		if got.detail.offset != resized.detail.offset+3 {
+			t.Errorf("same-seat resize wheel offset = %d, want %d", got.detail.offset, resized.detail.offset+3)
+		}
+	})
+
+	t.Run("same-seat reorder remains valid", func(t *testing.T) {
+		m := base
+		links := append([]model.Link(nil), m.detail.input.Detail.Links...)
+		links[0], links[1] = links[1], links[0]
+		m.detail.input.Detail.Links = links
+		m = m.reconcileDetail(true)
+		got := applyDetailWheel(t, m, msg)
+		if got.detail.offset != m.detail.offset+3 {
+			t.Errorf("same-seat reorder wheel offset = %d, want %d", got.detail.offset, m.detail.offset+3)
+		}
+	})
+
+	t.Run("same-seat reread remains valid", func(t *testing.T) {
+		rereading, _ := base.startDetailFetch()
+		reread := rereading.onDetailFetched(detailFetchedMsg{
+			generation: rereading.detailGeneration,
+			id:         rereading.detail.ticket.ID,
+			detail:     base.detail.input.Detail,
+			caps:       base.detail.input.Capabilities,
+		})
+		if reread.detailMouseEpoch != base.detailMouseEpoch {
+			t.Fatalf("reread advanced mouse epoch from %d to %d", base.detailMouseEpoch, reread.detailMouseEpoch)
+		}
+		got := applyDetailWheel(t, reread, msg)
+		if got.detail.offset != reread.detail.offset+3 {
+			t.Errorf("same-seat reread wheel offset = %d, want %d", got.detail.offset, reread.detail.offset+3)
+		}
+	})
+
+	t.Run("followed child rejects parent wheel", func(t *testing.T) {
+		doc := base.detailDocument()
+		childModel, cmd := base.followDetailLink(doc.LinkRows[0].Identity)
+		child := childModel.(Model)
+		if cmd != nil {
+			child = acceptDetailCommand(t, child, cmd)
+		}
+		child.detail.input.Detail.Description = strings.Repeat("child Detail body line\n", 50)
+		child = child.reconcileDetail(true)
+		got := applyDetailWheel(t, child, msg)
+		if got.detail.offset != child.detail.offset {
+			t.Errorf("stale parent wheel moved child from %d to %d", child.detail.offset, got.detail.offset)
+		}
+	})
+
+	t.Run("popped parent rejects prior-seat wheel", func(t *testing.T) {
+		doc := base.detailDocument()
+		childModel, _ := base.followDetailLink(doc.LinkRows[0].Identity)
+		restored := childModel.(Model).popDetailTrail()
+		if restored.detail.ticket.ID != base.detail.ticket.ID || restored.detailMouseEpoch == base.detailMouseEpoch {
+			t.Fatalf("pop restored source %q epoch %d, want source %q with epoch after %d",
+				restored.detail.ticket.ID, restored.detailMouseEpoch, base.detail.ticket.ID, base.detailMouseEpoch)
+		}
+		got := applyDetailWheel(t, restored, msg)
+		if got.detail.offset != restored.detail.offset {
+			t.Errorf("pre-round-trip wheel moved restored parent from %d to %d", restored.detail.offset, got.detail.offset)
+		}
+	})
+
+	t.Run("another seated root rejects wheel", func(t *testing.T) {
+		next, _ := base.seatDetail(model.Ticket{ID: "other-root", Key: "OTHER-1", Title: "Other root"},
+			base.detail.input.Parent, allCaps)
+		other := next.(Model)
+		other.detail.loaded = true
+		other.detail.loading = false
+		other.detail.input.Detail.Description = strings.Repeat("other Detail body line\n", 50)
+		other = other.reconcileDetail(true)
+		got := applyDetailWheel(t, other, msg)
+		if got.detail.offset != other.detail.offset {
+			t.Errorf("stale wheel moved another root from %d to %d", other.detail.offset, got.detail.offset)
+		}
+	})
+
+	t.Run("mouse disabled after queue", func(t *testing.T) {
+		disabled := base.toggleMouse()
+		got := applyDetailWheel(t, disabled, msg)
+		if got.detail.offset != disabled.detail.offset {
+			t.Errorf("queued wheel moved disabled Detail from %d to %d", disabled.detail.offset, got.detail.offset)
+		}
+	})
+
+	t.Run("mouse off and on rejects prior-epoch wheel", func(t *testing.T) {
+		retoggled := base.toggleMouse().toggleMouse()
+		if !retoggled.mouseEnabled || retoggled.detailMouseEpoch == base.detailMouseEpoch {
+			t.Fatalf("retoggle enabled=%t epoch=%d, want enabled with epoch after %d",
+				retoggled.mouseEnabled, retoggled.detailMouseEpoch, base.detailMouseEpoch)
+		}
+		got := applyDetailWheel(t, retoggled, msg)
+		if got.detail.offset != retoggled.detail.offset {
+			t.Errorf("prior-epoch wheel moved retoggled Detail from %d to %d", retoggled.detail.offset, got.detail.offset)
+		}
+	})
 }
 
 func TestDetailMouseClickAndKeyboardFollowShareTransition(t *testing.T) {

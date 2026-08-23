@@ -296,16 +296,20 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 		identity.Occurrence = occurrence
 		identities[i] = identity
 	}
-	// The title is what gives on a narrow terminal: the label carries the
-	// relationship and the key is how a human finds the Ticket again. The fixed
-	// focus gutter is removed before the column budget is calculated.
+	// The relationship label gives first on a narrow terminal. Reserve both
+	// inter-column gutters, the target key, and a useful title before assigning its
+	// width; a trailing Native Status can then disappear under the row's final
+	// truncation without hiding the target identity. The fixed focus gutter is
+	// removed before either column budget is calculated.
 	contentWidth := max(width-selectionGutter, 0)
+	labelWidth = min(labelWidth, max(contentWidth-keyWidth-minLinkTitleWidth-4, 0))
 	titleWidth = min(titleWidth, max(contentWidth-labelWidth-keyWidth-statusWidth-6, minLinkTitleWidth))
 
 	lines := []string{s.SectionHeader.Render(fmt.Sprintf("LINKS (%d)", len(links))), ""}
 	rows := make([]detailLinkRow, 0, len(links))
 	for i, l := range links {
-		line := column(s.LinkLabel.Render(labels[i]), labels[i], labelWidth) +
+		label := ansi.Truncate(labels[i], labelWidth, "…")
+		line := column(s.LinkLabel.Render(label), label, labelWidth) +
 			column(renderHyperlink(s.TicketKey, l.Target.Key, l.Target.URL), l.Target.Key, keyWidth)
 
 		title := ansi.Truncate(l.Target.Title, titleWidth, "…")

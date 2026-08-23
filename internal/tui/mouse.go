@@ -25,7 +25,9 @@ type listMouseWheelMsg struct {
 }
 
 type detailMouseWheelMsg struct {
-	delta int
+	sourceID model.TicketID
+	epoch    int
+	delta    int
 }
 
 type detailMouseLinkMsg struct {
@@ -90,8 +92,8 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 }
 
 // detailMouseHandler translates clicks and wheel movement against the exact
-// document and geometry of the last rendered Detail frame. It captures only
-// relationship identity; current Link data is re-resolved in Update.
+// document and geometry of the last rendered Detail frame. Every domain message
+// captures the source seat; Link data is still re-resolved in Update.
 func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
 	bodyHeight, offset := m.detailBodyHeight(), m.detail.offset
@@ -126,9 +128,9 @@ func (m Model) detailMouseHandler(doc detailDocument) func(tea.MouseMsg) tea.Cmd
 			}
 			switch msg.Button {
 			case tea.MouseWheelUp:
-				return mouseCmd(detailMouseWheelMsg{delta: -3})
+				return mouseCmd(detailMouseWheelMsg{sourceID: sourceID, epoch: epoch, delta: -3})
 			case tea.MouseWheelDown:
-				return mouseCmd(detailMouseWheelMsg{delta: 3})
+				return mouseCmd(detailMouseWheelMsg{sourceID: sourceID, epoch: epoch, delta: 3})
 			}
 		}
 		return nil
@@ -171,6 +173,9 @@ func (m Model) onListMouseWheel(msg listMouseWheelMsg) Model {
 }
 
 func (m Model) onDetailMouseWheel(msg detailMouseWheelMsg) Model {
+	if !m.mouseEnabled || msg.sourceID != m.detail.ticket.ID || msg.epoch != m.detailMouseEpoch {
+		return m
+	}
 	m = m.clearPendingClick()
 	return m.scrollDetail(msg.delta)
 }

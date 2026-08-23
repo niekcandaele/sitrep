@@ -13,4 +13,4 @@ Press r to try again, esc to go back.
 
 
 
-m off, shift-drag · esc back · q quit
+m off, shift-drag·esc back·q quit·? help

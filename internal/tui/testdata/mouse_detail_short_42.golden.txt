@@ -36,5 +36,5 @@ COMMENTS (3)
 @mara-vos · 2026-01-13 08:30 UTC
   Version byte it is. Updating the draft.
 
-                                        0%
-m off, shift-drag·esc back·q quit·tab/⇧·u↑
+
+m/⇧drag·esc·q quit·tab/⇧·? help·u↑      0%

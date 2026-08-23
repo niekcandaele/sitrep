@@ -37,4 +37,4 @@ LINKS (1)
 
 
 
-m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ↑/k up • ↓/j down • r refresh
+m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down
