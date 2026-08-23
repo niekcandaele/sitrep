@@ -311,7 +311,7 @@ func TestOpenSessionDropsDelayedChildAfterPopAndRestoresOffset(t *testing.T) {
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
-	rootBody := strings.Repeat("root body line that wraps across the terminal\n", 60)
+	rootBody := strings.Repeat("root body line that wraps across the terminal\n\n", 60)
 	reads.next(t, rootID).reply <- controlledDetailReply{
 		detail: testNavigationDetail(rootID, rootBody, model.Link{Kind: model.LinkRelates, Target: child}),
 	}
@@ -324,7 +324,7 @@ func TestOpenSessionDropsDelayedChildAfterPopAndRestoresOffset(t *testing.T) {
 	s.tm.Send(enterKey)
 	childRead := reads.next(t, childID)
 	s.tm.Send(escKey)
-	s.waitFor(t, "root body line that wraps across the terminal")
+	s.waitFor(t, "root body")
 	childRead.reply <- controlledDetailReply{detail: testNavigationDetail(childID, "ABANDONED CHILD BODY")}
 	c.advance(time.Second)
 	s.beat()

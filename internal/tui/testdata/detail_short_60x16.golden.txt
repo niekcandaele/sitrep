@@ -2,10 +2,10 @@
 #112  Draft the shard sync protocol
 [In Review]  @mara-vos  #501 open ci ok changes req
 
-  saves a migration later.
 
 @mara-vos · 2026-01-13 08:30 UTC
-  Version byte it is. Updating the draft.
+    Version byte it is. Updating the draft.
+
 
 LINKS (3)
 

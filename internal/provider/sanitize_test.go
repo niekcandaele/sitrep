@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -47,6 +48,136 @@ func TestSanitizeLine(t *testing.T) {
 	}
 }
 
+func TestSanitizeTextKeepsMarkdownLayoutAndPrintableUnicode(t *testing.T) {
+	input := "# Café 東京 👩🏽‍💻\r\n\n\t- [x] **done** é"
+	want := "# Café 東京 👩🏽‍💻\n\n\t- [x] **done** é"
+	if got := provider.SanitizeText(input); got != want {
+		t.Errorf("SanitizeText(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestSanitizeTextRemovesAllControlsExceptLayout(t *testing.T) {
+	for control := byte(0); control < 0x20; control++ {
+		t.Run(fmt.Sprintf("C0_%02x", control), func(t *testing.T) {
+			input := "body" + string([]byte{control})
+			want := "body"
+			switch control {
+			case '\n':
+				want += "\n"
+			case '\t':
+				want += "\t"
+			}
+			if got := provider.SanitizeText(input); got != want {
+				t.Errorf("SanitizeText(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+	for control := rune(0x7f); control <= 0x9f; control++ {
+		t.Run(fmt.Sprintf("control_%04x", control), func(t *testing.T) {
+			input := "body" + string(control)
+			if got := provider.SanitizeText(input); got != "body" {
+				t.Errorf("SanitizeText(%q) = %q, want %q", input, got, "body")
+			}
+		})
+	}
+	for control := byte(0x80); control <= 0x9f; control++ {
+		t.Run(fmt.Sprintf("raw_C1_%02x", control), func(t *testing.T) {
+			input := "body" + string([]byte{control})
+			if got := provider.SanitizeText(input); got != "body" {
+				t.Errorf("SanitizeText(% x) = %q, want %q", []byte(input), got, "body")
+			}
+		})
+	}
+	if got := provider.SanitizeText("one\rtwo\r\nthree"); got != "onetwo\nthree" {
+		t.Errorf("bare CR and CRLF = %q, want %q", got, "onetwo\nthree")
+	}
+}
+
+func TestSanitizeTextStripsCompleteTerminalSequencesAndPayloads(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "ESC OSC 8 with BEL and ST",
+			input: "before\x1b]8;;https://evil.example.test/a\aLABEL\x1b]8;;\x1b\\after",
+			want:  "beforeLABELafter",
+		},
+		{
+			name:  "ESC OSC 52 clipboard payload",
+			input: "before\x1b]52;c;cHduZWQ=\aafter",
+			want:  "beforeafter",
+		},
+		{
+			name:  "raw C1 OSC 8 and ST",
+			input: "before\x9d8;;https://evil.example.test/raw\x9cLABEL\x9d8;;\x9cafter",
+			want:  "beforeLABELafter",
+		},
+		{
+			name:  "UTF-8 C1 OSC 52 and ST",
+			input: "before" + string(rune(0x9d)) + "52;c;cHduZWQ=" + string(rune(0x9c)) + "after",
+			want:  "beforeafter",
+		},
+		{
+			name:  "CSI styling keeps visible text",
+			input: "before\x1b[31mred\x1b[0mafter",
+			want:  "beforeredafter",
+		},
+		{
+			name:  "DCS payload",
+			input: "before\x1bP1;2|https://evil.example.test\x1b\\after",
+			want:  "beforeafter",
+		},
+		{
+			name:  "unterminated OSC payload",
+			input: "before\x1b]52;c;cHduZWQ=https://evil.example.test",
+			want:  "before",
+		},
+		{
+			name:  "truncated CSI",
+			input: "before\x1b[38;2",
+			want:  "before",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := provider.SanitizeText(tt.input)
+			if got != tt.want {
+				t.Errorf("SanitizeText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			if again := provider.SanitizeText(got); again != got {
+				t.Errorf("SanitizeText is not idempotent: first %q, second %q", got, again)
+			}
+		})
+	}
+}
+
+func TestSanitizeTextDropsMalformedUTF8(t *testing.T) {
+	tests := [][]byte{
+		{'a', 0x80, 'b'},
+		{'a', 0xc0, 0xaf, 'b'},
+		{'a', 0xc2, 'b'},
+		{'a', 0xe2, 0x82, 'b'},
+		{'a', 0xf0, 0x9f, 0x92, 'b'},
+		{'a', 0xf5, 0x80, 0x80, 0x80, 'b'},
+	}
+	for _, input := range tests {
+		got := provider.SanitizeText(string(input))
+		if !utf8.ValidString(got) || got != "ab" {
+			t.Errorf("SanitizeText(% x) = %q (valid=%v), want %q", input, got, utf8.ValidString(got), "ab")
+		}
+	}
+}
+
+func TestSanitizeLineMalformedUTF8PolicyRemainsUnchanged(t *testing.T) {
+	input := string([]byte{'a', 0xff, 'b'})
+	if got := provider.SanitizeLine(input); got != input {
+		t.Errorf("SanitizeLine changed discovery-6-scoped malformed input: % x became % x", input, got)
+	}
+}
+
 // The decorator's field-by-field test asserts what the multi-line helper does
 // through the two fields that use it.
 func TestSanitizedKeepsTheStructureOfMultiLineText(t *testing.T) {
@@ -57,11 +188,11 @@ func TestSanitizedKeepsTheStructureOfMultiLineText(t *testing.T) {
 		t.Fatalf("FetchDetail: %v", err)
 	}
 
-	want := "line one\nline two\n\tindented[2J"
+	want := "line one\nline two\n\tindented"
 	if detail.Description != want {
 		t.Errorf("Description = %q, want %q", detail.Description, want)
 	}
-	if got, want := detail.Comments[0].Body, "hello\nworld]52;c;cHduZWQ="; got != want {
+	if got, want := detail.Comments[0].Body, "hello\nworld"; got != want {
 		t.Errorf("Comment body = %q, want %q", got, want)
 	}
 }

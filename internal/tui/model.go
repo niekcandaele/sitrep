@@ -88,12 +88,14 @@ type Model struct {
 	lastClickID  model.TicketID
 	lastClickAt  time.Time
 
-	keys       KeyMap
-	searchKeys SearchKeyMap
-	detailKeys DetailKeyMap
-	help       help.Model
-	styles     Styles
-	quitting   bool
+	keys          KeyMap
+	searchKeys    SearchKeyMap
+	detailKeys    DetailKeyMap
+	help          help.Model
+	styles        Styles
+	markdownTheme markdownTheme
+	markdown      detailMarkdownRenderers
+	quitting      bool
 	// interrupted reports that the quit was a ctrl+c rather than a q or an esc.
 	// README states ctrl+c prints nothing and exits 130, which is true of the
 	// one-shot path because a signal reaches it; in the monitor raw mode
@@ -152,20 +154,22 @@ func New(ctx context.Context, opts Options) Model {
 		now:      now,
 		interval: opts.Interval,
 		// The first refresh is already on its way out of Init.
-		generation:   1,
-		refreshing:   true,
-		lastAttempt:  now(),
-		listArmed:    true,
-		hasSource:    src != nil,
-		search:       search,
-		fetchDetail:  fetchDetail,
-		mouseEnabled: !opts.NoMouse,
-		details:      make(map[model.TicketID]detailEntry),
-		keys:         DefaultKeyMap(),
-		searchKeys:   DefaultSearchKeyMap(),
-		detailKeys:   DefaultDetailKeyMap(),
-		help:         help.New(),
-		styles:       DefaultStyles(true),
+		generation:    1,
+		refreshing:    true,
+		lastAttempt:   now(),
+		listArmed:     true,
+		hasSource:     src != nil,
+		search:        search,
+		fetchDetail:   fetchDetail,
+		mouseEnabled:  !opts.NoMouse,
+		details:       make(map[model.TicketID]detailEntry),
+		keys:          DefaultKeyMap(),
+		searchKeys:    DefaultSearchKeyMap(),
+		detailKeys:    DefaultDetailKeyMap(),
+		help:          help.New(),
+		styles:        DefaultStyles(true),
+		markdownTheme: markdownDark,
+		markdown:      newDetailMarkdownRenderers(0, markdownDark),
 	}
 	m = m.syncMouseKeys()
 
@@ -227,6 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
+		m = m.rebuildMarkdownRenderers()
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 		if m.mode == modeDetail {
 			m = m.reconcileDetail(true)
@@ -234,7 +239,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.BackgroundColorMsg:
-		m.styles = DefaultStyles(msg.IsDark())
+		isDark := msg.IsDark()
+		m.styles = DefaultStyles(isDark)
+		if isDark {
+			m.markdownTheme = markdownDark
+		} else {
+			m.markdownTheme = markdownLight
+		}
+		m = m.rebuildMarkdownRenderers()
+		if m.mode == modeDetail {
+			m = m.reconcileDetail(true)
+		}
 		return m, nil
 
 	case heartbeatMsg:

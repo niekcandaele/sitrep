@@ -577,7 +577,8 @@ func (m Model) clampDetail(offset int) int {
 func (m Model) detailDocument() detailDocument {
 	switch {
 	case m.detail.loaded:
-		return composeDetailDocument(m.detail.input, m.width, m.styles, m.detail.linkFocus, m.detail.hasLinkFocus)
+		return composeDetailDocumentWithMarkdown(m.detail.input, m.width, m.styles, m.detail.linkFocus,
+			m.detail.hasLinkFocus, m.effectiveMarkdownRenderers())
 	case m.detail.lastErr != nil:
 		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles, m.detailBackDescription())
 	default:

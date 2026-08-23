@@ -56,17 +56,27 @@ func TestDetailLinesWrapToWidth(t *testing.T) {
 	}
 }
 
-// A markdown body is shown as source, wrapped, with its paragraph breaks intact:
-// blank lines are how the shape of a description survives without a renderer.
-func TestDetailLinesKeepParagraphBreaks(t *testing.T) {
-	lines := plainLines(detailLines(fixtureDetailInput(allCaps), 60, Styles{}))
+// A Markdown body is rendered into terminal presentation while keeping its
+// structure and ordinary data.
+func TestDetailLinesRenderMarkdownStructure(t *testing.T) {
+	rawLines := detailLines(fixtureDetailInput(allCaps), 60, Styles{})
+	lines := plainLines(rawLines)
 	body := strings.Join(lines, "\n")
 
-	if !strings.Contains(body, "## Shape") {
-		t.Errorf("the markdown source was rendered away:\n%s", body)
+	headingStyled := false
+	for i, line := range lines {
+		if strings.Contains(line, "## Shape") && strings.Contains(rawLines[i], "\x1b[") {
+			headingStyled = true
+			break
+		}
 	}
-	if !strings.Contains(body, "\n\n1. The sender announces") {
-		t.Errorf("the blank line before the list was lost:\n%s", body)
+	if !headingStyled {
+		t.Errorf("the built-in Markdown heading was not styled:\n%s", body)
+	}
+	for _, want := range []string{"Shape", "1. The sender announces", "2. The receiver either accepts"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the rendered Markdown lost %q:\n%s", want, body)
+		}
 	}
 	// The fixture's ampersand is data, not markup.
 	if !strings.Contains(body, "&") {
@@ -447,9 +457,9 @@ func TestDetailStaleness(t *testing.T) {
 
 func TestDetailDocumentRecordsVisibleLinkRows(t *testing.T) {
 	wantLines := map[int][]int{
-		40:  {38, 39, 40},
-		60:  {33, 34, 35},
-		120: {26, 27, 28},
+		40:  {43, 44, 45},
+		60:  {37, 38, 39},
+		120: {31, 32, 33},
 	}
 	for _, width := range []int{40, 60, 120} {
 		doc := composeDetailDocument(fixtureDetailInput(allCaps), width, Styles{}, detailLinkIdentity{}, false)
@@ -506,34 +516,34 @@ func TestDetailDocumentPinsSectionOrderAndLinkGeometry(t *testing.T) {
 		linkLine int
 	}{
 		{
-			name: "wrapped at twelve", width: 12, caps: input.Capabilities, linkLine: 14,
+			name: "wrapped at twelve", width: 12, caps: input.Capabilities, linkLine: 20,
 			wantRows: []string{
-				"DESCRIPTION", "", "alpha beta", "gamma delta", "",
-				"COMMENTS (1)", "", "@ann · 2026-", "  comment", "  words wrap", "  here", "",
-				"LINKS (1)", "", "<LINK>",
+				"DESCRIPTION", "", "  alpha   ", "  beta    ", "  gamma   ", "  delta   ", "", "",
+				"COMMENTS (1)", "", "@ann · 2026-", "    commen", "    t     ", "    words ",
+				"    wrap  ", "    here  ", "  ", "", "LINKS (1)", "", "<LINK>",
 			},
 		},
 		{
-			name: "wrapped at twenty", width: 20, caps: input.Capabilities, linkLine: 13,
+			name: "wrapped at twenty", width: 20, caps: input.Capabilities, linkLine: 15,
 			wantRows: []string{
-				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
-				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "  comment words wrap", "  here", "",
-				"LINKS (1)", "", "<LINK>",
+				"DESCRIPTION", "", "  alpha beta gamma", "  delta           ", "", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "    comment words ", "    wrap here     ",
+				"  ", "", "LINKS (1)", "", "<LINK>",
 			},
 		},
 		{
-			name: "single-line content at thirty", width: 30, caps: input.Capabilities, linkLine: 11,
+			name: "single-line content at thirty", width: 30, caps: input.Capabilities, linkLine: 13,
 			wantRows: []string{
-				"DESCRIPTION", "", "alpha beta gamma delta", "",
-				"COMMENTS (1)", "", "@ann · 2026-01-02 03:04 UTC", "  comment words wrap here", "",
-				"LINKS (1)", "", "<LINK>",
+				"DESCRIPTION", "", "  alpha beta gamma delta    ", "", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03:04 UTC", "    comment words wrap here ",
+				"  ", "", "LINKS (1)", "", "<LINK>",
 			},
 		},
 		{
 			name: "comments capability hidden", width: 20,
-			caps: model.Capabilities{BlockingLinks: true}, linkLine: 7,
+			caps: model.Capabilities{BlockingLinks: true}, linkLine: 8,
 			wantRows: []string{
-				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
+				"DESCRIPTION", "", "  alpha beta gamma", "  delta           ", "", "",
 				"LINKS (1)", "", "<LINK>",
 			},
 		},
@@ -541,8 +551,8 @@ func TestDetailDocumentPinsSectionOrderAndLinkGeometry(t *testing.T) {
 			name: "blocking links capability hidden", width: 20,
 			caps: model.Capabilities{Comments: true}, linkLine: -1,
 			wantRows: []string{
-				"DESCRIPTION", "", "alpha beta gamma", "delta", "",
-				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "  comment words wrap", "  here",
+				"DESCRIPTION", "", "  alpha beta gamma", "  delta           ", "", "",
+				"COMMENTS (1)", "", "@ann · 2026-01-02 03", "    comment words ", "    wrap here     ", "  ",
 			},
 		},
 	}
