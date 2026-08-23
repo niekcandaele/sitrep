@@ -59,9 +59,9 @@ func rightAlign(s string, width int) string {
 	return truncateLine(s, width)
 }
 
-// headerIdentity draws "#111  Widget sync v2 …" with the Watchlist's URL
-// right-aligned when there is room for it. The URL is a convenience, not
-// load-bearing: it is the first thing dropped on a narrow terminal.
+// headerIdentity draws a Header's key and title, with its URL right-aligned
+// when there is room for it. The URL is a convenience, not load-bearing: it is
+// the first thing dropped on a narrow terminal.
 func headerIdentity(h Header, width int, s Styles, hyperlinkKey ...bool) string {
 	key := s.HeaderKey.Render(h.Key)
 	if len(hyperlinkKey) > 0 && hyperlinkKey[0] {

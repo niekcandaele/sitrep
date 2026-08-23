@@ -4,7 +4,9 @@ import (
 	"reflect"
 	"testing"
 
+	help "charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	"charm.land/lipgloss/v2"
 )
 
 func namedDetailHelpKeyMap() DetailKeyMap {
@@ -95,5 +97,40 @@ func TestDetailHelpGroupsAreBuiltFromNamedRoles(t *testing.T) {
 		"up", "down", "page-up", "page-down", "home", "end",
 	}; !reflect.DeepEqual(got, want) {
 		t.Errorf("scroll roles = %v, want %v", got, want)
+	}
+}
+
+func TestCompactDetailShortHelpSelectsPriorityRolesByName(t *testing.T) {
+	binding := func(name string) key.Binding {
+		return key.NewBinding(
+			key.WithKeys(name),
+			key.WithHelp(name, name+" action"),
+		)
+	}
+	roles := detailHelpRoles{
+		refresh: binding("supplemental-refresh"),
+		down:    binding("supplemental-down"),
+		help:    binding("priority-help"),
+		links:   binding("priority-links"),
+		up:      binding("supplemental-up"),
+		parent:  binding("priority-parent"),
+		mouse:   binding("priority-mouse"),
+		follow:  binding("priority-follow"),
+		quit:    binding("priority-quit"),
+		back:    binding("priority-back"),
+	}
+	renderer := help.New()
+	renderer.SetWidth(0)
+	priority := roles.priorityShortBindings()
+	budget := lipgloss.Width(renderer.ShortHelpView(priority))
+
+	got := compactDetailShortHelp(renderer, roles, budget)
+	want := []string{
+		"priority-mouse", "priority-back", "priority-quit",
+		"priority-follow", "priority-links", "priority-parent",
+		"priority-help",
+	}
+	if gotKeys := detailHelpKeysOf(got); !reflect.DeepEqual(gotKeys, want) {
+		t.Errorf("compact priority roles = %v, want %v", gotKeys, want)
 	}
 }

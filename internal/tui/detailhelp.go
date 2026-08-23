@@ -60,15 +60,18 @@ func (r detailHelpRoles) defaultShortBindings() []key.Binding {
 	}
 }
 
-func (r detailHelpRoles) prioritizedShortBindings() []key.Binding {
+func (r detailHelpRoles) priorityShortBindings() []key.Binding {
 	parent := r.parent
 	if !parent.Enabled() {
 		parent = key.Binding{}
 	}
 	return []key.Binding{
 		r.mouse, r.back, r.quit, r.follow, r.links, parent, r.help,
-		r.up, r.down, r.refresh,
 	}
+}
+
+func (r detailHelpRoles) supplementalShortBindings() []key.Binding {
+	return []key.Binding{r.up, r.down, r.refresh}
 }
 
 func (r detailHelpRoles) actionBindings() []key.Binding {
@@ -124,14 +127,18 @@ func compactDetailShortHelp(renderer help.Model, roles detailHelpRoles, width in
 	if width <= 0 {
 		return roles.defaultShortBindings()
 	}
-	bindings := roles.prioritizedShortBindings()
-	const priorityCount = 7
+	priority := roles.priorityShortBindings()
 	budget := max(width, 1)
-	fits := func() bool {
-		return lipgloss.Width(renderer.ShortHelpView(bindings[:priorityCount])) <= budget
+	fits := func(bindings []key.Binding) bool {
+		return lipgloss.Width(renderer.ShortHelpView(bindings)) <= budget
 	}
-	if fits() {
-		return fittingShortHelpPrefix(renderer, bindings, priorityCount, budget)
+	if fits(priority) {
+		return fittingDetailShortHelp(
+			renderer,
+			priority,
+			roles.supplementalShortBindings(),
+			budget,
+		)
 	}
 	if descriptive, ok := descriptiveDetailShortBinding(roles, budget); ok {
 		return []key.Binding{descriptive}
@@ -141,39 +148,45 @@ func compactDetailShortHelp(renderer help.Model, roles detailHelpRoles, width in
 	}
 
 	roles.links.SetHelp("tab/⇧", "")
-	bindings = roles.prioritizedShortBindings()
-	if fits() {
-		return bindings[:priorityCount]
+	priority = roles.priorityShortBindings()
+	if fits(priority) {
+		return priority
 	}
 	roles.links.SetHelp("tab/⇧tab", "links")
 
 	if roles.mouse.Help().Desc == mouseEnabledHelp {
 		roles.mouse.SetHelp("m", "off/⇧drag")
 	}
-	bindings = roles.prioritizedShortBindings()
-	if fits() {
-		return bindings[:priorityCount]
+	priority = roles.priorityShortBindings()
+	if fits(priority) {
+		return priority
 	}
 
 	roles.quit.SetHelp("q", "")
 	roles.follow.SetHelp("↵", "follow")
-	bindings = roles.prioritizedShortBindings()
-	if fits() {
-		return bindings[:priorityCount]
+	priority = roles.priorityShortBindings()
+	if fits(priority) {
+		return priority
 	}
 
 	return []key.Binding{compactDetailShortBinding(roles, width)}
 }
 
-func fittingShortHelpPrefix(renderer help.Model, bindings []key.Binding, minimum, budget int) []key.Binding {
-	end := minimum
-	for end < len(bindings) {
-		if lipgloss.Width(renderer.ShortHelpView(bindings[:end+1])) > budget {
+func fittingDetailShortHelp(
+	renderer help.Model,
+	priority []key.Binding,
+	supplemental []key.Binding,
+	budget int,
+) []key.Binding {
+	bindings := append([]key.Binding(nil), priority...)
+	for _, binding := range supplemental {
+		candidate := append(append([]key.Binding(nil), bindings...), binding)
+		if lipgloss.Width(renderer.ShortHelpView(candidate)) > budget {
 			break
 		}
-		end++
+		bindings = candidate
 	}
-	return bindings[:end]
+	return bindings
 }
 
 func descriptiveDetailShortBinding(roles detailHelpRoles, budget int) (key.Binding, bool) {
