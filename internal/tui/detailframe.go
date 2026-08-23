@@ -51,8 +51,8 @@ const commentIndent = "  "
 const commentTimeLayout = "2006-01-02 15:04"
 
 // renderDetailHeader draws the block above the Detail body: the root Watchlist
-// and prior Trail Tickets as a breadcrumb, the current Ticket's identity, and the
-// same meta line the list row shows for it.
+// and prior Trail Tickets as a breadcrumb, the current Ticket's identity, and a
+// meta line using the same field renderer as list rows.
 //
 // It is drawn in every state — loading, failed, loaded — because a screen that
 // cannot say which Ticket it is reading is worse than the list it replaced.

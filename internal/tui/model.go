@@ -60,11 +60,9 @@ type Model struct {
 	// touches nothing above this line — which is why the selection, the scroll
 	// offset and the filters survive it without any code restoring them.
 	//
-	// A later caller may start the program in modeDetail by seating a
-	// DetailInput before the first frame — a bare Ticket Ref decoded straight
-	// into Detail — which is why detailState is a struct and why the Detail
-	// screen takes its breadcrumb as a Header field rather than reading the
-	// list's.
+	// Decoder startup can seat modeDetail before the first frame, with no list
+	// behind it. detailState therefore carries the Detail's own rendering context,
+	// including its breadcrumb, rather than reading list state.
 	mode   mode
 	detail detailState
 	// trail is the ordered path of prior Detail seats followed through explicit

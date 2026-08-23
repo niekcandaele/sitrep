@@ -254,39 +254,92 @@ func TestDetailResponsiveShortHelpKeepsPriorityActions(t *testing.T) {
 }
 
 func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) {
-	parent, _ := navigableDetailModel(t)
-	parent = focusLinkAt(parent, 0)
-	childModel, _ := parent.followFocusedDetailLink()
-	child := childModel.(Model)
+	input := ListInput{
+		Header:       Header{Key: "#111", Title: "Widget sync v2"},
+		Tickets:      fixtureTickets(),
+		Capabilities: allCaps,
+	}
+	newChild := func(noMouse bool) Model {
+		t.Helper()
+		m := New(t.Context(), Options{
+			Source: func(context.Context) (ListInput, error) {
+				return input, nil
+			},
+			DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+				detail, ok := fake.FixtureDetails()[id]
+				if !ok {
+					return model.Detail{}, model.Capabilities{}, errors.New("fixture detail not found")
+				}
+				return detail, allCaps, nil
+			},
+			Initial:  &input,
+			Interval: time.Minute,
+			Now:      func() time.Time { return time.Time{} },
+			NoMouse:  noMouse,
+		})
+		m.width, m.height, m.ready = 80, 18, true
+		m.details["acme/widgets#112"] = detailEntry{
+			detail: fake.FixtureDetails()["acme/widgets#112"],
+			caps:   allCaps,
+		}
+		rootModel, _ := m.openDetail()
+		root := focusLinkAt(rootModel.(Model), 0)
+		childModel, _ := root.followFocusedDetailLink()
+		child := childModel.(Model)
+		if !child.hasSource || child.detail.input.Parent == (Header{}) {
+			t.Fatal("post-follow fixture has no root Watchlist context")
+		}
+		return child
+	}
 
-	isSeparator := func(field string) bool { return field == "•" || field == "·" }
-	for width := 54; width <= 66; width++ {
-		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
-			m := child
-			m.width, m.height = width, 16
-			m.help.SetWidth(width)
-			m = m.reconcileDetail(true)
+	states := []struct {
+		name      string
+		mouseHelp string
+		noMouse   bool
+	}{
+		{name: "mouse-enabled", mouseHelp: "m off"},
+		{name: "no-mouse", mouseHelp: "m on", noMouse: true},
+	}
+	for _, state := range states {
+		t.Run(state.name, func(t *testing.T) {
+			base := newChild(state.noMouse)
+			for width := 54; width <= 66; width++ {
+				t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+					m := base
+					m.width, m.height = width, 16
+					m.help.SetWidth(width)
+					m = m.reconcileDetail(true)
 
-			helpText := strings.TrimSpace(string(frame(m.detailHelpView())))
-			fields := strings.Fields(helpText)
-			if len(fields) == 0 {
-				t.Fatal("post-follow help is empty")
-			}
-			for _, want := range []string{"m", "esc", "q", "u"} {
-				if !strings.Contains(helpText, want) {
-					t.Errorf("post-follow help omitted %q: %q", want, helpText)
-				}
-			}
-			for i, field := range fields {
-				if !isSeparator(field) {
-					continue
-				}
-				if i == 0 || i == len(fields)-1 || isSeparator(fields[i-1]) {
-					t.Errorf("post-follow help has a leading, trailing, or doubled separator: %q", helpText)
-				}
-			}
-			if got := ansi.StringWidth(helpText); got > width {
-				t.Errorf("post-follow help width = %d, budget %d: %q", got, width, helpText)
+					helpText := strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
+					if helpText == "" {
+						t.Fatal("post-follow help is empty")
+					}
+					for _, want := range []string{state.mouseHelp, "esc back", "q quit"} {
+						if !strings.Contains(helpText, want) {
+							t.Errorf("post-follow help omitted %q: %q", want, helpText)
+						}
+					}
+					if !m.detailKeys.Parent.Enabled() {
+						t.Error("post-follow Parent binding is disabled despite root Watchlist context")
+					}
+					if !strings.Contains(helpText, "u watchlist") && !strings.Contains(helpText, "u↑") {
+						t.Errorf("post-follow help omitted the complete Parent binding: %q", helpText)
+					}
+					if state.noMouse && strings.Contains(helpText, "shift-drag") {
+						t.Errorf("no-mouse help advertises capture recovery: %q", helpText)
+					}
+					compact := strings.ReplaceAll(helpText, " ", "")
+					if strings.HasPrefix(helpText, "•") || strings.HasPrefix(helpText, "·") ||
+						strings.HasSuffix(helpText, "•") || strings.HasSuffix(helpText, "·") ||
+						strings.Contains(compact, "••") || strings.Contains(compact, "··") ||
+						strings.Contains(compact, "•·") || strings.Contains(compact, "·•") ||
+						strings.Contains(helpText, "…") {
+						t.Errorf("post-follow help has a partial binding or dangling/doubled separator: %q", helpText)
+					}
+					if got := ansi.StringWidth(helpText); got > width {
+						t.Errorf("post-follow help width = %d, budget %d: %q", got, width, helpText)
+					}
+				})
 			}
 		})
 	}

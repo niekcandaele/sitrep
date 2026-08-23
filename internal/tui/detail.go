@@ -22,12 +22,9 @@ const (
 	modeList mode = iota
 	// modeDetail is one Ticket's Detail.
 	//
-	// The Detail screen is entered from the list today, and it is deliberately
-	// not written that way: it renders a DetailInput seated on the Model, so a
-	// future caller — a bare Ticket Ref decoded straight into Detail — can seat
-	// one before the first frame instead of teaching this screen a second way to
-	// find its data. That is why the breadcrumb is a Header field on DetailInput
-	// rather than a read of the list's own Header.
+	// List drill-in and direct Ticket-Ref decoding both seat a DetailInput before
+	// rendering. That is why the breadcrumb is carried on DetailInput rather than
+	// read from list state.
 	modeDetail
 )
 
@@ -648,9 +645,9 @@ func (m Model) detailHelpView() string {
 	mouse := groups[0][0]
 	mouseLines := truncateLine(unbounded.ShortHelpView([]key.Binding{mouse}), m.width)
 	if mouse.Help().Desc == mouseEnabledHelp {
-		// Separate the capture-recovery affordance from the action grid. Besides
-		// making the long sentence readable, this preserves #38's one-row mouse
-		// toggle geometry change so the existing Detail re-clamp path stays live.
+		// Separate the capture-recovery affordance from the action grid. The extra
+		// row also keeps enabled and disabled mouse-help geometry distinct, so a
+		// capture toggle follows the normal body-height re-clamp path.
 		mouseLines += "\n"
 	}
 	remaining := [][]key.Binding{groups[0][1:], groups[1]}
