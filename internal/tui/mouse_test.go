@@ -442,25 +442,88 @@ func TestDetailResponsiveShortHelpAtDecoderRoot(t *testing.T) {
 	m.detail.input.Parent = Header{}
 	m = m.reconcileDetail(true)
 
-	helpText := strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
-	for _, want := range []string{"m off, shift-drag", "q quit", "tab/⇧", "? help"} {
-		if !strings.Contains(helpText, want) {
-			t.Errorf("decoder-root help omitted %q: %q", want, helpText)
+	helpText := func(m Model) string {
+		return strings.Join(strings.Fields(string(frame(m.detailHelpView()))), " ")
+	}
+	hasSegment := func(text, want string) bool {
+		for _, segment := range strings.FieldsFunc(text, func(r rune) bool { return r == '•' || r == '·' }) {
+			if strings.TrimSpace(segment) == want {
+				return true
+			}
+		}
+		return false
+	}
+	assertBackSegment := func(t *testing.T, m Model, want string) {
+		t.Helper()
+		text := helpText(m)
+		if !hasSegment(text, want) {
+			t.Errorf("Detail help omitted %q: %q", want, text)
+		}
+		other := "esc back"
+		if want == other {
+			other = "esc quit"
+		}
+		if hasSegment(text, other) {
+			t.Errorf("Detail help advertised %q instead of %q: %q", other, want, text)
 		}
 	}
-	backCount := 0
-	for _, segment := range strings.FieldsFunc(helpText, func(r rune) bool { return r == '•' || r == '·' }) {
-		segment = strings.TrimSpace(segment)
-		if segment == "esc quit" || segment == "esc" {
-			backCount++
+
+	t.Run("unfocused root", func(t *testing.T) {
+		text := helpText(m)
+		for _, want := range []string{"m off, shift-drag", "q quit", "tab/⇧", "? help"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("decoder-root help omitted %q: %q", want, text)
+			}
 		}
-	}
-	if backCount != 1 {
-		t.Errorf("decoder-root help has %d complete Back segments, want 1: %q", backCount, helpText)
-	}
-	if strings.Contains(helpText, "watchlist") || strings.Contains(helpText, "u↑") {
-		t.Errorf("decoder-root help advertises unavailable Parent: %q", helpText)
-	}
+		if !hasSegment(text, "esc quit") && !hasSegment(text, "esc") {
+			t.Errorf("decoder-root help omitted a complete Esc action: %q", text)
+		}
+		if hasSegment(text, "esc back") {
+			t.Errorf("decoder-root help falsely advertised esc back: %q", text)
+		}
+		if strings.Contains(text, "watchlist") || strings.Contains(text, "u↑") {
+			t.Errorf("decoder-root help advertises unavailable Parent: %q", text)
+		}
+	})
+
+	t.Run("focused root quits", func(t *testing.T) {
+		focused := focusLinkAt(m, 0)
+		assertBackSegment(t, focused, "esc quit")
+		next, cmd := focused.onDetailKey(keyPress("esc"))
+		if cmd == nil {
+			t.Fatal("focused decoder-root Esc issued no quit command")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Fatalf("focused decoder-root Esc command produced %T, want tea.QuitMsg", cmd())
+		}
+		if got := next.(Model); got.mode != modeDetail || len(got.trail) != 0 {
+			t.Errorf("focused decoder-root Esc left mode %v Trail %d before quit", got.mode, len(got.trail))
+		}
+	})
+
+	t.Run("focused list root goes back", func(t *testing.T) {
+		root := focusLinkAt(m, 0)
+		root.listArmed = true
+		root = root.reconcileDetail(false)
+		assertBackSegment(t, root, "esc back")
+		next, cmd := root.onDetailKey(keyPress("esc"))
+		if got := next.(Model); cmd != nil || got.mode != modeList {
+			t.Errorf("focused list-root Esc = cmd nil:%t mode:%v, want no command and list", cmd == nil, got.mode)
+		}
+	})
+
+	t.Run("focused Trail seat goes back", func(t *testing.T) {
+		child := focusLinkAt(m, 0)
+		child.trail = []detailTrailEntry{child.detailTrailSnapshot()}
+		child = child.reconcileDetail(false)
+		assertBackSegment(t, child, "esc back")
+		next, cmd := child.onDetailKey(keyPress("esc"))
+		got := next.(Model)
+		if cmd != nil || got.mode != modeDetail || len(got.trail) != 0 {
+			t.Errorf("focused Trail Esc = cmd nil:%t mode:%v Trail:%d, want no command, Detail, empty Trail",
+				cmd == nil, got.mode, len(got.trail))
+		}
+	})
 }
 
 func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {

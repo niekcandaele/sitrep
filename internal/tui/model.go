@@ -1053,7 +1053,7 @@ func compactDetailShortBinding(bindings []key.Binding, width int) key.Binding {
 	if mouseEnabled {
 		mouse = "m/⇧drag"
 	}
-	parts := []string{mouse, "esc back", "q"}
+	parts := []string{mouse, "esc " + bindings[1].Help().Desc, "q"}
 	if bindings[3].Enabled() {
 		parts = append(parts, "follow↵")
 	}

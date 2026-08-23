@@ -399,6 +399,134 @@ func TestDetailMouseDomainMessageRevalidatesLastFrameFacts(t *testing.T) {
 	})
 }
 
+func TestDetailCompositeIdentitySurvivesRereadReorderAndMutableTargetFields(t *testing.T) {
+	const label = "is related to"
+	linkA0 := model.Link{
+		Kind:        model.LinkRelates,
+		NativeLabel: label,
+		Target: model.LinkTarget{
+			ID: "A", Key: "A-old-0", Title: "A old zero", URL: "https://old.test/a0",
+			Status: model.StatusTodo, NativeStatus: "Open",
+		},
+	}
+	linkB := model.Link{
+		Kind:        model.LinkRelates,
+		NativeLabel: label,
+		Target: model.LinkTarget{
+			ID: "B", Key: "B-old", Title: "B old", URL: "https://old.test/b",
+			Status: model.StatusTodo, NativeStatus: "Open",
+		},
+	}
+	linkA1 := linkA0
+	linkA1.Target.Key = "A-old-1"
+	linkA1.Target.Title = "A old one"
+	linkA1.Target.URL = "https://old.test/a1"
+
+	m, _ := navigableDetailModel(t)
+	m.width, m.height = 100, 30
+	m.help.SetWidth(m.width)
+	m.detail.input.Detail.Description = ""
+	m.detail.input.Detail.Comments = nil
+	m.detail.input.Detail.Links = []model.Link{linkA0, linkB, linkA1}
+	m = m.reconcileDetail(true)
+	original := m.detailDocument()
+	if len(original.LinkRows) != 3 {
+		t.Fatalf("Link rows = %d, want 3", len(original.LinkRows))
+	}
+	wantA0 := detailLinkIdentity{TargetID: "A", Kind: model.LinkRelates, NativeLabel: label}
+	wantB := detailLinkIdentity{TargetID: "B", Kind: model.LinkRelates, NativeLabel: label}
+	wantA1 := wantA0
+	wantA1.Occurrence = 1
+	for i, want := range []detailLinkIdentity{wantA0, wantB, wantA1} {
+		if got := original.LinkRows[i].Identity; got != want {
+			t.Fatalf("original Link %d identity = %+v, want %+v", i, got, want)
+		}
+	}
+
+	queueClick := func(index int) detailMouseLinkMsg {
+		t.Helper()
+		cmd := m.View().OnMouse(tea.MouseClickMsg{
+			X: 1, Y: detailLinkY(t, m, original, index), Button: tea.MouseLeft,
+		})
+		if cmd == nil {
+			t.Fatalf("Link %d produced no mouse domain message", index)
+		}
+		msg, ok := cmd().(detailMouseLinkMsg)
+		if !ok {
+			t.Fatalf("Link %d translated to %T", index, cmd())
+		}
+		return msg
+	}
+	queuedB := queueClick(1)
+	queuedA1 := queueClick(2)
+	m = focusLinkAt(m, 1)
+
+	updatedA0 := linkA1
+	updatedA0.Target.Key = "A-new-first"
+	updatedA0.Target.Title = "A new first"
+	updatedA0.Target.URL = "https://new.test/a-first"
+	updatedA0.Target.Status = model.StatusInProgress
+	updatedA0.Target.NativeStatus = "Doing"
+	updatedA1 := linkA0
+	updatedA1.Target.Key = "A-new-second"
+	updatedA1.Target.Title = "A new second"
+	updatedA1.Target.URL = "https://new.test/a-second"
+	updatedA1.Target.Status = model.StatusDone
+	updatedA1.Target.NativeStatus = "Closed"
+	updatedB := linkB
+	updatedB.Target.Key = "B-new"
+	updatedB.Target.Title = "B new"
+	updatedB.Target.URL = "https://new.test/b"
+	updatedB.Target.Status = model.StatusDone
+	updatedB.Target.NativeStatus = "Resolved"
+	updated := m.detail.input.Detail
+	updated.Links = []model.Link{updatedA0, updatedA1, updatedB}
+
+	rereading, _ := m.startDetailFetch()
+	reread := rereading.onDetailFetched(detailFetchedMsg{
+		generation: rereading.detailGeneration,
+		id:         rereading.detail.ticket.ID,
+		detail:     updated,
+		caps:       rereading.detail.input.Capabilities,
+	})
+	if reread.detailMouseEpoch != m.detailMouseEpoch {
+		t.Fatalf("same-seat reread advanced mouse epoch from %d to %d", m.detailMouseEpoch, reread.detailMouseEpoch)
+	}
+	if !reread.detail.hasLinkFocus || reread.detail.linkFocus != wantB || !reread.detailKeys.Follow.Enabled() {
+		t.Fatalf("B focus after reread = focused:%t identity:%+v follow:%t, want %+v",
+			reread.detail.hasLinkFocus, reread.detail.linkFocus, reread.detailKeys.Follow.Enabled(), wantB)
+	}
+	rereadDoc := reread.detailDocument()
+	for i, want := range []detailLinkIdentity{wantA0, wantA1, wantB} {
+		if got := rereadDoc.LinkRows[i].Identity; got != want {
+			t.Fatalf("reread Link %d identity = %+v, want %+v", i, got, want)
+		}
+	}
+
+	keyboardChild, keyboardCmd := followFocused(t, reread)
+	if keyboardCmd == nil || !reflect.DeepEqual(keyboardChild.detail.ticket, ticketFromLinkTarget(updatedB.Target)) {
+		t.Errorf("retained keyboard focus followed Ticket %+v with nil command %t, want updated B %+v",
+			keyboardChild.detail.ticket, keyboardCmd == nil, ticketFromLinkTarget(updatedB.Target))
+	}
+
+	mouseBModel, mouseBCmd := reread.Update(queuedB)
+	mouseB := mouseBModel.(Model)
+	if mouseBCmd == nil || !reflect.DeepEqual(mouseB.detail.ticket, ticketFromLinkTarget(updatedB.Target)) {
+		t.Errorf("pre-reread B callback followed Ticket %+v with nil command %t, want updated B %+v",
+			mouseB.detail.ticket, mouseBCmd == nil, ticketFromLinkTarget(updatedB.Target))
+	}
+
+	mouseAModel, mouseACmd := reread.Update(queuedA1)
+	mouseA := mouseAModel.(Model)
+	if mouseACmd == nil || !reflect.DeepEqual(mouseA.detail.ticket, ticketFromLinkTarget(updatedA1.Target)) {
+		t.Errorf("pre-reread A occurrence 1 callback followed Ticket %+v with nil command %t, want current second A %+v",
+			mouseA.detail.ticket, mouseACmd == nil, ticketFromLinkTarget(updatedA1.Target))
+	}
+	if reflect.DeepEqual(mouseA.detail.ticket, ticketFromLinkTarget(updatedA0.Target)) {
+		t.Error("A occurrence 1 callback collided with occurrence 0")
+	}
+}
+
 func TestDetailMouseDuplicateOccurrenceIsIndependent(t *testing.T) {
 	m, _ := navigableDetailModel(t)
 	duplicate := model.Link{
