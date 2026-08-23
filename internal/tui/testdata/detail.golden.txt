@@ -4,37 +4,37 @@
 
 DESCRIPTION
 
-The shard sync protocol has to survive a shard going away mid-transfer & coming back with a different generation number.
+  The shard sync protocol has to survive a shard going away mid-transfer & coming back with a different generation
+  number.
 
-## Shape
+  ## Shape
 
-1. The sender announces `(shard, generation, offset)`.
-2. The receiver either accepts or replies with the offset it wants.
-3. Either side may abort; an aborted transfer leaves no partial state.
+  1. The sender announces  (shard, generation, offset) .
+  2. The receiver either accepts or replies with the offset it wants.
+  3. Either side may abort; an aborted transfer leaves no partial state.
 
-Open question: do we version the handshake itself, or rely on the generation number to carry it? Leaning towards an
-explicit version — see the linked ticket.
+  Open question: do we version the handshake itself, or rely on the generation number to carry it? Leaning towards an
+  explicit version — see the linked ticket.
+
 
 COMMENTS (3)
 
 @mara-vos · 2026-01-12 09:14 UTC
-  Sketched the state machine; the abort path is the one that bites.
+    Sketched the state machine; the abort path is the one that bites.
+
 
 @tobias · 2026-01-12 16:02 UTC
-  Agreed on an explicit version byte. Costs nothing now, saves a migration later.
+    Agreed on an explicit version byte. Costs nothing now, saves a migration later.
+
 
 @mara-vos · 2026-01-13 08:30 UTC
-  Version byte it is. Updating the draft.
+    Version byte it is. Updating the draft.
+
 
 LINKS (3)
 
   is blocked by     #115  Reconcile widget IDs across shards       [open]
   blocks            #116  Protocol conformance tests               [Selected for Development]
   is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
-
-
-
-
-
 
 m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down

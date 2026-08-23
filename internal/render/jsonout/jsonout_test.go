@@ -67,6 +67,33 @@ func TestRenderDetailRich(t *testing.T) {
 	}
 }
 
+func TestRenderDetailKeepsMarkdownSourceLiteral(t *testing.T) {
+	markdown := "# Heading\n\n- [x] task\n\n```go\nfmt.Println(\"raw\")\n```\n\nSee #12, @alice, and [docs](https://example.test/docs)."
+	var output bytes.Buffer
+	if err := jsonout.RenderDetail(&output, model.Detail{
+		TicketID:    "acme/widgets#40",
+		Description: markdown,
+		Comments:    []model.Comment{{Body: markdown}},
+	}, model.Capabilities{Comments: true}, "fake", generatedAt); err != nil {
+		t.Fatalf("RenderDetail: %v", err)
+	}
+	var document struct {
+		Description string `json:"description"`
+		Comments    []struct {
+			Body string `json:"body"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
+		t.Fatalf("unmarshal Detail: %v", err)
+	}
+	if document.Description != markdown || len(document.Comments) != 1 || document.Comments[0].Body != markdown {
+		t.Errorf("JSON changed raw Markdown: description %q, comments %+v", document.Description, document.Comments)
+	}
+	if strings.Contains(output.String(), "\x1b]8;") || strings.Contains(output.String(), "https://github.com/") {
+		t.Errorf("JSON rendered or rewrote Markdown: %q", output.String())
+	}
+}
+
 func TestRenderDetailMinimal(t *testing.T) {
 	got := renderDetail(t, fake.New(), minimalTicket)
 

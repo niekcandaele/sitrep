@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // detailHeaderHeight is what renderDetailHeader always draws: the breadcrumb,
@@ -189,13 +190,21 @@ func detailLines(in DetailInput, width int, s Styles) []string {
 	return composeDetailDocument(in, width, s, detailLinkIdentity{}, false).Lines
 }
 
-// composeDetailDocument renders a DetailInput and records the exact document
-// line occupied by every capability-visible Link. Description and comment line
-// production stay isolated so markdown rendering can replace either producer
-// without changing navigation metadata.
+// composeDetailDocument is the compatibility seam for focused rendering tests.
+// The live Model supplies its cached, width-bound renderers instead.
 func composeDetailDocument(in DetailInput, width int, s Styles, focused detailLinkIdentity, hasFocus bool) detailDocument {
-	doc := detailDocument{Lines: describeDetail(in, width, s)}
-	if comments := commentLines(in, width, s); len(comments) > 0 {
+	markdown := newDetailMarkdownRenderers(width, markdownDark)
+	return composeDetailDocumentWithMarkdown(in, width, s, focused, hasFocus, markdown)
+}
+
+// composeDetailDocumentWithMarkdown renders a DetailInput and records the exact
+// document line occupied by every capability-visible Link. Description and
+// comment rendering never creates Link rows: only linkDocument owns that
+// navigation metadata.
+func composeDetailDocumentWithMarkdown(in DetailInput, width int, s Styles, focused detailLinkIdentity,
+	hasFocus bool, markdown detailMarkdownRenderers) detailDocument {
+	doc := detailDocument{Lines: describeDetail(in, width, s, markdown.description)}
+	if comments := commentLines(in, width, s, markdown.comment); len(comments) > 0 {
 		doc.Lines = append(append(doc.Lines, ""), comments...)
 	}
 	links, rows := linkDocument(in, width, s, focused, hasFocus)
@@ -222,22 +231,34 @@ func truncateDocumentLines(lines []string, width int) []string {
 // describeDetail renders the description section, which is always drawn: an
 // empty description is a fact about the Ticket, and a screen that answers a
 // drill-in with nothing at all reads as a bug.
-func describeDetail(in DetailInput, width int, s Styles) []string {
+func describeDetail(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	lines := []string{s.SectionHeader.Render("DESCRIPTION"), ""}
-	if strings.TrimSpace(in.Detail.Description) == "" {
+	body := provider.SanitizeText(in.Detail.Description)
+	if strings.TrimSpace(body) == "" {
 		return append(lines, s.Muted.Render("No description."))
 	}
-	for _, line := range wrapText(in.Detail.Description, width) {
-		lines = append(lines, s.Body.Render(line))
+	return append(lines, renderMarkdownBody(body, in.Ticket.URL, width, s, renderer)...)
+}
+
+func renderMarkdownBody(body, ticketURL string, width int, s Styles, renderer markdownRenderer) []string {
+	lines, err := renderer.render(body, ticketURL)
+	if err == nil {
+		return lines
 	}
-	return lines
+
+	message := "Could not render Markdown: " + sanitizeTerminalText(err.Error())
+	fallback := []string{s.Error.Render(truncateLine(message, width))}
+	for _, line := range wrapText(body, width) {
+		fallback = append(fallback, s.Body.Render(line))
+	}
+	return fallback
 }
 
 // commentLines renders the comments section, or nothing at all when the Provider
 // does not declare the Comments Capability. That silence is the point: an
 // undeclared Capability is absent, never an error and never a placeholder. With
 // the Capability and no comments there is something to say, so it is said.
-func commentLines(in DetailInput, width int, s Styles) []string {
+func commentLines(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	if !in.Capabilities.Comments {
 		return nil
 	}
@@ -254,8 +275,10 @@ func commentLines(in DetailInput, width int, s Styles) []string {
 			lines = append(lines, "")
 		}
 		lines = append(lines, truncateLine(s.CommentAuthor.Render(commentByline(c)), width))
-		for _, line := range wrapText(c.Body, width-len(commentIndent)) {
-			lines = append(lines, commentIndent+s.Body.Render(line))
+		body := provider.SanitizeText(c.Body)
+		for _, line := range renderMarkdownBody(body, in.Ticket.URL,
+			width-lipgloss.Width(commentIndent), s, renderer) {
+			lines = append(lines, commentIndent+line)
 		}
 	}
 	return lines

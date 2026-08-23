@@ -13,4 +13,4 @@ tab   next link        pgup page up
 u     watchlist        g    first
 r     refresh          G    last
 ?     help
-q     quit                             92%
+q     quit                             93%

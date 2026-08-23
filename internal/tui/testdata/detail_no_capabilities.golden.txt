@@ -4,22 +4,22 @@
 
 DESCRIPTION
 
-The shard sync protocol has to survive a shard going away mid-transfer & coming back with a different generation number.
+  The shard sync protocol has to survive a shard going away mid-transfer & coming back with a different generation
+  number.
 
-## Shape
+  ## Shape
 
-1. The sender announces `(shard, generation, offset)`.
-2. The receiver either accepts or replies with the offset it wants.
-3. Either side may abort; an aborted transfer leaves no partial state.
+  1. The sender announces  (shard, generation, offset) .
+  2. The receiver either accepts or replies with the offset it wants.
+  3. Either side may abort; an aborted transfer leaves no partial state.
 
-Open question: do we version the handshake itself, or rely on the generation number to carry it? Leaning towards an
-explicit version — see the linked ticket.
+  Open question: do we version the handshake itself, or rely on the generation number to carry it? Leaning towards an
+  explicit version — see the linked ticket.
+
 
 LINKS (1)
 
   is duplicated by  #7  Teach the gadget agent to speak sync v2  [In Progress]
-
-
 
 
 

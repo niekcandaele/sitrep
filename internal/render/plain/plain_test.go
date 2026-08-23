@@ -1,6 +1,8 @@
 package plain
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -58,6 +60,36 @@ func TestProgressBar(t *testing.T) {
 					tt.progress, width, n, width)
 			}
 		})
+	}
+}
+
+func TestRenderTicketKeepsMarkdownSourceLiteral(t *testing.T) {
+	markdown := "# Heading\n\n- [x] task\n\n```go\nfmt.Println(\"raw\")\n```\n\nSee #12, @alice, and [docs](https://example.test/docs)."
+	var output bytes.Buffer
+	if err := RenderTicket(&output, TicketSnapshot{
+		Ticket: model.Ticket{Key: "#40", Title: "Markdown"},
+		Detail: model.Detail{
+			Description: markdown,
+			Comments:    []model.Comment{{Body: markdown}},
+		},
+		Capabilities: model.Capabilities{Comments: true},
+	}); err != nil {
+		t.Fatalf("RenderTicket: %v", err)
+	}
+
+	raw := output.String()
+	if !strings.Contains(raw, "DESCRIPTION\n\n"+markdown+"\n\n") {
+		t.Errorf("plain description did not preserve literal Markdown:\n%s", raw)
+	}
+	for _, line := range strings.Split(markdown, "\n") {
+		if !strings.Contains(raw, "\n  "+line+"\n") {
+			t.Errorf("plain comment did not preserve Markdown line %q:\n%s", line, raw)
+		}
+	}
+	for _, rewritten := range []string{"https://github.com/", "\x1b[", "\x1b]8;"} {
+		if strings.Contains(raw, rewritten) {
+			t.Errorf("plain Ticket unexpectedly rendered or rewrote Markdown with %q: %q", rewritten, raw)
+		}
 	}
 }
 
