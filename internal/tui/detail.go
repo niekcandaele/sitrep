@@ -54,13 +54,12 @@ type DetailHeader struct {
 	Repository string
 }
 
-// DetailInput is everything the Detail screen renders.
+// DetailInput contains the current Detail seat's Provider-backed rendering data.
 type DetailInput struct {
 	// Ticket identifies what is being read.
 	Ticket DetailHeader
-	// Parent is the Watchlist this Ticket was reached through, drawn as a
-	// breadcrumb above the Ticket's own identity. The zero Header draws no
-	// breadcrumb.
+	// Parent is the root Watchlist crumb shown before any Trail entries. A zero
+	// Header omits that root crumb; prior Trail Tickets may still be shown.
 	Parent Header
 	// Detail is the expensive per-ticket data, exactly as the Provider returned
 	// it.
@@ -413,10 +412,9 @@ func (m Model) popDetailTrail() Model {
 	return m
 }
 
-// walkUp leaves the Detail for the Watchlist the Ticket belongs to. In a
-// decoder session it is where the list is first fetched — nothing has read it
-// until now — and from a drill-in it is esc by another name, because both mean
-// "the Watchlist this Ticket belongs to".
+// walkUp leaves the entire Detail Trail for its root Watchlist. It returns to an
+// armed list immediately or fetches the list for the first time in a decoder
+// session.
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
 	m.detailGeneration++
@@ -488,15 +486,10 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	return m.reconcileDetail(true)
 }
 
-// onDetailKey dispatches a key press while a Ticket's Detail is open.
-//
-// esc goes back rather than quitting: after the find box and the filter, "one
-// level up" is what esc means everywhere in this program. q and ctrl+c quit
-// outright, from here as from the list, so nobody is trapped in a Detail.
-//
-// u goes up to the Watchlist this Ticket belongs to. From a drill-in that is
-// where esc already lands, which is coherent rather than surprising; from a
-// decoded Ticket it is the way into the full monitor.
+// onDetailKey dispatches a key press while a Ticket's Detail is open. Esc pops
+// one Trail entry, returns an untrailed root to the armed list, or quits a
+// decoded root with no list. q and ctrl+c always quit. u clears the Trail and
+// jumps to the root Watchlist, fetching it first in a decoder session.
 func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.detailKeys.Quit):
@@ -705,9 +698,9 @@ func (m Model) detailFooterLines(doc detailDocument) []string {
 // detailBodyHeight is the room left for the Detail body once the header and the
 // footer have taken theirs, floored at one line so a tiny terminal still renders.
 //
-// The footer's *height* does not depend on the scroll indicator, which is what
-// keeps this out of a loop with detailFooterLines: the indicator only decides
-// what the last help line says, never how many lines there are.
+// The footer's *height* does not depend on the scroll indicator, which keeps
+// this out of a loop with detailFooterLines: the indicator reuses either the
+// spacer or a help line and never adds a line.
 func (m Model) detailBodyHeight() int {
 	lines := 1
 	if m.detail.lastErr != nil && m.detail.loaded {

@@ -185,7 +185,7 @@ func New(ctx context.Context, opts Options) Model {
 
 	if opts.Open != nil {
 		// Decoder mode seats the same Detail state as a list-open, but leaves the
-		// command for Init so Bubble Tea owns startup I/O exactly as before.
+		// command for Init so Bubble Tea owns startup I/O.
 		if opts.Initial == nil {
 			m.refreshing = false
 			m.generation = 0
@@ -848,7 +848,7 @@ func compactDetailShortHelp(renderer help.Model, bindings []key.Binding, width i
 		return lipgloss.Width(renderer.ShortHelpView(bindings[:priorityCount])) <= budget
 	}
 	if fits() {
-		return bindings
+		return fittingShortHelpPrefix(renderer, bindings, priorityCount, budget)
 	}
 	if descriptive, ok := descriptiveDetailShortBinding(bindings, budget); ok {
 		return []key.Binding{descriptive}
@@ -877,6 +877,17 @@ func compactDetailShortHelp(renderer help.Model, bindings []key.Binding, width i
 	}
 
 	return []key.Binding{compactDetailShortBinding(bindings, width)}
+}
+
+func fittingShortHelpPrefix(renderer help.Model, bindings []key.Binding, minimum, budget int) []key.Binding {
+	end := minimum
+	for end < len(bindings) {
+		if lipgloss.Width(renderer.ShortHelpView(bindings[:end+1])) > budget {
+			break
+		}
+		end++
+	}
+	return bindings[:end]
 }
 
 func descriptiveDetailShortBinding(bindings []key.Binding, budget int) (key.Binding, bool) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
@@ -249,6 +250,45 @@ func TestDetailResponsiveShortHelpKeepsPriorityActions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDetailResponsiveShortHelpAfterFollowKeepsWholeSeparators(t *testing.T) {
+	parent, _ := navigableDetailModel(t)
+	parent = focusLinkAt(parent, 0)
+	childModel, _ := parent.followFocusedDetailLink()
+	child := childModel.(Model)
+
+	isSeparator := func(field string) bool { return field == "•" || field == "·" }
+	for width := 54; width <= 66; width++ {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			m := child
+			m.width, m.height = width, 16
+			m.help.SetWidth(width)
+			m = m.reconcileDetail(true)
+
+			helpText := strings.TrimSpace(string(frame(m.detailHelpView())))
+			fields := strings.Fields(helpText)
+			if len(fields) == 0 {
+				t.Fatal("post-follow help is empty")
+			}
+			for _, want := range []string{"m", "esc", "q", "u"} {
+				if !strings.Contains(helpText, want) {
+					t.Errorf("post-follow help omitted %q: %q", want, helpText)
+				}
+			}
+			for i, field := range fields {
+				if !isSeparator(field) {
+					continue
+				}
+				if i == 0 || i == len(fields)-1 || isSeparator(fields[i-1]) {
+					t.Errorf("post-follow help has a leading, trailing, or doubled separator: %q", helpText)
+				}
+			}
+			if got := ansi.StringWidth(helpText); got > width {
+				t.Errorf("post-follow help width = %d, budget %d: %q", got, width, helpText)
+			}
+		})
 	}
 }
 

@@ -126,12 +126,10 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 }
 
 // DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses list
-// bindings where key and meaning match, adds relationship focus/follow actions,
-// and gives Esc the Detail-specific meaning of one level back through the Trail.
-//
-// Quit is deliberately not the list's: there esc is the last rung of the filter
-// ladder, and here esc means "one level up" — back to the list. q and ctrl+c
-// still quit outright from both, so a Detail can never trap anyone.
+// bindings where key and meaning match and adds relationship focus/follow
+// actions. Quit is separate from Back: q and ctrl+c always quit, while Esc pops
+// the Trail, returns a root Detail to its armed list, or quits a decoded root
+// with no list.
 type DetailKeyMap struct {
 	// Up scrolls the body up one line.
 	Up key.Binding
@@ -156,8 +154,8 @@ type DetailKeyMap struct {
 	// Back pops one Trail entry first. At the root it returns to the armed list,
 	// or quits when a directly decoded Ticket has no list behind it.
 	Back key.Binding
-	// Parent opens the Watchlist this Ticket belongs to in the monitor. It is
-	// enabled only when there is one to walk up into.
+	// Parent opens the root Watchlist context and is enabled only when one is
+	// available.
 	Parent key.Binding
 	// ToggleMouse enables or disables terminal mouse capture.
 	ToggleMouse key.Binding
