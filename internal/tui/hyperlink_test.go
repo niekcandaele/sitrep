@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
@@ -39,6 +40,101 @@ func TestRenderHyperlinkUsesLipGlossScopeWithoutMutatingStyle(t *testing.T) {
 	}
 	if got := renderHyperlink(style, "T-1", ""); strings.Contains(got, "\x1b]8;") {
 		t.Errorf("empty URL emitted OSC 8: %q", got)
+	}
+}
+
+func TestHyperlinkSeamsStripTerminalControlInjection(t *testing.T) {
+	hostileURL := "https://safe.example/path\a\x1b]8;;https://evil.example/\a" +
+		"\x1b]52;c;YXR0YWNr\x1b\\" + string(rune(0x9d)) + "52;c;YXR0YWNr" +
+		string(rune(0x9c)) + "\r\nend"
+	cleanURL := provider.SanitizeLine(hostileURL)
+	if cleanURL == hostileURL {
+		t.Fatal("hostile URL fixture did not require sanitizing")
+	}
+
+	linkInput := DetailInput{
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		Detail: model.Detail{Links: []model.Link{{
+			Kind: model.LinkBlockedBy, NativeLabel: "is blocked by",
+			Target: model.LinkTarget{ID: "T-2", Key: "T-2", Title: "Target title", URL: hostileURL},
+		}}},
+	}
+	linkLines, linkRows := linkDocument(linkInput, 500, Styles{}, detailLinkIdentity{}, false)
+	lead := model.PullRequest{
+		Number: 8, Title: "Lead", URL: hostileURL,
+		Repository: "acme/widgets", State: model.PROpen,
+	}
+
+	tests := []struct {
+		name   string
+		raw    string
+		scopes int
+	}{
+		{
+			name: "list Ticket key",
+			raw: rowLines([]Row{{Kind: RowTicket, Ticket: model.Ticket{
+				ID: "T-1", Key: "T-1", Title: "A title", URL: hostileURL,
+			}}}, 0, 7, 500, true, model.Capabilities{}, Styles{})[0],
+			scopes: 1,
+		},
+		{
+			name:   "Detail key and displayed header URL",
+			raw:    headerIdentity(Header{Key: "T-1", Title: "A title", URL: hostileURL}, 500, Styles{}, true),
+			scopes: 2,
+		},
+		{
+			name:   "Link target key and title",
+			raw:    linkLines[linkRows[0].Line],
+			scopes: 2,
+		},
+		{
+			name: "Trail breadcrumb",
+			raw: renderBreadcrumbCrumbs([]detailBreadcrumbCrumb{{
+				text: "T-1", url: hostileURL,
+			}}, 500, Styles{}),
+			scopes: 1,
+		},
+		{
+			name: "lead pull request summary",
+			raw: pullRequest(model.Ticket{
+				Repository: "acme/widgets", PullRequests: []model.PullRequest{lead},
+			}, model.Capabilities{PullRequests: true}, Styles{}),
+			scopes: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertBalancedHyperlink(t, tt.raw, cleanURL, tt.scopes)
+			if strings.Contains(tt.raw, hyperlinkOpen("https://evil.example/")) ||
+				strings.Contains(tt.raw, "\x1b]52;") {
+				t.Errorf("terminal control payload escaped the intended URI: %q", tt.raw)
+			}
+			for _, forbidden := range []string{"\r", "\n", string(rune(0x9c)), string(rune(0x9d))} {
+				if strings.Contains(tt.raw, forbidden) {
+					t.Errorf("rendered hyperlink contains control %q: %q", forbidden, tt.raw)
+				}
+			}
+			if got := strings.Count(tt.raw, "\x1b]"); got != tt.scopes*2 {
+				t.Errorf("OSC sequence count = %d, want exactly %d OSC 8 open/reset sequences in %q",
+					got, tt.scopes*2, tt.raw)
+			}
+			if got := strings.Count(tt.raw, "\a"); got != tt.scopes*2 {
+				t.Errorf("OSC terminator count = %d, want exactly %d in %q", got, tt.scopes*2, tt.raw)
+			}
+		})
+	}
+}
+
+func TestRenderHyperlinkSanitizesVisibleTextAndDropsControlOnlyURL(t *testing.T) {
+	text := "visible\a\x1b]52;c;YXR0YWNr\x1b\\" + string(rune(0x9c)) + "\r\ntext"
+	raw := renderHyperlink(lipgloss.NewStyle(), text, "\a\x1b\r"+string(rune(0x9c))+"\x7f")
+	if strings.Contains(raw, "\x1b]") || strings.Contains(raw, "\a") ||
+		strings.Contains(raw, "\r") || strings.Contains(raw, string(rune(0x9c))) {
+		t.Errorf("control-only URL or hostile visible text emitted terminal controls: %q", raw)
+	}
+	if got, want := raw, provider.SanitizeLine(text); got != want {
+		t.Errorf("sanitized plain fragment = %q, want %q", got, want)
 	}
 }
 

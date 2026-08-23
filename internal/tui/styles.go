@@ -4,6 +4,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // Styles is every Lip Gloss style the monitor draws with, in one place, so a
@@ -129,7 +130,12 @@ func DefaultStyles(isDark bool) Styles {
 	}
 }
 
+// renderHyperlink is the TUI's only OSC 8 creation seam. Provider.Sanitized
+// applies the same single-line policy at ingestion; repeating that policy here
+// also protects direct Options inputs and keeps controls out of both URI and text.
 func renderHyperlink(style lipgloss.Style, text, url string) string {
+	text = provider.SanitizeLine(text)
+	url = provider.SanitizeLine(url)
 	if url == "" {
 		return style.Render(text)
 	}
