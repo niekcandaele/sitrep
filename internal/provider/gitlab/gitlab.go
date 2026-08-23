@@ -89,11 +89,13 @@
 // actually closing — only those pay the second correlation request — and A ≤ C
 // is the number whose lead merge request is still live. An explicit Ref-list
 // costs R + I + C + A: one direct root read for each of R Refs, then correlation
-// for its I issue roots; epic and milestone roots skip correlation. For a
-// thirty-Ticket Epic that is roughly forty to ninety requests a refresh.
-// Correlation is bounded to mergeRequestWorkers concurrent requests and is fully
-// context-cancellable; a reader deciding whether to raise --interval deserves
-// the number.
+// for its I issue roots; a Query also pays its membership pages before those
+// same exact-root and correlation costs. Epic and milestone roots skip
+// correlation. Exact roots run with at most exactRootWorkers requests in flight;
+// correlation is separately bounded to mergeRequestWorkers concurrent requests
+// and is fully context-cancellable. For a thirty-Ticket Epic that is roughly
+// forty to ninety requests a refresh; a reader deciding whether to raise
+// --interval deserves the number.
 package gitlab
 
 import (
@@ -116,10 +118,11 @@ import (
 // pageSize is GitLab's documented maximum page, and maxPages bounds the loop.
 // An epic with five thousand children is a bug somewhere, not a situation
 // report, and an unbounded loop against a paging API is how a polling tool
-// hangs.
+// hangs. exactRootWorkers separately bounds Query and Ref-list direct reads.
 const (
-	pageSize = 100
-	maxPages = 50
+	pageSize         = 100
+	maxPages         = 50
+	exactRootWorkers = 8
 )
 
 // notePageSize is how many notes a drill-in reads. Nothing paginates: one
@@ -318,16 +321,23 @@ func (p *Provider) resolveRefList(ctx context.Context, selector provider.RefList
 }
 
 func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
-	initialCapacity := min(p.maxTickets, pageSize)
+	membershipPath := p.queryMembershipPath()
+	membershipPageSize := min(pageSize, p.maxTickets)
+	initialCapacity := membershipPageSize
 	refs := make([]ref.Ref, 0, initialCapacity)
 	seen := make(map[string]struct{}, initialCapacity)
 	page := 1
+	rawQuery := queryMembershipRawQuery(query, membershipPageSize, page)
+	seenRequests := map[string]struct{}{
+		queryMembershipRequestIdentity(membershipPath, rawQuery): {},
+	}
 	consumed := 0
+	followedContinuation := false
 	limitReached := false
 
 	for {
 		remaining := p.maxTickets - consumed
-		issues, header, err := p.searchQueryMembership(ctx, query, min(pageSize, remaining), page)
+		issues, header, err := p.searchQueryMembership(ctx, membershipPath, rawQuery, query)
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
 		}
@@ -362,29 +372,73 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 			})
 		}
 		consumed += len(issues)
-		if page != 1 && len(issues) == 0 {
+		if followedContinuation && len(issues) == 0 {
 			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"gitlab: query pagination returned an empty continuation page")
 		}
 
-		next := strings.TrimSpace(header.Get("x-next-page"))
+		nextPage := strings.TrimSpace(header.Get("x-next-page"))
+		nextCursor := strings.TrimSpace(header.Get("x-next-cursor"))
 		switch {
 		case overflow:
 			limitReached = true
 		case consumed == p.maxTickets:
-			limitReached = next != ""
-		case next == "":
-		default:
+			limitReached = nextPage != "" || nextCursor != ""
+			if !limitReached {
+				_, limitReached, err = nextLink(header.Values("Link"))
+				if err != nil {
+					return model.WatchlistSnapshot{}, err
+				}
+			}
+		case nextPage != "":
 			if len(issues) == 0 {
 				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 					"gitlab: query reports more results but returned an empty page")
 			}
-			nextPage, err := strconv.Atoi(next)
-			if err != nil || nextPage <= page {
+			nextPageNumber, err := strconv.Atoi(nextPage)
+			if err != nil || nextPageNumber <= page {
 				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
-					"gitlab: query reports its next page as %q, which is not after page %d", next, page)
+					"gitlab: query reports a malformed or non-forward next page")
 			}
-			page = nextPage
+			nextRawQuery := queryMembershipRawQuery(query, membershipPageSize, nextPageNumber)
+			identity := queryMembershipRequestIdentity(membershipPath, nextRawQuery)
+			if _, repeated := seenRequests[identity]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query pagination repeated a continuation request")
+			}
+			seenRequests[identity] = struct{}{}
+			page = nextPageNumber
+			rawQuery = nextRawQuery
+			followedContinuation = true
+			continue
+		default:
+			next, found, err := nextLink(header.Values("Link"))
+			if err != nil {
+				return model.WatchlistSnapshot{}, err
+			}
+			if !found {
+				if nextCursor != "" {
+					return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+						"gitlab: query returned a cursor without a usable next link")
+				}
+				break
+			}
+			if len(issues) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query reports more results but returned an empty page")
+			}
+			nextRawQuery, identity, err := p.validateQueryContinuation(
+				membershipPath, rawQuery, next, membershipPageSize)
+			if err != nil {
+				return model.WatchlistSnapshot{}, err
+			}
+			if _, repeated := seenRequests[identity]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query pagination repeated a continuation request")
+			}
+			seenRequests[identity] = struct{}{}
+			rawQuery = nextRawQuery
+			followedContinuation = true
 			continue
 		}
 		break
@@ -406,23 +460,247 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 	}, nil
 }
 
-func (p *Provider) searchQueryMembership(ctx context.Context, query string, perPage, page int) ([]issueWire, http.Header, error) {
-	path := "/issues"
+func (p *Provider) queryMembershipPath() string {
 	if p.path != "" {
-		path = "/projects/" + url.PathEscape(p.path) + "/issues"
+		return "/projects/" + url.PathEscape(p.path) + "/issues"
 	}
+	return "/issues"
+}
+
+func queryMembershipRawQuery(query string, perPage, page int) string {
 	rawQuery := query
 	if rawQuery != "" && !strings.HasSuffix(rawQuery, "&") {
 		rawQuery += "&"
 	}
-	rawQuery += "per_page=" + strconv.Itoa(perPage) + "&page=" + strconv.Itoa(page)
+	return rawQuery + "per_page=" + strconv.Itoa(perPage) + "&page=" + strconv.Itoa(page)
+}
 
+func queryMembershipRequestIdentity(path, rawQuery string) string {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path + "?" + rawQuery
+	}
+	return path + "?" + values.Encode()
+}
+
+func (p *Provider) searchQueryMembership(
+	ctx context.Context,
+	path, rawQuery, query string,
+) ([]issueWire, http.Header, error) {
 	var issues []issueWire
 	header, err := p.doQuery(ctx, path, rawQuery, query, &issues)
 	if err != nil {
 		return nil, nil, err
 	}
 	return issues, header, nil
+}
+
+func (p *Provider) validateQueryContinuation(
+	membershipPath, currentRawQuery, next string,
+	perPage int,
+) (string, string, error) {
+	current, err := url.Parse(p.baseURL + apiBase + membershipPath)
+	if err != nil {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: building the query pagination endpoint: %w", err)
+	}
+	current.RawQuery = currentRawQuery
+
+	reference, err := url.Parse(next)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	candidate := current.ResolveReference(reference)
+	if candidate.Opaque != "" || candidate.User != nil || candidate.Fragment != "" ||
+		!strings.EqualFold(candidate.Scheme, current.Scheme) ||
+		!strings.EqualFold(candidate.Host, current.Host) || candidate.Path != current.Path {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: query pagination returned an unsafe next link")
+	}
+
+	values, err := url.ParseQuery(candidate.RawQuery)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	perPageValues := values["per_page"]
+	if len(perPageValues) == 0 || perPageValues[len(perPageValues)-1] != strconv.Itoa(perPage) {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: query pagination changed the Provider page size")
+	}
+	return candidate.RawQuery, membershipPath + "?" + values.Encode(), nil
+}
+
+func malformedQueryPaginationError() error {
+	return provider.Errorf(provider.KindUnavailable,
+		"gitlab: query returned malformed pagination links")
+}
+
+func nextLink(headers []string) (string, bool, error) {
+	if len(headers) == 0 {
+		return "", false, nil
+	}
+	values, err := splitLinkHeader(strings.Join(headers, ","))
+	if err != nil {
+		return "", false, malformedQueryPaginationError()
+	}
+
+	var next string
+	for _, value := range values {
+		target, relations, err := parseLinkValue(value)
+		if err != nil {
+			return "", false, malformedQueryPaginationError()
+		}
+		for _, relation := range relations {
+			if !strings.EqualFold(relation, "next") {
+				continue
+			}
+			if next != "" {
+				return "", false, malformedQueryPaginationError()
+			}
+			next = target
+		}
+	}
+	return next, next != "", nil
+}
+
+func splitLinkHeader(header string) ([]string, error) {
+	var values []string
+	start := 0
+	inTarget := false
+	inQuote := false
+	escaped := false
+	for i, r := range header {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
+		case inQuote && r == '"':
+			inQuote = false
+		case inQuote:
+		case inTarget && r == '>':
+			inTarget = false
+		case inTarget:
+		case r == '<':
+			inTarget = true
+		case r == '"':
+			inQuote = true
+		case r == ',':
+			value := strings.TrimSpace(header[start:i])
+			if value == "" {
+				return nil, malformedQueryPaginationError()
+			}
+			values = append(values, value)
+			start = i + 1
+		}
+	}
+	if inTarget || inQuote || escaped {
+		return nil, malformedQueryPaginationError()
+	}
+	value := strings.TrimSpace(header[start:])
+	if value == "" {
+		return nil, malformedQueryPaginationError()
+	}
+	return append(values, value), nil
+}
+
+func parseLinkValue(value string) (string, []string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "<") {
+		return "", nil, malformedQueryPaginationError()
+	}
+	end := strings.IndexByte(value, '>')
+	if end < 2 {
+		return "", nil, malformedQueryPaginationError()
+	}
+	target := strings.TrimSpace(value[1:end])
+	rest := strings.TrimSpace(value[end+1:])
+	if target == "" || (rest != "" && !strings.HasPrefix(rest, ";")) {
+		return "", nil, malformedQueryPaginationError()
+	}
+
+	var relations []string
+	seenRel := false
+	for rest != "" {
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, ";"))
+		if rest == "" {
+			return "", nil, malformedQueryPaginationError()
+		}
+		parameter, remaining, err := takeLinkParameter(rest)
+		if err != nil {
+			return "", nil, err
+		}
+		rest = remaining
+		name, rawValue, ok := strings.Cut(parameter, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			return "", nil, malformedQueryPaginationError()
+		}
+		decoded, err := decodeLinkParameter(strings.TrimSpace(rawValue))
+		if err != nil {
+			return "", nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "rel") {
+			if seenRel {
+				return "", nil, malformedQueryPaginationError()
+			}
+			seenRel = true
+			relations = strings.Fields(decoded)
+		}
+	}
+	return target, relations, nil
+}
+
+func takeLinkParameter(rest string) (string, string, error) {
+	inQuote := false
+	escaped := false
+	for i, r := range rest {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
+		case r == '"':
+			inQuote = !inQuote
+		case !inQuote && r == ';':
+			return strings.TrimSpace(rest[:i]), rest[i:], nil
+		}
+	}
+	if inQuote || escaped {
+		return "", "", malformedQueryPaginationError()
+	}
+	return strings.TrimSpace(rest), "", nil
+}
+
+func decodeLinkParameter(value string) (string, error) {
+	if value == "" {
+		return "", malformedQueryPaginationError()
+	}
+	if value[0] != '"' {
+		if strings.ContainsAny(value, " \t\r\n\"") {
+			return "", malformedQueryPaginationError()
+		}
+		return value, nil
+	}
+
+	var decoded strings.Builder
+	escaped := false
+	for i := 1; i < len(value); i++ {
+		switch {
+		case escaped:
+			decoded.WriteByte(value[i])
+			escaped = false
+		case value[i] == '\\':
+			escaped = true
+		case value[i] == '"':
+			if strings.TrimSpace(value[i+1:]) != "" {
+				return "", malformedQueryPaginationError()
+			}
+			return decoded.String(), nil
+		default:
+			decoded.WriteByte(value[i])
+		}
+	}
+	return "", malformedQueryPaginationError()
 }
 
 func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, out any) (http.Header, error) {
@@ -473,9 +751,9 @@ func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, ou
 }
 
 // readExactRefs authoritatively reads each named root as one thin Ticket. All
-// Refs are validated before the first request, each root uses its direct
-// resource rather than a children endpoint, and merge-request correlation runs
-// once over the complete ordered slice.
+// Refs are validated before the first request. The bounded root fan-out writes
+// by Selector index and reports errors in that same order; merge-request
+// correlation runs only after every direct read succeeds.
 func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
 	targets := make([]target, len(refs))
 	for i, r := range refs {
@@ -487,12 +765,33 @@ func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.T
 	}
 
 	tickets := make([]model.Ticket, len(targets))
-	for i, t := range targets {
-		ticket, err := p.fetchRootTicket(ctx, t)
+	errs := make([]error, len(targets))
+	indices := make(chan int, len(targets))
+	for i := range targets {
+		indices <- i
+	}
+	close(indices)
+
+	var wg sync.WaitGroup
+	for range min(len(targets), exactRootWorkers) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range indices {
+				if err := ctx.Err(); err != nil {
+					errs[i] = err
+					continue
+				}
+				tickets[i], errs[i] = p.fetchRootTicket(ctx, targets[i])
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		tickets[i] = ticket
 	}
 	if err := p.correlate(ctx, tickets); err != nil {
 		return nil, err

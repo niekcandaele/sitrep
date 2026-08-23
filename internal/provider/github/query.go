@@ -7,8 +7,12 @@ import (
 
 const queryPageSize = 100
 
+// querySearchResultLimit is GitHub Search's documented 1,000-result ceiling.
+const querySearchResultLimit = 1000
+
 const queryMembershipDocument = `query($query:String!, $first:Int!, $after:String) {
   search(query:$query, type:ISSUE, first:$first, after:$after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       __typename

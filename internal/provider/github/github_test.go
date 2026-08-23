@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -279,7 +280,7 @@ func TestResolveQuerySearchesMembershipThenReadsExactTickets(t *testing.T) {
 	if got := membership.variables["after"]; got != nil {
 		t.Errorf("membership after variable = %v, want null on page one", got)
 	}
-	for _, token := range []string{"search(query:$query", "type:ISSUE", "first:$first", "after:$after", "pageInfo", "__typename", "number", "nameWithOwner"} {
+	for _, token := range []string{"search(query:$query", "type:ISSUE", "first:$first", "after:$after", "issueCount", "pageInfo", "__typename", "number", "nameWithOwner"} {
 		if !strings.Contains(membership.query, token) {
 			t.Errorf("membership document omits %q: %s", token, membership.query)
 		}
@@ -407,6 +408,156 @@ func TestResolveQueryCutoffAccounting(t *testing.T) {
 			}
 			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
 				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryReportsGitHubSearchResultCeiling(t *testing.T) {
+	const exposedResults = 1000
+	tests := []struct {
+		name          string
+		reportedCount int
+		wantLimit     bool
+	}{
+		{name: "more matches exist", reportedCount: 1001, wantLimit: true},
+		{name: "exact ceiling is exhausted", reportedCount: 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			membershipRequests := 0
+			exactRequests := 0
+
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Query     string         `json:"query"`
+					Variables map[string]any `json:"variables"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode request: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+
+				if strings.Contains(request.Query, "search(query:$query") {
+					first, ok := request.Variables["first"].(float64)
+					if !ok || first != 100 {
+						t.Errorf("membership first = %v, want 100", request.Variables["first"])
+					}
+					offset := 0
+					if after := request.Variables["after"]; after != nil {
+						cursor, ok := after.(string)
+						if !ok {
+							t.Errorf("membership cursor = %T, want string", after)
+						} else {
+							var err error
+							offset, err = strconv.Atoi(cursor)
+							if err != nil {
+								t.Errorf("membership cursor = %q: %v", cursor, err)
+							}
+						}
+					}
+					if offset >= exposedResults {
+						t.Errorf("membership request started beyond GitHub's search ceiling at %d", offset)
+					}
+
+					next := min(offset+int(first), exposedResults)
+					nodes := make([]map[string]any, 0, next-offset)
+					for number := offset + 1; number <= next; number++ {
+						nodes = append(nodes, map[string]any{
+							"__typename": "Issue",
+							"number":     number,
+							"repository": map[string]any{"nameWithOwner": "acme/widgets"},
+						})
+					}
+					hasNext := next < exposedResults
+					endCursor := ""
+					if hasNext {
+						endCursor = strconv.Itoa(next)
+					}
+					mu.Lock()
+					membershipRequests++
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"data": map[string]any{
+							"search": map[string]any{
+								"issueCount": tt.reportedCount,
+								"pageInfo": map[string]any{
+									"hasNextPage": hasNext,
+									"endCursor":   endCursor,
+								},
+								"nodes": nodes,
+							},
+						},
+					})
+					return
+				}
+
+				data := make(map[string]any)
+				for i := 0; ; i++ {
+					suffix := strconv.Itoa(i)
+					rawNumber, ok := request.Variables["number"+suffix]
+					if !ok {
+						break
+					}
+					number := int(rawNumber.(float64))
+					data["ref"+suffix] = map[string]any{
+						"kind": map[string]any{"__typename": "Issue"},
+						"issue": map[string]any{
+							"id":         "issue-" + strconv.Itoa(number),
+							"number":     number,
+							"title":      "Exact " + strconv.Itoa(number),
+							"url":        "https://github.com/acme/widgets/issues/" + strconv.Itoa(number),
+							"state":      "OPEN",
+							"repository": map[string]any{"nameWithOwner": "acme/widgets"},
+						},
+					}
+				}
+				mu.Lock()
+				exactRequests++
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+			}))
+			t.Cleanup(s.Close)
+
+			p := github.New("github.com",
+				github.WithEndpoint(s.URL),
+				github.WithTokenSource(func(context.Context, string) (string, error) {
+					return fixtureToken, nil
+				}),
+				github.WithMaxTickets(1200),
+			)
+			snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "is:issue"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if len(snap.Tickets) != exposedResults {
+				t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), exposedResults)
+			}
+			if snap.Tickets[0].Key != "acme/widgets#1" ||
+				snap.Tickets[exposedResults-1].Key != "acme/widgets#1000" {
+				t.Errorf("Ticket boundary = %q ... %q, want #1 ... #1000",
+					snap.Tickets[0].Key, snap.Tickets[exposedResults-1].Key)
+			}
+			if snap.Tickets[0].Title != "Exact 1" {
+				t.Errorf("first Ticket title = %q, want authoritative exact-root state", snap.Tickets[0].Title)
+			}
+
+			mu.Lock()
+			gotMembershipRequests := membershipRequests
+			gotExactRequests := exactRequests
+			mu.Unlock()
+			if gotMembershipRequests != 10 {
+				t.Errorf("membership requests = %d, want 10 pages and no request beyond the ceiling", gotMembershipRequests)
+			}
+			if gotExactRequests != 10 {
+				t.Errorf("exact-root requests = %d, want 10 bounded alias batches", gotExactRequests)
 			}
 		})
 	}
