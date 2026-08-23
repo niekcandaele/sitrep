@@ -48,9 +48,9 @@
 // seat; only an untrailed root returns to its armed list or quits when a decoded
 // Ticket has no list behind it. u clears the Trail and jumps to the root Watchlist.
 //
-// None of those Detail transitions touches the list's reading, rows, selection,
-// scroll offset, or Filter. The original list therefore resumes exactly where it
-// was without restoration code.
+// Trail seat pushes and pops leave the hidden list state untouched. Root esc
+// and u instead resume or arm the list through its normal reconciliation, which
+// may clamp the selection and scroll offset to the current rows before drawing.
 //
 // A Ticket's Detail is fetched only when a seated Ticket misses the session cache
 // or r explicitly re-reads it: re-opening a cached Ticket costs the Tracker

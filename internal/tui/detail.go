@@ -211,7 +211,7 @@ func (m Model) selectedTicket() (model.Ticket, bool) {
 	return m.rows[m.selected].Ticket, true
 }
 
-// openDetail switches to the Detail screen for the selected thin Ticket. A
+// openDetail switches to the Detail screen for the selected list Ticket. A
 // successful session-cache entry seats immediately; only a miss fetches Detail
 // (ADR-0003). The list state remains untouched, which is why the root esc
 // round-trip is exact.
@@ -258,10 +258,10 @@ func ticketFromLinkTarget(target model.LinkTarget) model.Ticket {
 	return model.Ticket{
 		ID:           target.ID,
 		Key:          target.Key,
-		Title:        target.Title,
+		Title:        sanitizeTerminalText(target.Title),
 		URL:          target.URL,
 		Status:       target.Status,
-		NativeStatus: target.NativeStatus,
+		NativeStatus: sanitizeTerminalText(target.NativeStatus),
 	}
 }
 

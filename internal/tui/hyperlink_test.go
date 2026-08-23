@@ -324,6 +324,61 @@ func TestLinkPlainTextFieldsCannotInjectTerminalControls(t *testing.T) {
 	}
 }
 
+func TestFollowingHostileLinkSanitizesThinDetailSeat(t *testing.T) {
+	hostile := func(marker string) string {
+		return "visible-" + marker + "\x00\t\n\r\x7f " +
+			"\x1b]52;c;YXR0YWNr\a " +
+			"\x1b]8;;https://evil.example/" + marker + "\x1b\\scope\x1b]8;;\x1b\\ " +
+			string([]byte{0x9d}) + "52;c;c1" + string([]byte{0x9c, 0xff}) + " café 東京"
+	}
+	title := hostile("title")
+	status := hostile("status")
+	url := "https://tracker.example/CHILD"
+
+	m, _ := navigableDetailModel(t)
+	m.width = 600
+	m.help.SetWidth(m.width)
+	m.detail.input.Detail.Links = []model.Link{{
+		Kind: model.LinkRelates, NativeLabel: "relates to",
+		Target: model.LinkTarget{
+			ID: "CHILD", Key: "CHILD", Title: title, URL: url,
+			Status: model.StatusTodo, NativeStatus: status,
+		},
+	}}
+	m = focusLinkAt(m.reconcileDetail(true), 0)
+	child, cmd := followFocused(t, m)
+	if cmd == nil {
+		t.Fatal("hostile Link follow issued no Detail fetch")
+	}
+
+	safeTitle := sanitizeTerminalText(title)
+	safeStatus := sanitizeTerminalText(status)
+	if child.detail.ticket.Title != safeTitle || child.detail.ticket.NativeStatus != safeStatus {
+		t.Errorf("thin seat retained unsafe display fields: title=%q status=%q", child.detail.ticket.Title, child.detail.ticket.NativeStatus)
+	}
+	raw := child.View().Content
+	if !utf8.ValidString(raw) {
+		t.Errorf("followed Detail frame contains malformed UTF-8: % x", []byte(raw))
+	}
+	for _, injected := range []string{"\x1b]52;", hyperlinkOpen("https://evil.example/title"), hyperlinkOpen("https://evil.example/status")} {
+		if strings.Contains(raw, injected) {
+			t.Errorf("followed Detail retained injected terminal bytes % x: %q", []byte(injected), raw)
+		}
+	}
+	for control := rune(0x80); control <= 0x9f; control++ {
+		if strings.ContainsRune(raw, control) {
+			t.Errorf("followed Detail retained C1 control U+%04X: %q", control, raw)
+		}
+	}
+	visible := ansi.Strip(raw)
+	if !strings.Contains(visible, safeTitle) || !strings.Contains(visible, "["+safeStatus+"]") {
+		t.Errorf("followed Detail omitted sanitized title/status: %q", visible)
+	}
+	if !strings.Contains(visible, "café 東京") {
+		t.Errorf("followed Detail removed valid Unicode: %q", visible)
+	}
+}
+
 func TestListTicketKeyHyperlinkExcludesMarkerPaddingAndTitle(t *testing.T) {
 	url := "https://example.test/T-1"
 	rows := []Row{{Kind: RowTicket, Ticket: model.Ticket{
