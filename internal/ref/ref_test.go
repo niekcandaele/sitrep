@@ -224,12 +224,27 @@ func TestParseBareNumberInAnUnrecognisedClone(t *testing.T) {
 	}
 }
 
+func TestEmptyRefUsesGenericRefVocabulary(t *testing.T) {
+	for _, raw := range []string{"", " \t\n"} {
+		_, err := ref.Parse(context.Background(), raw)
+		if err == nil {
+			t.Fatalf("Parse(%q) succeeded, want an error", raw)
+		}
+		if got, want := err.Error(), "a Ref is required"; got != want {
+			t.Errorf("Parse(%q) error = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // Rule 4 of the prose contract: an error names the fix. "cannot parse this"
 // with no accepted form beside it is a dead end.
 func TestUnparseableRefNamesTheAcceptedForms(t *testing.T) {
 	_, err := ref.Parse(context.Background(), "not a ref at all")
 	if err == nil {
 		t.Fatal("Parse succeeded on nonsense, want an error")
+	}
+	if !strings.HasPrefix(err.Error(), `cannot parse "not a ref at all" as a Ref`) {
+		t.Errorf("error %q does not use generic Ref vocabulary", err)
 	}
 	for _, want := range []string{"not a ref at all", "owner/repo#123", "PROJ-123", "bare number", "--help"} {
 		if !strings.Contains(err.Error(), want) {

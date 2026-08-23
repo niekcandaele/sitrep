@@ -1214,7 +1214,7 @@ func TestResolveRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 		{
 			name: "a GitHub Ref",
 			r:    ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 1, Raw: "acme/widgets#1"},
-			want: "is not a Jira Epic Ref",
+			want: "is not a Jira Ref",
 		},
 		{
 			name: "an empty key",

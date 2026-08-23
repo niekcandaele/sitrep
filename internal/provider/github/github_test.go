@@ -1138,7 +1138,7 @@ func TestCrossRepoChildKeepsItsOwnRepository(t *testing.T) {
 	// paste it straight back into sitrep.
 	back, err := ref.Parse(context.Background(), found.Key)
 	if err != nil {
-		t.Fatalf("the cross-repo Key does not parse as an Epic Ref: %v", err)
+		t.Fatalf("the cross-repo Key does not parse as a Ref: %v", err)
 	}
 	if back.Owner != "acme" || back.Repo != "widgets" || back.Number != 91 {
 		t.Errorf("Key round-tripped to %+v, want acme/widgets#91", back)
@@ -1892,7 +1892,7 @@ func TestResolveRejectsANonGitHubRef(t *testing.T) {
 	// spends a request finding out.
 	providertest.CheckError(t, "github", err, providertest.Want{
 		Kind:     provider.KindBadRef,
-		Contains: []string{"not a GitHub Epic Ref", "https://gitlab.com/a/b/-/issues/1"},
+		Contains: []string{"not a GitHub Ref", "https://gitlab.com/a/b/-/issues/1"},
 	})
 }
 

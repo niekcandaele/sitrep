@@ -238,7 +238,7 @@ func TestParseValidation(t *testing.T) {
 		{
 			name: "project missing on jira",
 			doc:  "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    auth:\n      token_env: T\n",
-			want: []string{`profile "x"`, "project is required for a jira profile", "key prefix"},
+			want: []string{`profile "x"`, "project is required for a jira profile", "key prefix Refs match on"},
 		},
 		{
 			name: "project is not a key prefix",
@@ -289,7 +289,7 @@ func TestParseValidation(t *testing.T) {
 		{
 			name: "project on a github profile",
 			doc:  "profiles:\n  x:\n    provider: github\n    project: acme/widgets\n",
-			want: []string{`profile "x"`, "project is not used by a github profile", "owner/repo"},
+			want: []string{`profile "x"`, "project is not used by a github profile", "a GitHub Ref carries its own owner/repo"},
 		},
 		{
 			name: "a second YAML document",

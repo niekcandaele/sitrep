@@ -55,7 +55,7 @@ func TestRun(t *testing.T) {
 			name:         "no arguments demands a ref",
 			args:         nil,
 			wantCode:     2,
-			wantStderr:   []string{"Epic Ref is required", "sitrep [flags] <ref>"},
+			wantStderr:   []string{"a Selector is required", "sitrep [flags] <ref>"},
 			wantEmptyOut: true,
 		},
 		{

@@ -1,0 +1,53 @@
+sitrep - a read-only terminal ticket viewer.
+
+Usage:
+  sitrep [flags] <ref>
+  sitrep [flags] <ref> <ref>...
+  sitrep [flags] -
+  sitrep [flags] --query <query>
+
+Selectors:
+  One Ref selects an Epic Watchlist. If it resolves to a plain Ticket instead,
+  sitrep opens that Ticket's Detail.
+
+  Two or more positional Refs select exact Tickets in order. They need no common
+  Epic, but must use one Tracker and connection.
+
+  A sole "-" reads whitespace-separated Refs from stdin. It must be the only
+  positional argument; even one stdin Ref keeps exact Ref-list semantics.
+
+  --query passes the exact, opaque tracker-native Query to the selected Tracker.
+  It cannot be combined with positional Refs or stdin. Use an explicit Profile,
+  or an unambiguous supported GitHub/GitLab origin in the current clone.
+
+Ref forms:
+  111                                        bare issue number
+  #111                                       bare issue number
+  acme/widgets#111                           owner, repository, number
+  https://github.com/acme/widgets/issues/111  GitHub issue URL
+  ABC-123                                    Jira key; its prefix matches a Profile
+  https://acme.atlassian.net/browse/ABC-123   Jira browse URL
+  https://gitlab.com/acme/widgets/-/issues/7  GitLab issue/work-item URL
+  acme&12                                    GitLab native epic Ref
+  https://gitlab.com/groups/acme/-/epics/12  GitLab native epic URL
+  acme/widgets%3                             GitLab milestone Ref
+  https://gitlab.com/acme/widgets/-/milestones/3
+                                             GitLab milestone URL
+
+  A bare number is resolved through the current clone's origin remote; the other
+  forms work anywhere. GitLab's &N names a native Epic; %N is the milestone-as-
+  Epic fallback available on GitLab Free.
+
+Flags:
+  -h, --help              show this help and exit
+      --interval <dur>    how often the monitor refreshes (default 60s)
+      --no-mouse          start the monitor without mouse capture
+      --json              print a one-shot JSON report and exit
+      --plain             print a one-shot Watchlist or Ticket report and exit
+      --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
+                          matched from the route or Refs)
+      --provider <name>   Provider to read from: "auto" (the default) detects
+                          from the route or Refs; "github", "gitlab", or "jira"
+                          forces that driver; "fake" serves a fixture Watchlist
+      --query <query>     exact tracker-native Query selecting a Watchlist
+      --version           show version information and exit

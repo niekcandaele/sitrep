@@ -473,7 +473,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // checkRef rejects a Ref this driver cannot serve before any network call.
 func checkRef(r ref.Ref) error {
 	if r.Tracker != ref.TrackerGitHub {
-		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Epic Ref", r.Raw)
+		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Ref", r.Raw)
 	}
 	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
 		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)

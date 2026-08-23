@@ -471,7 +471,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // returns the issue key it names.
 func checkRef(r ref.Ref) (string, error) {
 	if r.Tracker != ref.TrackerJira {
-		return "", provider.Errorf(provider.KindBadRef, "jira: %q is not a Jira Epic Ref", r.Raw)
+		return "", provider.Errorf(provider.KindBadRef, "jira: %q is not a Jira Ref", r.Raw)
 	}
 	key, ok := normalizeKey(r.Key)
 	if !ok {

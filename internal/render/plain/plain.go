@@ -145,7 +145,7 @@ func BarFill(p model.Progress, width int) int {
 	return filled
 }
 
-// ProgressBar renders a fixed-width completion bar for an Epic's Progress.
+// ProgressBar renders a fixed-width completion bar for a Watchlist's Progress.
 // Cancelled Tickets are already out of Progress.Denominator, so the bar shows
 // real finished work rather than a total that can never be reached. The result
 // is always exactly width runes wide, including when the Denominator is zero.

@@ -2,7 +2,7 @@
 //
 // A Provider is a driver translating one Tracker's API into sitrep's model.
 // Providers are compiled in and read-only (ADR-0002): no method mutates Tracker
-// state, and none ever will — sitrep is a situation report, not a client.
+// state, and none ever will — sitrep is a ticket viewer, not a Tracker client.
 //
 // The interface is split by view, not by entity (ADR-0003). Resolve is the
 // cheap batched hot path: one logical read returning a Watchlist's lightweight

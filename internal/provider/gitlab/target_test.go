@@ -104,7 +104,7 @@ func TestTargetFor(t *testing.T) {
 		{
 			name:    "a GitHub Ref",
 			r:       ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
-			wantErr: "is not a GitLab Epic Ref",
+			wantErr: "is not a GitLab Ref",
 		},
 		{
 			name:    "no path and no Profile",

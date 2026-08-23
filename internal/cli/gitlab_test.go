@@ -507,7 +507,7 @@ func TestBareGitLabReferenceWithNoProfile(t *testing.T) {
 	if got.stdout != "" {
 		t.Errorf("stdout = %q, want empty on failure", got.stdout)
 	}
-	for _, want := range []string{"which GitLab instance", `"&12"`, "add a gitlab profile", "full URL"} {
+	for _, want := range []string{"which GitLab instance", `"&12"`, "add a gitlab profile", "pass the Ref's full URL"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}
@@ -603,7 +603,7 @@ func TestProviderGitLabRejectsAGitHubRef(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"is not a GitLab Epic Ref", "acme/widgets#111"} {
+	for _, want := range []string{"is not a GitLab Ref", "acme/widgets#111"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}
