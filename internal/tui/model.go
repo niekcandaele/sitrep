@@ -56,9 +56,9 @@ type Model struct {
 	// separate so that esc can drop both in one move.
 	search textinput.Model
 
-	// mode is which screen owns the terminal. Opening and closing Detail
-	// touches nothing above this line — which is why the selection, the scroll
-	// offset and the filters survive it without any code restoring them.
+	// mode is which screen owns the terminal. Detail Trail navigation leaves the
+	// list state above untouched. Returning from a Detail root to the list may
+	// reconcile its selection and scroll geometry before drawing.
 	//
 	// Decoder startup can seat modeDetail before the first frame, with no list
 	// behind it. detailState therefore carries the Detail's own rendering context,

@@ -213,8 +213,8 @@ func (m Model) selectedTicket() (model.Ticket, bool) {
 
 // openDetail switches to the Detail screen for the selected list Ticket. A
 // successful session-cache entry seats immediately; only a miss fetches Detail
-// (ADR-0003). The list state remains untouched, which is why the root esc
-// round-trip is exact.
+// (ADR-0003). The transition leaves hidden list state untouched; root esc
+// reconciles it before drawing the list again.
 func (m Model) openDetail() (tea.Model, tea.Cmd) {
 	t, ok := m.selectedTicket()
 	if !ok {
