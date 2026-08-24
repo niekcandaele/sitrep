@@ -96,20 +96,128 @@ func TestRedactedTransportErrorHidesURLAndPreservesCause(t *testing.T) {
 	}
 }
 
+func TestRedactQueryMasksEquivalentRepresentations(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		message    string
+		want       []string
+		absent     []string
+		unchanged  bool
+		wantMarker bool
+	}{
+		{
+			name: "exact raw", query: "SECRET_QUERY_47",
+			message: "Query SECRET_QUERY_47 is invalid: bad syntax",
+			want:    []string{"bad syntax"}, absent: []string{"SECRET_QUERY_47"}, wantMarker: true,
+		},
+		{
+			name: "percent hex case", query: "search=needs%2ftriage",
+			message: "search=needs%2Ftriage is invalid",
+			absent:  []string{"needs%2ftriage", "needs%2Ftriage", "needs/triage"}, wantMarker: true,
+		},
+		{
+			name: "opaque percent hex case", query: "state%3Aopen",
+			message: "state%3aopen is invalid",
+			absent:  []string{"state%3Aopen", "state%3aopen", "state:open"}, wantMarker: true,
+		},
+		{
+			name: "space spellings", query: "search=needs%20triage",
+			message: "search=needs+triage and search=needs triage are invalid",
+			absent:  []string{"needs%20triage", "needs+triage", "needs triage"}, wantMarker: true,
+		},
+		{
+			name: "decoded slash and non ASCII", query: "search=Caf%C3%A9%20%2Fready",
+			message: "search: Café /ready is invalid",
+			absent:  []string{"Caf%C3%A9%20%2Fready", "Café /ready"}, wantMarker: true,
+		},
+		{
+			name: "canonical component order", query: "z=needs%20triage&a=bug%2fui",
+			message: "normalized as a=bug%2Fui&z=needs+triage before rejection",
+			absent:  []string{"z=needs%20triage&a=bug%2fui", "a=bug%2Fui&z=needs+triage"}, wantMarker: true,
+		},
+		{
+			name: "repeated parameters", query: "label=needs%20triage&label=bug%2fui",
+			message: "labels label=needs+triage&label=bug%2Fui are invalid",
+			absent:  []string{"label=needs+triage&label=bug%2Fui", "needs triage", "bug/ui"}, wantMarker: true,
+		},
+		{
+			name: "field labelled decoded value", query: "jql=project%20%3D%20ABC",
+			message: "jql: project = ABC is not valid JQL",
+			want:    []string{"not valid JQL"}, absent: []string{"project%20%3D%20ABC", "project = ABC"}, wantMarker: true,
+		},
+		{
+			name: "no match", query: "search=private-value",
+			message:   "tracker service unavailable",
+			unchanged: true,
+		},
+		{
+			name: "empty query", query: "",
+			message:   "tracker service unavailable",
+			unchanged: true,
+		},
+		{
+			name: "malformed percent keeps exact masking", query: "q=bad%2",
+			message: "Query q=bad%2 was rejected",
+			absent:  []string{"q=bad%2"}, wantMarker: true,
+		},
+		{
+			name: "short value preserves status and guidance", query: "q=1",
+			message: "authentication failed (401); retry after 60s; q: 1 was rejected",
+			want:    []string{"401", "60s", "retry after"}, absent: []string{"q: 1"}, wantMarker: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := provider.RedactQuery(tt.message, tt.query)
+			if tt.unchanged && got != tt.message {
+				t.Fatalf("RedactQuery = %q, want original %q", got, tt.message)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("RedactQuery = %q, want useful prose %q", got, want)
+				}
+			}
+			for _, absent := range tt.absent {
+				if strings.Contains(got, absent) {
+					t.Errorf("RedactQuery = %q, leaked sensitive form %q", got, absent)
+				}
+			}
+			if tt.wantMarker && !strings.Contains(got, "[query]") {
+				t.Errorf("RedactQuery = %q, want replacement marker", got)
+			}
+		})
+	}
+}
+
 func TestRedactQueryErrorPreservesKindAndCause(t *testing.T) {
-	const query = "SECRET_QUERY_47"
+	const query = "search=needs%20triage"
 	cause := errors.New("server failed")
-	original := provider.Errorf(provider.KindUnavailable, "gitlab: %s: %w", query, cause)
+	original := provider.Errorf(provider.KindUnavailable,
+		"gitlab: search: needs triage and search=needs+triage were rejected: %w", cause)
 	err := provider.RedactQueryError(original, query)
 
-	if strings.Contains(err.Error(), query) || !strings.Contains(err.Error(), "[query]") {
-		t.Errorf("error = %q, want redacted Query", err)
+	for _, sensitive := range []string{query, "needs triage", "needs+triage"} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked Query form %q", err, sensitive)
+		}
+	}
+	if !strings.Contains(err.Error(), "[query]") || !strings.Contains(err.Error(), "gitlab:") {
+		t.Errorf("error = %q, want redacted Query and Provider context", err)
 	}
 	if provider.KindOf(err) != provider.KindUnavailable {
 		t.Errorf("KindOf(error) = %s, want unavailable", provider.KindOf(err))
 	}
-	if !errors.Is(err, cause) {
-		t.Errorf("errors.Is(%v, cause) = false, want true", err)
+	if !errors.Is(err, cause) || !errors.Is(err, original) {
+		t.Errorf("errors.Is did not preserve the complete original chain: %v", err)
+	}
+}
+
+func TestRedactQueryErrorReturnsOriginalWhenNothingChanges(t *testing.T) {
+	original := provider.Errorf(provider.KindAuth, "github: authentication failed (401) — retry after 60s")
+	if got := provider.RedactQueryError(original, "q=1"); !errors.Is(got, original) {
+		t.Errorf("RedactQueryError returned %T %v, want original error", got, got)
 	}
 }
 

@@ -151,8 +151,9 @@ type detailState struct {
 	offset int
 	// linkFocus is the stable identity of the focused relationship. The separate
 	// bit distinguishes an absent focus from a valid zero-value identity.
-	linkFocus    detailLinkIdentity
-	hasLinkFocus bool
+	linkFocus        detailLinkIdentity
+	hasLinkFocus     bool
+	markdownSections detailMarkdownSections
 }
 
 // detailTrailEntry is a stable snapshot of one prior Detail seat. In-flight
@@ -303,6 +304,7 @@ func (m Model) syncDetailKeysFor(doc detailDocument) Model {
 // height, then clamps the body window. Callers that changed the document's
 // geometry may ask to bring a retained focus minimally back into view.
 func (m Model) reconcileDetail(ensureFocus bool) Model {
+	m = m.ensureDetailMarkdownSections()
 	doc := m.detailDocument()
 	m = m.syncDetailKeysFor(doc)
 	m.detail.offset = clampDetailOffset(m.detail.offset, len(doc.Lines), m.detailBodyHeight())
@@ -311,6 +313,22 @@ func (m Model) reconcileDetail(ensureFocus bool) Model {
 			m.detail.offset = ensureDocumentLineVisible(row.Line, m.detail.offset, len(doc.Lines), m.detailBodyHeight())
 		}
 	}
+	return m
+}
+
+func (m Model) ensureDetailMarkdownSections() Model {
+	if !m.detail.loaded {
+		return m
+	}
+	markdown := m.effectiveMarkdownRenderers()
+	if !m.detail.markdownSections.matches(m.detail.input, m.width, markdown) {
+		m.detail.markdownSections = renderDetailMarkdownSections(m.detail.input, m.width, m.styles, markdown)
+	}
+	return m
+}
+
+func (m Model) invalidateDetailMarkdownSections() Model {
+	m.detail.markdownSections.valid = false
 	return m
 }
 
@@ -478,6 +496,7 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 		return m.reconcileDetail(false)
 	}
 	m.detail.lastErr = nil
+	m = m.invalidateDetailMarkdownSections()
 
 	at := m.now()
 	m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: at}
@@ -578,8 +597,15 @@ func (m Model) clampDetail(offset int) int {
 func (m Model) detailDocument() detailDocument {
 	switch {
 	case m.detail.loaded:
-		return composeDetailDocumentWithMarkdown(m.detail.input, m.width, m.styles, m.detail.linkFocus,
-			m.detail.hasLinkFocus, m.effectiveMarkdownRenderers())
+		markdown := m.effectiveMarkdownRenderers()
+		sections := m.detail.markdownSections
+		if !sections.matches(m.detail.input, m.width, markdown) {
+			// Hand-built loaded models used by embedding callers and focused tests may
+			// not have passed through a production reconciliation yet.
+			sections = renderDetailMarkdownSections(m.detail.input, m.width, m.styles, markdown)
+		}
+		return composeDetailDocumentWithSections(m.detail.input, m.width, m.styles, m.detail.linkFocus,
+			m.detail.hasLinkFocus, sections)
 	case m.detail.lastErr != nil:
 		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles, m.detailBackDescription())
 	default:

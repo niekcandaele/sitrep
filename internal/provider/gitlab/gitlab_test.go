@@ -1092,12 +1092,12 @@ func TestResolveQueryCutoffAccounting(t *testing.T) {
 }
 
 func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
-	const query = "state=opened&search=ready"
+	const query = "state=opened&search=ready&order_by=iid&sort=asc"
 	first := queryPage(queryIssueCLI101, "")
 	first.headers = map[string]string{
 		"X-Next-Cursor": "part,second",
 		"Link": "</api/v4/issues?per_page=4&cursor=before>; rel=\"prev\", " +
-			"</api/v4/issues?search=rea%64y&pagination=keyset&state=opened&per_page=4&cursor=part%2Csecond>; rel=\"next\"",
+			"</api/v4/issues?sort=asc&search=rea%64y&pagination=keyset&order_by=%69id&state=opened&per_page=4&cursor=part%2Csecond>; rel=\"next\"",
 	}
 	s := newReplayServer(t, queryResponses(first, queryPage(queryIssueCore7, "")))
 
@@ -1123,7 +1123,7 @@ func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
 		t.Errorf("first membership query = %q, want %q", got, want)
 	}
 	if got, want := searches[1].rawQuery,
-		"search=rea%64y&pagination=keyset&state=opened&per_page=4&cursor=part%2Csecond"; got != want {
+		"sort=asc&search=rea%64y&pagination=keyset&order_by=%69id&state=opened&per_page=4&cursor=part%2Csecond"; got != want {
 		t.Errorf("keyset continuation query = %q, want Tracker-supplied %q", got, want)
 	}
 	all := s.recorded()
@@ -1133,15 +1133,30 @@ func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
 }
 
 func TestResolveQueryRejectsContinuationMembershipChanges(t *testing.T) {
-	const query = "state=opened&search=SECRET_QUERY_47"
+	const defaultQuery = "state=opened&search=SECRET_QUERY_47"
 	tests := []struct {
 		name      string
+		query     string
 		nextQuery string
 	}{
-		{name: "dropped filter", nextQuery: "state=opened&per_page=4&cursor=next"},
-		{name: "changed value", nextQuery: "state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
-		{name: "duplicate changed value", nextQuery: "state=opened&state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
-		{name: "added filter", nextQuery: "state=opened&search=SECRET_QUERY_47&milestone=7&per_page=4&cursor=next"},
+		{name: "dropped filter", query: defaultQuery, nextQuery: "state=opened&per_page=4&cursor=next"},
+		{name: "changed value", query: defaultQuery, nextQuery: "state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "duplicate changed value", query: defaultQuery, nextQuery: "state=opened&state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "added filter", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&milestone=7&per_page=4&cursor=next"},
+		{name: "added order by", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=iid&per_page=4&cursor=next"},
+		{name: "added sort", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&sort=asc&per_page=4&cursor=next"},
+		{
+			name: "changed original order by", query: defaultQuery + "&order_by=iid",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=created_at&per_page=4&cursor=next",
+		},
+		{
+			name: "changed original sort", query: defaultQuery + "&sort=asc",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&sort=desc&per_page=4&cursor=next",
+		},
+		{
+			name: "conflicting duplicate ordering control", query: defaultQuery + "&order_by=iid&sort=asc",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=iid&sort=asc&sort=desc&per_page=4&cursor=next",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1154,14 +1169,14 @@ func TestResolveQueryRejectsContinuationMembershipChanges(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{queryGlobalIssues: {first}})
 
 			snap, err := newProvider(s, gitlab.WithMaxTickets(4)).Resolve(
-				context.Background(), provider.QuerySelector{Query: query})
+				context.Background(), provider.QuerySelector{Query: tt.query})
 			providertest.CheckError(t, "gitlab", err, providertest.Want{
 				Kind:     provider.KindUnavailable,
 				Contains: []string{"pagination", "Selector membership"},
-				Secret:   query,
+				Secret:   tt.query,
 			})
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Errorf("error = %q, leaked credential", err)
+			if strings.Contains(err.Error(), fixtureToken) || strings.Contains(err.Error(), "SECRET_QUERY_47") {
+				t.Errorf("error = %q, leaked credential or Query", err)
 			}
 			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
 				t.Errorf("snapshot = %+v, want no partial membership", snap)
@@ -1507,6 +1522,40 @@ func TestResolveQueryRejectsMalformedNativeQuery(t *testing.T) {
 	}
 	if provider.KindOf(err).Retryable() {
 		t.Error("malformed native query must not be retryable")
+	}
+}
+
+func TestResolveQueryRedactsDecodedAndNormalizedNativeExplanation(t *testing.T) {
+	const query = "search=needs%20triage&labels=bug%2fui"
+	s := newReplayServer(t, map[string][]response{
+		queryGlobalIssues: {{
+			status: http.StatusUnprocessableEntity,
+			body: `{"message":{"query":["search=needs triage&labels=bug/ui is invalid",` +
+				`"labels=bug%2Fui&search=needs+triage was normalized"]}}`,
+		}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "is invalid", "was normalized", "[query]"},
+		Secret:   query,
+	})
+	for _, sensitive := range []string{
+		"search=needs triage&labels=bug/ui", "labels=bug%2Fui&search=needs+triage", fixtureToken,
+	} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked sensitive form %q", err, sensitive)
+		}
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if got := len(s.requestsTo(queryGlobalIssues)); got != 1 {
+		t.Errorf("membership requests = %d, want one", got)
+	}
+	if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+		t.Errorf("exact reads = %d, want none", got)
 	}
 }
 

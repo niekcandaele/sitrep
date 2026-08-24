@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -23,6 +24,75 @@ const detailHeaderHeight = 4
 type detailDocument struct {
 	Lines    []string
 	LinkRows []detailLinkRow
+}
+
+// detailMarkdownSections is the expensive, width- and theme-bound part of a
+// loaded Detail document. Link rows stay outside it so focus and navigation
+// geometry can be recomposed on every frame without invoking Goldmark or
+// Glamour.
+type detailMarkdownSections struct {
+	description []string
+	comments    []string
+	valid       bool
+
+	sourceDescription string
+	sourceComments    []detailMarkdownCommentSource
+	ticketURL         string
+	commentsEnabled   bool
+	width             int
+	theme             markdownTheme
+	glamourStyle      string
+}
+
+type detailMarkdownCommentSource struct {
+	body      string
+	author    string
+	createdAt string
+}
+
+func (sections detailMarkdownSections) matches(
+	in DetailInput, width int, markdown detailMarkdownRenderers,
+) bool {
+	if !sections.valid || sections.sourceDescription != in.Detail.Description ||
+		sections.ticketURL != in.Ticket.URL || sections.commentsEnabled != in.Capabilities.Comments ||
+		sections.width != width || sections.theme != markdown.theme ||
+		sections.glamourStyle != os.Getenv("GLAMOUR_STYLE") ||
+		len(sections.sourceComments) != len(in.Detail.Comments) {
+		return false
+	}
+	for i, comment := range in.Detail.Comments {
+		source := sections.sourceComments[i]
+		if source.body != comment.Body || source.author != comment.Author.Login ||
+			source.createdAt != comment.CreatedAt.UTC().Format(commentTimeLayout) {
+			return false
+		}
+	}
+	return true
+}
+
+func renderDetailMarkdownSections(
+	in DetailInput, width int, s Styles, markdown detailMarkdownRenderers,
+) detailMarkdownSections {
+	comments := make([]detailMarkdownCommentSource, len(in.Detail.Comments))
+	for i, comment := range in.Detail.Comments {
+		comments[i] = detailMarkdownCommentSource{
+			body:      comment.Body,
+			author:    comment.Author.Login,
+			createdAt: comment.CreatedAt.UTC().Format(commentTimeLayout),
+		}
+	}
+	return detailMarkdownSections{
+		description:       describeDetail(in, width, s, markdown.description),
+		comments:          commentLines(in, width, s, markdown.comment),
+		valid:             true,
+		sourceDescription: in.Detail.Description,
+		sourceComments:    comments,
+		ticketURL:         in.Ticket.URL,
+		commentsEnabled:   in.Capabilities.Comments,
+		width:             width,
+		theme:             markdown.theme,
+		glamourStyle:      os.Getenv("GLAMOUR_STYLE"),
+	}
 }
 
 // detailLinkIdentity identifies one displayed relationship across re-reads and
@@ -203,9 +273,15 @@ func composeDetailDocument(in DetailInput, width int, s Styles, focused detailLi
 // navigation metadata.
 func composeDetailDocumentWithMarkdown(in DetailInput, width int, s Styles, focused detailLinkIdentity,
 	hasFocus bool, markdown detailMarkdownRenderers) detailDocument {
-	doc := detailDocument{Lines: describeDetail(in, width, s, markdown.description)}
-	if comments := commentLines(in, width, s, markdown.comment); len(comments) > 0 {
-		doc.Lines = append(append(doc.Lines, ""), comments...)
+	sections := renderDetailMarkdownSections(in, width, s, markdown)
+	return composeDetailDocumentWithSections(in, width, s, focused, hasFocus, sections)
+}
+
+func composeDetailDocumentWithSections(in DetailInput, width int, s Styles, focused detailLinkIdentity,
+	hasFocus bool, sections detailMarkdownSections) detailDocument {
+	doc := detailDocument{Lines: append([]string(nil), sections.description...)}
+	if len(sections.comments) > 0 {
+		doc.Lines = append(append(doc.Lines, ""), sections.comments...)
 	}
 	links, rows := linkDocument(in, width, s, focused, hasFocus)
 	if len(links) > 0 {

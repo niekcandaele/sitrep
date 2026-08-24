@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"image/color"
 	"reflect"
 	"strings"
 	"testing"
@@ -710,6 +711,117 @@ func TestDetailDocumentsStayWidthBoundedAtExtremeWidths(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDetailMarkdownCacheSurvivesHeartbeatsAndScrolling(t *testing.T) {
+	t.Setenv("GLAMOUR_STYLE", "dark")
+	m := detailModel(t)
+	m.width, m.height, m.ready = 48, 14, true
+	m.detail.input.Detail.Description = "## CACHE DESCRIPTION\n\n" + strings.Repeat("long description words ", 20)
+	m.detail.input.Detail.Comments = []model.Comment{
+		{Author: model.User{Login: "ann"}, Body: "CACHE COMMENT " + strings.Repeat("comment words ", 12)},
+		{Author: model.User{Login: "bob"}, Body: "SECOND CACHE COMMENT"},
+	}
+	m = m.invalidateDetailMarkdownSections().reconcileDetail(true)
+	if !m.detail.markdownSections.valid {
+		t.Fatal("loaded Detail reconciliation did not populate the Markdown cache")
+	}
+
+	rerendered := errors.New("Markdown was rendered again")
+	m.markdown.description = markdownRenderer{err: rerendered}
+	m.markdown.comment = markdownRenderer{err: rerendered}
+	messages := []tea.Msg{
+		heartbeatMsg(time.Now()),
+		heartbeatMsg(time.Now().Add(time.Second)),
+		tea.KeyPressMsg{Code: tea.KeyDown},
+		tea.KeyPressMsg{Code: tea.KeyPgDown},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+	}
+	for i, message := range messages {
+		updated, _ := m.Update(message)
+		m = updated.(Model)
+		document := ansi.Strip(strings.Join(m.detailDocument().Lines, "\n"))
+		frame := ansi.Strip(m.View().Content)
+		for _, rendered := range []string{document, frame} {
+			if strings.Contains(rendered, "Could not render Markdown:") || strings.Contains(rendered, rerendered.Error()) {
+				t.Fatalf("step %d rerendered cached Markdown:\n%s", i, rendered)
+			}
+		}
+		for _, want := range []string{"CACHE DESCRIPTION", "CACHE COMMENT", "SECOND CACHE COMMENT"} {
+			if !strings.Contains(document, want) {
+				t.Errorf("step %d document lost cached %q:\n%s", i, want, document)
+			}
+		}
+	}
+}
+
+func TestDetailMarkdownCacheInvalidatesOnResizeThemeAndReread(t *testing.T) {
+	t.Setenv("GLAMOUR_STYLE", "")
+	m := detailModel(t)
+	m.width, m.height, m.ready = 42, 14, true
+	m.detail.input.Detail.Description = "OLD CACHE PROSE " + strings.Repeat("wrap these words ", 12)
+	m.detail.input.Detail.Comments = []model.Comment{{Author: model.User{Login: "ann"}, Body: "OLD CACHE COMMENT"}}
+	m = m.invalidateDetailMarkdownSections().reconcileDetail(true)
+	m = m.moveDetailLinkFocus(1)
+	focus := m.detail.linkFocus
+	narrowDescriptionLines := len(m.detail.markdownSections.description)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 88, Height: 14})
+	m = updated.(Model)
+	if !m.detail.markdownSections.valid || m.detail.markdownSections.width != 88 {
+		t.Fatalf("resize cache = %+v, want valid width 88", m.detail.markdownSections)
+	}
+	if got := len(m.detail.markdownSections.description); got >= narrowDescriptionLines {
+		t.Errorf("resize left description at %d lines, narrow rendering had %d", got, narrowDescriptionLines)
+	}
+	if !m.detail.hasLinkFocus || m.detail.linkFocus != focus {
+		t.Errorf("resize changed Link focus from %+v to %+v", focus, m.detail.linkFocus)
+	}
+	if row, ok := detailLinkRowByIdentity(m.detailDocument(), focus); !ok ||
+		row.Line < m.detail.offset || row.Line >= m.detail.offset+m.detailBodyHeight() {
+		t.Errorf("resize did not reconcile retained Link focus into view: row=%+v offset=%d", row, m.detail.offset)
+	}
+
+	updated, _ = m.Update(tea.BackgroundColorMsg{Color: color.White})
+	m = updated.(Model)
+	if !m.detail.markdownSections.valid || m.detail.markdownSections.theme != markdownLight {
+		t.Fatalf("light-theme cache = %+v, want valid light rendering", m.detail.markdownSections)
+	}
+	lightDocument := strings.Join(m.detailDocument().Lines, "\n")
+	if !strings.Contains(lightDocument, "\x1b[38;5;234m") || strings.Contains(lightDocument, "\x1b[38;5;252mOLD CACHE PROSE") {
+		t.Errorf("theme invalidation did not recolor ordinary prose for light output: %q", lightDocument)
+	}
+
+	m.detailGeneration = 9
+	m = m.onDetailFetched(detailFetchedMsg{
+		generation: 9,
+		id:         m.detail.ticket.ID,
+		detail: model.Detail{
+			Description: "NEW CACHE PROSE",
+			Links: []model.Link{{
+				Kind:   model.LinkRelates,
+				Target: model.LinkTarget{ID: "NEW-2", Key: "NEW-2", Title: "New link geometry"},
+			}},
+		},
+		caps: model.Capabilities{},
+	})
+	doc := m.detailDocument()
+	body := ansi.Strip(strings.Join(doc.Lines, "\n"))
+	for _, old := range []string{"OLD CACHE PROSE", "OLD CACHE COMMENT"} {
+		if strings.Contains(body, old) {
+			t.Errorf("successful reread retained stale %q:\n%s", old, body)
+		}
+	}
+	if !strings.Contains(body, "NEW CACHE PROSE") || strings.Contains(body, "COMMENTS") {
+		t.Errorf("successful reread did not rebuild description/comment capability:\n%s", body)
+	}
+	if len(doc.LinkRows) != 1 || doc.LinkRows[0].Link.Target.ID != "NEW-2" ||
+		doc.LinkRows[0].Line < 0 || doc.LinkRows[0].Line >= len(doc.Lines) {
+		t.Errorf("successful reread Link geometry = %+v, want one current row", doc.LinkRows)
+	}
+	if m.detail.hasLinkFocus {
+		t.Errorf("successful reread retained focus for a removed Link: %+v", m.detail.linkFocus)
 	}
 }
 

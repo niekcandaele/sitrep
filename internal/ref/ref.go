@@ -837,8 +837,18 @@ func pathSegments(p string) []string {
 	return strings.Split(p, "/")
 }
 
+const maxDiagnosticRefBytes = 80
+
 func unparseable(raw string) error {
-	return fmt.Errorf(`cannot parse %q as a Ref — pass an issue URL, "owner/repo#123", `+
+	return fmt.Errorf(`cannot parse %s as a Ref — pass an issue URL, "owner/repo#123", `+
 		`"PROJ-123" or a bare number inside a clone (run "sitrep --help" for every accepted form)`,
-		strings.TrimSpace(raw))
+		diagnosticRef(raw))
+}
+
+func diagnosticRef(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) <= maxDiagnosticRefBytes {
+		return fmt.Sprintf("%q", trimmed)
+	}
+	return fmt.Sprintf("%q… (%d bytes)", trimmed[:maxDiagnosticRefBytes], len(trimmed))
 }

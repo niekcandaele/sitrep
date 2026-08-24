@@ -231,6 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
 		m = m.rebuildMarkdownRenderers()
+		m = m.invalidateDetailMarkdownSections()
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 		if m.mode == modeDetail {
 			m = m.reconcileDetail(true)
@@ -246,6 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markdownTheme = markdownLight
 		}
 		m = m.rebuildMarkdownRenderers()
+		m = m.invalidateDetailMarkdownSections()
 		if m.mode == modeDetail {
 			m = m.reconcileDetail(true)
 		}

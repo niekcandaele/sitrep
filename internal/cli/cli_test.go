@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/cli"
+	"github.com/niekcandaele/sitrep/internal/config"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
@@ -209,6 +210,42 @@ func TestStdinReadFailureDiscardsPartialInput(t *testing.T) {
 	}
 	if p.ResolveCalls() != 0 {
 		t.Errorf("ResolveCalls = %d, want 0", p.ResolveCalls())
+	}
+}
+
+func TestMalformedRefFromStdinHasCompactDiagnosticBeforeProviderWork(t *testing.T) {
+	const inputBytes = 100_000
+	input := strings.Repeat("x", inputBytes)
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"--plain", "-"}, &stdout, &stderr, cli.Deps{
+		Stdin:   strings.NewReader(input),
+		Config:  &config.Config{},
+		OpenTTY: panicTTY,
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			panic("origin was read")
+		},
+	})
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() >= 1024 {
+		t.Errorf("stderr is %d bytes, want a compact diagnostic", stderr.Len())
+	}
+	message := stderr.String()
+	for _, want := range []string{"sitrep: cannot parse", "(100000 bytes)", "owner/repo#123", "--help"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("stderr = %q, want %q", message, want)
+		}
+	}
+	if strings.Contains(message, input) {
+		t.Error("stderr contains the complete malformed stdin Ref")
+	}
+	if strings.Count(message, "\n") != 1 || !strings.HasSuffix(message, "\n") {
+		t.Errorf("stderr is not exactly one physical line: %q", message)
 	}
 }
 

@@ -803,6 +803,30 @@ func TestResolveQueryRedactsQueryFromNativeExplanation(t *testing.T) {
 	}
 }
 
+func TestResolveQueryRedactsDecodedAndNormalizedNativeExplanation(t *testing.T) {
+	const query = "label%3aneeds%20triage"
+	body := `{"errors":[{"type":"SEARCH_QUERY_ERROR","message":"Decoded label:needs triage; normalized label%3Aneeds+triage is invalid","path":["search"]}]}`
+	s := newReplayServer(t, response{body: body})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "github", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "Decoded", "normalized", "is invalid", "[query]"},
+		Secret:   query,
+	})
+	for _, sensitive := range []string{"label:needs triage", "label%3Aneeds+triage", fixtureToken} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked sensitive form %q", err, sensitive)
+		}
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if got := len(s.recorded()); got != 1 {
+		t.Errorf("requests = %d, want membership error only", got)
+	}
+}
+
 func TestResolveQueryDoesNotClassifyGraphQLValidationAsMalformedNativeQuery(t *testing.T) {
 	body := `{"errors":[{"type":"VALIDATION","message":"Unknown field in sitrep document"}]}`
 	s := newReplayServer(t, response{status: http.StatusBadRequest, body: body})

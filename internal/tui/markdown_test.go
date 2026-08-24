@@ -110,30 +110,80 @@ func TestMarkdownDetailLinesStayCellBoundedAtExtremeWidths(t *testing.T) {
 }
 
 func TestMarkdownThemeLifecycleAndEnvironmentOverride(t *testing.T) {
-	t.Setenv("GLAMOUR_STYLE", "")
-	model := New(t.Context(), Options{})
-	if model.markdownTheme != markdownDark {
-		t.Fatalf("initial Markdown theme = %q, want dark", model.markdownTheme)
-	}
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
-	model = updated.(Model)
-	if model.markdown.width != 72 || model.markdown.description.renderer == nil {
-		t.Fatalf("resize did not build width-bound renderer: %+v", model.markdown)
-	}
-	updated, _ = model.Update(tea.BackgroundColorMsg{Color: color.White})
-	model = updated.(Model)
-	if model.markdownTheme != markdownLight || model.markdown.theme != markdownLight {
-		t.Fatalf("light background left Markdown theme at %q / %q", model.markdownTheme, model.markdown.theme)
+	markers := []string{"DESCRIPTION PROSE", "LIST PROSE", "COMMENT PROSE"}
+	renderAfterLightBackground := func(t *testing.T, glamourStyle string) string {
+		t.Helper()
+		t.Setenv("GLAMOUR_STYLE", glamourStyle)
+		m := New(t.Context(), Options{})
+		if m.markdownTheme != markdownDark {
+			t.Fatalf("initial Markdown theme = %q, want dark", m.markdownTheme)
+		}
+		m.mode = modeDetail
+		m.detail = detailState{
+			loaded: true,
+			input: DetailInput{
+				Ticket:       DetailHeader{URL: "https://github.com/acme/widgets/issues/40"},
+				Capabilities: model.Capabilities{Comments: true},
+				Detail: model.Detail{
+					Description: "DESCRIPTION PROSE\n\n- LIST PROSE",
+					Comments:    []model.Comment{{Body: "COMMENT PROSE"}},
+				},
+			},
+		}
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
+		m = updated.(Model)
+		if m.markdown.width != 72 || m.markdown.description.renderer == nil {
+			t.Fatalf("resize did not build width-bound renderer: %+v", m.markdown)
+		}
+		updated, _ = m.Update(tea.BackgroundColorMsg{Color: color.White})
+		m = updated.(Model)
+		if m.markdownTheme != markdownLight || m.markdown.theme != markdownLight {
+			t.Fatalf("light background left Markdown theme at %q / %q", m.markdownTheme, m.markdown.theme)
+		}
+		return strings.Join(m.detailDocument().Lines, "\n")
 	}
 
-	t.Setenv("GLAMOUR_STYLE", "notty")
-	overridden := newMarkdownRenderer(72, markdownLight)
-	lines, err := overridden.render("**plain override**", "")
-	if err != nil {
-		t.Fatalf("render environment override: %v", err)
-	}
-	if raw := strings.Join(lines, "\n"); strings.Contains(raw, "\x1b[") {
-		t.Errorf("GLAMOUR_STYLE=notty did not override detected light style: %q", raw)
+	t.Run("detected light background emits light prose", func(t *testing.T) {
+		raw := renderAfterLightBackground(t, "")
+		assertMarkdownProseForeground(t, raw, markers, "\x1b[38;5;234m", "\x1b[38;5;252m")
+	})
+
+	t.Run("explicit dark environment override wins over detected light", func(t *testing.T) {
+		raw := renderAfterLightBackground(t, "dark")
+		assertMarkdownProseForeground(t, raw, markers, "\x1b[38;5;252m", "\x1b[38;5;234m")
+	})
+
+	t.Run("notty environment override remains plain", func(t *testing.T) {
+		t.Setenv("GLAMOUR_STYLE", "notty")
+		overridden := newMarkdownRenderer(72, markdownLight)
+		lines, err := overridden.render("**plain override**", "")
+		if err != nil {
+			t.Fatalf("render environment override: %v", err)
+		}
+		if raw := strings.Join(lines, "\n"); strings.Contains(raw, "\x1b[") {
+			t.Errorf("GLAMOUR_STYLE=notty did not override detected light style: %q", raw)
+		}
+	})
+}
+
+func assertMarkdownProseForeground(t *testing.T, raw string, markers []string, want, forbidden string) {
+	t.Helper()
+	lines := strings.Split(raw, "\n")
+	for _, marker := range markers {
+		var lastRenderedLine string
+		for _, line := range lines {
+			if strings.Contains(ansi.Strip(line), marker) {
+				lastRenderedLine = line
+			}
+		}
+		if lastRenderedLine == "" {
+			t.Errorf("Markdown output lost marker %q: %q", marker, raw)
+			continue
+		}
+		if !strings.Contains(lastRenderedLine, want) || strings.Contains(lastRenderedLine, forbidden) {
+			t.Errorf("final rendering of marker %q does not carry foreground %q without %q: %q",
+				marker, want, forbidden, lastRenderedLine)
+		}
 	}
 }
 
