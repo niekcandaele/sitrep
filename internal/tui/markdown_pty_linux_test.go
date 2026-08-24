@@ -145,7 +145,9 @@ func runMarkdownPTYSessionWithTheme(t *testing.T, mode string, light bool) []byt
 	command := exec.Command(os.Args[0], "-test.run=^TestMarkdownPTYHelper$", "-test.v=false")
 	command.Env = environmentWithout(os.Environ(), "GLAMOUR_STYLE")
 	command.Env = environmentWithout(command.Env, markdownPTYLightMode)
-	command.Env = append(command.Env, markdownPTYHelperMode+"="+mode)
+	command.Env = environmentWithout(command.Env, "TERM")
+	command.Env = environmentWithout(command.Env, "COLORTERM")
+	command.Env = append(command.Env, markdownPTYHelperMode+"="+mode, "TERM=xterm-256color")
 	if light {
 		command.Env = append(command.Env, markdownPTYLightMode+"=1")
 	} else {
