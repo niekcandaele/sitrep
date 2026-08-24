@@ -778,6 +778,35 @@ func TestResolveQueryRejectsMalformedJQLWithNativeExplanation(t *testing.T) {
 	}
 }
 
+func TestResolveQueryRedactsDecodedAndNormalizedNativeExplanation(t *testing.T) {
+	const query = "project%20%3D%20Caf%C3%A9"
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{
+			status: http.StatusBadRequest,
+			body: `{"errorMessages":["project = Café is invalid",` +
+				`"project+%3D+Caf%C3%A9 was normalized"],"errors":{"jql":"check the project field"}}`,
+		}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "is invalid", "was normalized", "check the project field", "[query]"},
+		Secret:   query,
+	})
+	for _, sensitive := range []string{"project = Café", "project+%3D+Caf%C3%A9", fixtureToken} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked sensitive form %q", err, sensitive)
+		}
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if len(s.recorded()) != 1 || len(s.requestsTo(bulkFetchPath)) != 0 {
+		t.Errorf("requests = %+v, want membership error only", s.recorded())
+	}
+}
+
 func TestResolveQueryPreservesMembershipFailureClasses(t *testing.T) {
 	tests := []struct {
 		name string

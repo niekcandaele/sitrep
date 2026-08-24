@@ -499,10 +499,8 @@ var queryPaginationParameters = map[string]struct{}{
 	"cursor":     {},
 	"id_after":   {},
 	"id_before":  {},
-	"order_by":   {},
 	"page":       {},
 	"pagination": {},
-	"sort":       {},
 }
 
 func (p *Provider) validateQueryContinuation(

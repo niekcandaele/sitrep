@@ -20,7 +20,10 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
-const markdownPTYHelperMode = "SITREP_MARKDOWN_PTY_HELPER"
+const (
+	markdownPTYHelperMode = "SITREP_MARKDOWN_PTY_HELPER"
+	markdownPTYLightMode  = "SITREP_MARKDOWN_PTY_LIGHT"
+)
 
 func TestMarkdownBodySafetyThroughRawPTY(t *testing.T) {
 	for _, mode := range []string{"list", "decoder"} {
@@ -59,10 +62,36 @@ func TestMarkdownBodySafetyThroughRawPTY(t *testing.T) {
 	}
 }
 
+func TestMarkdownLightThemeThroughRawPTY(t *testing.T) {
+	raw := runMarkdownPTYSessionWithTheme(t, "decoder", true)
+	if !utf8.Valid(raw) {
+		t.Fatalf("PTY output contains malformed UTF-8: % x", raw)
+	}
+	output := string(raw)
+	visible := ansi.Strip(output)
+	markers := []string{"DESCRIPTION PROSE MARKER", "LIST PROSE MARKER", "COMMENT PROSE MARKER"}
+	for _, marker := range markers {
+		if !strings.Contains(visible, marker) {
+			t.Errorf("light PTY output lost %q:\n%s", marker, visible)
+		}
+	}
+	assertMarkdownProseForeground(t, output, markers, "\x1b[38;5;234m", "\x1b[38;5;252m")
+	assertPTYHyperlinksClosed(t, output)
+	assertTerminalModePair(t, output, ansi.SetModeAltScreenSaveCursor, ansi.ResetModeAltScreenSaveCursor)
+	assertTerminalModePair(t, output, ansi.SetModeMouseButtonEvent, ansi.ResetModeMouseButtonEvent)
+	assertTerminalModePair(t, output, ansi.SetModeMouseExtSgr, ansi.ResetModeMouseExtSgr)
+	assertTerminalModePair(t, output, ansi.HideCursor, ansi.ShowCursor)
+}
+
 func TestMarkdownPTYHelper(t *testing.T) {
 	mode := os.Getenv(markdownPTYHelperMode)
 	if mode == "" {
 		return
+	}
+	if os.Getenv(markdownPTYLightMode) != "" {
+		if err := os.Unsetenv("GLAMOUR_STYLE"); err != nil {
+			t.Fatalf("remove GLAMOUR_STYLE for light PTY helper: %v", err)
+		}
 	}
 	if err := Run(context.Background(), markdownPTYOptions(mode)); err != nil {
 		t.Fatalf("tui.Run: %v", err)
@@ -74,14 +103,14 @@ func markdownPTYOptions(mode string) Options {
 		ID: "acme/widgets#40", Key: "#40", Title: "PTY body safety",
 		URL: "https://github.com/acme/widgets/issues/40", Status: model.StatusInProgress,
 	}
-	hostile := "## PTY MARKDOWN READY\n\ncafé 東京 " + string([]byte{0xff, 0xc0, 0xaf}) +
+	hostile := "## PTY MARKDOWN READY\n\nDESCRIPTION PROSE MARKER café 東京 " + string([]byte{0xff, 0xc0, 0xaf}) +
 		"\x1b]8;;https://evil.example.test/pty\aVISIBLE\x1b]8;;\x1b\\" +
 		"\x1b]52;c;cHR5LW9zYy01Mg==\a\x1b[2J\r\n" +
-		"[safe PTY link](https://safe.example.test/pty) and #12"
+		"- LIST PROSE MARKER\n\n[safe PTY link](https://safe.example.test/pty) and #12"
 	detailSource := func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
 		return model.Detail{
 			Description: hostile,
-			Comments:    []model.Comment{{Body: "Comment **Markdown** is safe."}},
+			Comments:    []model.Comment{{Body: "COMMENT PROSE MARKER **Markdown** is safe."}},
 		}, model.Capabilities{Comments: true}, nil
 	}
 	opts := Options{
@@ -107,9 +136,21 @@ func markdownPTYOptions(mode string) Options {
 
 func runMarkdownPTYSession(t *testing.T, mode string) []byte {
 	t.Helper()
+	return runMarkdownPTYSessionWithTheme(t, mode, false)
+}
+
+func runMarkdownPTYSessionWithTheme(t *testing.T, mode string, light bool) []byte {
+	t.Helper()
 	master, slave := openMarkdownPTY(t, 100, 40)
 	command := exec.Command(os.Args[0], "-test.run=^TestMarkdownPTYHelper$", "-test.v=false")
-	command.Env = append(os.Environ(), markdownPTYHelperMode+"="+mode, "GLAMOUR_STYLE=dark")
+	command.Env = environmentWithout(os.Environ(), "GLAMOUR_STYLE")
+	command.Env = environmentWithout(command.Env, markdownPTYLightMode)
+	command.Env = append(command.Env, markdownPTYHelperMode+"="+mode)
+	if light {
+		command.Env = append(command.Env, markdownPTYLightMode+"=1")
+	} else {
+		command.Env = append(command.Env, "GLAMOUR_STYLE=dark")
+	}
 	command.Stdin = slave
 	command.Stdout = slave
 	command.Stderr = slave
@@ -141,6 +182,16 @@ func runMarkdownPTYSession(t *testing.T, mode string) []byte {
 	}()
 
 	output := make([]byte, 0, 16*1024)
+	if light {
+		output = waitForPTYMarker(t, chunks, output, "\x1b]11;?\a")
+		output = waitForPTYMarker(t, chunks, output, ansi.SetModeAltScreenSaveCursor)
+		if _, err := io.WriteString(master, "\x1b]11;rgb:ffff/ffff/ffff\a"); err != nil {
+			t.Fatalf("answer PTY background query: %v", err)
+		}
+		output = waitForPTYMarkdownForeground(t, chunks, output,
+			[]string{"DESCRIPTION PROSE MARKER", "LIST PROSE MARKER", "COMMENT PROSE MARKER"},
+			"\x1b[38;5;234m")
+	}
 	if mode == "list" {
 		output = waitForPTYMarker(t, chunks, output, "PTY LIST READY")
 		if _, err := io.WriteString(master, "\r"); err != nil {
@@ -198,6 +249,50 @@ func waitForPTYMarker(t *testing.T, chunks <-chan []byte, output []byte, marker 
 		}
 	}
 	return output
+}
+
+func waitForPTYMarkdownForeground(t *testing.T, chunks <-chan []byte, output []byte,
+	markers []string, foreground string) []byte {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		matched := make(map[string]bool, len(markers))
+		for _, line := range strings.Split(string(output), "\n") {
+			visible := ansi.Strip(line)
+			if !strings.Contains(line, foreground) {
+				continue
+			}
+			for _, marker := range markers {
+				if strings.Contains(visible, marker) {
+					matched[marker] = true
+				}
+			}
+		}
+		if len(matched) == len(markers) {
+			return output
+		}
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				t.Fatalf("PTY closed before light Markdown prose rendered\n%s", output)
+			}
+			output = append(output, chunk...)
+		case <-deadline.C:
+			t.Fatalf("PTY did not render light Markdown prose\n%s", output)
+		}
+	}
+}
+
+func environmentWithout(environment []string, name string) []string {
+	prefix := name + "="
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func openMarkdownPTY(t *testing.T, width, height uint16) (*os.File, *os.File) {
