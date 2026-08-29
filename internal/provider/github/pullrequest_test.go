@@ -506,3 +506,62 @@ func TestStatusWithPullRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestPullRequestTotal(t *testing.T) {
+	held := func(n int) []model.PullRequest {
+		prs := make([]model.PullRequest, n)
+		for i := range prs {
+			prs[i] = model.PullRequest{Number: 100 + i}
+		}
+		return prs
+	}
+
+	tests := []struct {
+		name    string
+		closing *pullRequestConnection
+		prs     []model.PullRequest
+		want    int
+	}{
+		{
+			name: "no connection and no pull requests is no total",
+			want: 0,
+		},
+		{
+			name:    "an absent totalCount falls back to what is held",
+			closing: &pullRequestConnection{},
+			prs:     held(3),
+			want:    3,
+		},
+		{
+			name:    "a totalCount matching the node count is that count",
+			closing: &pullRequestConnection{TotalCount: 3},
+			prs:     held(3),
+			want:    3,
+		},
+		{
+			name:    "a truncated connection reports GitHub's own total",
+			closing: &pullRequestConnection{TotalCount: 34},
+			prs:     held(20),
+			want:    34,
+		},
+		{
+			name:    "cross-reference extras above the totalCount floor the answer at what is held",
+			closing: &pullRequestConnection{TotalCount: 20},
+			prs:     held(23),
+			want:    23,
+		},
+		{
+			name:    "a nil connection beside cross-referenced pull requests counts those",
+			closing: nil,
+			prs:     held(2),
+			want:    2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pullRequestTotal(tc.closing, tc.prs); got != tc.want {
+				t.Errorf("pullRequestTotal = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

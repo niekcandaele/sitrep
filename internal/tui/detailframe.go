@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // detailHeaderHeight is what renderDetailHeader always draws: the breadcrumb,
@@ -123,7 +123,8 @@ const commentTimeLayout = "2006-01-02 15:04"
 
 // renderDetailHeader draws the block above the Detail body: the root Watchlist
 // and prior Trail Tickets as a breadcrumb, the current Ticket's identity, and a
-// meta line using the same field renderer as list rows.
+// meta line whose status names the Status Category when the Tracker's own word
+// would only restate it — nothing supplies that context here.
 //
 // It is drawn in every state — loading, failed, loaded — because a screen that
 // cannot say which Ticket it is reading is worse than the list it replaced.
@@ -131,7 +132,7 @@ func renderDetailHeader(in DetailInput, staleness string, width int, s Styles, t
 	return strings.Join([]string{
 		renderDetailTopLine(in.Parent, trail, staleness, width, s),
 		headerIdentity(Header{Key: in.Ticket.Key, Title: in.Ticket.Title, URL: in.Ticket.URL}, width, s, true),
-		truncateLine(ticketMeta(detailMetaTicket(in.Ticket), in.Capabilities, s), width),
+		truncateLine(detailMetaLine(detailMetaTicket(in.Ticket), in.Capabilities, s), width),
 		"",
 	}, "\n")
 }
@@ -155,7 +156,7 @@ func renderDetailTopLine(parent Header, trail []detailTrailEntry, staleness stri
 	}
 	right := s.Staleness.Render(staleness)
 	if lipgloss.Width(right) >= width {
-		right = ansi.Truncate(right, width, "")
+		right = balancedTruncate(right, width, "")
 		return strings.Repeat(" ", max(width-lipgloss.Width(right), 0)) + right
 	}
 
@@ -209,7 +210,7 @@ func renderBreadcrumbCrumbs(crumbs []detailBreadcrumbCrumb, width int, s Styles)
 	newest := rendered[len(rendered)-1]
 	used := lipgloss.Width(newest)
 	if used > width {
-		return ansi.Truncate(newest, width, "")
+		return balancedTruncate(newest, width, "")
 	}
 
 	first := len(rendered) - 1
@@ -243,14 +244,15 @@ func renderBreadcrumb(parent Header, width int, s Styles) string {
 // not describe itself differently one keystroke apart.
 func detailMetaTicket(h DetailHeader) model.Ticket {
 	return model.Ticket{
-		Key:          h.Key,
-		Title:        h.Title,
-		URL:          h.URL,
-		Status:       h.Status,
-		NativeStatus: h.NativeStatus,
-		Assignees:    h.Assignees,
-		PullRequests: h.PullRequests,
-		Repository:   h.Repository,
+		Key:              h.Key,
+		Title:            h.Title,
+		URL:              h.URL,
+		Status:           h.Status,
+		NativeStatus:     h.NativeStatus,
+		Assignees:        h.Assignees,
+		PullRequests:     h.PullRequests,
+		PullRequestTotal: h.PullRequestTotal,
+		Repository:       h.Repository,
 	}
 }
 
@@ -309,7 +311,7 @@ func truncateDocumentLines(lines []string, width int) []string {
 // drill-in with nothing at all reads as a bug.
 func describeDetail(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	lines := []string{s.SectionHeader.Render("DESCRIPTION"), ""}
-	body := provider.SanitizeText(in.Detail.Description)
+	body := in.Detail.Description
 	if strings.TrimSpace(body) == "" {
 		return append(lines, s.Muted.Render("No description."))
 	}
@@ -322,7 +324,9 @@ func renderMarkdownBody(body, ticketURL string, width int, s Styles, renderer ma
 		return lines
 	}
 
-	message := "Could not render Markdown: " + sanitizeTerminalText(err.Error())
+	// The renderer's own prose is not model data — it is a message from a
+	// dependency — so it does not arrive through intake and is cleaned here.
+	message := "Could not render Markdown: " + termtext.Line(err.Error())
 	fallback := []string{s.Error.Render(truncateLine(message, width))}
 	for _, line := range wrapText(body, width) {
 		fallback = append(fallback, s.Body.Render(line))
@@ -351,8 +355,7 @@ func commentLines(in DetailInput, width int, s Styles, renderer markdownRenderer
 			lines = append(lines, "")
 		}
 		lines = append(lines, truncateLine(s.CommentAuthor.Render(commentByline(c)), width))
-		body := provider.SanitizeText(c.Body)
-		for _, line := range renderMarkdownBody(body, in.Ticket.URL,
+		for _, line := range renderMarkdownBody(c.Body, in.Ticket.URL,
 			width-lipgloss.Width(commentIndent), s, renderer) {
 			lines = append(lines, commentIndent+line)
 		}
@@ -384,8 +387,8 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 	seen := make(map[detailLinkIdentity]int, len(links))
 	labelWidth, keyWidth, titleWidth, statusWidth := 0, 0, 0, 0
 	for i, l := range links {
-		labels[i] = sanitizeTerminalText(linkLabel(l))
-		statuses[i] = sanitizeTerminalText(nativeStatusTag(l.Target.NativeStatus))
+		labels[i] = linkLabel(l)
+		statuses[i] = nativeStatusTag(l.Target.NativeStatus)
 		labelWidth = max(labelWidth, lipgloss.Width(labels[i]))
 		keyWidth = max(keyWidth, lipgloss.Width(l.Target.Key))
 		titleWidth = max(titleWidth, lipgloss.Width(l.Target.Title))
@@ -409,11 +412,11 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 	lines := []string{s.SectionHeader.Render(fmt.Sprintf("LINKS (%d)", len(links))), ""}
 	rows := make([]detailLinkRow, 0, len(links))
 	for i, l := range links {
-		label := ansi.Truncate(labels[i], labelWidth, "…")
+		label := balancedTruncate(labels[i], labelWidth, "…")
 		line := column(s.LinkLabel.Render(label), label, labelWidth) +
 			column(renderHyperlink(s.TicketKey, l.Target.Key, l.Target.URL), l.Target.Key, keyWidth)
 
-		title := ansi.Truncate(l.Target.Title, titleWidth, "…")
+		title := balancedTruncate(l.Target.Title, titleWidth, "…")
 		styledTitle := renderHyperlink(s.TicketTitle, title, l.Target.URL)
 		if tag := statuses[i]; tag != "" {
 			line += column(styledTitle, title, titleWidth) + s.NativeStatus.Render(tag)
@@ -447,6 +450,11 @@ func linkLabel(l model.Link) string {
 
 // nativeStatusTag renders a link target's Native Status the way a list row does,
 // or nothing when the Tracker supplied none.
+//
+// The LINKS table is deliberately exempt from plain.ShowsNativeStatus: no
+// Status Category heading groups these rows, so a link target's Native Status
+// is the only status signal the reader gets. Do not "fix" the inconsistency
+// with the list and Detail header meta lines; it is the rule working.
 func nativeStatusTag(native string) string {
 	if native == "" {
 		return ""

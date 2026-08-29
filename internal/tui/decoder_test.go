@@ -88,7 +88,7 @@ func TestDecodedFrameWithNoParent(t *testing.T) {
 
 	checkGolden(t, "decoded_no_parent.golden.txt", got)
 	if m.mode != modeDetail {
-		t.Error("u left the Detail screen with no collection to go to")
+		t.Error("u left the Detail screen with no Watchlist to go to")
 	}
 	if n := p.ResolveCalls(); n != 0 {
 		t.Errorf("ResolveCalls() = %d, want 0", n)
@@ -122,7 +122,7 @@ func TestWalkUpOpensTheCollection(t *testing.T) {
 
 	checkGolden(t, "decoded_up.golden.txt", got)
 	if m.mode != modeList {
-		t.Error("u did not open the collection")
+		t.Error("u did not open the Watchlist")
 	}
 }
 

@@ -13,7 +13,7 @@ func TestTargetFor(t *testing.T) {
 	tests := []struct {
 		name        string
 		r           ref.Ref
-		defaultPath string
+		profilePath string
 		want        target
 		wantErr     string
 	}{
@@ -31,17 +31,30 @@ func TestTargetFor(t *testing.T) {
 			want: target{kind: kindEpic, path: "acme/platform/core", iid: 12},
 		},
 		{
-			name:        "a bare reference falls back to the Profile's project",
+			name:        "a bare epic reference falls back to a group Profile",
 			r:           ref.Ref{Tracker: ref.TrackerGitLab, Number: 12, Key: "&12", Raw: "&12"},
-			defaultPath: "acme/platform",
+			profilePath: "groups/acme/platform",
 			want:        target{kind: kindEpic, path: "acme/platform", iid: 12},
 		},
 		{
-			name: "a written group beats the Profile's project",
+			name:        "a bare epic reference under a project Profile",
+			r:           ref.Ref{Tracker: ref.TrackerGitLab, Number: 12, Key: "&12", Raw: "&12"},
+			profilePath: "acme/widgets",
+			wantErr:     `"&12" names a group epic, but profile path "acme/widgets" is a project`,
+		},
+		{
+			name: "a written group beats a project Profile",
 			r: ref.Ref{Tracker: ref.TrackerGitLab, Owner: "other", Number: 9,
 				Key: "other&9", Raw: "other&9"},
-			defaultPath: "acme/platform",
+			profilePath: "acme/widgets",
 			want:        target{kind: kindEpic, path: "other", iid: 9},
+		},
+		{
+			name: "a written project beats a group Profile",
+			r: ref.Ref{Tracker: ref.TrackerGitLab, Host: "gitlab.com",
+				Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
+			profilePath: "groups/acme/platform",
+			want:        target{kind: kindIssue, path: "acme/widgets", iid: 7},
 		},
 		{
 			name: "a project issue URL",
@@ -59,8 +72,14 @@ func TestTargetFor(t *testing.T) {
 		{
 			name:        "a bare number in a clone falls back to the Profile's project",
 			r:           ref.Ref{Tracker: ref.TrackerGitLab, Host: "gitlab.com", Number: 7, Raw: "7"},
-			defaultPath: "acme/widgets",
+			profilePath: "acme/widgets",
 			want:        target{kind: kindIssue, path: "acme/widgets", iid: 7},
+		},
+		{
+			name:        "a bare number under a group Profile",
+			r:           ref.Ref{Tracker: ref.TrackerGitLab, Host: "gitlab.com", Number: 7, Raw: "7"},
+			profilePath: "groups/acme/platform",
+			wantErr:     `"7" names a project issue, but profile path "groups/acme/platform" is a group`,
 		},
 		{
 			name: "a project milestone URL",
@@ -83,11 +102,24 @@ func TestTargetFor(t *testing.T) {
 			want: target{kind: kindGroupMilestone, path: "acme/platform/core", iid: 3},
 		},
 		{
-			// GitLab's own "%" syntax is project-scoped, so a bare reference means
-			// a project milestone in the Profile's project.
-			name:        "a bare milestone reference falls back to the Profile's project",
+			// A milestone exists in both scopes, so a bare reference follows
+			// whichever scope the Profile's path declared.
+			name:        "a bare milestone reference falls back to a project Profile",
 			r:           ref.Ref{Tracker: ref.TrackerGitLab, Number: 3, Key: "%3", Raw: "%3"},
-			defaultPath: "acme/widgets",
+			profilePath: "acme/widgets",
+			want:        target{kind: kindProjectMilestone, path: "acme/widgets", iid: 3},
+		},
+		{
+			name:        "a bare milestone reference falls back to a group Profile",
+			r:           ref.Ref{Tracker: ref.TrackerGitLab, Number: 3, Key: "%3", Raw: "%3"},
+			profilePath: "groups/acme",
+			want:        target{kind: kindGroupMilestone, path: "acme", iid: 3},
+		},
+		{
+			name: "a written project milestone beats a group Profile",
+			r: ref.Ref{Tracker: ref.TrackerGitLab, Owner: "acme", Repo: "widgets",
+				Number: 3, Key: "acme/widgets%3", Raw: "acme/widgets%3"},
+			profilePath: "groups/acme",
 			want:        target{kind: kindProjectMilestone, path: "acme/widgets", iid: 3},
 		},
 		{
@@ -120,7 +152,7 @@ func TestTargetFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := targetFor(tt.r, tt.defaultPath)
+			got, err := targetFor(tt.r, parseDefaultPath(tt.profilePath))
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("targetFor = %+v, want an error mentioning %q", got, tt.wantErr)
@@ -135,6 +167,32 @@ func TestTargetFor(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("targetFor = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDefaultPath(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want defaultPath
+	}{
+		{raw: "", want: defaultPath{}},
+		{raw: "acme/widgets", want: defaultPath{path: "acme/widgets", scope: scopeProject}},
+		{raw: "groups/acme", want: defaultPath{path: "acme", scope: scopeGroup}},
+		{raw: "groups/acme/platform", want: defaultPath{path: "acme/platform", scope: scopeGroup}},
+		{raw: "/groups/acme/", want: defaultPath{path: "acme", scope: scopeGroup}},
+		{raw: "  groups/acme  ", want: defaultPath{path: "acme", scope: scopeGroup}},
+		{raw: "groups/", want: defaultPath{}},
+		// Only the "groups/" prefix switches scope: a project may be named
+		// "groups", and nothing about that spelling says group.
+		{raw: "groups", want: defaultPath{path: "groups", scope: scopeProject}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			if got := parseDefaultPath(tt.raw); got != tt.want {
+				t.Errorf("parseDefaultPath(%q) = %+v, want %+v", tt.raw, got, tt.want)
 			}
 		})
 	}
@@ -199,7 +257,7 @@ func TestMilestoneStringIsAReferenceRefAccepts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ref.Parse(%q): %v", want.String(), err)
 			}
-			got, err := targetFor(r, "")
+			got, err := targetFor(r, defaultPath{})
 			if err != nil {
 				t.Fatalf("targetFor: %v", err)
 			}
@@ -292,5 +350,26 @@ func TestMilestoneWebURL(t *testing.T) {
 	}
 	if got := milestoneWebURL("", project); got != "" {
 		t.Errorf("milestoneWebURL with no host = %q, want empty", got)
+	}
+}
+
+// The predicate config validation calls, so that the "groups/" prefix rule has
+// one owner and the comment on parseDefaultPath saying so is true.
+func TestProfilePathNamesNoGroup(t *testing.T) {
+	tests := map[string]bool{
+		"groups/":              true,
+		"groups//":             true,
+		"  /groups/ ":          true,
+		"":                     false,
+		"acme/widgets":         false,
+		"groups":               false,
+		"groups/acme":          false,
+		"groups/acme/platform": false,
+	}
+
+	for raw, want := range tests {
+		if got := ProfilePathNamesNoGroup(raw); got != want {
+			t.Errorf("ProfilePathNamesNoGroup(%q) = %v, want %v", raw, got, want)
+		}
 	}
 }

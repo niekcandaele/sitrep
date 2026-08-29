@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-01-15T12:00:00Z",
   "provider": {
     "name": "github",
@@ -58,7 +58,8 @@
           "review": "approved",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_WhQ88AAAABNqYB8w",
@@ -78,7 +79,8 @@
           "review": "approved",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_WhQ88AAAABNqYCjw",
@@ -98,7 +100,8 @@
           "review": "pending",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_WhQ88AAAABNqYDCA",
@@ -118,7 +121,8 @@
           "review": "none",
           "checks": "pending"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_WhQ88AAAABNqYDWA",
@@ -181,7 +185,8 @@
           "review": "approved",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 34
     },
     {
       "id": "I_kwDOT_FIXTURE_91",
@@ -208,7 +213,8 @@
           "review": "none",
           "checks": "failing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_FIXTURE_92",
@@ -255,7 +261,8 @@
           "review": "changes_requested",
           "checks": "failing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_FIXTURE_96",
@@ -275,7 +282,8 @@
           "review": "approved",
           "checks": "failing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_FIXTURE_97",
@@ -295,7 +303,8 @@
           "review": "changes_requested",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_FIXTURE_98",
@@ -324,7 +333,8 @@
           "review": "none",
           "checks": "pending"
         }
-      ]
+      ],
+      "pull_request_total": 2
     },
     {
       "id": "I_kwDOT_FIXTURE_99",
@@ -344,7 +354,8 @@
           "review": "pending",
           "checks": "passing"
         }
-      ]
+      ],
+      "pull_request_total": 1
     },
     {
       "id": "I_kwDOT_FIXTURE_100",
@@ -373,7 +384,8 @@
           "review": "none",
           "checks": "none"
         }
-      ]
+      ],
+      "pull_request_total": 2
     },
     {
       "id": "I_kwDOT_FIXTURE_101",
@@ -392,7 +404,8 @@
           "review": "none",
           "checks": "pending"
         }
-      ]
+      ],
+      "pull_request_total": 1
     }
   ]
 }

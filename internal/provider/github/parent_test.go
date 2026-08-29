@@ -73,6 +73,11 @@ func TestResolveReadsTheRootIssuesAssigneesAndPullRequests(t *testing.T) {
 	if got := snap.Epic.PullRequests; len(got) != 1 || got[0].Number != 25 {
 		t.Fatalf("Epic.PullRequests = %+v, want the one open pull request", got)
 	}
+	// The recorded connection is truncated: twelve exist, one was fetched. The
+	// total rides onto the Epic so the decoded Ticket's row counts all of them.
+	if got := snap.Epic.PullRequestTotal; got != 12 {
+		t.Errorf("Epic.PullRequestTotal = %d, want the 12 GitHub reported", got)
+	}
 	// The pull-request rule for in-progress runs on the fetched issue exactly as
 	// it does on a child: one node must not describe itself two different ways
 	// depending on which Ref reached it.

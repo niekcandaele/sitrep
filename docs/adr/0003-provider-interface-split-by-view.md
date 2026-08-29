@@ -40,3 +40,23 @@ list.
 The Provider completes authoritative exact-root reads for the selected identities before any
 snapshot reaches rendering. Internal paging exposes neither partial search state nor a new
 Provider method.
+
+## Amendment 4: an explicit bulk Detail fan-out
+
+One screen needs Links for every Ticket at once. The Frontier answers "which Tickets can be
+picked up right now?", `Actionable` is computed from BlockedBy Links, and Links live in
+Detail. The split forbids the list refresh from paying for that, and it still does.
+
+A caller may fan `FetchDetail` out across a whole Watchlist **only in response to an explicit
+user action**, never from a refresh, a poll, or a render. The cost is visible and voluntary:
+you pressed a key, you get a progress indicator, and you can interrupt it. Results land in the
+caller's existing per-Ticket Detail cache, so a Ticket already opened this session costs
+nothing. The policy — canonical order, cache skipping, bounded concurrency, and the rule that
+only a successful fetch is recorded — lives in `internal/detailfanout` so that every consumer
+pays the same price and fails the same way. A screen may also *read* the cache a fan-out
+filled to render a derived property, provided it issues no fetch of its own and claims nothing
+when the cache does not cover the whole Watchlist.
+
+The rejected alternative is promoting Links onto the thin `Ticket`, which makes every refresh
+slower forever to serve a screen that may never be opened. Do not "fix" the fan-out that way;
+it is the thing this ADR exists to prevent.

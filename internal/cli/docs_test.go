@@ -39,6 +39,7 @@ func TestDocumentationContract(t *testing.T) {
 		"jira issue list",
 		"max_tickets",
 		"refresh_interval",
+		"wont_do_labels",
 		"when no Profile is selected",
 		"has at most one selected Profile",
 		"Mouse capture is on by default",
@@ -46,8 +47,11 @@ func TestDocumentationContract(t *testing.T) {
 		"`--no-mouse`",
 		"`tab` and `shift+tab` to focus Links",
 		"session-local **Trail**",
+		"Press `v` to open the **Frontier**",
+		"**Filters do not apply on the Frontier**",
+		"**Ghost Ticket**",
 		"OSC 8 terminal hyperlinks",
-		"Watchlist documents use schema version 2",
+		"Watchlist documents use schema version 3",
 		"Decoded Ticket/Detail documents remain schema version 1",
 	} {
 		if !strings.Contains(readme, marker) {
@@ -129,7 +133,11 @@ func TestREADMEStructuredExamplesUseRealContracts(t *testing.T) {
 		Raw:     "acme/widgets#115",
 	}}}
 	var rendered bytes.Buffer
-	if err := jsonout.RenderWatchlist(&rendered, snapshot, selector, "fake"); err != nil {
+	if err := jsonout.RenderWatchlist(&rendered, jsonout.WatchlistDocument{
+		Snapshot:     snapshot,
+		Selector:     selector,
+		ProviderName: "fake",
+	}); err != nil {
 		t.Fatalf("render deterministic README Watchlist: %v", err)
 	}
 	var authoritative any

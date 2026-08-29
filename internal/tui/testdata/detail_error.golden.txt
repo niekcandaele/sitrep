@@ -1,6 +1,6 @@
 #111 · Widget sync v2: shards, retries & telemetry                                                  current · never read
 #118  Cache shard lookups                                                  https://tracker.example.test/acme/widgets/118
-[closed]  @mara-vos  #504 merged
+[Done]  @mara-vos  #504 merged
 
 Could not read this Ticket's detail: fake: no detail for ticket "acme/widgets#118"
 
@@ -37,4 +37,4 @@ Press r to try again, esc to go back.
 
 
 
-m off · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh
+m release · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh

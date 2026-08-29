@@ -63,9 +63,10 @@ func writeTicketHeader(b *strings.Builder, in TicketSnapshot) {
 	t := in.Ticket
 	fmt.Fprintf(b, "Ticket %s  %s\n", t.Key, Truncate(t.Title, maxTitleWidth))
 
-	if meta := ticketMeta(t, in.Capabilities); meta != "" {
-		fmt.Fprintf(b, "%s\n", meta)
-	}
+	// No Status Category heading stands above a single-Ticket report, so the
+	// status is drawn with StatusField and the line is never empty.
+	meta := append([]string{StatusField(t)}, ticketMetaTail(t, in.Capabilities)...)
+	fmt.Fprintf(b, "%s\n", strings.Join(meta, "  "))
 	if t.URL != "" {
 		fmt.Fprintf(b, "%s\n", t.URL)
 	}
@@ -147,6 +148,10 @@ func writeLinks(b *strings.Builder, in TicketSnapshot) {
 	fmt.Fprintf(b, "LINKS (%d)\n\n", len(links))
 	for i, l := range links {
 		line := PadKey(linkLabel(l), labelColumn) + PadKey(l.Target.Key, keyColumn)
+		// The LINKS table is deliberately exempt from ShowsNativeStatus: no
+		// Status Category heading groups these rows, so a link target's
+		// Native Status is the only status signal the reader gets. Do not
+		// "fix" the inconsistency with the meta lines; it is the rule working.
 		if l.Target.NativeStatus == "" {
 			fmt.Fprintf(b, "%s%s\n", line, titles[i])
 			continue

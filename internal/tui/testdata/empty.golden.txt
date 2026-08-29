@@ -1,7 +1,7 @@
 #900  Widget sync v3: nothing planned yet                                  https://tracker.example.test/acme/widgets/900
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0/0 done · 0%                                                                     just now
 
-This collection has no Tickets.
+This Watchlist has no Tickets.
 
 
 
@@ -37,4 +37,4 @@ This collection has no Tickets.
 
 
 
-m off · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …

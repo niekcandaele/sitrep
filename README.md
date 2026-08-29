@@ -21,7 +21,8 @@ sitrep --profile work-github \
   --query 'repo:acme/widgets is:issue label:agent'  # tracker-native Query Watchlist
 
 sitrep 38 39 40 41 --plain                 # one-shot text
-sitrep 38 39 40 41 --json                  # schema-v2 Watchlist JSON
+sitrep 38 39 40 41 --json                  # schema-v3 Watchlist JSON
+sitrep 38 39 40 41 --json --links          # ...plus Actionable and unmet blockers
 ```
 
 A **Ref** points to one Ticket or Epic. Accepted forms are:
@@ -77,7 +78,7 @@ For Watchlist-producing Selectors, all three modes read the same resolved Watchl
 
 The single-Ref decoder exception applies in every mode: a plain Ticket opens Detail in the
 TUI, prints one Ticket report with `--plain`, and emits a schema-v1 Ticket/Detail document
-with `--json`. Watchlist JSON uses the schema-v2 contract.
+with `--json`. Watchlist JSON uses the schema-v3 contract.
 
 Progress, grouping, and filters cover the complete fetched Watchlist. Hiding rows does not
 change the progress denominator. When a Query reaches its configured membership cutoff,
@@ -141,8 +142,10 @@ sitrep --profile acme-gitlab \
   when required; a Profile does not add it.
 - **Jira** receives exact JQL. The Profile supplies site, credentials, and routing, but sitrep
   does not insert a `project = ...` clause.
-- **GitLab** receives a raw issue-API query component. The Profile's `project` selects a
-  project-scoped endpoint; an empty project uses the global issues endpoint.
+- **GitLab** receives a raw issue-API query component. The Profile's `project` selects the
+  endpoint it is searched against: an unprefixed path such as `acme/widgets` uses the
+  project-scoped issues endpoint, a `groups/`-prefixed path such as `groups/acme` uses the
+  group-scoped one, and an empty project uses the global issues endpoint.
 
 Search selects identities. The Provider then rereads each identity through its exact Ticket
 path, so rendered title, status, assignees, and code state do not come from a search-result
@@ -179,6 +182,33 @@ not extend the in-app Trail ([ADR-0004](docs/adr/0004-links-are-hyperlinks-not-b
 Description and comment text is shown as returned by the Tracker, without inferred Link
 navigation.
 
+Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
+renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
+Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — a bulk
+per-Ticket read, which is why it shows a progress count and why `esc` interrupts it
+(`--json --links` is the other one) — and Details already read this session are reused.
+Colour carries the Status Category, exactly as it does on the list, while border weight and
+a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
+is also blocked shows both.
+A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
+never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
+whose Links could not be read is marked unverified, which leaves anything it blocks not
+Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
+could make a blocked Ticket look Actionable — so it always renders the whole Watchlist and
+says so in the footer. A Provider that does not report blocking links opens a screen that
+explains why there is no graph to draw.
+
+Once the Frontier has been opened this session and every member's Detail has been read, the
+list marks Actionable Tickets with `●` and the header counts them (`· 4 actionable`, printed
+even when the count is zero). Before that the list shows nothing about Actionability at all,
+because finding out would mean a per-Ticket read on every refresh — the one thing the split
+between the list and Detail exists to prevent. For the same reason the markers disappear
+again, all of them rather than some, if any member's Detail read failed or if a refresh brings
+in a Ticket whose Detail has not been read; a partial answer about blocking is a wrong answer.
+Statuses stay fresh — a Ticket that moves out of Todo loses its marker on the next refresh —
+but the Links behind the marker are the ones read when the Frontier last ran, and a refresh
+does not re-read them.
+
 `d` hides Done and Cancelled Tickets without changing progress arithmetic. `/` opens fuzzy
 find over Ticket titles and keys; type to narrow, `enter` keeps the query, and `esc` first
 clears the active find or visibility filter.
@@ -196,6 +226,7 @@ The footer shows currently applicable keys, and `?` expands it.
 | `pgup`, `pgdn` | move one page |
 | `g`, `G` | first Ticket, last Ticket |
 | `enter` | open the selected Ticket's Detail |
+| `v` | open the Frontier |
 | `d` | hide Done and Cancelled Tickets |
 | `/` | open fuzzy find |
 | `esc` | clear filters, or quit when none are active |
@@ -233,6 +264,24 @@ rather than quitting.
 | `?` | expand help |
 | `q`, `ctrl+c` | quit |
 
+**The Frontier**
+
+| Key | Does |
+|---|---|
+| `↑` / `k`, `↓` / `j` | move focus within a column |
+| `←` / `h` | move focus to the blocker side |
+| `→` / `l` | move focus to the dependent side |
+| `g`, `G` | first node, last node |
+| click | focus a node |
+| double-click | open a node's Ticket |
+| wheel | scroll the canvas |
+| `enter` | open the focused Ticket, Ghost Tickets included |
+| `v`, `esc` | return to the list, interrupting any Detail reads still in flight |
+| `r` | re-read the Details that never succeeded |
+| `m` | turn mouse capture off or on |
+| `?` | expand help |
+| `q`, `ctrl+c` | quit |
+
 ## Profiles, Providers, and configuration
 
 **GitHub with `gh auth login` done needs no config file.** GitLab.com has the equivalent
@@ -266,7 +315,8 @@ profiles:
   acme-gitlab:
     provider: gitlab
     host: git.acme.test
-    project: acme/platform
+    project: groups/acme/platform
+    wont_do_labels: [ausgemustert, "workflow::no-fix"]
     auth:
       token_env: GITLAB_TOKEN
 ```
@@ -275,6 +325,25 @@ profiles:
 set `project`, because a GitHub Ref or native Query carries its own scope. A Jira Profile
 requires `host`, `project`, and `auth.token_env`; `auth.user` or `auth.user_env` supplies the
 Atlassian identity. A GitLab Profile requires `host` and may set a group or project path.
+
+A GitLab `project` declares which of the two it is, and sitrep never guesses: `project:
+acme/widgets` is a project, `project: groups/acme` is a group. That scope decides both which
+issues endpoint a `--query` reads and which hostless Refs the Profile can complete — `&N`
+needs a group, `N` or `#N` needs a project, and `%N` works under either and follows the
+Profile's scope. A Ref the Profile's scope cannot complete is rejected before any request,
+with the spelling to use instead.
+
+`wont_do_labels` names the labels that mean "nobody did this" on that GitLab site, so a closed
+issue carrying one is Cancelled instead of Done. It **replaces** sitrep's built-in list rather
+than adding to it: a site that has an opinion has the whole opinion, and dropping `duplicate`
+or `invalid` from the list is how you stop sitrep reading them as cancellation. Names are
+matched case-, punctuation- and scope-insensitively, so `Won't Fix`, `wontfix` and
+`workflow::wontfix` are one entry. The key is GitLab-only — GitHub and Jira report
+cancellation natively, and a `github` or `jira` Profile that sets it is an error — and writing
+it empty is an error too, as is an entry with no letters or digits to match by (`::`,
+`workflow::`): omit the key entirely to keep sitrep's built-in list
+(`wontfix`, `wontdo`, `willnotfix`, `willnotdo`, `duplicate`, `invalid`, `declined`,
+`rejected`, `obsolete`, `notplanned`, `notreproducible`, `cannotreproduce`, `abandoned`).
 
 **A Profile names a token; it never holds one.** `auth.token_env` is the environment-variable
 name. Literal tokens in config are rejected. A credential is sent only to the Profile host
@@ -298,7 +367,7 @@ its configured values; profileless routes use the defaults below:
 - it caps only Tracker-discovered Query membership — never Epic children, positional Refs,
   or stdin Refs;
 - hitting the cutoff is successful truncation, not a known total. Plain/TUI output says
-  `Limit reached — showing N ticket(s).`; schema-v2 JSON adds
+  `Limit reached — showing N ticket(s).`; schema-v3 JSON adds
   `watchlist.limit_reached: true`;
 - exhausting results exactly at the boundary is not labeled as truncated;
 - `refresh_interval` controls monitor cadence independently. It defaults to 60 seconds,
@@ -318,6 +387,12 @@ origin; full issue URLs and `owner/repository#number` work elsewhere. GitHub pul
 information comes from the closing pull-request references GitHub returns for each issue,
 including state, review decision, and head checks. sitrep does not infer additional
 relationships from branch names.
+
+sitrep reads a bounded window of a Ticket's pull requests and never paginates it, so a Ticket
+with more than the window holds shows one of them and counts the rest. The `+N more` figure
+uses GitHub's own count of all of a Ticket's pull requests, so it stays honest about what was
+left out; on a Tracker that reports no total it degrades to counting what was fetched. Under
+`--json` the same figure is `pull_request_total`.
 
 For github.com, an ambient `$GH_TOKEN` or `$GITHUB_TOKEN` is scoped to github.com and sitrep
 falls back to `gh auth token`. An Enterprise host needs its own `gh auth login --hostname`
@@ -340,12 +415,24 @@ rendered empty or guessed.
 
 GitLab.com can use ambient GitLab token variables or `glab auth login`; a self-managed host
 needs `$GITLAB_HOST`, a host-specific `glab` login, or a Profile. A Profile can also provide
-the group/project needed to complete hostless `&N` and `%N` Refs.
+the group/project needed to complete hostless `&N` and `%N` Refs. A Profile naming a group
+must write it `groups/<path>`; anything unprefixed is a project path. `&N` therefore needs a
+group Profile, a bare `N` or `#N` needs a project Profile, and `%N` reads the milestones of
+whichever scope the Profile declared. If a Profile's `project:` names a group, rewrite it
+with the prefix — `project: acme/platform` becomes `project: groups/acme/platform` — or
+hostless `&N` Refs will fail with a message telling you the same thing. sitrep cannot detect
+this at config time: `acme/platform` is a perfectly valid project path.
 
 Native epics require Premium or Ultimate. On GitLab Free, a project or group milestone is the
 Epic fallback, with the same Watchlist renderers and Ticket drill-in. sitrep does not guess
 between them: an `&N` Ref reads a native Epic and a `%N` Ref reads a milestone. A child
 issue's native Epic, or its milestone when no Epic exists, becomes its parent breadcrumb.
+
+GitLab's REST API exposes no resolution or closed-reason field, so a label is the only signal
+that closed work was abandoned rather than finished: a closed issue or epic carrying a
+won't-do label is Cancelled and leaves the progress denominator. The label list is
+configurable per Profile with `wont_do_labels`, and the Native Status shown is GitLab's own
+spelling of the label on the issue.
 
 Merge requests show per Ticket with state, review/approval posture, and pipeline status. An
 open Ticket with an open or draft merge request is categorized InProgress. Correlation costs
@@ -360,16 +447,16 @@ omitted, never `null`.
 
 There are two independently versioned document families:
 
-- **Watchlist documents use schema version 2** for Epic, Ref-list/stdin, and Query
+- **Watchlist documents use schema version 3** for Epic, Ref-list/stdin, and Query
   Watchlists.
 - **Decoded Ticket/Detail documents remain schema version 1** when one positional Ref opens a
   plain Ticket.
 
-### Watchlist document: schema v2
+### Watchlist document: schema v3
 
 | Key | Meaning |
 |---|---|
-| `schema_version` | `2` |
+| `schema_version` | `3` |
 | `generated_at` | when this Watchlist was resolved |
 | `provider.name` | `github`, `gitlab`, `jira`, or `fake` |
 | `provider.capabilities` | optional data Capabilities plus `selectors.epic`, `ref_list`, and `query` |
@@ -377,6 +464,7 @@ There are two independently versioned document families:
 | `watchlist.epic` | Epic identity, present only for an Epic Selector |
 | `watchlist.limit_reached` | optional `true`, present only for a truncated Query |
 | `progress` | Status Category arithmetic over the fetched Tickets |
+| `blocking` | `--links` only: `cycles`, always an array |
 | `tickets` | current thin Tickets, flat and in Provider order |
 
 The three Selector variants are:
@@ -392,7 +480,7 @@ non-Epic shape:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-01-15T12:00:00Z",
   "provider": {
     "name": "fake",
@@ -441,8 +529,14 @@ non-Epic shape:
 `progress` counts `todo`, `in_progress`, `done`, `cancelled`, and `unknown`, plus `total`,
 `denominator` (`total - cancelled`), and rounded `percent_done`. A Ticket carries `id`, `key`,
 `title`, `url`, `status`, and optional `native_status`, `repository`, hierarchy `parent_id`,
-`assignees`, and `pull_requests`. Each pull request has `number`, `title`, `url`, optional
-`repository`, and the fixed `state`, `review`, and `checks` tokens listed below.
+`assignees`, `pull_requests`, and `pull_request_total`. Each pull request has `number`,
+`title`, `url`, optional `repository`, and the fixed `state`, `review`, and `checks` tokens
+listed below.
+
+`pull_request_total` is a lower bound on how many pull requests the Ticket has: never below
+the length of `pull_requests`, never above the Tracker's own count. It is omitted at zero,
+and so is `pull_requests`, so an absent pair does not distinguish a Provider that does not
+report pull requests from one that found none — read `capabilities.pull_requests` for that.
 
 Two useful Watchlist queries:
 
@@ -452,10 +546,65 @@ sitrep --profile work-github --query 'repo:acme/widgets is:issue' --json |
   jq -r '.tickets[] | select(.status != "done" and .status != "cancelled") | .key'
 ```
 
+### `--links`: Actionable and unmet blockers
+
+An agent asking "what can I start?" should not have to open a TUI. `--links` answers that
+in the same document:
+
+```sh
+sitrep 38 39 40 41 --json --links | jq -r '.tickets[] | select(.actionable) | .key'
+```
+
+`--links` requires `--json`; with `--plain`, or on its own, it is a usage error. It costs
+one Detail fetch per Ticket, because Links live in Detail — that price is why it is opt-in
+and why a plain `--json` run still makes exactly one batched request
+([ADR-0003](docs/adr/0003-provider-interface-split-by-view.md)).
+
+With `--links`, each Ticket gains:
+
+| Key | Meaning |
+|---|---|
+| `actionable` | Status Category is Todo, this Ticket's Links were readable, and every blocker is finished |
+| `links_known` | `false` when this Ticket's own Detail could not be read, so its blockers are unknown |
+| `in_cycle` | `true` when the Ticket sits on a BlockedBy cycle; it never changes `actionable` |
+| `unmet_blockers` | the blockers holding this Ticket, present only when there are any |
+
+A Ticket with `links_known: false` may still list a blocker, when that blocker was
+discovered through another Ticket's `blocks` Link. `links_known: false` says the list may
+be incomplete; it never means a listed blocker was guessed at.
+
+and the document gains `blocking.cycles`: each cycle's Ticket IDs, always an array.
+
+Each unmet blocker is a Ticket object — `id`, `key`, `title`, `url`, `status`, optional
+`native_status` — plus `member` (`false` for a **Ghost Ticket**, a Link target that is not
+a Watchlist member) and `status_known`. Satisfied blockers are not listed; the question is
+what is holding the Ticket. A blocker with no identity at all is still emitted, with empty
+identity fields, because dropping it would make a blocked Ticket look actionable.
+
+`actionable` **fails closed**: anything sitrep could not read leaves it `false`. A blocker
+with `status: "todo", status_known: true` is honestly blocked; one with
+`status: "unknown", status_known: false` is a blocker sitrep could not verify. Both leave
+the Ticket not actionable, and a consumer can tell which is which.
+
+These keys are **absent, not null**, when they were not computed — without `--links`, or
+when the Provider does not declare the `blocking_links` Capability (which is silent, like
+every other optional Capability, and issues no fetch). Absence means "not computed"; a
+`false` under `--links` is a computed answer, and the two must never look alike.
+
+A failed Detail fetch is not fatal: the run still exits `0` and the affected Ticket carries
+`links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
+passing a half-fetched Watchlist off as complete.
+
+A single Ref that resolves to a plain Ticket fails with `--links` rather than exiting `0`
+with a document missing every key that was asked for: Actionable is a Watchlist-level
+property that needs the other members' statuses, so there is nothing to compute. That
+document already carries the Ticket's complete `links` array, which is what a script wanting
+one Ticket's Links should read.
+
 ### Decoded Ticket/Detail document: schema v1
 
 A plain Ticket document has `schema_version`, `generated_at`, and `provider` (without the
-schema-v2 Selector Capability object), plus:
+schema-v3 Selector Capability object), plus:
 
 | Key | Meaning |
 |---|---|
@@ -477,9 +626,17 @@ schema-v2 Selector Capability object), plus:
 | `links[].kind` | `relates`, `blocked_by`, `blocks` |
 
 Compatibility is per document schema. Additive optional fields do not require a bump. A
-breaking Watchlist change increments schema v2; an unchanged decoded Ticket/Detail document
-remains schema v1. Consumers should pin the schema version for the document family they read
-and ignore unknown keys.
+breaking Watchlist change increments the Watchlist schema version; an unchanged decoded
+Ticket/Detail document remains schema v1. Consumers should pin the schema version for the
+document family they read and ignore unknown keys.
+
+Watchlist v3 is a deliberate exception to that additive rule. The `--links` fields are
+additive, but they make the Watchlist field set *invocation-dependent*, so the version is
+what tells a consumer which fields this binary is capable of emitting at all: left at `2`,
+a consumer could not distinguish an old binary that rejects `--links` from a new one that
+was simply not asked for blockers. The version identifies the contract the binary
+implements, not the invocation used, so it is `3` on every Watchlist document whether or
+not `--links` was given.
 
 ## When something fails
 

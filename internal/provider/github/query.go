@@ -54,8 +54,11 @@ const queryMembershipDocument = `query($query:String!, $first:Int!, $after:Strin
 // repository-plus-number identity is deduplicated first-occurrence-wins. The
 // union therefore contains at most forty pull requests. Older events and nodes
 // past either bound are silently absent: this Provider cap is not a Query
-// membership LimitReached condition. totalCount and timeline pageInfo are
-// decoded so the bounds stay explicit even though no renderer reports them.
+// membership LimitReached condition. The closing connection's totalCount is
+// decoded and reported: it becomes model.Ticket's PullRequestTotal, so a
+// truncated row counts all of a Ticket's pull requests rather than the twenty
+// that were fetched. The timeline totalCount and pageInfo are decoded only so
+// the bounds stay explicit in this package; no renderer reports those.
 //
 // The shared PullRequest fragment contains only thin list fields. Its aggregate
 // head-commit statusCheckRollup — rather than per-check detail — keeps the

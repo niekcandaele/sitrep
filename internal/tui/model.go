@@ -73,6 +73,24 @@ type Model struct {
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
+	// frontier is the Frontier screen's own state. Like detailState it is seated
+	// whole; the list's state is never consulted to draw it.
+	frontier frontierState
+	// frontierGeneration guards the bulk fan-out the way detailGeneration guards
+	// a single Detail read: leaving the Frontier, or reseating it on a refreshed
+	// Watchlist, advances it and every outstanding answer is dropped. That is
+	// what makes the fan-out interruptible.
+	frontierGeneration int
+	// detailFanoutInflight is how many bulk fan-out fetches are out, counted on
+	// the Model rather than on frontierState so that re-seating the Frontier
+	// does not reset it. It is what bounds concurrency across toggles: the
+	// generation drops an old fetch's answer, but the fetch itself is still
+	// running and still costing the Tracker a request.
+	detailFanoutInflight int
+	// detailReturn is the mode a root Detail seat returns to on esc. The
+	// Frontier is a second rendering of the list, not a Trail entry, so a Ticket
+	// opened from it goes back to it.
+	detailReturn mode
 	// mouseEpoch identifies the current capture lifetime and Detail seat for queued
 	// mouse callbacks. Rereads leave it stable so callbacks can re-resolve facts
 	// from the same seat; navigation and mouse toggles advance it so an older frame
@@ -90,6 +108,7 @@ type Model struct {
 	keys          KeyMap
 	searchKeys    SearchKeyMap
 	detailKeys    DetailKeyMap
+	frontierKeys  FrontierKeyMap
 	help          help.Model
 	styles        Styles
 	markdownTheme markdownTheme
@@ -132,7 +151,8 @@ func New(ctx context.Context, opts Options) Model {
 		if detailSrc == nil {
 			return model.Detail{}, model.Capabilities{}, errNoDetailSource
 		}
-		return detailSrc(ctx, id)
+		d, caps, err := detailSrc(ctx, id)
+		return safeDetail(d), caps, safeErr(err)
 	}
 
 	// The box draws no cursor of its own: the real terminal cursor is placed
@@ -148,7 +168,8 @@ func New(ctx context.Context, opts Options) Model {
 			if src == nil {
 				return ListInput{}, errNoSource
 			}
-			return src(ctx)
+			in, err := src(ctx)
+			return safeListInput(in), safeErr(err)
 		},
 		now:      now,
 		interval: opts.Interval,
@@ -165,6 +186,7 @@ func New(ctx context.Context, opts Options) Model {
 		keys:          DefaultKeyMap(),
 		searchKeys:    DefaultSearchKeyMap(),
 		detailKeys:    DefaultDetailKeyMap(),
+		frontierKeys:  DefaultFrontierKeyMap(),
 		help:          help.New(),
 		styles:        DefaultStyles(true),
 		markdownTheme: markdownDark,
@@ -177,7 +199,7 @@ func New(ctx context.Context, opts Options) Model {
 		// successful refresh is folded in, and nothing is in flight: the refresh
 		// clock runs from when the reading was *taken*, so the first auto-refresh
 		// lands one interval after that rather than one interval after startup.
-		m.input = *opts.Initial
+		m.input = safeListInput(*opts.Initial)
 		m.hasData = true
 		m.refreshing = false
 		m.generation = 0
@@ -193,7 +215,8 @@ func New(ctx context.Context, opts Options) Model {
 			m.generation = 0
 			m.listArmed = false
 		}
-		next, _ := m.seatDetail(opts.Open.Ticket, opts.Open.Parent, opts.Open.Capabilities)
+		entry := safeOpen(*opts.Open)
+		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities)
 		m = next.(Model)
 	}
 	return m
@@ -206,7 +229,7 @@ var errNoDetailSource = errors.New("this monitor was opened without a Detail sou
 // errNoSource explains a refresh attempted with no Watchlist behind the
 // screen. A decoded Ticket with no parent has none, and the walk-up key is
 // disabled rather than offered — so reaching this is a wiring mistake.
-var errNoSource = errors.New("this monitor was opened without a collection to watch")
+var errNoSource = errors.New("this monitor was opened without a Watchlist to watch")
 
 // Init starts the heartbeat, the background-colour query that decides the
 // palette, and whichever first read this session is for: the list's, the
@@ -236,7 +259,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeDetail {
 			m = m.reconcileDetail(true)
 		}
+		if m.mode == modeFrontier {
+			// The card width can change on a very narrow terminal, so the canvas
+			// is rebuilt rather than only re-clamped.
+			m = m.rebuildFrontier()
+		}
 		return m, nil
+
+	case frontierDetailMsg:
+		return m.onFrontierDetail(msg)
+
+	case frontierMouseClickMsg:
+		if m.mode != modeFrontier || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onFrontierMouseClick(msg)
+
+	case frontierMouseWheelMsg:
+		if m.mode != modeFrontier || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onFrontierMouseWheel(msg), nil
 
 	case tea.BackgroundColorMsg:
 		isDark := msg.IsDark()
@@ -257,7 +300,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onHeartbeat()
 
 	case refreshedMsg:
-		return m.onRefreshed(msg), nil
+		return m.applyRefresh(msg)
 
 	case detailFetchedMsg:
 		return m.onDetailFetched(msg), nil
@@ -295,6 +338,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.clearPendingClick().onSearchKey(msg)
 		case m.mode == modeDetail:
 			return m.clearPendingClick().onDetailKey(msg)
+		case m.mode == modeFrontier:
+			return m.clearPendingClick().onFrontierKey(msg)
 		}
 		return m.clearPendingClick().onKey(msg)
 
@@ -334,8 +379,20 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
-	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
+	if m.mode == modeFrontier {
+		v.SetContent(m.frontierFrame())
+		if m.mouseEnabled {
+			v.OnMouse = m.frontierMouseHandler()
+		}
+		return v
+	}
+
+	// Recomputed per frame rather than stored on the Model: a cached field
+	// would be a third thing to keep in step with the Detail cache, the
+	// reading and the filter, and this cannot drift.
+	markers := m.listMarkers()
+	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, markers, m.styles)
+	v.SetContent(strings.Join(append([]string{header, m.renderBody(markers)}, m.footerLines()...), "\n"))
 	v.Cursor = m.cursor()
 	if m.mouseEnabled {
 		v.OnMouse = m.listMouseHandler()
@@ -406,6 +463,73 @@ func (m Model) fetchCmd(generation int) tea.Cmd {
 	}
 }
 
+// applyRefresh folds one reading in and, when the Frontier is the screen on
+// display, reseats it on the new reading. A refresh that failed or answered a
+// superseded generation changes nothing, so it reseats nothing either.
+func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
+	landed := msg.generation == m.generation && msg.err == nil
+	next := m.onRefreshed(msg)
+	if !landed || next.mode != modeFrontier {
+		return next, nil
+	}
+	return next.reseatFrontier()
+}
+
+// reseatFrontier rebuilds the Frontier on a Watchlist that has just changed
+// shape. The generation advances, so every outstanding answer from the previous
+// reading is dropped, and the session's Detail cache is read again so that every
+// Ticket the previous seat paid for is still verified.
+//
+// It issues no fetch. A refresh reaches here from the --interval timer as
+// readily as from r, and ADR-0003 Amendment 4 permits a whole-Watchlist Detail
+// fan-out only in response to an explicit user action. A member the refresh
+// introduced therefore stays UNVERIFIED until the user presses r: a timer is not
+// a user action. enterFrontier and refreshFrontier are the only two fan-out
+// doors, and both are keypresses.
+func (m Model) reseatFrontier() (Model, tea.Cmd) {
+	m.frontierGeneration++
+	m.mouseEpoch++
+	previous := m.frontier
+	m.frontier = frontierState{
+		input:    FrontierFromList(m.input, m.linksFromCache()),
+		focusID:  previous.focusID,
+		offsetX:  previous.offsetX,
+		offsetY:  previous.offsetY,
+		resolved: true,
+	}
+	// A read that failed is still failed, so the footer keeps saying so and
+	// keeps pointing at r. Dropping the record because the Watchlist was read
+	// again would leave cards marked UNVERIFIED with nothing on screen saying
+	// why or what to press. Members the refresh removed leave the set with them.
+	for id := range previous.failed {
+		if _, seated := m.frontier.input.Links[id]; seated {
+			continue
+		}
+		if !m.hasMember(id) {
+			continue
+		}
+		if m.frontier.failed == nil {
+			m.frontier.failed = make(map[model.TicketID]struct{}, len(previous.failed))
+		}
+		m.frontier.failed[id] = struct{}{}
+	}
+	if len(m.frontier.failed) > 0 {
+		m.frontier.lastErr = previous.lastErr
+	}
+	return m.rebuildFrontier(), repaint
+}
+
+// hasMember reports whether id names a Ticket in the seated Frontier's
+// Watchlist.
+func (m Model) hasMember(id model.TicketID) bool {
+	for _, t := range m.frontier.input.Tickets {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // onRefreshed folds one reading in. A failed refresh keeps the last good data
 // on screen: the list still renders, and the staleness indicator keeps
 // counting from the last *successful* fetch, because the data really is that
@@ -442,6 +566,8 @@ func (m Model) rebuildRows() Model {
 	// in step with the Filter is what makes both the matching and the help
 	// line say the same thing.
 	m.keys.ClearFilter.SetEnabled(m.filter.Active())
+	// The Frontier is offered only when there is a Watchlist to draw.
+	m.keys.Frontier.SetEnabled(m.hasData)
 
 	m.rows = BuildRows(m.visibleTickets())
 
@@ -529,6 +655,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Open):
 		return m.openDetail()
+
+	case key.Matches(msg, m.keys.Frontier):
+		return m.enterFrontier()
 
 	case key.Matches(msg, m.keys.Up):
 		return m.move(-1), nil
@@ -665,13 +794,16 @@ func (m Model) selectRow(i int) Model {
 }
 
 // renderBody draws the list, or the state that stands in for it: a Watchlist
-// with no Tickets, or a first fetch that has not landed yet.
-func (m Model) renderBody() string {
+// with no Tickets, or a first fetch that has not landed yet. The markers reach
+// the rows and nothing else: an empty, failed or loading body has no row to
+// mark.
+func (m Model) renderBody(markers listMarkers) string {
 	height := m.bodyHeight()
 
 	switch {
 	case m.hasData && len(m.rows) > 0:
-		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities, m.styles)
+		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities,
+			markers, m.styles)
 	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
 		// Distinct from the empty Watchlist below on purpose: "there is
 		// nothing here" and "you are hiding everything" look identical on
@@ -680,12 +812,12 @@ func (m Model) renderBody() string {
 		return pad(m.styles.EmptyFilter.Render(truncateLine(
 			"No Tickets match this filter.  Press esc to clear it.", m.width)), height)
 	case m.hasData:
-		return pad(m.styles.Muted.Render("This collection has no Tickets."), height)
+		return pad(m.styles.Muted.Render("This Watchlist has no Tickets."), height)
 	case m.lastErr != nil:
 		// A monitor that exits on one bad DNS lookup is useless on an SSH box:
 		// the screen says what went wrong and how to try again, and waits.
 		return pad(strings.Join([]string{
-			m.styles.Error.Render(truncateLine("Could not read the collection: "+m.lastErr.Error(), m.width)),
+			m.styles.Error.Render(truncateLine("Could not read the Watchlist: "+m.lastErr.Error(), m.width)),
 			"",
 			m.styles.Muted.Render("Press r to try again, q to quit."),
 		}, "\n"), height)
@@ -795,7 +927,70 @@ func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
 		return m.responsiveHelpKeys(m.searchKeys)
 	}
+	if m.mode == modeFrontier {
+		return m.responsiveHelpKeys(m.frontierGraphKeys())
+	}
 	return m.responsiveHelpKeys(m.keys)
+}
+
+// frontierGraphKeys is the Frontier's key map with the bindings that need a
+// graph switched off when there is none. Without the BlockingLinks Capability
+// the screen draws no nodes and issued no fetch, so opening a node, re-reading
+// Details and moving focus have nothing to act on — and a footer offering them
+// would quietly lie, which is the reason d and / are not bound here at all.
+func (m Model) frontierGraphKeys() FrontierKeyMap {
+	keys := m.frontierKeys
+	if m.frontier.input.Capabilities.BlockingLinks {
+		return keys
+	}
+	for _, binding := range []*key.Binding{&keys.Open, &keys.Refresh,
+		&keys.Up, &keys.Down, &keys.Left, &keys.Right, &keys.Home, &keys.End,
+		&keys.MouseSelect, &keys.MouseOpen, &keys.MouseWheel} {
+		binding.SetEnabled(false)
+	}
+	return keys
+}
+
+// compactMouseHelp is the next shorter spelling of the mouse toggle's help, for
+// either capture state. Both states need one: the item says what pressing m
+// does, and both verbs are longer than the terminal always has room for.
+func compactMouseHelp(binding key.Binding) (string, bool) {
+	if binding.Help().Key != "m" {
+		return "", false
+	}
+	switch binding.Help().Desc {
+	case mouseEnabledHelp:
+		return mouseEnabledCompactHelp, true
+	case mouseEnabledCompactHelp:
+		return mouseEnabledTerseHelp, true
+	}
+	return "", false
+}
+
+// shortenHelpItem drops one rung off the first short-help item until the three
+// items a reader cannot do without fit. Those three are what makes a footer
+// actionable: without them the reader has no way out of the screen.
+func shortenHelpItem(short []key.Binding, renderer help.Model, width int) {
+	if len(short) < 3 {
+		return
+	}
+	for range 3 {
+		if lipgloss.Width(renderer.ShortHelpView(short[:3])) <= width {
+			return
+		}
+		desc, ok := shorterHelpDesc(short[0])
+		if !ok {
+			return
+		}
+		short[0].SetHelp(short[0].Help().Key, desc)
+	}
+}
+
+func shorterHelpDesc(binding key.Binding) (string, bool) {
+	if binding.Help().Key == "shift-drag" && binding.Help().Desc == searchMouseHintHelp {
+		return searchMouseHintCompactHelp, true
+	}
+	return compactMouseHelp(binding)
 }
 
 type responsiveHelpKeyMap struct {
@@ -816,11 +1011,13 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 		full[i] = append([]key.Binding(nil), groups[i]...)
 	}
 
+	// The expanded panel has two columns to spend, so only the longest item --
+	// the capture-on wording, which carries the shift-drag recovery -- gives way
+	// there.
 	if m.width > 0 && m.width <= 42 {
 		for i := range full {
 			for j := range full[i] {
-				help := full[i][j].Help()
-				if help.Key == "m" && help.Desc == mouseEnabledHelp {
+				if full[i][j].Help().Desc == mouseEnabledHelp {
 					full[i][j].SetHelp("m", mouseEnabledCompactHelp)
 				}
 			}
@@ -829,16 +1026,7 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 
 	unbounded := m.help
 	unbounded.SetWidth(0)
-	if len(short) >= 3 && short[0].Help().Key == "m" &&
-		short[0].Help().Desc == mouseEnabledHelp &&
-		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-		short[0].SetHelp("m", mouseEnabledCompactHelp)
-	}
-	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
-		short[0].Help().Desc == searchMouseHintHelp &&
-		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
-		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
-	}
+	shortenHelpItem(short, unbounded, m.width)
 	if listKeys, ok := keys.(KeyMap); ok && m.help.ShowAll &&
 		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
 		full = compactListFullHelp(listKeys)

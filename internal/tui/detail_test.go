@@ -382,7 +382,7 @@ func TestRenderBreadcrumb(t *testing.T) {
 		parent Header
 		want   string
 	}{
-		{"a collection", Header{Key: "#111", Title: "Widget sync v2"}, "#111 · Widget sync v2"},
+		{"a Watchlist", Header{Key: "#111", Title: "Widget sync v2"}, "#111 · Widget sync v2"},
 		{"no parent at all", Header{}, ""},
 		{"a title with no key", Header{Title: "Everything assigned to @tobias"}, "Everything assigned to @tobias"},
 		{"a key with no title", Header{Key: "#111"}, "#111"},
@@ -405,7 +405,7 @@ func TestDetailFrameFromAHandBuiltInput(t *testing.T) {
 	in := DetailInput{
 		Ticket: DetailHeader{
 			Key: "PROJ-7", Title: "Teach the gadget agent to speak sync v2",
-			Status: model.StatusInProgress, NativeStatus: "In Progress",
+			Status: model.StatusInProgress, NativeStatus: "In Review",
 		},
 		Detail:       model.Detail{TicketID: "PROJ-7", Description: "A Ticket reached without a list."},
 		Capabilities: allCaps,
@@ -417,7 +417,7 @@ func TestDetailFrameFromAHandBuiltInput(t *testing.T) {
 	if strings.Count(header, "\n") != detailHeaderHeight-1 {
 		t.Errorf("the header is not %d lines:\n%s", detailHeaderHeight, header)
 	}
-	for _, want := range []string{"PROJ-7", "Teach the gadget agent", "[In Progress]", "read just now"} {
+	for _, want := range []string{"PROJ-7", "Teach the gadget agent", "[In Review]", "read just now"} {
 		if !strings.Contains(header, want) {
 			t.Errorf("the header does not contain %q:\n%s", want, header)
 		}

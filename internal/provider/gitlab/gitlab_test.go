@@ -1440,6 +1440,101 @@ func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
 	}
 }
 
+// A Profile's own won't-do labels replace sitrep's built-in list rather than
+// extending it. The fixture Epic closes #103 and #107 labelled "backend" and
+// #105 labelled "backend" plus "workflow::wontfix", which is enough to show
+// both halves: a site that calls "backend" cancellation gets all three
+// Cancelled, and a site that names something none of them carries gets all
+// three Done — "workflow::wontfix" included, because a configured list is the
+// whole opinion.
+//
+// The Native Status a matched label produces is GitLab's own spelling of the
+// label on the issue, never the Profile's.
+func TestResolveEpicHonoursConfiguredWontDoLabels(t *testing.T) {
+	// "Backend" is deliberately not how GitLab spells it: the configured name
+	// and the label go through one normalization.
+	got := resolveEpicStatuses(t, gitlab.WithWontDoLabels([]string{"Backend"}))
+	want := map[int]ticketStatus{
+		103: {model.StatusCancelled, "backend"},
+		105: {model.StatusCancelled, "backend"},
+		107: {model.StatusCancelled, "backend"},
+	}
+	assertTicketStatuses(t, got, want)
+}
+
+func TestConfiguredWontDoLabelsReplaceTheBuiltInList(t *testing.T) {
+	got := resolveEpicStatuses(t, gitlab.WithWontDoLabels([]string{"ausgemustert"}))
+	want := map[int]ticketStatus{
+		103: {model.StatusDone, "closed"},
+		// "workflow::wontfix" is a built-in name this Profile did not configure.
+		105: {model.StatusDone, "closed"},
+		107: {model.StatusDone, "closed"},
+	}
+	assertTicketStatuses(t, got, want)
+}
+
+// The same Epic with no configured list is the regression gate on the default.
+func TestResolveEpicKeepsTheBuiltInWontDoLabels(t *testing.T) {
+	got := resolveEpicStatuses(t)
+	want := map[int]ticketStatus{
+		103: {model.StatusDone, "closed"},
+		105: {model.StatusCancelled, "workflow::wontfix"},
+		107: {model.StatusDone, "closed"},
+	}
+	assertTicketStatuses(t, got, want)
+}
+
+type ticketStatus struct {
+	status model.StatusCategory
+	native string
+}
+
+// resolveEpicStatuses expands the fixture Epic and reports each child's Status
+// Category and Native Status by iid.
+func resolveEpicStatuses(t *testing.T, opts ...gitlab.Option) map[int]ticketStatus {
+	t.Helper()
+	p := newProvider(fullEpic(t), opts...)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	got := make(map[int]ticketStatus, len(snap.Tickets))
+	for _, ticket := range snap.Tickets {
+		got[iidFromKey(t, ticket.Key)] = ticketStatus{ticket.Status, ticket.NativeStatus}
+	}
+	return got
+}
+
+func assertTicketStatuses(t *testing.T, got map[int]ticketStatus, want map[int]ticketStatus) {
+	t.Helper()
+	for iid, expected := range want {
+		actual, ok := got[iid]
+		if !ok {
+			t.Errorf("#%d is missing from the Watchlist", iid)
+			continue
+		}
+		if actual != expected {
+			t.Errorf("#%d = (%v, %q), want (%v, %q)",
+				iid, actual.status, actual.native, expected.status, expected.native)
+		}
+	}
+}
+
+// iidFromKey reads the iid out of a project-qualified Ticket Key such as
+// "gitlab-org/cli#103".
+func iidFromKey(t *testing.T, key string) int {
+	t.Helper()
+	_, digits, found := strings.Cut(key, "#")
+	if !found {
+		t.Fatalf("key %q is not project-qualified", key)
+	}
+	iid, err := strconv.Atoi(digits)
+	if err != nil {
+		t.Fatalf("key %q carries no iid: %v", key, err)
+	}
+	return iid
+}
+
 func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.T) {
 	const scoped = "/api/v4/projects/gitlab-org%2Fcli/issues"
 	s := newReplayServer(t, map[string][]response{
@@ -1459,6 +1554,43 @@ func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.
 	requests := s.recorded()
 	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100&page=1" {
 		t.Errorf("requests = %+v, want one project-scoped maximal first page", requests)
+	}
+}
+
+func TestResolveQueryUsesGroupScopedMembershipWhenPathIsAGroup(t *testing.T) {
+	const scoped = "/api/v4/groups/gitlab-org/issues"
+	s := newReplayServer(t, map[string][]response{
+		scoped: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithPath("groups/gitlab-org"))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.recorded()
+	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100&page=1" {
+		t.Errorf("requests = %+v, want one group-scoped maximal first page", requests)
+	}
+}
+
+// Group scoping changes the collection, never the Query: GitLab's group issues
+// endpoint takes the same filters, so the bytes have to arrive untouched here too.
+func TestResolveQueryPreservesLiteralHashUnderGroupScope(t *testing.T) {
+	const (
+		query       = "search=#47&labels=agent%23ready"
+		groupIssues = "/api/v4/groups/gitlab-org/issues"
+	)
+	s := newReplayServer(t, map[string][]response{groupIssues: {{body: `[]`}}})
+
+	p := newProvider(s, gitlab.WithPath("groups/gitlab-org"))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.requestsTo(groupIssues)
+	if len(requests) != 1 {
+		t.Fatalf("membership requests = %d, want 1", len(requests))
+	}
+	if got, want := requests[0].rawQuery, query+"&per_page=100&page=1"; got != want {
+		t.Errorf("raw query = %q, want literal bytes %q", got, want)
 	}
 }
 

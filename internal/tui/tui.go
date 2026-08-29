@@ -13,6 +13,20 @@
 // TUI holds as a plain function so it knows nothing about Refs, auth or
 // GraphQL.
 //
+// # The terminal-text boundary
+//
+// Model data enters this package through exactly four funnels — Options.Initial,
+// Options.Open, Options.Source and Options.DetailSource — and none of them has
+// to come from a Provider: a Source is any closure the caller wrote. So the
+// screens do not trust their caller. Everything entering Model state crosses
+// intake.go, which applies internal/termtext to whole model values, and the
+// renderers below are therefore free of sanitizing calls (ADR-0006).
+//
+// A new screen inherits that by consuming a ListInput or a DetailInput: both
+// can only be seated through those funnels or through DetailFromTicket, which
+// crosses the same boundary. A screen shows a Key, never a model.TicketID —
+// identity is deliberately outside the boundary because it is never drawn.
+//
 // # Progress is computed from every Ticket
 //
 // The header's progress bar is derived from the whole reading, never from the
@@ -63,6 +77,43 @@
 // DetailFromTicket is the adapter this package needs today; a Ticket opened
 // without a list behind it, a bare Ticket Ref decoded straight into Detail,
 // fills the same fields and needs no new entry point here.
+//
+// # The Frontier is a second rendering of the same Watchlist
+//
+// v draws the current Watchlist as nodes and BlockedBy/Blocks edges, answering
+// which Tickets can be picked up right now. It is a mode toggle rather than a
+// navigation frame: membership is exactly the Watchlist's, the selection
+// survives the toggle in both directions, and a Ticket opened from it returns
+// to it — detailReturn is what records that, and the Trail stays what CONTEXT.md
+// says it is, the path of Tickets followed through explicit Links in Detail.
+//
+// Filters are deliberately ignored here. Hiding a node deletes an edge, and a
+// deleted edge can make a blocked Ticket look Actionable, which is the precise
+// failure Actionable exists to prevent — so the screen draws the whole
+// Watchlist and says so in the footer whenever a filter is on.
+//
+// The screen consumes a FrontierInput, adapted by FrontierFromList and cleaned
+// at intake like every other seat. Everything derived — the model.BlockingGraph
+// and the canvas — is recomputed from it, and the layout in frontierframe.go is
+// a pure function of data with no Model, no clock and no style in it.
+//
+// # The Frontier's bulk fan-out is the one exception ADR-0003 allows
+//
+// Actionable is computed from BlockedBy Links, and Links live in Detail, so the
+// Frontier reads every member's Detail once. That is a fan-out, and it is
+// legitimate only because an explicit key press asked for it: never a refresh,
+// never a poll, never a render (ADR-0003 Amendment 4). The policy — canonical
+// order, cache skipping, bounded concurrency, and the rule that only a
+// successful read is recorded — lives in internal/detailfanout, which the
+// one-shot renderers share. Results land in the same per-Ticket Detail cache a
+// drill-in uses, so a Ticket already opened this session costs nothing.
+//
+// Emphasis is withheld until every planned read has answered. Fail-closed plus
+// a progressive fetch means a half-loaded Frontier would give wrong answers to
+// anyone glancing at it, so the cards draw in Status Category colours with no
+// badge and the header counts the reads still outstanding. Leaving the screen
+// advances frontierGeneration, which drops every outstanding answer: that is
+// what makes the fan-out interruptible.
 //
 // # The program can start in Detail, and can be seeded
 //

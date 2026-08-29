@@ -136,10 +136,17 @@ func TestPlainJiraEpicReport(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"ABC-1", "ABC-7", "Won't Do", "« éclair »"} {
+	for _, want := range []string{"ABC-1", "ABC-7", "[Duplicate]", "[Icebox]", "« éclair »"} {
 		if !strings.Contains(got.stdout, want) {
 			t.Errorf("stdout = %q, want it to mention %q", got.stdout, want)
 		}
+	}
+	// ABC-7's Native Status is "Won't Do" and it sits under the CANCELLED
+	// heading, so the tag says nothing the heading has not: it is suppressed.
+	// ABC-8's "[Duplicate]" under the same heading survives, which is the
+	// difference the rule exists to draw.
+	if strings.Contains(got.stdout, "Won't Do") {
+		t.Errorf("stdout = %q, want the degenerate [Won't Do] tag suppressed under CANCELLED", got.stdout)
 	}
 	if strings.Contains(strings.ToLower(got.stdout), "pull request") {
 		t.Error("the report mentions pull requests, which the Jira driver does not serve")

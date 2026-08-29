@@ -1,0 +1,40 @@
+#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
+frontier · 13 nodes · reading Detail 0/13                                                                       just now
+
+┌──────────────────────────┐                                ▲
+│  #202                Todo│
+│Wire the rebalancer into …│
+│                          │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #203                Todo│
+│Backfill shard weights    │
+│                          │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #204                Todo│
+│Drain a shard safely      │
+│                          │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #205                Done│
+│Compute shard weights     │
+│                          │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #206           Cancelled│
+│Legacy weight table       │
+│                          │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│▸ #207         In Progress│
+│Rewrite the placement heu…│
+│[In Review]               │
+└──────────────────────────┘                                ▼
+
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 6/43

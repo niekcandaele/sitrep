@@ -42,6 +42,25 @@
 // receives nothing else. It is Provider-scoped and opaque by contract; nothing
 // outside this package may parse it.
 //
+// # The Profile path
+//
+// A Profile's project is this driver's default path (WithPath), and it declares
+// its own scope rather than being guessed at per reference: "acme/widgets" is a
+// project, "groups/acme/platform" is a group. The scope chooses the issues
+// endpoint a Query reads and decides which hostless references the Profile can
+// complete — "&12" needs a group, "7" needs a project, "%3" follows whichever
+// the Profile declared. A mismatch is refused before any request, by targetFor.
+//
+// # The won't-do labels
+//
+// A closed GitLab issue or epic carrying a won't-do label is Cancelled rather
+// than Done, because REST exposes no resolution field and a label is the only
+// signal there is. sitrep ships a built-in list of such labels
+// (defaultWontDoLabels); a Profile's wont_do_labels replaces it wholesale with
+// the site's own wording, and a Profile that writes none keeps the built-in
+// list. A matched label becomes the Native Status verbatim, as GitLab spells it
+// on the issue — never as the Profile spells it.
+//
 // # Milestone as Epic
 //
 // Native epics are a Premium/Ultimate feature. On GitLab Free the collection a
@@ -135,15 +154,17 @@ const notePageSize = 100
 const requestTimeout = 30 * time.Second
 
 // Provider is the GitLab Tracker driver. Construct it with New; the zero value
-// is not usable.
+// is not usable. path is the Profile's default group or project, already parsed
+// into the scope it declared.
 type Provider struct {
 	host        string
 	baseURL     string
-	path        string
+	path        defaultPath
 	httpClient  *http.Client
 	tokenSource TokenSource
 	userAgent   string
 	maxTickets  int
+	wontDo      wontDoSet
 
 	tokenMu sync.Mutex
 	token   string
@@ -165,6 +186,7 @@ func New(host string, opts ...Option) *Provider {
 		tokenSource: DefaultTokenSource,
 		userAgent:   buildinfo.Name + "/" + buildinfo.Version,
 		maxTickets:  provider.DefaultMaxTickets,
+		wontDo:      newWontDoSet(nil),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -193,9 +215,15 @@ func WithBaseURL(rawurl string) Option {
 }
 
 // WithPath sets the default group or project path — the Profile's project —
-// used for a Ref that names none, such as the bare reference form "&12".
+// used for a Ref that names none, such as the bare reference form "&12", and
+// for the issues endpoint a Query reads.
+//
+// The path declares its own scope and the driver never guesses: "acme/widgets"
+// is a project, "groups/acme/platform" is a group. Only the "groups/" prefix
+// makes a path group-scoped, and stripping it is parseDefaultPath's job alone —
+// callers pass the Profile's project through verbatim.
 func WithPath(path string) Option {
-	return func(p *Provider) { p.path = strings.TrimSpace(path) }
+	return func(p *Provider) { p.path = parseDefaultPath(path) }
 }
 
 // WithTokenSource replaces the token discovery chain. The source is called at
@@ -223,6 +251,17 @@ func WithMaxTickets(maxTickets int) Option {
 	return func(p *Provider) {
 		if maxTickets > 0 {
 			p.maxTickets = maxTickets
+		}
+	}
+}
+
+// WithWontDoLabels replaces the built-in won't-do label list with the Profile's
+// own — the label names that mean cancelled on this site. An empty list leaves
+// the built-in list in place, mirroring WithMaxTickets' non-positive values.
+func WithWontDoLabels(names []string) Option {
+	return func(p *Provider) {
+		if len(names) > 0 {
+			p.wontDo = newWontDoSet(names)
 		}
 	}
 }
@@ -460,11 +499,18 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 	}, nil
 }
 
+// queryMembershipPath is the issues collection a Query searches: the Profile's
+// project, its group, or — with no Profile path — the token's own issues. The
+// group and project endpoints take the same filter and pagination parameters, so
+// everything downstream of this choice is scope-blind.
 func (p *Provider) queryMembershipPath() string {
-	if p.path != "" {
-		return "/projects/" + url.PathEscape(p.path) + "/issues"
+	if p.path.path == "" {
+		return "/issues"
 	}
-	return "/issues"
+	if p.path.scope == scopeGroup {
+		return "/groups/" + url.PathEscape(p.path.path) + "/issues"
+	}
+	return "/projects/" + url.PathEscape(p.path.path) + "/issues"
 }
 
 func queryMembershipRawQuery(query string, perPage, page int) string {
@@ -858,7 +904,7 @@ func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket,
 		if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 			return model.Ticket{}, err
 		}
-		return newTicketFromIssue(issue), nil
+		return newTicketFromIssue(issue, p.wontDo), nil
 
 	case t.isMilestone():
 		milestone, err := p.fetchMilestone(ctx, t)
@@ -872,7 +918,7 @@ func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket,
 		if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 			return model.Ticket{}, err
 		}
-		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path)), nil
+		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path, p.wontDo)), nil
 	}
 }
 
@@ -886,7 +932,7 @@ func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model
 	if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 		return err
 	}
-	snap.Epic = newEpicFromIssue(issue)
+	snap.Epic = newEpicFromIssue(issue, p.wontDo)
 	snap.Parent = newParentFromIssue(issue, p.host)
 
 	prs, err := p.mergeRequestsFor(ctx, t)
@@ -904,7 +950,7 @@ func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.
 	if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 		return err
 	}
-	snap.Epic = newEpicFromEpic(epic, p.host, t.path)
+	snap.Epic = newEpicFromEpic(epic, p.host, t.path, p.wontDo)
 	snap.Parent = newParentFromEpic(epic, p.host, t.path)
 
 	tickets, err := p.fetchChildren(ctx, t, t.epicIssuesPath())
@@ -952,7 +998,7 @@ func (p *Provider) fetchChildren(ctx context.Context, t target, path string) ([]
 	}
 	var tickets []model.Ticket
 	for _, issue := range issues {
-		tickets = append(tickets, newTicketFromIssue(issue))
+		tickets = append(tickets, newTicketFromIssue(issue, p.wontDo))
 	}
 	return tickets, nil
 }
@@ -1050,7 +1096,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 		TicketID:    id,
 		Description: issue.Description,
 		Comments:    newComments(notes, issue.WebURL),
-		Links:       newLinks(links),
+		Links:       newLinks(links, p.wontDo),
 	}, nil
 }
 

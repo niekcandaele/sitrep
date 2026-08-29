@@ -3,19 +3,19 @@
 
 IN PROGRESS (1)
 ▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req
+           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 TODO (1)
   #115     Reconcile widget IDs across shards
-           [open]
 
 DONE (1)
   #118     Cache shard lookups
-           [closed]  @mara-vos  #504 merged
+           @mara-vos  #504 merged
 
 CANCELLED (1)
   #121     Mirror shards to the legacy feed
-           [not planned]
+
+
 
 
 
@@ -37,4 +37,4 @@ CANCELLED (1)
 
 
 filter: "shard" · 4 of 10 Tickets                                                                              esc clear
-m off · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find …
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find …

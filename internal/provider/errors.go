@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // Kind classifies a Provider failure by what the person at the terminal has to
@@ -112,7 +114,7 @@ func (e *Error) Unwrap() error { return e.Err }
 // newline.
 func Errorf(kind Kind, format string, a ...any) error {
 	err := fmt.Errorf(format, a...)
-	if msg := SanitizeLine(err.Error()); msg != err.Error() {
+	if msg := termtext.Line(err.Error()); msg != err.Error() {
 		err = &sanitizedMessage{msg: msg, err: err}
 	}
 	return &Error{Kind: kind, Err: err}

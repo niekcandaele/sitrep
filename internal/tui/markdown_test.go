@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -189,7 +190,11 @@ func assertMarkdownProseForeground(t *testing.T, raw string, markers []string, w
 
 func TestMarkdownRendererErrorsRemainVisibleWithSafeSourceFallback(t *testing.T) {
 	t.Setenv("GLAMOUR_STYLE", "this-style-does-not-exist")
-	in := DetailInput{Detail: model.Detail{Description: "**still readable**\x1b]52;c;cHduZWQ=\a"}}
+	// Seated the way every Detail is seated: the fallback prints the source it
+	// was handed, which is the source that crossed intake.
+	in := DetailFromTicket(model.Ticket{ID: "T-1", Key: "#1"},
+		model.Detail{Description: "**still readable**\x1b]52;c;cHduZWQ=\a"},
+		model.Capabilities{}, Header{}, time.Time{})
 	doc := composeDetailDocument(in, 80, Styles{}, detailLinkIdentity{}, false)
 	raw := strings.Join(doc.Lines, "\n")
 	visible := ansi.Strip(raw)

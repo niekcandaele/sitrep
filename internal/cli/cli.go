@@ -23,6 +23,8 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
+	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -31,6 +33,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 	"github.com/niekcandaele/sitrep/internal/tui"
 )
 
@@ -68,7 +71,8 @@ Usage:
 
 Selectors:
   One Ref selects an Epic Watchlist. If it resolves to a plain Ticket instead,
-  sitrep opens that Ticket's Detail.
+  sitrep opens that Ticket's Detail; --links needs a Watchlist and is refused
+  there.
 
   Two or more positional Refs select exact Tickets in order. They need no common
   Epic, but must use one Tracker and connection.
@@ -84,13 +88,17 @@ Ref forms:
   111                                        bare issue number
   #111                                       bare issue number
   acme/widgets#111                           owner, repository, number
-  https://github.com/acme/widgets/issues/111  GitHub issue URL
   ABC-123                                    Jira key; its prefix matches a Profile
-  https://acme.atlassian.net/browse/ABC-123   Jira browse URL
-  https://gitlab.com/acme/widgets/-/issues/7  GitLab issue/work-item URL
   acme&12                                    GitLab native epic Ref
-  https://gitlab.com/groups/acme/-/epics/12  GitLab native epic URL
   acme/widgets%3                             GitLab milestone Ref
+  https://github.com/acme/widgets/issues/111
+                                             GitHub issue URL
+  https://acme.atlassian.net/browse/ABC-123
+                                             Jira browse URL
+  https://gitlab.com/acme/widgets/-/issues/7
+                                             GitLab issue/work-item URL
+  https://gitlab.com/groups/acme/-/epics/12
+                                             GitLab native epic URL
   https://gitlab.com/acme/widgets/-/milestones/3
                                              GitLab milestone URL
 
@@ -98,11 +106,21 @@ Ref forms:
   forms work anywhere. GitLab's &N names a native Epic; %N is the milestone-as-
   Epic fallback available on GitLab Free.
 
+Monitor:
+  The monitor opens on the Watchlist. Press v for the Frontier, which draws the
+  same Watchlist as nodes and blocking edges to answer one question: which
+  Tickets can be picked up right now.
+
 Flags:
   -h, --help              show this help and exit
-      --interval <dur>    how often the monitor refreshes (default 60s)
+      --interval <dur>    how often the monitor refreshes (default 60s,
+                          minimum 5s)
       --no-mouse          start the monitor without mouse capture
       --json              print a one-shot JSON report and exit
+      --links             with --json, add each Ticket's unmet blockers and
+                          whether it is Actionable - Todo with every blocker
+                          finished or cancelled. Needs a Watchlist, and costs
+                          one Detail fetch per Ticket
       --plain             print a one-shot Watchlist or Ticket report and exit
       --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
                           matched from the route or Refs)
@@ -240,6 +258,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	showVersion := fs.Bool("version", false, "show version information and exit")
 	asJSON := fs.Bool("json", false, "print a one-shot JSON report and exit")
 	asPlain := fs.Bool("plain", false, "print a one-shot Watchlist or Ticket report and exit")
+	withLinks := fs.Bool("links", false, "with --json, add Actionable and unmet blockers (per-Ticket fetch)")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
@@ -264,6 +283,15 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// one would hide a scripting mistake.
 	if *asJSON && *asPlain {
 		return usageError(stderr, "--json and --plain are mutually exclusive")
+	}
+
+	// Unlike --interval, --links is never a default a script inherited from a
+	// Profile: it is only ever present because someone typed it, and typing it
+	// means "give me blocking data", which neither --plain nor the monitor will
+	// produce. Failing is the honest answer; ignoring it would silently drop the
+	// data the caller asked for.
+	if *withLinks && !*asJSON {
+		return usageError(stderr, "--links requires --json")
 	}
 
 	// --interval only means anything to the monitor. Rejecting it beside a
@@ -378,6 +406,15 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	}
 
 	if _, epic := selector.(provider.EpicSelector); epic && decodesToTicket(snap) {
+		// Blocking data is produced for a Watchlist, and this Ref resolved to
+		// one Ticket. It is the same misuse as --links without --json, so it is
+		// the same answer: ignoring the flag would silently drop the data the
+		// caller asked for. The Ref itself resolved perfectly well, so this is
+		// not a bad Ref.
+		if *withLinks {
+			return usageError(stderr, fmt.Sprintf(
+				"--links needs a Watchlist: %s names a single Ticket", snap.Epic.Key))
+		}
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}
@@ -386,8 +423,21 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	switch {
 	case *asJSON:
+		blocking := blockingGraphFor(ctx, p, snap, *withLinks)
+		// A ctrl+c during the fan-out ends the run. Emitting the half-fetched
+		// document would be a lie by omission: most Tickets would say
+		// links_known: false because the user pressed a key, not because the
+		// Tracker could not answer.
+		if code, ok := interrupted(ctx); ok {
+			return code
+		}
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return jsonout.RenderWatchlist(w, snap, selector, p.Name())
+			return jsonout.RenderWatchlist(w, jsonout.WatchlistDocument{
+				Snapshot:     snap,
+				Selector:     selector,
+				ProviderName: p.Name(),
+				Blocking:     blocking,
+			})
 		})
 	case *asPlain:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
@@ -403,6 +453,42 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		Interval:     refresh,
 		NoMouse:      *noMouse,
 	})
+}
+
+// blockingGraphFor reads every member's Detail and derives the Watchlist's
+// blocking graph, or returns nil when the caller did not ask for one or the
+// Provider cannot express blocking at all.
+//
+// nil is what makes --json's default free: ADR-0003 still forbids a render from
+// fanning FetchDetail out, and Amendment 4 permits it here only because --links
+// is an explicit user action. An undeclared BlockingLinks Capability is silent
+// rather than an error, the same way pull_requests is: the keys are simply
+// absent, and emitting actionable: false everywhere would read as a computed
+// negative when BuildBlockingGraph in fact claims nothing.
+//
+// A failed FetchDetail is not fatal and is not reported: the Ticket is left out
+// of the links map, which is exactly the unreadable-Links tri-state, and the
+// document says so per Ticket with links_known: false.
+func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.WatchlistSnapshot, withLinks bool) *model.BlockingGraph {
+	if !withLinks || !snap.Capabilities.BlockingLinks {
+		return nil
+	}
+
+	// A one-shot run holds no Detail cache, so nothing is skipped; Plan is still
+	// the way in, for its canonical order and its empty-ID skip.
+	ids := detailfanout.Plan(snap.Tickets, nil)
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	//nolint:errcheck // Run's only error is ctx.Err(), which RunWith reads back
+	// through interrupted(ctx) so that an interrupt stays an interrupt rather
+	// than becoming a rendering failure.
+	_ = detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
+		if o.Err == nil {
+			details[o.ID] = o.Detail
+		}
+	})
+
+	graph := model.BuildBlockingGraph(snap.Tickets, detailfanout.Links(details), snap.Capabilities)
+	return &graph
 }
 
 // stdinSelection recognizes the transport sentinel only in argv. It must be
@@ -1073,7 +1159,7 @@ func usageError(stderr io.Writer, msg string) int {
 // driver builds, and this covers anything constructed outside it that still
 // quotes tracker text.
 func runtimeError(stderr io.Writer, err error) int {
-	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, provider.SanitizeLine(err.Error()))
+	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, termtext.Line(err.Error()))
 	return exitFailure
 }
 
@@ -1258,8 +1344,10 @@ func (d Deps) newJira(
 //
 // Unlike Jira, a GitLab Ref needs no Profile: a user with `glab auth login`
 // done is a supported zero-config setup, exactly as on GitHub. What a Profile
-// adds is the instance's default group or project path — which is what makes
-// the bare "&12" reference form typeable — and a named token variable.
+// adds is a default path — which is what makes the bare "&12" reference form
+// typeable — a named token variable, and the site's own won't-do labels. The
+// path declares its own scope in its spelling, which only the driver reads: the
+// Profile's project is passed through verbatim.
 //
 // Translating a config.Credential into the driver's own token happens here,
 // deliberately: it is what keeps internal/provider/gitlab free of any knowledge
@@ -1283,7 +1371,8 @@ func (d Deps) newGitLab(host, path string, prof *config.Profile, maxTickets int)
 	return gitlab.New(host,
 		gitlab.WithPath(path),
 		gitlab.WithTokenSource(d.gitLabTokenSource(prof)),
-		gitlab.WithMaxTickets(maxTickets)), nil
+		gitlab.WithMaxTickets(maxTickets),
+		gitlab.WithWontDoLabels(profileWontDoLabels(prof))), nil
 }
 
 // gitLabTokenSource layers a Profile's auth reference on top of the GitLab
@@ -1301,6 +1390,15 @@ func profileProject(prof *config.Profile) string {
 		return ""
 	}
 	return prof.Project
+}
+
+// profileWontDoLabels is a Profile's won't-do label names, or nil when there is
+// no Profile — which is the driver's "keep the built-in list" input.
+func profileWontDoLabels(prof *config.Profile) []string {
+	if prof == nil {
+		return nil
+	}
+	return prof.WontDoLabels
 }
 
 func (d Deps) newGitHub(host string, prof *config.Profile, maxTickets int) provider.Provider {

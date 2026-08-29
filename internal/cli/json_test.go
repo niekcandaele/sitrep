@@ -506,8 +506,8 @@ func TestRunResolvesTheFakeProvider(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
 		t.Fatalf("unmarshalling the epic document: %v", err)
 	}
-	if got := doc["schema_version"]; got != float64(2) {
-		t.Errorf("schema_version = %v, want 2", got)
+	if got := doc["schema_version"]; got != float64(3) {
+		t.Errorf("schema_version = %v, want 3", got)
 	}
 }
 

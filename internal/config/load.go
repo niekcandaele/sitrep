@@ -15,6 +15,13 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/niekcandaele/sitrep/internal/provider"
+	// A deliberate one-driver dependency. Two Profile keys — project and
+	// wont_do_labels — mean whatever the gitlab driver says they mean, and a
+	// config package that re-derives either rule is a second owner of it that
+	// nothing keeps in step. Calling the driver's own predicates is the cheaper
+	// of the two wrong-looking options. Moving all driver-specific Profile
+	// validation into internal/cli is the refactor that would remove it.
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -147,7 +154,7 @@ type yamlSection struct {
 // because it is a key anyone should use.
 var yamlSections = map[string]yamlSection{
 	"config.Config":  {label: "the top level", keys: []string{"profiles"}},
-	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval", "max_tickets"}},
+	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval", "max_tickets", "wont_do_labels"}},
 	"config.Auth":    {label: "auth", keys: []string{"token_env", "user", "user_env"}},
 }
 
@@ -232,6 +239,9 @@ func (c Config) validateProfile(p *Profile) error {
 	if err := c.validateProject(*p); err != nil {
 		return err
 	}
+	if err := c.validateWontDoLabels(*p); err != nil {
+		return err
+	}
 	if err := c.validateAuth(*p); err != nil {
 		return err
 	}
@@ -300,6 +310,15 @@ func (c Config) validateProject(p Profile) error {
 		return c.profileErrorf(p.Name,
 			"project is not used by a github profile (a GitHub Ref carries its own owner/repo)")
 	}
+	if p.Provider == providerGitLab {
+		// The gitlab driver owns what a Profile path means, prefix rule
+		// included; re-deriving it here is how the two drift. Every other
+		// spelling is a path sitrep cannot check offline and does not try to.
+		if gitlab.ProfilePathNamesNoGroup(p.Project) {
+			return c.profileErrorf(p.Name, "project %q names no group — write groups/<group path>", p.Project)
+		}
+		return nil
+	}
 	if p.Provider != providerJira {
 		return nil
 	}
@@ -311,6 +330,39 @@ func (c Config) validateProject(p Profile) error {
 	// has to be a shape the Ref grammar can produce.
 	if ref.KeyPrefix(p.Project+"-1") != strings.ToUpper(p.Project) {
 		return c.profileErrorf(p.Name, "project %q is not a Jira project key", p.Project)
+	}
+	return nil
+}
+
+// validateWontDoLabels checks the GitLab won't-do label list. A Profile that
+// writes nothing keeps sitrep's built-in list; a Profile that writes the key has
+// to mean something by it.
+func (c Config) validateWontDoLabels(p Profile) error {
+	if p.WontDoLabels == nil {
+		return nil
+	}
+	if p.Provider != providerGitLab {
+		// Accepting and ignoring it is the worst thing a config file can do, and
+		// there is nothing to honour: GitHub's not_planned and Jira's resolution
+		// say outright what a label can only imply.
+		return c.profileErrorf(p.Name, "wont_do_labels is only used by a gitlab profile "+
+			"(GitHub and Jira report cancellation natively)")
+	}
+	if len(p.WontDoLabels) == 0 {
+		// Honouring an empty list would silently turn the inference off and
+		// flatter every Epic containing abandoned work.
+		return c.profileErrorf(p.Name,
+			"wont_do_labels names no labels — remove the key to use sitrep's built-in list")
+	}
+	for _, label := range p.WontDoLabels {
+		// The gitlab package owns what a label name reduces to. Checking
+		// whitespace here instead would accept "::" or "---", which normalize
+		// away to nothing and leave the built-in list in force — an override
+		// that silently overrides nothing.
+		if !gitlab.UsableWontDoLabel(label) {
+			return c.profileErrorf(p.Name,
+				"wont_do_labels entry %q has no letters or digits to match a label by", label)
+		}
 	}
 	return nil
 }

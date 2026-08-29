@@ -9,9 +9,14 @@ import (
 )
 
 const (
-	doubleClickInterval        = 500 * time.Millisecond
-	mouseEnabledHelp           = "off · shift-drag to select text"
-	mouseEnabledCompactHelp    = "off, shift-drag"
+	doubleClickInterval = 500 * time.Millisecond
+	// Every footer item names what its key does, and so do these: "m off" with
+	// capture on parses as "the mouse is off", which is the opposite of both
+	// the state and the effect of pressing m.
+	mouseEnabledHelp           = "release · shift-drag to select text"
+	mouseEnabledCompactHelp    = "release, shift-drag"
+	mouseEnabledTerseHelp      = "release/⇧drag"
+	mouseDisabledHelp          = "capture"
 	searchMouseHintHelp        = "to select text"
 	searchMouseHintCompactHelp = "select text"
 )
@@ -22,6 +27,16 @@ type listMouseClickMsg struct {
 }
 
 type listMouseWheelMsg struct {
+	epoch int
+	delta int
+}
+
+type frontierMouseClickMsg struct {
+	epoch int
+	id    model.TicketID
+}
+
+type frontierMouseWheelMsg struct {
 	epoch int
 	delta int
 }
@@ -92,6 +107,77 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// frontierMouseHandler translates input against the exact canvas geometry of
+// the last rendered Frontier frame. Like the list's, it never mutates Model:
+// its domain message is re-resolved against the current layout in Update, and
+// ignored when its epoch is stale.
+func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
+	width, height := m.width, m.height
+	bodyHeight := m.frontierBodyHeight()
+	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
+	epoch := m.mouseEpoch
+	layout := m.frontier.layout
+
+	return func(msg tea.MouseMsg) tea.Cmd {
+		switch msg := msg.(type) {
+		case tea.MouseClickMsg:
+			// Modified primary clicks are reserved for terminal gestures such as
+			// shift-drag text selection, and are transparent here.
+			if msg.Button != tea.MouseLeft || msg.Mod != 0 {
+				return nil
+			}
+			if msg.X < 0 || msg.X >= width ||
+				msg.Y < headerHeight || msg.Y >= headerHeight+bodyHeight {
+				return nil
+			}
+			id, ok := layout.nodeAtPoint(msg.X+offsetX, msg.Y-headerHeight+offsetY)
+			if !ok {
+				return nil
+			}
+			return mouseCmd(frontierMouseClickMsg{epoch: epoch, id: id})
+
+		case tea.MouseWheelMsg:
+			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
+				return nil
+			}
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				return mouseCmd(frontierMouseWheelMsg{epoch: epoch, delta: -3})
+			case tea.MouseWheelDown:
+				return mouseCmd(frontierMouseWheelMsg{epoch: epoch, delta: 3})
+			}
+		}
+		return nil
+	}
+}
+
+func (m Model) onFrontierMouseClick(msg frontierMouseClickMsg) (tea.Model, tea.Cmd) {
+	if _, drawn := m.frontier.layout.nodeAt[msg.id]; !drawn {
+		return m.clearPendingClick(), nil
+	}
+
+	now := m.now()
+	delta := now.Sub(m.lastClickAt)
+	double := m.lastClickID == msg.id && delta >= 0 && delta <= doubleClickInterval
+	m.frontier.focusID = msg.id
+	m.frontier.hasFocus = true
+	m = m.reconcileFrontier(true)
+	if !double {
+		m.lastClickID = msg.id
+		m.lastClickAt = now
+		return m, nil
+	}
+	return m.clearPendingClick().openFrontierNode()
+}
+
+// onFrontierMouseWheel scrolls the canvas rather than moving focus: a graph's
+// rows are six lines tall, and moving focus by wheel would feel broken.
+func (m Model) onFrontierMouseWheel(msg frontierMouseWheelMsg) Model {
+	m = m.clearPendingClick()
+	m.frontier.offsetY += msg.delta
+	return m.reconcileFrontier(false)
 }
 
 // detailMouseHandler translates clicks and wheel movement against the exact
@@ -207,9 +293,12 @@ func (m Model) onDetailMouseLink(msg detailMouseLinkMsg) (tea.Model, tea.Cmd) {
 func (m Model) toggleMouse() Model {
 	previousBodyHeight := 0
 	if m.ready {
-		if m.mode == modeDetail {
+		switch m.mode {
+		case modeDetail:
 			previousBodyHeight = m.detailBodyHeight()
-		} else {
+		case modeFrontier:
+			previousBodyHeight = m.frontierBodyHeight()
+		default:
 			previousBodyHeight = m.bodyHeight()
 		}
 	}
@@ -227,6 +316,9 @@ func (m Model) toggleMouse() Model {
 	if m.mode == modeDetail {
 		return m.reconcileDetail(m.detailBodyHeight() != previousBodyHeight)
 	}
+	if m.mode == modeFrontier {
+		return m.reconcileFrontier(m.frontierBodyHeight() != previousBodyHeight)
+	}
 	if m.bodyHeight() != previousBodyHeight {
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 	}
@@ -242,16 +334,24 @@ func (m Model) syncMouseKeys() Model {
 		m.detailKeys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
 		m.detailKeys.MouseWheel.SetEnabled(true)
 		m.detailKeys.MouseFollow.SetEnabled(m.detailKeys.NextLink.Enabled())
+		m.frontierKeys.ToggleMouse.SetHelp("m", mouseEnabledHelp)
+		m.frontierKeys.MouseSelect.SetEnabled(true)
+		m.frontierKeys.MouseOpen.SetEnabled(true)
+		m.frontierKeys.MouseWheel.SetEnabled(true)
 		m.searchKeys.MouseHint.SetEnabled(true)
 		return m
 	}
-	m.keys.ToggleMouse.SetHelp("m", "on")
+	m.keys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
 	m.keys.MouseSelect.SetEnabled(false)
 	m.keys.MouseOpen.SetEnabled(false)
 	m.keys.MouseWheel.SetEnabled(false)
-	m.detailKeys.ToggleMouse.SetHelp("m", "on")
+	m.detailKeys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
 	m.detailKeys.MouseWheel.SetEnabled(false)
 	m.detailKeys.MouseFollow.SetEnabled(false)
+	m.frontierKeys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
+	m.frontierKeys.MouseSelect.SetEnabled(false)
+	m.frontierKeys.MouseOpen.SetEnabled(false)
+	m.frontierKeys.MouseWheel.SetEnabled(false)
 	m.searchKeys.MouseHint.SetEnabled(false)
 	return m
 }

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -105,6 +107,79 @@ func TestNewFakeProviderUsesProfileMaxTicketsIndependentlyOfCadence(t *testing.T
 	if got := effectiveInterval(false, 0, profile.RefreshInterval); got != time.Hour {
 		t.Errorf("effective interval = %s, want 1h", got)
 	}
+}
+
+// A Profile's won't-do labels have to survive the CLI seam: config decodes them,
+// newGitLab hands them to the driver, and a closed issue carrying one comes back
+// Cancelled. Proving it here rather than only in the driver's own tests is the
+// point — the wiring is what breaks.
+func TestNewProviderForwardsProfileWontDoLabelsToTheGitLabDriver(t *testing.T) {
+	const issueBody = `{"iid":8509,"state":"closed","labels":["Backend"],` +
+		`"references":{"full":"acme/widgets#8509"},` +
+		`"web_url":"https://gitlab.com/acme/widgets/-/issues/8509","title":"Retire the shim"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/closed_by") || strings.HasSuffix(r.URL.Path, "/related_merge_requests") {
+			_, _ = io.WriteString(w, "[]")
+			return
+		}
+		_, _ = io.WriteString(w, issueBody)
+	}))
+	t.Cleanup(server.Close)
+
+	resolve := func(t *testing.T, profile *config.Profile) model.Epic {
+		t.Helper()
+		deps := Deps{GitLabTokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
+		constructed, err := deps.newProvider(providerAuto, connectionRoute{
+			tracker: ref.TrackerGitLab, host: "gitlab.com", gitLabPath: profile.Project, raw: "8509",
+		}, profile, "")
+		if err != nil {
+			t.Fatalf("newProvider: %v", err)
+		}
+		p, ok := constructed.(*gitlab.Provider)
+		if !ok {
+			t.Fatalf("provider = %T, want *gitlab.Provider", constructed)
+		}
+		gitlab.WithBaseURL(server.URL)(p)
+
+		snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{
+			Tracker: ref.TrackerGitLab, Host: "gitlab.com", Number: 8509, Raw: "8509",
+		}})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		return snap.Epic
+	}
+
+	t.Run("a configured list reaches the driver", func(t *testing.T) {
+		epic := resolve(t, gitlabProfileFrom(t, "    wont_do_labels: [backend]\n"))
+		// The Native Status is GitLab's spelling of the label, not the Profile's.
+		if epic.Status != model.StatusCancelled || epic.NativeStatus != "Backend" {
+			t.Errorf("status = (%v, %q), want (cancelled, \"Backend\")", epic.Status, epic.NativeStatus)
+		}
+	})
+
+	t.Run("a profile writing none keeps the built-in list", func(t *testing.T) {
+		epic := resolve(t, gitlabProfileFrom(t, ""))
+		if epic.Status != model.StatusDone || epic.NativeStatus != "closed" {
+			t.Errorf("status = (%v, %q), want (done, \"closed\")", epic.Status, epic.NativeStatus)
+		}
+	})
+}
+
+// gitlabProfileFrom parses a one-profile config document, so the value under
+// test starts as the bytes a user writes rather than as a Go literal.
+func gitlabProfileFrom(t *testing.T, extraKeys string) *config.Profile {
+	t.Helper()
+	doc := "profiles:\n  acme:\n    provider: gitlab\n    host: gitlab.com\n" +
+		"    project: acme/widgets\n" + extraKeys
+	cfg, err := config.Parse(strings.NewReader(doc), "/tmp/sitrep-test/config.yml")
+	if err != nil {
+		t.Fatalf("Parse:\n%s\n%v", doc, err)
+	}
+	profile := cfg.Profiles["acme"]
+	return &profile
 }
 
 type captureRoundTripper func(*http.Request) (*http.Response, error)

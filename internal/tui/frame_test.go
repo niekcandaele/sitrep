@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
 
 // ensureVisible is the one piece of list arithmetic in the monitor, and it is
@@ -141,7 +142,7 @@ func TestMetaLineTruncatesWithAnEllipsis(t *testing.T) {
 	budget := width - selectionGutter - keyColumn
 
 	lines := rowLines([]Row{{Kind: RowTicket, Ticket: t3}}, 0, keyColumn, width,
-		false, model.Capabilities{PullRequests: true}, Styles{})
+		false, model.Capabilities{PullRequests: true}, listMarkers{}, Styles{})
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want a title and a meta line: %q", len(lines), lines)
 	}
@@ -164,7 +165,7 @@ func TestRenderRowsFillsTheWindowExactly(t *testing.T) {
 		ticket("#2", model.StatusTodo),
 	})
 
-	got := renderRows(rows, 1, 0, 12, 40, model.Capabilities{}, Styles{})
+	got := renderRows(rows, 1, 0, 12, 40, model.Capabilities{}, listMarkers{}, Styles{})
 
 	if n := len(strings.Split(got, "\n")); n != 12 {
 		t.Errorf("body is %d lines, want exactly the 12 it was given", n)
@@ -173,5 +174,104 @@ func TestRenderRowsFillsTheWindowExactly(t *testing.T) {
 		if w := lipgloss.Width(line); w > 40 {
 			t.Errorf("line %q is %d cells wide, want at most 40", line, w)
 		}
+	}
+}
+
+// "0 actionable" is the case that has to be drawn: without it, a warm reading
+// where nothing can be picked up renders exactly like a cold one that is not
+// claiming anything. assertNoMarkers asserts absence and cannot reach this.
+func TestHeaderDrawsAZeroActionableCount(t *testing.T) {
+	p := model.Progress{Done: 1, Denominator: 2, PercentDone: 50}
+	warm := listMarkers{active: true, actionable: map[model.TicketID]bool{}}
+
+	got := headerProgress(p, "just now", 120, warm, Styles{})
+
+	if !strings.Contains(got, separator+"0 actionable") {
+		t.Errorf("a warm header with nothing Actionable says nothing about it:\n%s", got)
+	}
+	if cold := headerProgress(p, "just now", 120, listMarkers{}, Styles{}); cold == got {
+		t.Errorf("warm-and-none renders identically to cold:\n%s", got)
+	}
+}
+
+// The marker column takes two cells from the title's budget, and the budget is
+// what keeps a line inside the terminal. A cold listMarkers reserves nothing,
+// so the discipline has to be asserted warm, at a width where the titles
+// actually reach the edge.
+func TestRenderRowsFitsTheWindowWithMarkersActive(t *testing.T) {
+	long := func(key string) model.Ticket {
+		t := ticket(key, model.StatusTodo)
+		t.Title = strings.Repeat("rebalance the shard placement heuristic ", 3)
+		t.NativeStatus = "Selected for Development"
+		return t
+	}
+	rows := BuildRows([]model.Ticket{long("#1"), long("#2")})
+	markers := listMarkers{
+		active:     true,
+		actionable: map[model.TicketID]bool{"#1": true},
+		count:      1,
+	}
+
+	// rowLines rather than renderRows: renderRows clips every line to the width
+	// as a last resort, which would hide a row that overran its budget instead
+	// of failing. What is asserted is the budget itself.
+	for _, width := range []int{40, 60, 80} {
+		drew := false
+		for i := range rows {
+			for _, line := range rowLines(rows, i, 4, width, i == 1, model.Capabilities{}, markers, Styles{}) {
+				drew = drew || strings.Contains(line, strings.TrimSpace(actionableMarker))
+				if w := lipgloss.Width(line); w > width {
+					t.Errorf("width %d: line %q is %d cells wide", width, line, w)
+				}
+			}
+		}
+		if !drew {
+			t.Fatalf("width %d: no marker was drawn, so this proves nothing", width)
+		}
+	}
+}
+
+// hasMeta feeds rowHeights, which feeds ensureVisible, rowAt and the scroll
+// offset, while ticketMeta decides what is actually drawn. A Native Status
+// suppressed by one and counted by the other makes the scroll window drift and
+// mouse clicks land on the wrong row, which is why both call one predicate.
+// Over the whole fixture, and with the pull-request Capability both on and
+// off, the two must answer the same question.
+func TestHasMetaAgreesWithTicketMeta(t *testing.T) {
+	for _, caps := range []model.Capabilities{{PullRequests: true}, {PullRequests: false}} {
+		for _, ticket := range fake.FixtureSnapshot().Tickets {
+			drawn := ticketMeta(ticket, caps, Styles{}) != ""
+			if counted := hasMeta(ticket, caps); counted != drawn {
+				t.Errorf("%s (%v/%q) with PullRequests=%v: hasMeta = %v but ticketMeta non-empty = %v",
+					ticket.Key, ticket.Status, ticket.NativeStatus, caps.PullRequests, counted, drawn)
+			}
+		}
+	}
+}
+
+// A Ticket whose Provider capped what it fetched counts every pull request the
+// Tracker reported, not the handful that came back. The field decides what the
+// meta line says and never whether there is one, so the row keeps its height.
+func TestMetaLineCountsTheTrackersPullRequestTotal(t *testing.T) {
+	caps := model.Capabilities{PullRequests: true}
+	base := ticket("#1", model.StatusInProgress)
+	base.PullRequests = []model.PullRequest{{
+		Number: 501, State: model.PROpen,
+		Checks: model.ChecksPassing, Review: model.ReviewApproved,
+	}}
+
+	if got := ticketMeta(base, caps, Styles{}); strings.Contains(got, "more") {
+		t.Errorf("meta line %q counts an overflow the Provider never reported", got)
+	}
+
+	truncated := base
+	truncated.PullRequestTotal = 34
+	got := ticketMeta(truncated, caps, Styles{})
+	if !strings.Contains(got, "+33 more") {
+		t.Errorf("meta line = %q, want the 33 pull requests the row does not show", got)
+	}
+
+	if hasMeta(truncated, caps) != hasMeta(base, caps) {
+		t.Error("the total changed a row's height; it may only change what the meta line says")
 	}
 }

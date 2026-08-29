@@ -1,12 +1,10 @@
 package tui
 
 import (
-	"strings"
-
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // Styles is every Lip Gloss style the monitor draws with, in one place, so a
@@ -74,6 +72,17 @@ type Styles struct {
 	Error lipgloss.Style
 	// Muted styles secondary prose, such as the empty Watchlist notice.
 	Muted lipgloss.Style
+	// FrontierBold is the loud half of the Frontier's emphasis channel: an
+	// Actionable node, a node on a cycle, and the focus marker. Emphasis is
+	// weight rather than a second hue, because colour there carries Status
+	// Category and nothing else.
+	FrontierBold lipgloss.Style
+	// FrontierFaint is the quiet half of that channel: a node that is blocked.
+	FrontierFaint lipgloss.Style
+	// Actionable styles the list's Actionable marker. Weight rather than a
+	// second hue, because colour in the list carries Status Category; the
+	// glyph, not the style, is what carries the fact.
+	Actionable lipgloss.Style
 }
 
 // DefaultStyles returns the monitor's palette for a dark or light terminal.
@@ -129,20 +138,24 @@ func DefaultStyles(isDark bool) Styles {
 		Body:            base.Foreground(text),
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
+		FrontierBold:    base.Foreground(text).Bold(true),
+		FrontierFaint:   base.Foreground(dim),
+		Actionable:      base.Foreground(text).Bold(true),
 	}
 }
 
-// sanitizeTerminalText repeats the Provider's single-line policy at direct TUI
-// input seams. Normalizing malformed UTF-8 first keeps raw C1 bytes from
-// bypassing the rune-based policy.
-func sanitizeTerminalText(text string) string {
-	return provider.SanitizeLine(strings.ToValidUTF8(text, ""))
-}
-
 // renderHyperlink is the TUI's only OSC 8 creation seam.
+//
+// It cleans its own text and URI, and that is not a second boundary: model
+// fields reaching it are already clean from intake.go, so these calls are
+// idempotent no-ops in practice. They are scope integrity for the one sequence
+// this function writes. An unbalanced or control-carrying URI breaks the
+// hyperlink scope, which then swallows the rest of the screen — and this
+// function is also handed strings the package composed itself, such as a
+// plain.PullRequestSummary, which never crossed intake as a model field.
 func renderHyperlink(style lipgloss.Style, text, url string) string {
-	text = sanitizeTerminalText(text)
-	url = sanitizeTerminalText(url)
+	text = termtext.Line(text)
+	url = termtext.Line(url)
 	if url == "" {
 		return style.Render(text)
 	}

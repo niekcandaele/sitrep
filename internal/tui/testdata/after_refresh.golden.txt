@@ -3,31 +3,27 @@
 
 IN PROGRESS (2)
 ▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req
+           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
   #7       Teach the gadget agent to speak sync v2
-           [In Progress]  #18 draft ci ...
+           #18 draft ci ...
 
 TODO (3)
   #115     Reconcile widget IDs across shards
-           [open]
   #116     Protocol conformance tests
            [Selected for Development]  @tobias
   #117     Renseigner la métrique « éclair » du tableau de bord
-           [open]
 
 DONE (4)
   #113     Retry & backoff for the sync worker
-           [closed]  @mara-vos @tobias  #502 open ci FAIL review pending
+           @mara-vos @tobias  #502 open ci FAIL review pending
   #118     Cache shard lookups
-           [closed]  @mara-vos  #504 merged
+           @mara-vos  #504 merged
   #119     Emit sync telemetry
-           [Done]  @tobias
+           @tobias
   #120     Write the sync v2 runbook
-           [closed]
 
 CANCELLED (1)
   #121     Mirror shards to the legacy feed
-           [not planned]
 
 
 
@@ -37,4 +33,8 @@ CANCELLED (1)
 
 
 
-m off · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help
+
+
+
+
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …

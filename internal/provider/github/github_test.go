@@ -2369,3 +2369,38 @@ func TestResolveHonoursContextCancellation(t *testing.T) {
 		t.Fatal("Resolve returned no error after its context was cancelled")
 	}
 }
+
+// The connection is capped at twenty and never paginated (ADR-0003), so a
+// Ticket with more pull requests than the cap must still say how many it has.
+// #90's recorded connection reports thirty-four against three fetched nodes;
+// every other PR-bearing Ticket in the fixture omits totalCount, which is the
+// degradation path a Tracker with no total takes.
+func TestResolveReportsTheTruncatedPullRequestTotal(t *testing.T) {
+	p := newProvider(fullEpic(t))
+
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	byKey := ticketsByKey(t, snap)
+
+	truncated := byKey["#90"]
+	if got := len(truncated.PullRequests); got != 3 {
+		t.Fatalf("#90 holds %d pull requests, want the 3 the payload carries", got)
+	}
+	if got := truncated.PullRequestTotal; got != 34 {
+		t.Errorf("#90 PullRequestTotal = %d, want the 34 GitHub reported", got)
+	}
+
+	// No totalCount in the payload: the total floors at what is actually held,
+	// so the row counts the pull requests it has.
+	degraded := byKey["#98"]
+	if got, want := degraded.PullRequestTotal, len(degraded.PullRequests); got != want {
+		t.Errorf("#98 PullRequestTotal = %d, want %d — a payload with no total counts what it holds", got, want)
+	}
+
+	// The Epic root's connection is null, which is no total at all.
+	if got := snap.Epic.PullRequestTotal; got != 0 {
+		t.Errorf("Epic.PullRequestTotal = %d, want 0: the root has no pull requests", got)
+	}
+}

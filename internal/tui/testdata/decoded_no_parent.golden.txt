@@ -1,6 +1,6 @@
                                                                                                  current · read just now
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 DESCRIPTION
 
@@ -37,4 +37,4 @@ LINKS (3)
   blocks            #116  Protocol conformance tests               [Selected for Development]
   is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
 
-m off · shift-drag to select text • esc quit • q quit • tab/⇧tab links • ? help • ↑/k up • ↓/j down • r refresh
+m release · shift-drag to select text • esc quit • q quit • tab/⇧tab links • ? help • ↑/k up • ↓/j down • r refresh

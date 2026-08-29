@@ -30,6 +30,7 @@
           ]
         },
         "closedByPullRequestsReferences": {
+          "totalCount": 12,
           "nodes": [
             {
               "number": 25,

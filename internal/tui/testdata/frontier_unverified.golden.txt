@@ -1,0 +1,40 @@
+#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
+frontier · 13 nodes · actionable unknown                                                                        just now
+
+┌──────────────────────────┐
+│▸ #201                Todo│
+│Ship the rebalancer CLI   │
+│UNVERIFIED                │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #202                Todo│
+│Wire the rebalancer into …│
+│UNVERIFIED                │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #203                Todo│
+│Backfill shard weights    │
+│UNVERIFIED                │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #204                Todo│
+│Drain a shard safely      │
+│UNVERIFIED                │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #205                Done│
+│Compute shard weights     │
+│UNVERIFIED                │
+└──────────────────────────┘
+
+┌──────────────────────────┐
+│  #206           Cancelled│
+│Legacy weight table       │                                ▼
+
+13 Tickets' Links could not be read; anything they block is not Actionable
+read failed: tracker said no — press r to retry the Tickets that failed
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 0/45

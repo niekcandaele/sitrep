@@ -30,6 +30,9 @@ type KeyMap struct {
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
+	// Frontier opens the Frontier: the same Watchlist drawn as blocking-graph
+	// nodes. It is offered only when there is a Watchlist to draw.
+	Frontier key.Binding
 	// Find opens the fuzzy find over Ticket keys and titles.
 	Find key.Binding
 	// ClearFilter drops both filter criteria. It is enabled only while a
@@ -89,6 +92,11 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("d"),
 			key.WithHelp("d", "hide finished"),
 		),
+		Frontier: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "frontier"),
+			key.WithDisabled(),
+		),
 		Find: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "find"),
@@ -121,7 +129,11 @@ func DefaultKeyMap() KeyMap {
 // still explain how to recover text selection. Open and quit follow, keeping all
 // three visible at 80 columns. Every binding remains available in FullHelp.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Help}
+	// Frontier comes last: at 80 and at 120 columns the line is already full,
+	// and dropping "? help" — the one binding that reveals the rest — to make
+	// room for a binding the expanded listing already carries is a bad trade.
+	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find,
+		k.ClearFilter, k.Help, k.Frontier}
 }
 
 // FullHelp returns every binding in two dense columns. The model stacks these
@@ -129,7 +141,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.Refresh, k.Help, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
@@ -150,6 +162,9 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("enter/r", "open/refresh"),
 		helpOnlyBinding("d /", "hide finished/find"),
 		helpOnlyBinding("?/q", "help/quit"),
+	}
+	if k.Frontier.Enabled() {
+		bindings = append(bindings, k.Frontier)
 	}
 	if k.ClearFilter.Enabled() {
 		bindings = append(bindings, k.ClearFilter)
@@ -262,6 +277,129 @@ func (k DetailKeyMap) ShortHelp() []key.Binding {
 // the model stacks both groups when the terminal cannot show them side by side.
 func (k DetailKeyMap) FullHelp() [][]key.Binding {
 	return detailHelpRolesFrom(k).fullGroups()
+}
+
+// FrontierKeyMap is the keyboard while the Frontier is open. It reuses list
+// bindings where key and meaning match and replaces the list's paging with
+// movement along the two axes a graph has. Neither d nor / appears: filters do
+// not apply on this screen, and the footer says so rather than binding a key
+// that would quietly lie.
+type FrontierKeyMap struct {
+	// Up moves focus to the previous node in this column.
+	Up key.Binding
+	// Down moves focus to the next node in this column.
+	Down key.Binding
+	// Left moves focus to the blocker side.
+	Left key.Binding
+	// Right moves focus to the dependent side.
+	Right key.Binding
+	// Home focuses the first node in canonical order.
+	Home key.Binding
+	// End focuses the last node in canonical order.
+	End key.Binding
+	// Open opens the focused node's Ticket, Ghost Tickets included.
+	Open key.Binding
+	// Toggle returns to the list, dropping every outstanding Detail read.
+	Toggle key.Binding
+	// Refresh re-issues the Detail reads that never succeeded.
+	Refresh key.Binding
+	// ToggleMouse enables or disables terminal mouse capture.
+	ToggleMouse key.Binding
+	// MouseSelect describes click focus in expanded help only.
+	MouseSelect key.Binding
+	// MouseOpen describes double-click opening in expanded help only.
+	MouseOpen key.Binding
+	// MouseWheel describes wheel scrolling in expanded help only.
+	MouseWheel key.Binding
+	// Help toggles the full help listing.
+	Help key.Binding
+	// Quit ends the program.
+	Quit key.Binding
+}
+
+// DefaultFrontierKeyMap returns the Frontier's bindings.
+func DefaultFrontierKeyMap() FrontierKeyMap {
+	list := DefaultKeyMap()
+	return FrontierKeyMap{
+		// The list's keys, the graph's words: "up" and "down" beside "blocker
+		// side" and "wheel scroll" read as scrolling the canvas, which is what
+		// the wheel does and these do not.
+		Up: key.NewBinding(
+			key.WithKeys(list.Up.Keys()...),
+			key.WithHelp("↑/k", "previous node"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys(list.Down.Keys()...),
+			key.WithHelp("↓/j", "next node"),
+		),
+		Left: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "blocker side"),
+		),
+		Right: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "dependent side"),
+		),
+		Home: key.NewBinding(
+			key.WithKeys("home", "g"),
+			key.WithHelp("g", "first node"),
+		),
+		End: key.NewBinding(
+			key.WithKeys("end", "G"),
+			key.WithHelp("G", "last node"),
+		),
+		Open: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "open Ticket"),
+		),
+		Toggle: key.NewBinding(
+			key.WithKeys("v", "esc"),
+			// Both keys are named: esc is the one a reader reaches for to leave
+			// a screen, and advertising only v hides it on the footer and in the
+			// ? panel alike.
+			key.WithHelp("v/esc", "list"),
+		),
+		Refresh: key.NewBinding(
+			key.WithKeys("r"),
+			key.WithHelp("r", "re-read Details"),
+		),
+		ToggleMouse: list.ToggleMouse,
+		MouseSelect: helpOnlyBinding("click", "select node"),
+		MouseOpen:   helpOnlyBinding("double-click", "open Ticket"),
+		MouseWheel:  helpOnlyBinding("wheel", "scroll"),
+		Help:        list.Help,
+		// esc belongs to Toggle here, so Quit is q and ctrl+c only — the same
+		// separation the Detail screen makes.
+		Quit: key.NewBinding(
+			key.WithKeys("q", "ctrl+c"),
+			key.WithHelp("q", "quit"),
+		),
+	}
+}
+
+// ShortHelp returns the bindings the Frontier's one-line footer shows, in the
+// order they survive a narrow terminal: the one-line footer is cut from the
+// right, so first is what a reader keeps.
+//
+// The escape hatches come first — leaving the screen, retrying the reads, the
+// help panel, quitting. r is the only remedy for the failure banner drawn
+// directly above this line, and "? help" is not discoverable by anything.
+// Opening a Ticket and the mouse toggle follow, then movement, which is
+// discoverable by trying the arrow keys. This is the same trade
+// KeyMap.ShortHelp names, made the same way, so the two footers are visibly one
+// decision.
+func (k FrontierKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Toggle, k.Refresh, k.Help, k.Quit, k.Open, k.ToggleMouse,
+		k.Up, k.Down, k.Left, k.Right}
+}
+
+// FullHelp returns every binding in two dense columns; the model stacks them
+// when the terminal cannot show them side by side.
+func (k FrontierKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Quit},
+		{k.Up, k.Down, k.Left, k.Right, k.Home, k.End},
+	}
 }
 
 // SearchKeyMap is the keyboard while the find box is open. It is deliberately

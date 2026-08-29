@@ -1,6 +1,6 @@
 #111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
   length. Step 13 of the handshake, spelled out at length. Step 14 of the handshake, spelled out at length. Step 15 of
   the handshake, spelled out at length. Step 16 of the handshake, spelled out at length. Step 17 of the handshake,
@@ -36,5 +36,5 @@ LINKS (3)
   is blocked by     #115  Reconcile widget IDs across shards       [open]
   blocks            #116  Protocol conformance tests               [Selected for Development]
   is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
-
-m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down   100%
+                                                                                                                    100%
+m release · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down

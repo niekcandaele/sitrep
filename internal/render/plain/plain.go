@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // Layout widths are fixed constants, not terminal-derived: a one-shot report
@@ -182,12 +183,18 @@ func PadKey(key string, width int) string {
 // Truncate shortens s to at most width runes, ending in an ellipsis when it
 // had to cut. It counts runes rather than bytes: a byte-slice truncation
 // corrupts a multi-byte title such as "Renseigner la métrique « éclair »".
+//
+// A cut is re-balanced for the same reason: the terminator that closes a
+// bidirectional scope can be among the runes dropped, and a renderer may not
+// re-create at the cut a defect the boundary already removed. This is not a
+// second policy about Tracker text — the policy is termtext.Balance's, and
+// this only declines to undo it.
 func Truncate(s string, width int) string {
 	runes := []rune(s)
 	if len(runes) <= width || width <= 0 {
 		return s
 	}
-	return string(runes[:width-1]) + ellipsis
+	return termtext.Balance(string(runes[:width-1]) + ellipsis)
 }
 
 // PullRequestSummary renders one pull request as a single line fragment:
@@ -263,22 +270,34 @@ func writeTicket(b *strings.Builder, t model.Ticket, keyColumn int, caps model.C
 	fmt.Fprintf(b, "%s%s%s\n", ticketIndent, strings.Repeat(" ", keyColumn), meta)
 }
 
-// ticketMeta joins the non-empty parts of a Ticket's second line with two
-// spaces: its Native Status, its assignees, and its lead pull request.
+// ticketMeta joins the non-empty parts of a grouped row's second line with two
+// spaces: its Native Status, its assignees, and its lead pull request. The row
+// sits under a Status Category heading, so a Native Status that only restates
+// that heading is dropped.
 func ticketMeta(t model.Ticket, caps model.Capabilities) string {
 	var parts []string
 
-	// Native Status is displayed as-is and never branched on.
-	if t.NativeStatus != "" {
+	// The word is printed exactly as the Tracker wrote it and never branched
+	// on for meaning; ShowsNativeStatus decides only whether it is printed at
+	// all, by reading the Status Category the row already sits under.
+	if ShowsNativeStatus(t) {
 		parts = append(parts, "["+t.NativeStatus+"]")
 	}
+	return strings.Join(append(parts, ticketMetaTail(t, caps)...), "  ")
+}
+
+// ticketMetaTail is the part of a meta line that does not depend on whether a
+// Status Category heading stands above the Ticket: assignees, then the lead
+// pull request.
+func ticketMetaTail(t model.Ticket, caps model.Capabilities) []string {
+	var parts []string
 	if s := assigneeList(t.Assignees); s != "" {
 		parts = append(parts, s)
 	}
 	if s := pullRequests(t, caps); s != "" {
 		parts = append(parts, s)
 	}
-	return strings.Join(parts, "  ")
+	return parts
 }
 
 // assigneeList renders the assignees as @-prefixed logins in Provider order.
@@ -296,9 +315,10 @@ func assigneeList(users []model.User) string {
 }
 
 // pullRequests renders the Ticket's lead pull request, with a count of the
-// rest so nothing is silently hidden. The Capability is the authority: when
-// the snapshot does not declare PullRequests nothing is emitted, even if the
-// Ticket somehow carries pull requests.
+// rest so nothing is silently hidden — including the ones the Provider never
+// fetched, when it can say how many there are. The Capability is the authority:
+// when the snapshot does not declare PullRequests nothing is emitted, even if
+// the Ticket somehow carries pull requests.
 func pullRequests(t model.Ticket, caps model.Capabilities) string {
 	if !caps.PullRequests || len(t.PullRequests) == 0 {
 		return ""
@@ -306,8 +326,8 @@ func pullRequests(t model.Ticket, caps model.Capabilities) string {
 	// Providers list the lead pull request first: the one that best represents
 	// the Ticket's current state.
 	summary := PullRequestSummary(t.PullRequests[0], t.Repository)
-	if rest := len(t.PullRequests) - 1; rest > 0 {
-		summary += fmt.Sprintf(" +%d more", rest)
+	if overflow := PullRequestOverflow(len(t.PullRequests), t.PullRequestTotal); overflow != "" {
+		summary += " " + overflow
 	}
 	return summary
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/provider/providertest"
 )
 
@@ -127,6 +128,45 @@ func TestFetchDetailMapsTheLinks(t *testing.T) {
 	}
 	if dup := detail.Links[4].Target; dup.Status != model.StatusCancelled || dup.NativeStatus != "duplicate" {
 		t.Errorf("Links[4].Target = %+v, want Cancelled/duplicate", dup)
+	}
+}
+
+// A Detail's link targets run through the same normalizeStatus the list does,
+// so a Profile's own won't-do labels reach the LINKS table: one Ticket reads the
+// same in both places.
+func TestFetchDetailLinkTargetsHonourConfiguredWontDoLabels(t *testing.T) {
+	// One closed link target labelled with a word only this site calls
+	// cancellation.
+	const linkedIssue = `[{"iid":301,"state":"closed","labels":["Ausgemustert"],` +
+		`"link_type":"relates_to","references":{"full":"gitlab-org/cli#301"}}]`
+
+	detailServer := func() *replayServer {
+		return newReplayServer(t, map[string][]response{
+			issuePath:      {{file: "issue_detail.json"}},
+			issueNotesPath: {{file: "notes_page.json"}},
+			issueLinksPath: {{body: linkedIssue}},
+		})
+	}
+
+	configured := newProvider(detailServer(), gitlab.WithWontDoLabels([]string{"ausgemustert"}))
+	detail, err := configured.FetchDetail(context.Background(), issueTicketID)
+	if err != nil {
+		t.Fatalf("FetchDetail: %v", err)
+	}
+	if len(detail.Links) != 1 {
+		t.Fatalf("got %d links, want 1", len(detail.Links))
+	}
+	// The Native Status is GitLab's spelling of the label, not the Profile's.
+	if got := detail.Links[0].Target; got.Status != model.StatusCancelled || got.NativeStatus != "Ausgemustert" {
+		t.Errorf("configured target = (%v, %q), want (cancelled, \"Ausgemustert\")", got.Status, got.NativeStatus)
+	}
+
+	detail, err = newProvider(detailServer()).FetchDetail(context.Background(), issueTicketID)
+	if err != nil {
+		t.Fatalf("FetchDetail: %v", err)
+	}
+	if got := detail.Links[0].Target; got.Status != model.StatusDone || got.NativeStatus != "closed" {
+		t.Errorf("built-in target = (%v, %q), want (done, \"closed\")", got.Status, got.NativeStatus)
 	}
 }
 
