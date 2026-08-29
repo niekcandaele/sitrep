@@ -45,7 +45,11 @@ sitrep's normalized lifecycle bucket for a Ticket: Todo, InProgress, Done, or Ca
 
 **Native Status**:
 The Tracker's own status label ("In Review", "Selected for Development"), displayed as-is
-and never filtered on.
+and never filtered on. A Native Status that only restates its Status Category ("open" under
+Todo, "closed" or "Done" under Done) carries no information, so renderers suppress it wherever
+the Status Category is already supplied — list rows and meta lines — and keep it where nothing
+else supplies the context, such as a Detail LINKS row. The word itself is never rewritten and
+never branched on for meaning, and `--json` always carries the Tracker's own word.
 
 **Capability**:
 A per-Provider declaration of supported Selector kinds and optional data features such as

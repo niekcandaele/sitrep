@@ -405,7 +405,7 @@ func TestDetailFrameFromAHandBuiltInput(t *testing.T) {
 	in := DetailInput{
 		Ticket: DetailHeader{
 			Key: "PROJ-7", Title: "Teach the gadget agent to speak sync v2",
-			Status: model.StatusInProgress, NativeStatus: "In Progress",
+			Status: model.StatusInProgress, NativeStatus: "In Review",
 		},
 		Detail:       model.Detail{TicketID: "PROJ-7", Description: "A Ticket reached without a list."},
 		Capabilities: allCaps,
@@ -417,7 +417,7 @@ func TestDetailFrameFromAHandBuiltInput(t *testing.T) {
 	if strings.Count(header, "\n") != detailHeaderHeight-1 {
 		t.Errorf("the header is not %d lines:\n%s", detailHeaderHeight, header)
 	}
-	for _, want := range []string{"PROJ-7", "Teach the gadget agent", "[In Progress]", "read just now"} {
+	for _, want := range []string{"PROJ-7", "Teach the gadget agent", "[In Review]", "read just now"} {
 		if !strings.Contains(header, want) {
 			t.Errorf("the header does not contain %q:\n%s", want, header)
 		}

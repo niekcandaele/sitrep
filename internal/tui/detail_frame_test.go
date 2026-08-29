@@ -60,6 +60,78 @@ func longDetails() map[model.TicketID]model.Detail {
 	return details
 }
 
+// suppressedStatusDetails gives fixture Ticket #115 — Todo with the degenerate
+// Native Status "open", no assignee and no pull request — two Links: one whose
+// target's status is equally degenerate and one that is informative. It is
+// test-local rather than a change to the shared fixture, which would move the
+// --json goldens.
+func suppressedStatusDetails() map[model.TicketID]model.Detail {
+	details := fake.FixtureDetails()
+	details["acme/widgets#115"] = model.Detail{
+		TicketID:    "acme/widgets#115",
+		Description: "Shard IDs drifted apart during the first migration.",
+		Links: []model.Link{
+			{
+				Kind:        model.LinkBlocks,
+				NativeLabel: "blocks",
+				Target: model.LinkTarget{
+					ID:           "acme/widgets#120",
+					Key:          "#120",
+					Title:        "Write the sync v2 runbook",
+					URL:          "https://tracker.example.test/acme/widgets/120",
+					Status:       model.StatusTodo,
+					NativeStatus: "open",
+				},
+			},
+			{
+				Kind:        model.LinkBlockedBy,
+				NativeLabel: "is blocked by",
+				Target: model.LinkTarget{
+					ID:           "acme/widgets#112",
+					Key:          "#112",
+					Title:        "Draft the shard sync protocol",
+					URL:          "https://tracker.example.test/acme/widgets/112",
+					Status:       model.StatusInProgress,
+					NativeStatus: "In Review",
+				},
+			},
+		},
+	}
+	return details
+}
+
+// The Detail header meta line obeys the same suppression rule as the list row
+// it was opened from — a Ticket must not describe itself differently one
+// keystroke apart — while the LINKS table below it keeps every tag, because no
+// Status Category heading supplies that context there.
+func TestDetailFrameSuppressedNativeStatus(t *testing.T) {
+	p := fake.New(fake.WithDetails(suppressedStatusDetails()))
+	s := startBoth(t, p, newClock(), time.Minute)
+	s.waitFor(t, "Widget sync v2")
+
+	s.down(3)
+	s.tm.Send(enterKey)
+	s.waitFor(t, "LINKS")
+
+	_, got := s.finish(t)
+
+	checkGolden(t, "detail_suppressed_status.golden.txt", got)
+	frame := string(got)
+	if !strings.Contains(frame, "Reconcile widget IDs across shards") {
+		t.Fatalf("the frame is not #115's Detail:\n%s", frame)
+	}
+	// Exactly one [open]: the link row's. The header's was suppressed, and so
+	// was the #115 list row's behind the Detail screen.
+	if n := strings.Count(frame, "[open]"); n != 1 {
+		t.Errorf("the frame carries %d [open] tags, want only the LINKS row's:\n%s", n, frame)
+	}
+	for _, want := range []string{"#120", "[open]", "[In Review]"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("the LINKS table lost %q; it is exempt from the suppression rule:\n%s", want, frame)
+		}
+	}
+}
+
 // down steps the list selection n times. The fixture's first row is #112, so
 // counting down from it is how a session names the Ticket it opens.
 func (s *session) down(n int) {

@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
 
 // ensureVisible is the one piece of list arithmetic in the monitor, and it is
@@ -172,6 +173,24 @@ func TestRenderRowsFillsTheWindowExactly(t *testing.T) {
 	for _, line := range strings.Split(got, "\n") {
 		if w := lipgloss.Width(line); w > 40 {
 			t.Errorf("line %q is %d cells wide, want at most 40", line, w)
+		}
+	}
+}
+
+// hasMeta feeds rowHeights, which feeds ensureVisible, rowAt and the scroll
+// offset, while ticketMeta decides what is actually drawn. A Native Status
+// suppressed by one and counted by the other makes the scroll window drift and
+// mouse clicks land on the wrong row, which is why both call one predicate.
+// Over the whole fixture, and with the pull-request Capability both on and
+// off, the two must answer the same question.
+func TestHasMetaAgreesWithTicketMeta(t *testing.T) {
+	for _, caps := range []model.Capabilities{{PullRequests: true}, {PullRequests: false}} {
+		for _, ticket := range fake.FixtureSnapshot().Tickets {
+			drawn := ticketMeta(ticket, caps, Styles{}) != ""
+			if counted := hasMeta(ticket, caps); counted != drawn {
+				t.Errorf("%s (%v/%q) with PullRequests=%v: hasMeta = %v but ticketMeta non-empty = %v",
+					ticket.Key, ticket.Status, ticket.NativeStatus, caps.PullRequests, counted, drawn)
+			}
 		}
 	}
 }

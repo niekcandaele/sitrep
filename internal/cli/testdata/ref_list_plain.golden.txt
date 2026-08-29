@@ -8,13 +8,11 @@ IN PROGRESS (1)
 
 TODO (1)
   #115     Reconcile widget IDs across shards
-           [open]
 
 DONE (1)
   #118     Cache shard lookups
-           [closed]  @mara-vos  #504 merged
+           @mara-vos  #504 merged
 
 CANCELLED (1)
   #121     Mirror shards to the legacy feed
-           [not planned]
 

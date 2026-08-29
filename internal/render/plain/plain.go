@@ -268,8 +268,10 @@ func writeTicket(b *strings.Builder, t model.Ticket, keyColumn int, caps model.C
 func ticketMeta(t model.Ticket, caps model.Capabilities) string {
 	var parts []string
 
-	// Native Status is displayed as-is and never branched on.
-	if t.NativeStatus != "" {
+	// The word is printed exactly as the Tracker wrote it and never branched
+	// on for meaning; ShowsNativeStatus decides only whether it is printed at
+	// all, by reading the Status Category the row already sits under.
+	if ShowsNativeStatus(t) {
 		parts = append(parts, "["+t.NativeStatus+"]")
 	}
 	if s := assigneeList(t.Assignees); s != "" {
