@@ -300,6 +300,16 @@ func (c Config) validateProject(p Profile) error {
 		return c.profileErrorf(p.Name,
 			"project is not used by a github profile (a GitHub Ref carries its own owner/repo)")
 	}
+	if p.Provider == providerGitLab {
+		// "groups/" is how a GitLab path declares it names a group; with nothing
+		// after it, it names nothing at all. Every other spelling is a path
+		// sitrep cannot check offline and does not try to.
+		group, prefixed := strings.CutPrefix(strings.TrimLeft(strings.TrimSpace(p.Project), "/"), "groups/")
+		if prefixed && strings.Trim(group, "/") == "" {
+			return c.profileErrorf(p.Name, "project %q names no group — write groups/<group path>", p.Project)
+		}
+		return nil
+	}
 	if p.Provider != providerJira {
 		return nil
 	}

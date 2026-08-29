@@ -141,8 +141,10 @@ sitrep --profile acme-gitlab \
   when required; a Profile does not add it.
 - **Jira** receives exact JQL. The Profile supplies site, credentials, and routing, but sitrep
   does not insert a `project = ...` clause.
-- **GitLab** receives a raw issue-API query component. The Profile's `project` selects a
-  project-scoped endpoint; an empty project uses the global issues endpoint.
+- **GitLab** receives a raw issue-API query component. The Profile's `project` selects the
+  endpoint it is searched against: an unprefixed path such as `acme/widgets` uses the
+  project-scoped issues endpoint, a `groups/`-prefixed path such as `groups/acme` uses the
+  group-scoped one, and an empty project uses the global issues endpoint.
 
 Search selects identities. The Provider then rereads each identity through its exact Ticket
 path, so rendered title, status, assignees, and code state do not come from a search-result
@@ -266,7 +268,7 @@ profiles:
   acme-gitlab:
     provider: gitlab
     host: git.acme.test
-    project: acme/platform
+    project: groups/acme/platform
     auth:
       token_env: GITLAB_TOKEN
 ```
@@ -275,6 +277,13 @@ profiles:
 set `project`, because a GitHub Ref or native Query carries its own scope. A Jira Profile
 requires `host`, `project`, and `auth.token_env`; `auth.user` or `auth.user_env` supplies the
 Atlassian identity. A GitLab Profile requires `host` and may set a group or project path.
+
+A GitLab `project` declares which of the two it is, and sitrep never guesses: `project:
+acme/widgets` is a project, `project: groups/acme` is a group. That scope decides both which
+issues endpoint a `--query` reads and which hostless Refs the Profile can complete — `&N`
+needs a group, `N` or `#N` needs a project, and `%N` works under either and follows the
+Profile's scope. A Ref the Profile's scope cannot complete is rejected before any request,
+with the spelling to use instead.
 
 **A Profile names a token; it never holds one.** `auth.token_env` is the environment-variable
 name. Literal tokens in config are rejected. A credential is sent only to the Profile host
@@ -340,7 +349,10 @@ rendered empty or guessed.
 
 GitLab.com can use ambient GitLab token variables or `glab auth login`; a self-managed host
 needs `$GITLAB_HOST`, a host-specific `glab` login, or a Profile. A Profile can also provide
-the group/project needed to complete hostless `&N` and `%N` Refs.
+the group/project needed to complete hostless `&N` and `%N` Refs. A Profile naming a group
+must write it `groups/<path>`; anything unprefixed is a project path. `&N` therefore needs a
+group Profile, a bare `N` or `#N` needs a project Profile, and `%N` reads the milestones of
+whichever scope the Profile declared.
 
 Native epics require Premium or Ultimate. On GitLab Free, a project or group milestone is the
 Epic fallback, with the same Watchlist renderers and Ticket drill-in. sitrep does not guess

@@ -292,6 +292,11 @@ func TestParseValidation(t *testing.T) {
 			want: []string{`profile "x"`, "project is not used by a github profile", "a GitHub Ref carries its own owner/repo"},
 		},
 		{
+			name: "a group-scoped gitlab project naming no group",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.test\n    project: groups/\n",
+			want: []string{`profile "x"`, `project "groups/" names no group`, "write groups/<group path>"},
+		},
+		{
 			name: "a second YAML document",
 			doc:  "profiles:\n  x:\n    provider: github\n---\nprofiles:\n  y:\n    provider: github\n",
 			want: []string{testPath, "more than one YAML document"},
@@ -466,6 +471,13 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 			name: "a gitlab profile with no token_env",
 			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    project: platform/widgets\n",
 			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "platform/widgets", MaxTickets: 100},
+		},
+		{
+			// A group-scoped path reaches the driver spelled exactly as written:
+			// config documents the spelling and never strips the prefix.
+			name: "a gitlab profile naming a group",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    project: groups/acme\n",
+			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "groups/acme", MaxTickets: 100},
 		},
 		{
 			// After credential scoping a Profile is the only way a self-hosted
