@@ -8,6 +8,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // This file is the Frontier's layout: nodes and BlockedBy edges in, a canvas of
@@ -835,7 +836,13 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 			}
 		}
 		flush()
-		lines = append(lines, truncateLine(strings.TrimRight(line.String(), " "), width))
+		// The canvas cuts by column, not by line: a horizontal scroll slices
+		// every card in the leftmost and rightmost columns mid-field, which can
+		// leave a bidirectional opener or its terminator on the far side of the
+		// window. Balancing the assembled line is the same obligation
+		// balancedTruncate carries for a field it clips (ADR-0006).
+		lines = append(lines, termtext.Balance(
+			truncateLine(strings.TrimRight(line.String(), " "), width)))
 	}
 	return lines
 }

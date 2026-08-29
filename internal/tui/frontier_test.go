@@ -634,11 +634,58 @@ func TestFrontierSeatIsSanitized(t *testing.T) {
 		t.Fatalf("mode = %v, want the Frontier", m.mode)
 	}
 	termtexttest.AssertClean(t, "m.frontier.input.Header", m.frontier.input.Header)
-	for i, ticket := range m.frontier.input.Tickets {
+	for _, ticket := range m.frontier.input.Tickets {
 		termtexttest.AssertClean(t, "m.frontier.input.Tickets", ticket,
 			termtexttest.Exempt("ID", "ParentID"))
-		if i > 2 {
-			break
+	}
+	assertNoInjectedControls(t, "frontier frame", m.View().Content)
+}
+
+// Links arriving through the fan-out never crossed a seat funnel: they are
+// written straight into frontier.input.Links from a DetailSource answer. The
+// boundary has to hold on that path too, or the one screen that fetches in bulk
+// is the one screen that does not sanitize.
+func TestFrontierFanOutLinksAreSanitized(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := hostileListInput(now)
+	detail := hostileDetail("T-1")
+	if termtexttest.IsClean(detail, detailValueOptions...) {
+		t.Fatal("the hostile Detail fixture carries nothing hostile")
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return hostileDetail(id), in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+	m = updated.(Model)
+	updated, cmd := m.Update(keyPress("v"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("the Frontier issued no fan-out, so this test proves nothing")
+	}
+	// Entering batches a repaint with the fan-out's fetch commands.
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("entering the Frontier produced %T, want a batch of fetches", cmd())
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		updated, _ = m.Update(sub())
+		m = updated.(Model)
+	}
+
+	if len(m.frontier.input.Links) == 0 {
+		t.Fatal("no fan-out answer reached the seat, so this test proves nothing")
+	}
+	for id, links := range m.frontier.input.Links {
+		for _, link := range links {
+			termtexttest.AssertClean(t, "m.frontier.input.Links["+string(id)+"]", link,
+				termtexttest.Exempt("Target.ID"))
 		}
 	}
 	assertNoInjectedControls(t, "frontier frame", m.View().Content)

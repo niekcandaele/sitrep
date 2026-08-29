@@ -142,7 +142,7 @@ func pairLineReserved(left, right string, width int) string {
 		return ""
 	}
 	if lipgloss.Width(right) >= width {
-		return rightAlign(ansi.Truncate(right, width, ""), width)
+		return rightAlign(truncateLine(right, width), width)
 	}
 	left = balancedTruncate(left, width-lipgloss.Width(right)-1, "")
 	return pairLine(left, right, width)
@@ -401,11 +401,6 @@ func truncateBlock(block string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncateLine clips a rendered line to the terminal width. It is ANSI-aware:
-// the line already carries styling, and cutting it by bytes would leave a
-// dangling escape sequence that bleeds colour down the screen. Nothing this
-// package emits may be wider than the terminal — a line that wraps would
-// silently break the window arithmetic above it.
 // plural picks the wording for a count. "1 nodes" and "1 Tickets' Links" are
 // the common cases on a small Watchlist, which is where a screen most needs to
 // read as if someone wrote it.
@@ -416,20 +411,32 @@ func plural(n int, singular, plural string) string {
 	return strconv.Itoa(n) + " " + plural
 }
 
+// truncateLine clips a rendered line to the terminal width. It is ANSI-aware:
+// the line already carries styling, and cutting it by bytes would leave a
+// dangling escape sequence that bleeds colour down the screen. Nothing this
+// package emits may be wider than the terminal — a line that wraps would
+// silently break the window arithmetic above it.
+//
+// It re-balances what it cuts, so this is the catch-all it reads as: every
+// screen's last pass over a line goes through here, and a cut that dropped the
+// bidirectional terminator termtext appended would re-create the defect
+// ADR-0006 removed. A line composed of already-balanced fields comes back
+// byte-identical.
 func truncateLine(line string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	return ansi.Truncate(line, width, "")
+	return balancedTruncate(line, width, "")
 }
 
-// balancedTruncate clips a fragment of Tracker-controlled text and re-balances
-// what it cut. termtext closed every bidirectional scope the field opened, and
-// a cut can drop the terminator it appended: this exists so narrowing a line
-// does not re-create the defect the boundary removed. It is not a second
-// boundary and holds no policy of its own — a fragment that fits is returned
-// untouched, and Balance only drops strays and appends at the very end, so the
-// ANSI styling these fragments carry is unaffected.
+// balancedTruncate is truncateLine with a tail — an ellipsis where a clipped
+// fragment must not read as a complete verdict about the wrong thing. Both
+// re-balance: termtext closed every bidirectional scope a field opened, and a
+// cut can drop the terminator it appended.
+//
+// It is not a second boundary and holds no policy of its own. A fragment that
+// fits is returned untouched, and Balance only drops strays and appends at the
+// very end, so the ANSI styling these fragments carry is unaffected.
 func balancedTruncate(s string, width int, tail string) string {
 	cut := ansi.Truncate(s, width, tail)
 	if cut == s {
