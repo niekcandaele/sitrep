@@ -111,6 +111,9 @@ Watchlist never looks Actionable. Its Links are not followed to discover further
 - **Actionable** is computed from a Ticket's Status Category and its BlockedBy **Links**;
   because Links live in **Detail**, the Frontier fetches Detail per Ticket and the list
   refresh never does.
+- The list may *display* Actionable when the session's Detail cache is already warm for the
+  whole **Watchlist**, and shows nothing at all otherwise — never a marker on the cached
+  subset, and never a fetch to find out.
 - A cycle of BlockedBy Links makes every Ticket in it permanently not Actionable; the
   Frontier reports the cycle rather than hiding it.
 

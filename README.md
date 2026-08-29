@@ -197,6 +197,17 @@ could make a blocked Ticket look Actionable — so it always renders the whole W
 says so in the footer. A Provider that does not report blocking links opens a screen that
 explains why there is no graph to draw.
 
+Once the Frontier has been opened this session and every member's Detail has been read, the
+list marks Actionable Tickets with `●` and the header counts them (`· 4 actionable`, printed
+even when the count is zero). Before that the list shows nothing about Actionability at all,
+because finding out would mean a per-Ticket read on every refresh — the one thing the split
+between the list and Detail exists to prevent. For the same reason the markers disappear
+again, all of them rather than some, if any member's Detail read failed or if a refresh brings
+in a Ticket whose Detail has not been read; a partial answer about blocking is a wrong answer.
+Statuses stay fresh — a Ticket that moves out of Todo loses its marker on the next refresh —
+but the Links behind the marker are the ones read when the Frontier last ran, and a refresh
+does not re-read them.
+
 `d` hides Done and Cancelled Tickets without changing progress arithmetic. `/` opens fuzzy
 find over Ticket titles and keys; type to narrow, `enter` keeps the query, and `esc` first
 clears the active find or visibility filter.

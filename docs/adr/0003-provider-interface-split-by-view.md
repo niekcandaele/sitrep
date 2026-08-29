@@ -53,7 +53,9 @@ you pressed a key, you get a progress indicator, and you can interrupt it. Resul
 caller's existing per-Ticket Detail cache, so a Ticket already opened this session costs
 nothing. The policy — canonical order, cache skipping, bounded concurrency, and the rule that
 only a successful fetch is recorded — lives in `internal/detailfanout` so that every consumer
-pays the same price and fails the same way.
+pays the same price and fails the same way. A screen may also *read* the cache a fan-out
+filled to render a derived property, provided it issues no fetch of its own and claims nothing
+when the cache does not cover the whole Watchlist.
 
 The rejected alternative is promoting Links onto the thin `Ticket`, which makes every refresh
 slower forever to serve a screen that may never be opened. Do not "fix" the fan-out that way;

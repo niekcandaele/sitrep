@@ -79,6 +79,10 @@ type Styles struct {
 	FrontierBold lipgloss.Style
 	// FrontierFaint is the quiet half of that channel: a node that is blocked.
 	FrontierFaint lipgloss.Style
+	// Actionable styles the list's Actionable marker. Weight rather than a
+	// second hue, because colour in the list carries Status Category; the
+	// glyph, not the style, is what carries the fact.
+	Actionable lipgloss.Style
 }
 
 // DefaultStyles returns the monitor's palette for a dark or light terminal.
@@ -136,6 +140,7 @@ func DefaultStyles(isDark bool) Styles {
 		Muted:           base.Foreground(dim),
 		FrontierBold:    base.Foreground(text).Bold(true),
 		FrontierFaint:   base.Foreground(dim).Faint(true),
+		Actionable:      base.Foreground(text).Bold(true),
 	}
 }
 

@@ -26,6 +26,15 @@ const (
 	selectedMarker = "▸ "
 	// unselectedMarker keeps unselected Tickets in the same column.
 	unselectedMarker = "  "
+	// actionableMarker flags an Actionable Ticket. The glyph is the signal: it
+	// is what survives ansi.Strip, a pipe and a monochrome terminal, and
+	// Styles.Actionable is decoration on top of it.
+	actionableMarker = "● "
+	// notActionableMarker keeps every other Ticket's title in the same column.
+	notActionableMarker = "  "
+	// actionableColumn is the two columns the marker occupies, reserved on
+	// every Ticket row while markers are active and on none while they are not.
+	actionableColumn = 2
 )
 
 // The progress bar's runes, shared with the --plain report so the two views
@@ -44,10 +53,11 @@ const (
 // hiding the done ones.
 // Before the first reading lands there is no progress to report, so the bar is
 // left out rather than drawn as a truthful-looking "0/0 done · 0%".
-func renderHeader(in ListInput, staleness string, hasData bool, width int, s Styles) string {
+func renderHeader(in ListInput, staleness string, hasData bool, width int, markers listMarkers,
+	s Styles) string {
 	progress := rightAlign(s.Staleness.Render(staleness), width)
 	if hasData {
-		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, s)
+		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, markers, s)
 	}
 	return strings.Join([]string{headerIdentity(in.Header, width, s), progress, ""}, "\n")
 }
@@ -87,12 +97,21 @@ func headerIdentity(h Header, width int, s Styles, hyperlinkKey ...bool) string 
 // headerProgress draws the bar, the counts and the staleness indicator. The
 // Cancelled count appears only when there is one: "0 cancelled" is noise on the
 // nine epics out of ten that have none.
-func headerProgress(p model.Progress, staleness string, width int, s Styles) string {
+//
+// The Actionable count is the opposite case and prints even at zero: it is the
+// row marker's only legend, and without it "warm, and nothing is Actionable"
+// and "cold, so nothing is claimed" would render identically. It counts the
+// whole reading, like the progress counts, so no filter can move it.
+func headerProgress(p model.Progress, staleness string, width int, markers listMarkers,
+	s Styles) string {
 	counts := fmt.Sprintf("%d/%d done", p.Done, p.Denominator)
 	if p.Cancelled > 0 {
 		counts += fmt.Sprintf("%s%d cancelled", separator, p.Cancelled)
 	}
 	counts += fmt.Sprintf("%s%d%%", separator, p.PercentDone)
+	if markers.active {
+		counts += fmt.Sprintf("%s%d actionable", separator, markers.count)
+	}
 
 	right := s.Staleness.Render(staleness)
 	// The bar takes what is left after the counts and the indicator, within
@@ -141,7 +160,14 @@ func renderBar(p model.Progress, width int, s Styles) string {
 // of the list where the spacer would only waste a row. A Ticket takes its
 // key/title line plus a meta line, and only one line when the meta would be
 // empty.
-func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Capabilities, s Styles) []string {
+//
+// The Actionable marker is drawn on the key/title line every Ticket already
+// has, so a row's height is independent of it and rowHeights needs to know
+// nothing about markers. A marker on the meta line would grow a Ticket with no
+// meta from one line to two, which is exactly the drift rowHeights and its nine
+// call sites must never have.
+func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Capabilities,
+	markers listMarkers, s Styles) []string {
 	r := rows[i]
 	if r.Kind == RowGroupHeader {
 		heading := s.groupHeader(r.Category).Render(
@@ -159,11 +185,23 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 		titleStyle = s.Selected
 	}
 
-	titleWidth := width - selectionGutter - keyColumn
+	// One indent feeds both the title's budget and the meta line's padding, so
+	// the two lines cannot end and begin in different columns.
+	indent := keyColumn
+	actionable := ""
+	if markers.active {
+		indent += actionableColumn
+		actionable = notActionableMarker
+		if markers.has(r.Ticket.ID) {
+			actionable = s.Actionable.Render(actionableMarker)
+		}
+	}
+
+	titleWidth := width - selectionGutter - indent
 	title := titleStyle.Render(plain.Truncate(r.Ticket.Title, titleWidth))
 	keyPadding := strings.Repeat(" ", max(keyColumn-len([]rune(r.Ticket.Key)), 0))
 	key := renderHyperlink(s.TicketKey, r.Ticket.Key, r.Ticket.URL) + keyPadding
-	lines := []string{marker + key + title}
+	lines := []string{marker + key + actionable + title}
 
 	if meta := ticketMeta(r.Ticket, caps, s); meta != "" {
 		// The meta line is clipped here, with an ellipsis, rather than left to
@@ -172,7 +210,7 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 		// escape-aware, which this line needs — it carries styling. The budget
 		// is the title's, so the two lines end in the same column.
 		meta = balancedTruncate(meta, titleWidth, "…")
-		lines = append(lines, unselectedMarker+strings.Repeat(" ", keyColumn)+meta)
+		lines = append(lines, unselectedMarker+strings.Repeat(" ", indent)+meta)
 	}
 	return lines
 }
@@ -302,12 +340,13 @@ func ensureVisible(heights []int, selected, offset, height int) int {
 // lines, marking the selected row and padding the remainder so the footer sits
 // at the bottom of the screen rather than floating under a short list. It is
 // pure: same inputs, same bytes.
-func renderRows(rows []Row, selected, offset, height, width int, caps model.Capabilities, s Styles) string {
+func renderRows(rows []Row, selected, offset, height, width int, caps model.Capabilities,
+	markers listMarkers, s Styles) string {
 	lines := make([]string, 0, height)
 	keyColumn := keyColumnWidth(rows)
 
 	for i := offset; i < len(rows) && len(lines) < height; i++ {
-		for _, line := range rowLines(rows, i, keyColumn, width, i == selected, caps, s) {
+		for _, line := range rowLines(rows, i, keyColumn, width, i == selected, caps, markers, s) {
 			if len(lines) == height {
 				break
 			}

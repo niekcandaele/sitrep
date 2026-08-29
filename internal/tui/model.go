@@ -382,8 +382,12 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
-	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
+	// Recomputed per frame rather than stored on the Model: a cached field
+	// would be a third thing to keep in step with the Detail cache, the
+	// reading and the filter, and this cannot drift.
+	markers := m.listMarkers()
+	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, markers, m.styles)
+	v.SetContent(strings.Join(append([]string{header, m.renderBody(markers)}, m.footerLines()...), "\n"))
 	v.Cursor = m.cursor()
 	if m.mouseEnabled {
 		v.OnMouse = m.listMouseHandler()
@@ -755,13 +759,16 @@ func (m Model) selectRow(i int) Model {
 }
 
 // renderBody draws the list, or the state that stands in for it: a Watchlist
-// with no Tickets, or a first fetch that has not landed yet.
-func (m Model) renderBody() string {
+// with no Tickets, or a first fetch that has not landed yet. The markers reach
+// the rows and nothing else: an empty, failed or loading body has no row to
+// mark.
+func (m Model) renderBody(markers listMarkers) string {
 	height := m.bodyHeight()
 
 	switch {
 	case m.hasData && len(m.rows) > 0:
-		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities, m.styles)
+		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities,
+			markers, m.styles)
 	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
 		// Distinct from the empty Watchlist below on purpose: "there is
 		// nothing here" and "you are hiding everything" look identical on
