@@ -35,6 +35,6 @@ frontier · 16 nodes · 3 ghosts · 3 actionable                                
 │  #211                Todo│  │││                           ▼
                                                                                                           x 0/2 · y 0/28
 filters do not apply here: the Frontier renders the whole Watchlist
-1 Ticket's Links could not be read; anything they block is not Actionable
+1 Ticket's Links could not be read; anything it blocks is not Actionable
 read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
 m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down

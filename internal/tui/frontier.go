@@ -76,9 +76,13 @@ type frontierState struct {
 	resolved bool
 	planned  int
 	done     int
-	// failed counts Tickets whose Links could not be read. Their dependents are
-	// not Actionable, and the footer says so rather than guessing.
-	failed  int
+	// failed names the Tickets whose Links could not be read. Their dependents
+	// are not Actionable, and the footer says so rather than guessing. It is a
+	// set rather than a count because adoption has to credit the one Ticket it
+	// seated: a count cannot tell which Ticket it is clearing, so adopting a
+	// still-queued Ticket's Detail would silently absolve one that really did
+	// fail while its card still says UNVERIFIED.
+	failed  map[model.TicketID]struct{}
 	lastErr error
 }
 
@@ -226,7 +230,10 @@ func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 	m.frontier.done++
 
 	if msg.err != nil {
-		m.frontier.failed++
+		if m.frontier.failed == nil {
+			m.frontier.failed = make(map[model.TicketID]struct{})
+		}
+		m.frontier.failed[msg.id] = struct{}{}
 		m.frontier.lastErr = msg.err
 	} else {
 		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
@@ -255,11 +262,9 @@ func (m Model) adoptCachedLinks() Model {
 			continue
 		}
 		m = m.seatFanoutLinks(t.ID, entry.detail.Links)
-		if m.frontier.failed > 0 {
-			m.frontier.failed--
-		}
+		delete(m.frontier.failed, t.ID)
 	}
-	if m.frontier.failed == 0 {
+	if len(m.frontier.failed) == 0 {
 		m.frontier.lastErr = nil
 	}
 	return m
@@ -384,7 +389,7 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 	m.frontier.queued = outstanding
 	m.frontier.planned = len(outstanding)
 	m.frontier.done = 0
-	m.frontier.failed = 0
+	m.frontier.failed = nil
 	m.frontier.lastErr = nil
 	m.frontier.resolved = false
 	m = m.rebuildFrontier()
@@ -474,16 +479,31 @@ func (m Model) frontierHeader() string {
 		// Counted over the layout's order rather than the graph's members: a
 		// Watchlist may name one Ticket twice, and a header claiming more
 		// Actionable Tickets than there are cards is not a count of anything.
-		actionable := 0
+		//
+		// Only members whose Links were readable are counted, and when no
+		// member's were the count is withheld outright. "0 actionable" is a
+		// computed answer, and a Frontier where nothing could be computed must
+		// not be byte-identical to one where everything is genuinely blocked.
+		actionable, known := 0, 0
 		for _, id := range f.layout.order {
-			if a, member := f.graph.For(id); member && a.Actionable {
+			a, member := f.graph.For(id)
+			if !member || !a.LinksKnown {
+				continue
+			}
+			known++
+			if a.Actionable {
 				actionable++
 			}
 		}
-		counts = fmt.Sprintf("frontier%s%s%s%s%s%d actionable",
-			separator, plural(nodes, "node", "nodes"),
-			separator, plural(ghosts, "ghost", "ghosts"),
-			separator, actionable)
+		tally := fmt.Sprintf("%d actionable", actionable)
+		if known == 0 {
+			tally = "actionable unknown"
+		}
+		counts = "frontier" + separator + plural(nodes, "node", "nodes")
+		if ghosts > 0 {
+			counts += separator + plural(ghosts, "ghost", "ghosts")
+		}
+		counts += separator + tally
 	default:
 		counts = fmt.Sprintf("frontier%s%s%sreading Detail %d/%d",
 			separator, plural(nodes, "node", "nodes"), separator, f.done, f.planned)
@@ -568,10 +588,13 @@ func (m Model) frontierFooterBlock() []string {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			"filters do not apply here: the Frontier renders the whole Watchlist", m.width)))
 	}
-	if m.frontier.resolved && m.frontier.failed > 0 {
-		lines = append(lines, m.styles.Error.Render(balancedTruncate(fmt.Sprintf(
-			"%s Links could not be read; anything they block is not Actionable",
-			plural(m.frontier.failed, "Ticket's", "Tickets'")), m.width, "…")))
+	if failed := len(m.frontier.failed); m.frontier.resolved && failed > 0 {
+		notice := fmt.Sprintf(
+			"%d Tickets' Links could not be read; anything they block is not Actionable", failed)
+		if failed == 1 {
+			notice = "1 Ticket's Links could not be read; anything it blocks is not Actionable"
+		}
+		lines = append(lines, m.styles.Error.Render(balancedTruncate(notice, m.width, "…")))
 	}
 	if m.frontier.lastErr != nil {
 		// Whichever parallel read failed last, labelled as one failure and

@@ -67,6 +67,11 @@ func TestFrontierFrame(t *testing.T) {
 		t.Errorf("mode = %v, want the Frontier", m.mode)
 	}
 	frame := string(got)
+	// The other spelling of the same header field: a Watchlist where some
+	// member's Links were readable gets a number, and it counts only those.
+	if !strings.Contains(frame, separator+"3 actionable") {
+		t.Errorf("the header does not carry a computed Actionable count:\n%s", frame)
+	}
 	for _, want := range []string{"ACTIONABLE", "blocked by 1", "CYCLE", "UNVERIFIED"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("the frame is missing %q:\n%s", want, frame)
@@ -175,6 +180,12 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 	if !strings.Contains(frame, "13 Tickets' Links could not be read") {
 		t.Errorf("the footer does not name the failure count:\n%s", frame)
 	}
+	// "0 actionable" is a computed answer. A Frontier where nothing could be
+	// computed must not render byte-identically to one where every Ticket is
+	// genuinely blocked.
+	if !strings.Contains(frame, "actionable unknown") {
+		t.Errorf("the header claims an Actionable count it could not compute:\n%s", frame)
+	}
 	if strings.Contains(frame, "ACTIONABLE") {
 		t.Errorf("something looked Actionable with no Links verified:\n%s", frame)
 	}
@@ -215,8 +226,8 @@ func TestFrontierFetchIsInterruptible(t *testing.T) {
 	if m.mode != modeList {
 		t.Errorf("mode = %v, want the list", m.mode)
 	}
-	if m.frontier.done != 0 || m.frontier.failed != 0 {
-		t.Errorf("a stale answer landed: done %d failed %d", m.frontier.done, m.frontier.failed)
+	if m.frontier.done != 0 || len(m.frontier.failed) != 0 {
+		t.Errorf("a stale answer landed: done %d failed %v", m.frontier.done, m.frontier.failed)
 	}
 }
 
@@ -1152,5 +1163,54 @@ func TestFrontierHeaderCountsCardsNotMemberRows(t *testing.T) {
 	}
 	if n := len(m.frontier.layout.order); n != 16 {
 		t.Errorf("the canvas drew %d nodes, so the count above is asserting the wrong thing", n)
+	}
+}
+
+// Adoption credits the Ticket it seated and nothing else. With more members
+// than detailfanout.Parallelism a Ticket can still be queued when its Detail is
+// read by hand, and a bare failure count cannot tell which Ticket it is
+// clearing: it would absolve one that really did fail, dropping the footer's
+// count and its "press r to retry" line while that card still says UNVERIFIED.
+//
+// The keyboard cannot reach this interleaving deterministically, so it is
+// driven through the state the two paths share.
+func TestAdoptCachedLinksCreditsOnlyTheTicketItSeats(t *testing.T) {
+	const failed = model.TicketID("acme/widgets#211")
+	const queued = model.TicketID("acme/widgets#212")
+	m := Model{
+		details: map[model.TicketID]detailEntry{
+			queued: {detail: model.Detail{TicketID: queued}},
+		},
+		frontier: frontierState{
+			input: FrontierInput{
+				Tickets:      []model.Ticket{{ID: failed}, {ID: queued}},
+				Capabilities: model.Capabilities{BlockingLinks: true},
+			},
+			failed:  map[model.TicketID]struct{}{failed: {}},
+			lastErr: errors.New("tracker said no"),
+		},
+	}
+
+	m = m.adoptCachedLinks()
+
+	if _, seated := m.frontier.input.Links[queued]; !seated {
+		t.Error("the hand-read Ticket's Links were not adopted")
+	}
+	if _, still := m.frontier.failed[failed]; !still {
+		t.Errorf("adopting %s cleared the failure for %s, which never succeeded", queued, failed)
+	}
+	if m.frontier.lastErr == nil {
+		t.Error("the retry line went away while a Ticket's Links are still unread")
+	}
+
+	// Seating the Ticket that actually failed is what clears it, and emptying
+	// the set is what clears the error.
+	m.details[failed] = detailEntry{detail: model.Detail{TicketID: failed}}
+	m = m.adoptCachedLinks()
+	if len(m.frontier.failed) != 0 {
+		t.Errorf("failed = %v after every Ticket was seated, want empty", m.frontier.failed)
+	}
+	if m.frontier.lastErr != nil {
+		t.Error("the retry line survived every Ticket being read")
 	}
 }
