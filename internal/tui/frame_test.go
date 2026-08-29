@@ -142,7 +142,7 @@ func TestMetaLineTruncatesWithAnEllipsis(t *testing.T) {
 	budget := width - selectionGutter - keyColumn
 
 	lines := rowLines([]Row{{Kind: RowTicket, Ticket: t3}}, 0, keyColumn, width,
-		false, model.Capabilities{PullRequests: true}, Styles{})
+		false, model.Capabilities{PullRequests: true}, listMarkers{}, Styles{})
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want a title and a meta line: %q", len(lines), lines)
 	}
@@ -165,7 +165,7 @@ func TestRenderRowsFillsTheWindowExactly(t *testing.T) {
 		ticket("#2", model.StatusTodo),
 	})
 
-	got := renderRows(rows, 1, 0, 12, 40, model.Capabilities{}, Styles{})
+	got := renderRows(rows, 1, 0, 12, 40, model.Capabilities{}, listMarkers{}, Styles{})
 
 	if n := len(strings.Split(got, "\n")); n != 12 {
 		t.Errorf("body is %d lines, want exactly the 12 it was given", n)

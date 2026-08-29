@@ -77,7 +77,7 @@ func TestHyperlinkSeamsStripTerminalControlInjection(t *testing.T) {
 			name: "list Ticket key",
 			raw: rowLines([]Row{{Kind: RowTicket, Ticket: model.Ticket{
 				ID: "T-1", Key: "T-1", Title: "A title", URL: hostileURL,
-			}}}, 0, 7, 500, true, model.Capabilities{}, Styles{})[0],
+			}}}, 0, 7, 500, true, model.Capabilities{}, listMarkers{}, Styles{})[0],
 			scopes: 1,
 		},
 		{
@@ -386,7 +386,7 @@ func TestListTicketKeyHyperlinkExcludesMarkerPaddingAndTitle(t *testing.T) {
 	rows := []Row{{Kind: RowTicket, Ticket: model.Ticket{
 		ID: "T-1", Key: "T-1", Title: "A title", URL: url,
 	}}}
-	raw := rowLines(rows, 0, 7, 40, true, model.Capabilities{}, Styles{})[0]
+	raw := rowLines(rows, 0, 7, 40, true, model.Capabilities{}, listMarkers{}, Styles{})[0]
 	assertBalancedHyperlink(t, raw, url, 1)
 	scope := hyperlinkOpen(url) + "T-1" + ansi.ResetHyperlink()
 	if !strings.Contains(raw, selectedMarker+scope+"    A title") {
