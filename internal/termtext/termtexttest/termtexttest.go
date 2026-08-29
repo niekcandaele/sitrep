@@ -71,7 +71,20 @@ func fill(v reflect.Value) {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
 		fill(v.Elem())
+	case reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
+		panic(unsweepable(v.Kind()))
 	}
+}
+
+// unsweepable is what the sweep says when it meets a kind it has no policy for.
+// Failing loudly is the point: a silent fall-through would leave the field
+// unfilled and unchecked while walk_test.go still promises that a field added
+// tomorrow is covered.
+func unsweepable(kind reflect.Kind) string {
+	return "termtexttest: no policy for a " + kind.String() + " field. " +
+		"A screen input carrying one needs a decision -- sweep its values, or " +
+		"Exempt the path with a reason -- before this sweep can promise anything " +
+		"about it."
 }
 
 // Option narrows what AssertClean demands of one field path.
@@ -165,6 +178,8 @@ func assertClean(t testing.TB, label, path string, v reflect.Value, o *options) 
 		if !v.IsNil() {
 			assertClean(t, label, path, v.Elem(), o)
 		}
+	case reflect.Map, reflect.Interface, reflect.Chan, reflect.Func:
+		t.Fatalf("%s: %s is a %s: %s", label, describe(path), v.Kind(), unsweepable(v.Kind()))
 	}
 }
 

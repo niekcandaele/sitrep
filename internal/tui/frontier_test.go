@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1293,6 +1294,143 @@ func TestFrontierExpandedHelp(t *testing.T) {
 				if !strings.Contains(string(got), want) {
 					t.Errorf("the expanded help omits %q:\n%s", want, got)
 				}
+			}
+		})
+	}
+}
+
+// r on a fully warm Frontier issues nothing. Re-reading a cache that already
+// covers the Watchlist would turn a recovery key into a whole-Watchlist
+// fan-out, which is the ADR-0003 Amendment 4 protection this guard exists for.
+func TestFrontierRefreshOnAWarmFrontierIssuesNothing(t *testing.T) {
+	// Every member has a Detail, so one fan-out leaves nothing outstanding --
+	// the fixture deliberately omits #211's.
+	details := fake.FixtureBlockingDetails()
+	details["acme/widgets#211"] = model.Detail{TicketID: "acme/widgets#211"}
+	p := fake.New(fake.WithSnapshot(fake.FixtureBlockingSnapshot()), fake.WithDetails(details))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	warm := p.DetailCalls()
+	if warm != len(fake.FixtureBlockingSnapshot().Tickets) {
+		t.Fatalf("DetailCalls = %d, want one per member: the cache is not warm", warm)
+	}
+
+	s.tm.Send(keyPress("r"))
+	s.tm.Send(keyPress("G"))
+	s.waitFor(t, "GHOST")
+	m, _ := s.finish(t)
+
+	if n := p.DetailCalls(); n != warm {
+		t.Errorf("r issued %d reads on a warm Frontier, want none", n-warm)
+	}
+	if !m.frontier.resolved {
+		t.Error("r left a warm Frontier unresolved")
+	}
+}
+
+// r while a fan-out is in flight issues nothing either: the reads it would
+// re-issue are the reads already running, and a second batch behind the first
+// is the fan-out paid for twice.
+func TestFrontierRefreshDuringAFanOutIssuesNothing(t *testing.T) {
+	release := make(chan struct{})
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	// The reads are held before they reach the Provider, so the Provider's own
+	// counter never moves: this counts what the screen issued.
+	var issued atomic.Int64
+	held := blockedDetailSource(release, TicketDetailSource(p))
+	counting := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+		issued.Add(1)
+		return held(ctx, id)
+	}
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: counting,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "reading Detail")
+	waitUntil(t, "the first batch to be issued", func() bool {
+		return issued.Load() == detailfanout.Parallelism
+	})
+
+	// Key presses are delivered in order and handled synchronously, so r has
+	// been through Update by the time q ends the session.
+	s.tm.Send(keyPress("r"))
+	m, _ := s.finish(t)
+	close(release)
+
+	if n := issued.Load(); n != detailfanout.Parallelism {
+		t.Errorf("issued %d reads, want the %d already in flight: r started a second batch",
+			n, detailfanout.Parallelism)
+	}
+	// The queue is the fan-out's own remainder. Re-planning over a fan-out in
+	// flight would put every member back on it, and the reads already running
+	// would then be issued a second time as slots freed.
+	if got, want := len(m.frontier.queued), len(m.frontier.input.Tickets)-detailfanout.Parallelism; got != want {
+		t.Errorf("queued = %d, want the fan-out's own remaining %d: r re-planned over it", got, want)
+	}
+}
+
+// Every movement binding is dispatched through a real key press, so swapping
+// two cases in onFrontierKey's switch fails here. moveFocus itself is unit
+// tested; the wiring from binding to direction was not.
+func TestFrontierMovementKeysReachTheirDirections(t *testing.T) {
+	// Three nodes: #3 blocks both #1 and #2, so #3 is alone on the blocker side
+	// and #1 sits above #2 on the dependent side.
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"#1": blockedBy("#3"), "#2": blockedBy("#3"), "#3": nil,
+	}
+
+	seat := func(t *testing.T, focus model.TicketID) Model {
+		t.Helper()
+		m := frontierMouseModel(t, tickets, links, 120, 40)
+		m.frontier.focusID = focus
+		m.frontier.hasFocus = true
+		return m
+	}
+	press := func(t *testing.T, m Model, key tea.KeyPressMsg) model.TicketID {
+		t.Helper()
+		next, _ := m.onFrontierKey(key)
+		return next.(Model).frontier.focusID
+	}
+
+	// The layout the assertions below read: #3 alone on the blocker side, #1
+	// above #2 on the dependent side.
+	l := seat(t, "#1").frontier.layout
+	if l.columnOf["#3"] != 0 || l.columnOf["#1"] != 1 || l.columnOf["#2"] != 1 {
+		t.Fatalf("columns = %v, want #3 left of #1 and #2", l.columnOf)
+	}
+	if l.nodeAt["#1"].Y >= l.nodeAt["#2"].Y {
+		t.Fatalf("#1 is not above #2, so up and down assert nothing")
+	}
+
+	for _, tt := range []struct {
+		name string
+		from model.TicketID
+		key  tea.KeyPressMsg
+		want model.TicketID
+		axis string
+	}{
+		{"down", "#1", keyPress("j"), "#2", "next node"},
+		{"up", "#2", keyPress("k"), "#1", "previous node"},
+		{"left", "#1", keyPress("h"), "#3", "blocker side"},
+		{"right", "#3", keyPress("l"), "#1", "dependent side"},
+		{"home", "#2", keyPress("g"), "#1", "first node"},
+		{"end", "#1", keyPress("G"), "#3", "last node"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := press(t, seat(t, tt.from), tt.key); got != tt.want {
+				t.Errorf("%s from %s focused %s, want %s (%s)",
+					tt.name, tt.from, got, tt.want, tt.axis)
 			}
 		})
 	}
