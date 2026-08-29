@@ -20,13 +20,13 @@ DONE (3)
            @mara-vos  #504 merged
   #119     Emit sync telemetry
            @tobias
-  #120     Write the sync v2 runbook
 
 m            off, shift-drag
 click        select Ticket
 double-click open Ticket
 wheel        move selection
 enter        open
+v            frontier
 r            refresh
 ?            help
 q            quit

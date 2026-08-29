@@ -42,6 +42,23 @@ func safeListInput(in ListInput) ListInput {
 	return in
 }
 
+// safeFrontierInput cleans one Frontier seat. The Links map's key presence is
+// the tri-state the blocking graph reads, so a key is copied across whether or
+// not its slice has entries: cleaning must not turn "read, and there are none"
+// into "never read".
+func safeFrontierInput(in FrontierInput) FrontierInput {
+	in.Header = safeHeader(in.Header)
+	in.Tickets = termtext.Tickets(in.Tickets)
+	if in.Links != nil {
+		links := make(map[model.TicketID][]model.Link, len(in.Links))
+		for id, l := range in.Links {
+			links[id] = termtext.Links(l)
+		}
+		in.Links = links
+	}
+	return in
+}
+
 // safeOpen cleans the decoder's entry Ticket and its breadcrumb.
 func safeOpen(open OpenTicket) OpenTicket {
 	open.Ticket = termtext.Ticket(open.Ticket)

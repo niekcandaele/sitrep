@@ -78,6 +78,43 @@
 // without a list behind it, a bare Ticket Ref decoded straight into Detail,
 // fills the same fields and needs no new entry point here.
 //
+// # The Frontier is a second rendering of the same Watchlist
+//
+// v draws the current Watchlist as nodes and BlockedBy/Blocks edges, answering
+// which Tickets can be picked up right now. It is a mode toggle rather than a
+// navigation frame: membership is exactly the Watchlist's, the selection
+// survives the toggle in both directions, and a Ticket opened from it returns
+// to it — detailReturn is what records that, and the Trail stays what CONTEXT.md
+// says it is, the path of Tickets followed through explicit Links in Detail.
+//
+// Filters are deliberately ignored here. Hiding a node deletes an edge, and a
+// deleted edge can make a blocked Ticket look Actionable, which is the precise
+// failure Actionable exists to prevent — so the screen draws the whole
+// Watchlist and says so in the footer whenever a filter is on.
+//
+// The screen consumes a FrontierInput, adapted by FrontierFromList and cleaned
+// at intake like every other seat. Everything derived — the model.BlockingGraph
+// and the canvas — is recomputed from it, and the layout in frontierframe.go is
+// a pure function of data with no Model, no clock and no style in it.
+//
+// # The Frontier's bulk fan-out is the one exception ADR-0003 allows
+//
+// Actionable is computed from BlockedBy Links, and Links live in Detail, so the
+// Frontier reads every member's Detail once. That is a fan-out, and it is
+// legitimate only because an explicit key press asked for it: never a refresh,
+// never a poll, never a render (ADR-0003 Amendment 4). The policy — canonical
+// order, cache skipping, bounded concurrency, and the rule that only a
+// successful read is recorded — lives in internal/detailfanout, which the
+// one-shot renderers share. Results land in the same per-Ticket Detail cache a
+// drill-in uses, so a Ticket already opened this session costs nothing.
+//
+// Emphasis is withheld until every planned read has answered. Fail-closed plus
+// a progressive fetch means a half-loaded Frontier would give wrong answers to
+// anyone glancing at it, so the cards draw in Status Category colours with no
+// badge and the header counts the reads still outstanding. Leaving the screen
+// advances frontierGeneration, which drops every outstanding answer: that is
+// what makes the fan-out interruptible.
+//
 // # The program can start in Detail, and can be seeded
 //
 // Options.Open starts the program on one Ticket's Detail — the decoder entry for

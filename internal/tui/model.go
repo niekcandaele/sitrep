@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
@@ -73,6 +74,18 @@ type Model struct {
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
+	// frontier is the Frontier screen's own state. Like detailState it is seated
+	// whole; the list's state is never consulted to draw it.
+	frontier frontierState
+	// frontierGeneration guards the bulk fan-out the way detailGeneration guards
+	// a single Detail read: leaving the Frontier, or reseating it on a refreshed
+	// Watchlist, advances it and every outstanding answer is dropped. That is
+	// what makes the fan-out interruptible.
+	frontierGeneration int
+	// detailReturn is the mode a root Detail seat returns to on esc. The
+	// Frontier is a second rendering of the list, not a Trail entry, so a Ticket
+	// opened from it goes back to it.
+	detailReturn mode
 	// mouseEpoch identifies the current capture lifetime and Detail seat for queued
 	// mouse callbacks. Rereads leave it stable so callbacks can re-resolve facts
 	// from the same seat; navigation and mouse toggles advance it so an older frame
@@ -90,6 +103,7 @@ type Model struct {
 	keys          KeyMap
 	searchKeys    SearchKeyMap
 	detailKeys    DetailKeyMap
+	frontierKeys  FrontierKeyMap
 	help          help.Model
 	styles        Styles
 	markdownTheme markdownTheme
@@ -167,6 +181,7 @@ func New(ctx context.Context, opts Options) Model {
 		keys:          DefaultKeyMap(),
 		searchKeys:    DefaultSearchKeyMap(),
 		detailKeys:    DefaultDetailKeyMap(),
+		frontierKeys:  DefaultFrontierKeyMap(),
 		help:          help.New(),
 		styles:        DefaultStyles(true),
 		markdownTheme: markdownDark,
@@ -239,7 +254,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeDetail {
 			m = m.reconcileDetail(true)
 		}
+		if m.mode == modeFrontier {
+			// The card width can change on a very narrow terminal, so the canvas
+			// is rebuilt rather than only re-clamped.
+			m = m.rebuildFrontier()
+		}
 		return m, nil
+
+	case frontierDetailMsg:
+		return m.onFrontierDetail(msg)
+
+	case frontierMouseClickMsg:
+		if m.mode != modeFrontier || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onFrontierMouseClick(msg)
+
+	case frontierMouseWheelMsg:
+		if m.mode != modeFrontier || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onFrontierMouseWheel(msg), nil
 
 	case tea.BackgroundColorMsg:
 		isDark := msg.IsDark()
@@ -260,7 +295,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onHeartbeat()
 
 	case refreshedMsg:
-		return m.onRefreshed(msg), nil
+		return m.applyRefresh(msg)
 
 	case detailFetchedMsg:
 		return m.onDetailFetched(msg), nil
@@ -298,6 +333,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.clearPendingClick().onSearchKey(msg)
 		case m.mode == modeDetail:
 			return m.clearPendingClick().onDetailKey(msg)
+		case m.mode == modeFrontier:
+			return m.clearPendingClick().onFrontierKey(msg)
 		}
 		return m.clearPendingClick().onKey(msg)
 
@@ -333,6 +370,14 @@ func (m Model) View() tea.View {
 		v.SetContent(m.detailFrame(doc))
 		if m.mouseEnabled {
 			v.OnMouse = m.detailMouseHandler(doc)
+		}
+		return v
+	}
+
+	if m.mode == modeFrontier {
+		v.SetContent(m.frontierFrame())
+		if m.mouseEnabled {
+			v.OnMouse = m.frontierMouseHandler()
 		}
 		return v
 	}
@@ -409,6 +454,43 @@ func (m Model) fetchCmd(generation int) tea.Cmd {
 	}
 }
 
+// applyRefresh folds one reading in and, when the Frontier is the screen on
+// display, reseats it on the new reading. A refresh that failed or answered a
+// superseded generation changes nothing, so it reseats nothing either.
+func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
+	landed := msg.generation == m.generation && msg.err == nil
+	next := m.onRefreshed(msg)
+	if !landed || next.mode != modeFrontier {
+		return next, nil
+	}
+	return next.reseatFrontier()
+}
+
+// reseatFrontier rebuilds the Frontier on a Watchlist that has just changed
+// shape. The generation advances, so every outstanding answer from the previous
+// reading is dropped, and emphasis is withheld again while the new members are
+// read: a Watchlist that just changed has not been verified.
+func (m Model) reseatFrontier() (Model, tea.Cmd) {
+	m.frontierGeneration++
+	m.mouseEpoch++
+	focus := m.frontier.focusID
+	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
+	m.frontier = frontierState{
+		input:   FrontierFromList(m.input, m.linksFromCache()),
+		focusID: focus,
+		offsetX: offsetX,
+		offsetY: offsetY,
+	}
+	if m.frontier.input.Capabilities.BlockingLinks {
+		m.frontier.queued = detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
+		m.frontier.planned = len(m.frontier.queued)
+	}
+	m.frontier.resolved = len(m.frontier.queued) == 0
+	m = m.rebuildFrontier()
+	next, cmd := m.issueFrontierFetches()
+	return next.(Model), cmd
+}
+
 // onRefreshed folds one reading in. A failed refresh keeps the last good data
 // on screen: the list still renders, and the staleness indicator keeps
 // counting from the last *successful* fetch, because the data really is that
@@ -445,6 +527,8 @@ func (m Model) rebuildRows() Model {
 	// in step with the Filter is what makes both the matching and the help
 	// line say the same thing.
 	m.keys.ClearFilter.SetEnabled(m.filter.Active())
+	// The Frontier is offered only when there is a Watchlist to draw.
+	m.keys.Frontier.SetEnabled(m.hasData)
 
 	m.rows = BuildRows(m.visibleTickets())
 
@@ -532,6 +616,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Open):
 		return m.openDetail()
+
+	case key.Matches(msg, m.keys.Frontier):
+		return m.enterFrontier()
 
 	case key.Matches(msg, m.keys.Up):
 		return m.move(-1), nil
@@ -797,6 +884,9 @@ func (m Model) filterLineIndex() int {
 func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
 		return m.responsiveHelpKeys(m.searchKeys)
+	}
+	if m.mode == modeFrontier {
+		return m.responsiveHelpKeys(m.frontierKeys)
 	}
 	return m.responsiveHelpKeys(m.keys)
 }

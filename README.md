@@ -181,6 +181,21 @@ not extend the in-app Trail ([ADR-0004](docs/adr/0004-links-are-hyperlinks-not-b
 Description and comment text is shown as returned by the Tracker, without inferred Link
 navigation.
 
+Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
+renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
+Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — the only
+bulk per-Ticket read sitrep does, which is why it shows a progress count and why `esc`
+interrupts it — and Details already read this session are reused. Colour carries the Status
+Category, exactly as it does on the list, while border weight and a badge word carry whether
+a Ticket is Actionable or blocked, so an in-progress Ticket that is also blocked shows both.
+A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
+never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
+whose Links could not be read is marked unverified, which leaves anything it blocks not
+Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
+could make a blocked Ticket look Actionable — so it always renders the whole Watchlist and
+says so in the footer. A Provider that does not report blocking links opens a screen that
+explains why there is no graph to draw.
+
 `d` hides Done and Cancelled Tickets without changing progress arithmetic. `/` opens fuzzy
 find over Ticket titles and keys; type to narrow, `enter` keeps the query, and `esc` first
 clears the active find or visibility filter.
@@ -198,6 +213,7 @@ The footer shows currently applicable keys, and `?` expands it.
 | `pgup`, `pgdn` | move one page |
 | `g`, `G` | first Ticket, last Ticket |
 | `enter` | open the selected Ticket's Detail |
+| `v` | open the Frontier |
 | `d` | hide Done and Cancelled Tickets |
 | `/` | open fuzzy find |
 | `esc` | clear filters, or quit when none are active |
@@ -231,6 +247,24 @@ rather than quitting.
 | `esc` | back one Trail step, then to the list; quit when opened directly |
 | `u` | open the root Watchlist when available, clearing the Trail |
 | `r` | reread this Ticket's Detail |
+| `m` | turn mouse capture off or on |
+| `?` | expand help |
+| `q`, `ctrl+c` | quit |
+
+**The Frontier**
+
+| Key | Does |
+|---|---|
+| `↑` / `k`, `↓` / `j` | move focus within a column |
+| `←` / `h` | move focus to the blocker side |
+| `→` / `l` | move focus to the dependent side |
+| `g`, `G` | first node, last node |
+| click | focus a node |
+| double-click | open a node's Ticket |
+| wheel | scroll the canvas |
+| `enter` | open the focused Ticket, Ghost Tickets included |
+| `v`, `esc` | return to the list, interrupting any Detail reads still in flight |
+| `r` | re-read the Details that never succeeded |
 | `m` | turn mouse capture off or on |
 | `?` | expand help |
 | `q`, `ctrl+c` | quit |

@@ -1,0 +1,40 @@
+#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
+frontier · 16 nodes · 3 ghosts · 3 actionable                                                                   just now
+
+║Deduplicate shard moves   ║ │││                            ▲
+║CYCLE                     ║ │││
+╚══════════════════════════╝ │││
+                             │││
+┌──────────────────────────┐ │││
+│  #211                Todo│ │││
+│Publish the rollout runbo…│ │││
+│UNVERIFIED                │ │││
+└──────────────────────────┘ │││
+                             │││
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓ │││
+┃  #212                Todo┃ │││
+┃Chart rebalancer latency  ┃ │││
+┃ACTIONABLE                ┃ │││
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛ │││
+                             │││
+╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮ │││                                                                                       ›
+╎  #401                Todo╎─┘││
+╎Approve the rebalancing R…╎  ││
+╎GHOST                     ╎  ││
+╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯  ││
+                              ││
+╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮  ││
+╎  #402             Unknown╎──┘│
+╎Vendor capacity sign-off  ╎   │
+╎GHOST                     ╎   │
+╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯   │
+                               │
+╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮   │
+╎▸ #403                Done╎───┘
+╎Ops capacity ticket       ╎
+╎GHOST                     ╎
+╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯                                ▼
+                                                                                                     col 0/2 · row 26/27
+1 Tickets' Links could not be read; anything they block is not Actionable
+fake: no detail for ticket "acme/widgets#211"
+m off · shift-drag to select text • enter open Ticket • v list • ↑/k up • ↓/j down • ←/h blockers • →/l dependents …

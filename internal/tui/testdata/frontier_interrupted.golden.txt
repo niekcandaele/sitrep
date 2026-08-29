@@ -1,0 +1,40 @@
+#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
+██░░░░░░░░░░░░░░░░░░░░░░░░░░  1/12 done · 1 cancelled · 8%                                                      just now
+
+IN PROGRESS (1)
+▸ #207     Rewrite the placement heuristic
+           [In Review]
+
+TODO (10)
+  #201     Ship the rebalancer CLI
+  #202     Wire the rebalancer into the scheduler
+  #203     Backfill shard weights
+  #204     Drain a shard safely
+  #208     Split the rebalancer queue
+  #209     Merge the rebalancer queue
+  #210     Deduplicate shard moves
+  #211     Publish the rollout runbook
+  #212     Chart rebalancer latency
+  #213     Rotate rebalancer credentials
+
+DONE (1)
+  #205     Compute shard weights
+
+CANCELLED (1)
+  #206     Legacy weight table
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+m off · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …
