@@ -44,13 +44,14 @@ func (t target) isMilestone() bool {
 	return t.kind == kindProjectMilestone || t.kind == kindGroupMilestone
 }
 
-// targetFor reads a Ref as the GitLab node it names. defaultPath is the
-// Profile's project, used for a reference that names no group or project.
+// targetFor reads a Ref as the GitLab node it names. def is the Profile's
+// project, used for a reference that names no group or project; its scope
+// decides which references it is able to complete.
 //
 // Every rejection this function makes happens before any network call: a Ref
 // that names nothing fetchable should fail instantly and say what to write, not
 // after a round trip.
-func targetFor(r ref.Ref, defaultPath string) (target, error) {
+func targetFor(r ref.Ref, def defaultPath) (target, error) {
 	if r.Tracker != ref.TrackerGitLab {
 		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Ref", r.Raw)
 	}
@@ -59,9 +60,8 @@ func targetFor(r ref.Ref, defaultPath string) (target, error) {
 	switch pct, amp := strings.Index(r.Key, "%"), strings.Index(r.Key, "&"); {
 	case pct >= 0:
 		// The "%" is the discriminator internal/ref put there: a Key carrying one
-		// is a milestone. A leading "groups/" makes it a group milestone, which is
-		// safe as a marker because GitLab reserves "groups" as a top-level route,
-		// so no namespace can be spelled that way.
+		// is a milestone. A leading "groups/" makes it a group milestone; see
+		// groupScopePrefix for why that spelling cannot collide with a namespace.
 		t.kind = kindProjectMilestone
 		t.path = strings.Trim(r.Key[:pct], "/")
 		if scoped, ok := strings.CutPrefix(t.path, groupScopePrefix); ok {
@@ -82,7 +82,13 @@ func targetFor(r ref.Ref, defaultPath string) (target, error) {
 		t.path = strings.Trim(strings.Trim(r.Owner, "/")+"/"+strings.Trim(r.Repo, "/"), "/")
 	}
 	if t.path == "" {
-		t.path = strings.Trim(strings.TrimSpace(defaultPath), "/")
+		if err := def.completes(t.kind, r.Raw); err != nil {
+			return target{}, err
+		}
+		if t.kind == kindProjectMilestone && def.scope == scopeGroup {
+			t.kind = kindGroupMilestone
+		}
+		t.path = def.path
 	}
 
 	if t.path == "" {
@@ -102,8 +108,77 @@ func targetFor(r ref.Ref, defaultPath string) (target, error) {
 	return t, nil
 }
 
-// groupScopePrefix marks a group-scoped milestone Key, as internal/ref writes it.
+// groupScopePrefix marks a group-scoped milestone Key, as internal/ref writes
+// it, and is also how a Profile's project declares that it names a group. It is
+// safe as a marker because GitLab reserves "groups" as a top-level route, so no
+// namespace can be spelled that way.
 const groupScopePrefix = "groups/"
+
+// pathScope says which GitLab collection a Profile's path names. GitLab serves
+// issues, epics and milestones from a different endpoint for a group than for a
+// project, so a path that stands in for an unwritten reference has to declare
+// which one it is; the driver never guesses per reference kind.
+type pathScope int
+
+const (
+	scopeProject pathScope = iota
+	scopeGroup
+)
+
+// defaultPath is a Profile's project as this driver reads it: the bare path
+// GitLab addresses, plus the scope the user declared by writing (or not
+// writing) the groupScopePrefix. The zero value is no default at all.
+type defaultPath struct {
+	path  string
+	scope pathScope
+}
+
+// parseDefaultPath is the only place a Profile path's "groups/" prefix is
+// interpreted. An unprefixed path is a project path; a "groups/"-prefixed one is
+// a group path with the prefix stripped; a path with nothing left after that,
+// the degenerate "groups/" included, is no default.
+func parseDefaultPath(raw string) defaultPath {
+	// The leading "/" goes first and alone: trimming both ends up front would
+	// turn "groups/" into the project path "groups".
+	trimmed := strings.TrimLeft(strings.TrimSpace(raw), "/")
+	if scoped, ok := strings.CutPrefix(trimmed, groupScopePrefix); ok {
+		group := strings.Trim(scoped, "/")
+		if group == "" {
+			return defaultPath{}
+		}
+		return defaultPath{path: group, scope: scopeGroup}
+	}
+	return defaultPath{path: strings.Trim(trimmed, "/"), scope: scopeProject}
+}
+
+// String spells the path back the way it was written in the config file, so an
+// error quoting it names the line the reader has to edit.
+func (d defaultPath) String() string {
+	if d.scope == scopeGroup {
+		return groupScopePrefix + d.path
+	}
+	return d.path
+}
+
+// completes reports whether this default can stand in for a reference of kind k,
+// written raw. A project path cannot complete a group epic and a group path
+// cannot complete a project issue: either would address an endpoint that does
+// not serve the node. A milestone exists in both scopes and follows the default.
+func (d defaultPath) completes(k kind, raw string) error {
+	if d.path == "" {
+		return nil
+	}
+	switch {
+	case k == kindIssue && d.scope == scopeGroup:
+		return provider.Errorf(provider.KindBadRef, "gitlab: %q names a project issue, but profile path %q is a group — "+
+			"write the full reference (acme/widgets#7) or point the Profile's project at a project", raw, d)
+	case k == kindEpic && d.scope == scopeProject:
+		return provider.Errorf(provider.KindBadRef, "gitlab: %q names a group epic, but profile path %q is a project — "+
+			"write the full reference (acme/platform&12) or write the Profile's project as %q",
+			raw, d, groupScopePrefix+d.path)
+	}
+	return nil
+}
 
 // ticketID encodes a target as a model.TicketID: "issue:{project path}#{iid}",
 // "epic:{group path}&{iid}", "project-milestone:{project path}%{iid}" or

@@ -689,7 +689,9 @@ profiles:
 // The mirror: an unset token_env is *not* fatal on GitLab, because glab may
 // still be logged in. The run reaches the driver, which is what fails.
 func TestGitLabProfileWithAnUnsetTokenEnvFallsThrough(t *testing.T) {
-	got := runWith([]string{"&12", "--json"}, cli.Deps{
+	// The Ref names its own group, so the only thing left to fail is the token:
+	// the Profile's project is a project path and cannot complete a bare "&12".
+	got := runWith([]string{"gitlab-org&12", "--json"}, cli.Deps{
 		Config:            parseConfig(t, gitlabConfig),
 		Env:               func(string) string { return "" },
 		GitLabTokenSource: noGitLabToken,

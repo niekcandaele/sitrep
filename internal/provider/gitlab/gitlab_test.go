@@ -1462,6 +1462,43 @@ func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.
 	}
 }
 
+func TestResolveQueryUsesGroupScopedMembershipWhenPathIsAGroup(t *testing.T) {
+	const scoped = "/api/v4/groups/gitlab-org/issues"
+	s := newReplayServer(t, map[string][]response{
+		scoped: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithPath("groups/gitlab-org"))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.recorded()
+	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100&page=1" {
+		t.Errorf("requests = %+v, want one group-scoped maximal first page", requests)
+	}
+}
+
+// Group scoping changes the collection, never the Query: GitLab's group issues
+// endpoint takes the same filters, so the bytes have to arrive untouched here too.
+func TestResolveQueryPreservesLiteralHashUnderGroupScope(t *testing.T) {
+	const (
+		query       = "search=#47&labels=agent%23ready"
+		groupIssues = "/api/v4/groups/gitlab-org/issues"
+	)
+	s := newReplayServer(t, map[string][]response{groupIssues: {{body: `[]`}}})
+
+	p := newProvider(s, gitlab.WithPath("groups/gitlab-org"))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.requestsTo(groupIssues)
+	if len(requests) != 1 {
+		t.Fatalf("membership requests = %d, want 1", len(requests))
+	}
+	if got, want := requests[0].rawQuery, query+"&per_page=100&page=1"; got != want {
+		t.Errorf("raw query = %q, want literal bytes %q", got, want)
+	}
+}
+
 func TestResolveQueryPreservesLiteralHashInRawQuery(t *testing.T) {
 	const (
 		query        = "search=#47&labels=agent%23ready"

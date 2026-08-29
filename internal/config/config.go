@@ -36,7 +36,8 @@
 //     basic-auth flow wants. The Ref it receives carries Key (upper-cased) and
 //     Host (completed from the Profile); Number is zero.
 //   - A GitLab driver is constructed from Profile.Host, Profile.Project (the
-//     project or group path) and Credential.Token. Reading the tracker's own CLI
+//     project or group path, project-scoped unless written "groups/<path>")
+//     and Credential.Token. Reading the tracker's own CLI
 //     first (`glab auth token`) belongs in its own TokenSource-shaped seam,
 //     mirroring GitHub's, with the Profile's token_env layered on top as a
 //     preference.
@@ -86,9 +87,11 @@ type Profile struct {
 	Host string `yaml:"host"`
 	// Project is the Tracker's own project identity: a Jira project key
 	// (required, and also the prefix of every Ref key in it) or a GitLab
-	// project or group path (optional). A github Profile must not set it — a
-	// GitHub Ref carries its own owner/repo — and one that does is
-	// rejected rather than silently ignored.
+	// project or group path (optional). A GitLab path is project-scoped —
+	// "acme/widgets" — unless it is written "groups/acme/platform", which is
+	// how a Profile names a group; the driver never guesses which was meant.
+	// A github Profile must not set it — a GitHub Ref carries its own
+	// owner/repo — and one that does is rejected rather than silently ignored.
 	Project string `yaml:"project"`
 	// Auth is how this Profile's credential is found. It holds references only:
 	// sitrep never stores a token in the config file.

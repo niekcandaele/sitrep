@@ -1258,8 +1258,10 @@ func (d Deps) newJira(
 //
 // Unlike Jira, a GitLab Ref needs no Profile: a user with `glab auth login`
 // done is a supported zero-config setup, exactly as on GitHub. What a Profile
-// adds is the instance's default group or project path — which is what makes
-// the bare "&12" reference form typeable — and a named token variable.
+// adds is a default path — which is what makes the bare "&12" reference form
+// typeable — and a named token variable. The path declares its own scope in its
+// spelling, which only the driver reads: the Profile's project is passed through
+// verbatim.
 //
 // Translating a config.Credential into the driver's own token happens here,
 // deliberately: it is what keeps internal/provider/gitlab free of any knowledge

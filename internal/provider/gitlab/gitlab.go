@@ -42,6 +42,15 @@
 // receives nothing else. It is Provider-scoped and opaque by contract; nothing
 // outside this package may parse it.
 //
+// # The Profile path
+//
+// A Profile's project is this driver's default path (WithPath), and it declares
+// its own scope rather than being guessed at per reference: "acme/widgets" is a
+// project, "groups/acme/platform" is a group. The scope chooses the issues
+// endpoint a Query reads and decides which hostless references the Profile can
+// complete — "&12" needs a group, "7" needs a project, "%3" follows whichever
+// the Profile declared. A mismatch is refused before any request, by targetFor.
+//
 // # Milestone as Epic
 //
 // Native epics are a Premium/Ultimate feature. On GitLab Free the collection a
@@ -135,11 +144,12 @@ const notePageSize = 100
 const requestTimeout = 30 * time.Second
 
 // Provider is the GitLab Tracker driver. Construct it with New; the zero value
-// is not usable.
+// is not usable. path is the Profile's default group or project, already parsed
+// into the scope it declared.
 type Provider struct {
 	host        string
 	baseURL     string
-	path        string
+	path        defaultPath
 	httpClient  *http.Client
 	tokenSource TokenSource
 	userAgent   string
@@ -193,9 +203,15 @@ func WithBaseURL(rawurl string) Option {
 }
 
 // WithPath sets the default group or project path — the Profile's project —
-// used for a Ref that names none, such as the bare reference form "&12".
+// used for a Ref that names none, such as the bare reference form "&12", and
+// for the issues endpoint a Query reads.
+//
+// The path declares its own scope and the driver never guesses: "acme/widgets"
+// is a project, "groups/acme/platform" is a group. Only the "groups/" prefix
+// makes a path group-scoped, and stripping it is parseDefaultPath's job alone —
+// callers pass the Profile's project through verbatim.
 func WithPath(path string) Option {
-	return func(p *Provider) { p.path = strings.TrimSpace(path) }
+	return func(p *Provider) { p.path = parseDefaultPath(path) }
 }
 
 // WithTokenSource replaces the token discovery chain. The source is called at
@@ -460,11 +476,18 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 	}, nil
 }
 
+// queryMembershipPath is the issues collection a Query searches: the Profile's
+// project, its group, or — with no Profile path — the token's own issues. The
+// group and project endpoints take the same filter and pagination parameters, so
+// everything downstream of this choice is scope-blind.
 func (p *Provider) queryMembershipPath() string {
-	if p.path != "" {
-		return "/projects/" + url.PathEscape(p.path) + "/issues"
+	if p.path.path == "" {
+		return "/issues"
 	}
-	return "/issues"
+	if p.path.scope == scopeGroup {
+		return "/groups/" + url.PathEscape(p.path.path) + "/issues"
+	}
+	return "/projects/" + url.PathEscape(p.path.path) + "/issues"
 }
 
 func queryMembershipRawQuery(query string, perPage, page int) string {
