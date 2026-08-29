@@ -584,10 +584,11 @@ A failed Detail fetch is not fatal: the run still exits `0` and the affected Tic
 `links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
 passing a half-fetched Watchlist off as complete.
 
-A single Ref that resolves to a plain Ticket ignores `--links` and exits `0`: that document
-already carries the Ticket's complete `links` array, and Actionable is a Watchlist-level
-property that needs the other members' statuses. A script can therefore pass `--links`
-uniformly over a mixed list of Refs.
+A single Ref that resolves to a plain Ticket fails with `--links` rather than exiting `0`
+with a document missing every key that was asked for: Actionable is a Watchlist-level
+property that needs the other members' statuses, so there is nothing to compute. That
+document already carries the Ticket's complete `links` array, which is what a script wanting
+one Ticket's Links should read.
 
 ### Decoded Ticket/Detail document: schema v1
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -295,29 +296,23 @@ func TestLinksRequiresJSON(t *testing.T) {
 	}
 }
 
-// A single Ref that decodes to a plain Ticket already carries its complete links
-// array, and Actionable is a Watchlist-level property that needs the other
-// members' statuses. --links is therefore a silent no-op there, so a script
-// passing it uniformly over a mixed list of Refs does not fail on the one Ref
-// that happens to name a Ticket.
-func TestLinksIsANoOpOnADecodedTicket(t *testing.T) {
-	withLinks := run([]string{"112", "--json", "--links"}, decoder())
-	plain := run([]string{"112", "--json"}, decoder())
+// A single Ref that decodes to a plain Ticket cannot answer --links: Actionable
+// is a Watchlist-level property that needs the other members' statuses, and the
+// decoded document has no key to carry it. Emitting that document with an exit
+// code of 0 is the silent drop --links already refuses without --json, so the
+// run fails and says which Ref it was.
+func TestLinksFailsOnADecodedTicket(t *testing.T) {
+	got := run([]string{"112", "--json", "--links"}, decoder())
 
-	if withLinks.code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %q)", withLinks.code, withLinks.stderr)
+	if got.code == 0 {
+		t.Fatalf("exit code = 0, want a failure (stdout: %q)", got.stdout)
 	}
-	if withLinks.stdout != plain.stdout {
-		t.Errorf("--links changed a decoded Ticket document\n--- with ---\n%s\n--- without ---\n%s",
-			withLinks.stdout, plain.stdout)
+	if got.stdout != "" {
+		t.Errorf("stdout = %q, want no document at all", got.stdout)
 	}
-
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(withLinks.stdout), &doc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got := doc["schema_version"]; got != float64(1) {
-		t.Errorf("schema_version = %v, want 1: the Ticket/Detail family did not move", got)
+	if !strings.Contains(got.stderr, "--links needs a Watchlist") ||
+		!strings.Contains(got.stderr, "#112") {
+		t.Errorf("stderr = %q, want it to name --links and the Ticket", got.stderr)
 	}
 }
 

@@ -16,9 +16,11 @@
 //   - tickets is always present and always an array, never null.
 //   - Optional strings, counts and capability-gated arrays are omitted when
 //     empty. An undeclared Capability means the key is absent everywhere —
-//     absence is the normal, silent way to say "this Tracker does not do that",
-//     and it is also how an absent pull_request_total says "this Provider
-//     cannot tell you how many there are".
+//     absence is the normal, silent way to say "this Tracker does not do that".
+//     pull_request_total is omitted at zero too, so an absent key does not
+//     distinguish "this Provider cannot tell you how many there are" from a
+//     capable Provider reporting none; an absent pull_requests array is the
+//     consumer's signal for the second.
 //   - The blocking fields — the top-level blocking object and each Ticket's
 //     actionable, links_known, in_cycle and unmet_blockers — appear only when
 //     the caller computed a BlockingGraph, which takes both the --links flag and
@@ -124,7 +126,10 @@ type ticketDoc struct {
 	Assignees    []userDoc            `json:"assignees,omitempty"`
 	PullRequests []pullRequestDoc     `json:"pull_requests,omitempty"`
 	// PullRequestTotal is how many pull requests the Tracker says the Ticket
-	// has, present only when the serving Provider can supply a total.
+	// has. Zero is omitted along with an unsupplied total: a genuine zero from
+	// a capable Provider is indistinguishable on the wire, and pull_requests
+	// being absent is what tells the consumer there are none. It stays an int
+	// rather than becoming a *int because that would be a wire change.
 	PullRequestTotal int `json:"pull_request_total,omitempty"`
 	// Actionable, LinksKnown and InCycle are pointers so that a computed false
 	// still encodes as false while an uncomputed field is omitted entirely. A
@@ -288,6 +293,7 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 	// by ID: a Ref-list Watchlist may legitimately contain the same Ticket
 	// twice, and BlockingGraph.For would collapse those rows onto one another.
 	var members []model.Actionability
+	var byID map[model.TicketID]model.Ticket
 	if doc.Blocking != nil {
 		members = doc.Blocking.Members()
 		if len(members) != len(snap.Tickets) {
@@ -295,12 +301,23 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 				len(members), len(snap.Tickets))
 		}
 		out.Blocking = &blockingDoc{Cycles: cyclesDoc(doc.Blocking.Cycles())}
+		byID = make(map[model.TicketID]model.Ticket, len(snap.Tickets))
+		for _, t := range snap.Tickets {
+			byID[t.ID] = t
+		}
 	}
 
 	for i, t := range snap.Tickets {
 		ticket := newTicketDoc(t, snap.Capabilities)
 		if members != nil {
-			addBlocking(&ticket, members[i])
+			// Positional pairing only holds while the graph's members are the
+			// snapshot's Tickets in order. A length check alone claims more
+			// than it checks, so the identity is compared too.
+			if members[i].TicketID != t.ID {
+				return fmt.Errorf("json: blocking graph member %d is %s, want %s",
+					i, members[i].TicketID, t.ID)
+			}
+			addBlocking(&ticket, members[i], byID)
 		}
 		out.Tickets = append(out.Tickets, ticket)
 	}
@@ -317,17 +334,44 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 // Link — that blocker was genuinely read, so suppressing it would hide real
 // information. links_known: false is what tells the consumer the list may be
 // incomplete; it never means the list was invented.
-func addBlocking(doc *ticketDoc, a model.Actionability) {
+//
+// A blocker's status is Blocker.Status, the authoritative one BuildBlockingGraph
+// resolved, not the second-hand copy the Link that named the blocker carried:
+// the same Ticket must not appear twice in one document with two statuses. The
+// native word is resolved the same way, from byID, which keys the snapshot's
+// Tickets — duplicate rows in a Ref-list Watchlist carry identical status, so
+// the lookup is safe for this field. Where no authoritative native word is
+// available and the Link's copy belongs to a different Status Category, the key
+// is omitted rather than emitted as a contradiction.
+func addBlocking(doc *ticketDoc, a model.Actionability, byID map[model.TicketID]model.Ticket) {
 	doc.Actionable = &a.Actionable
 	doc.LinksKnown = &a.LinksKnown
 	doc.InCycle = &a.InCycle
 	for _, b := range a.Unmet() {
+		target := newLinkTargetDoc(b.Target)
+		target.Status = b.Status
+		target.NativeStatus = blockerNativeStatus(b, byID)
 		doc.UnmetBlockers = append(doc.UnmetBlockers, blockerDoc{
-			linkTargetDoc: newLinkTargetDoc(b.Target),
+			linkTargetDoc: target,
 			Member:        b.Member,
 			StatusKnown:   b.StatusKnown,
 		})
 	}
+}
+
+// blockerNativeStatus resolves the Tracker's own word for a blocker: the
+// member's own Ticket when the blocker is a member, and otherwise the word the
+// Link carried, kept only while it agrees with the authoritative Category.
+func blockerNativeStatus(b model.Blocker, byID map[model.TicketID]model.Ticket) string {
+	if b.Member {
+		if t, ok := byID[b.Target.ID]; ok {
+			return t.NativeStatus
+		}
+	}
+	if b.Target.Status != b.Status {
+		return ""
+	}
+	return b.Target.NativeStatus
 }
 
 // cyclesDoc normalizes the graph's cycles for the wire, where the key is always

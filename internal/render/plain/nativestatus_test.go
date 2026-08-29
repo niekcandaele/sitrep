@@ -78,27 +78,27 @@ func TestDegenerateStatusIsSuppressedOnRowsAndNamedWithoutAHeading(t *testing.T)
 	tests := []struct {
 		native string
 		status model.StatusCategory
-		want   string
+		onRow  bool
+		field  string
 	}{
-		{"open", model.StatusTodo, "[Todo]"},
-		{"closed", model.StatusDone, "[Done]"},
-		{"Done", model.StatusDone, "[Done]"},
-		{"not planned", model.StatusCancelled, "[Cancelled]"},
-		{"in progress", model.StatusInProgress, "[In Progress]"},
-		{"", model.StatusTodo, "[Todo]"},
+		{"open", model.StatusTodo, false, "[Todo]"},
+		{"closed", model.StatusDone, false, "[Done]"},
+		{"Done", model.StatusDone, false, "[Done]"},
+		{"not planned", model.StatusCancelled, false, "[Cancelled]"},
+		{"in progress", model.StatusInProgress, false, "[In Progress]"},
+		{"", model.StatusTodo, false, "[Todo]"},
 		// Not degenerate: the Tracker's own word survives both ways.
-		{"In Review", model.StatusInProgress, "[In Review]"},
+		{"In Review", model.StatusInProgress, true, "[In Review]"},
 	}
 
 	for _, tc := range tests {
 		ticket := model.Ticket{Status: tc.status, NativeStatus: tc.native}
-		if got := StatusField(ticket); got != tc.want {
-			t.Errorf("StatusField(%q under %v) = %q, want %q", tc.native, tc.status, got, tc.want)
+		if got := StatusField(ticket); got != tc.field {
+			t.Errorf("StatusField(%q under %v) = %q, want %q", tc.native, tc.status, got, tc.field)
 		}
-		shown, wantShown := ShowsNativeStatus(ticket), tc.want == "["+tc.native+"]"
-		if shown != wantShown {
+		if got := ShowsNativeStatus(ticket); got != tc.onRow {
 			t.Errorf("ShowsNativeStatus(%q under %v) = %v, want %v",
-				tc.native, tc.status, shown, wantShown)
+				tc.native, tc.status, got, tc.onRow)
 		}
 	}
 }
