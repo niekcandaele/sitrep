@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
@@ -349,8 +350,13 @@ func (c Config) validateWontDoLabels(p Profile) error {
 			"wont_do_labels names no labels — remove the key to use sitrep's built-in list")
 	}
 	for _, label := range p.WontDoLabels {
-		if strings.TrimSpace(label) == "" {
-			return c.profileErrorf(p.Name, "wont_do_labels contains an empty label name")
+		// The gitlab package owns what a label name reduces to. Checking
+		// whitespace here instead would accept "::" or "---", which normalize
+		// away to nothing and leave the built-in list in force — an override
+		// that silently overrides nothing.
+		if !gitlab.UsableWontDoLabel(label) {
+			return c.profileErrorf(p.Name,
+				"wont_do_labels entry %q has no letters or digits to match a label by", label)
 		}
 	}
 	return nil

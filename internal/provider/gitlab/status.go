@@ -128,6 +128,13 @@ func normalizeStatus(state string, labels []string, closedAsDuplicate bool, wont
 	}
 }
 
+// UsableWontDoLabel reports whether a label name can ever match a GitLab label.
+// It is the rule config validation of wont_do_labels must use: a name that
+// normalizes to nothing — "::", "---" — passes a whitespace check, matches no
+// label, and leaves the whole list normalizing away to the built-in defaults,
+// which is the inference silently turned back on rather than replaced.
+func UsableWontDoLabel(name string) bool { return normalizeLabel(name) != "" }
+
 // normalizeLabel reduces a GitLab label to its comparable form: the segment
 // after the last "::" of a scoped label, lower-cased, with everything that is
 // not a letter or a digit stripped. "workflow::Won't Fix" and "wontfix" are one

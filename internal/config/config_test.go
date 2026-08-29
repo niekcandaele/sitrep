@@ -369,7 +369,21 @@ func TestParseValidation(t *testing.T) {
 		{
 			name: "wont_do_labels with a blank entry",
 			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    wont_do_labels: [wontfix, \"  \"]\n",
-			want: []string{`profile "x"`, "wont_do_labels contains an empty label name"},
+			want: []string{`profile "x"`, "wont_do_labels entry", "no letters or digits"},
+		},
+		{
+			// An entry that survives the whitespace check but normalizes away
+			// to nothing: the whole list could reduce to the empty set and
+			// silently restore the built-in labels the Profile meant to
+			// replace. The gitlab package's own rule is what decides.
+			name: "wont_do_labels with an entry that normalizes to nothing",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    wont_do_labels: [\"::\"]\n",
+			want: []string{`profile "x"`, `wont_do_labels entry "::"`, "no letters or digits"},
+		},
+		{
+			name: "wont_do_labels with an empty scope segment",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    wont_do_labels: [\"workflow::\"]\n",
+			want: []string{`profile "x"`, `wont_do_labels entry "workflow::"`, "no letters or digits"},
 		},
 		{
 			name: "an unknown field",

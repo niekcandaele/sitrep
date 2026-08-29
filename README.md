@@ -340,7 +340,8 @@ or `invalid` from the list is how you stop sitrep reading them as cancellation. 
 matched case-, punctuation- and scope-insensitively, so `Won't Fix`, `wontfix` and
 `workflow::wontfix` are one entry. The key is GitLab-only — GitHub and Jira report
 cancellation natively, and a `github` or `jira` Profile that sets it is an error — and writing
-it empty is an error too: omit the key entirely to keep sitrep's built-in list
+it empty is an error too, as is an entry with no letters or digits to match by (`::`,
+`workflow::`): omit the key entirely to keep sitrep's built-in list
 (`wontfix`, `wontdo`, `willnotfix`, `willnotdo`, `duplicate`, `invalid`, `declined`,
 `rejected`, `obsolete`, `notplanned`, `notreproducible`, `cannotreproduce`, `abandoned`).
 
