@@ -3,6 +3,7 @@ package config_test
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,7 @@ profiles:
     provider: gitlab
     host: gitlab.acme.test
     project: platform/widgets
+    wont_do_labels: [ausgemustert, "workflow::no-fix"]
     auth:
       token_env: GITLAB_TOKEN
 
@@ -74,7 +76,7 @@ profiles:
 		RawRefreshInterval: "30s",
 		MaxTickets:         100,
 	}
-	if got := cfg.Profiles["acme-jira"]; got != want {
+	if got := cfg.Profiles["acme-jira"]; !reflect.DeepEqual(got, want) {
 		t.Errorf("acme-jira = %+v\nwant %+v", got, want)
 	}
 	if got := cfg.Profiles["work-github"].RefreshInterval; got != 2*time.Minute {
@@ -85,6 +87,17 @@ profiles:
 	}
 	if got := cfg.Profiles["acme-gitlab"].RefreshInterval; got != 0 {
 		t.Errorf("refresh_interval = %s, want zero when unwritten", got)
+	}
+	// The names arrive exactly as written: normalizing them is the GitLab
+	// driver's business, not this package's.
+	wantLabels := []string{"ausgemustert", "workflow::no-fix"}
+	if got := cfg.Profiles["acme-gitlab"].WontDoLabels; !reflect.DeepEqual(got, wantLabels) {
+		t.Errorf("wont_do_labels = %#v, want %#v", got, wantLabels)
+	}
+	// A profile that writes none gets nil, which is what the driver reads as
+	// "keep sitrep's built-in list".
+	if got := cfg.Profiles["acme-jira"].WontDoLabels; got != nil {
+		t.Errorf("acme-jira wont_do_labels = %#v, want nil when unwritten", got)
 	}
 }
 
@@ -158,7 +171,7 @@ func TestUnknownProfileKeyListsMaxTicketsAsValid(t *testing.T) {
 	if err == nil {
 		t.Fatal("unknown key parsed cleanly")
 	}
-	if !strings.Contains(err.Error(), "valid keys are provider, host, project, auth, refresh_interval, max_tickets") {
+	if !strings.Contains(err.Error(), "valid keys are provider, host, project, auth, refresh_interval, max_tickets, wont_do_labels") {
 		t.Errorf("error = %q, want max_tickets in the valid Profile keys", err)
 	}
 }
@@ -334,6 +347,31 @@ func TestParseValidation(t *testing.T) {
 			want: []string{`profiles "a" and "b" both claim the Jira project key "ABC"`},
 		},
 		{
+			// GitHub and Jira report cancellation natively, so there is nothing
+			// for the key to do; accepting and ignoring it is worse.
+			name: "wont_do_labels on a github profile",
+			doc:  "profiles:\n  x:\n    provider: github\n    wont_do_labels: [wontfix]\n",
+			want: []string{`profile "x"`, "wont_do_labels is only used by a gitlab profile"},
+		},
+		{
+			name: "wont_do_labels on a jira profile",
+			doc: "profiles:\n  x:\n    provider: jira\n    host: acme.atlassian.net\n    project: ABC\n" +
+				"    wont_do_labels: [wontfix]\n    auth:\n      token_env: T\n",
+			want: []string{`profile "x"`, "wont_do_labels is only used by a gitlab profile"},
+		},
+		{
+			// Honouring it would silently turn the inference off and flatter
+			// every Epic containing abandoned work.
+			name: "wont_do_labels written empty",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    wont_do_labels: []\n",
+			want: []string{`profile "x"`, "wont_do_labels names no labels", "built-in list"},
+		},
+		{
+			name: "wont_do_labels with a blank entry",
+			doc:  "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n    wont_do_labels: [wontfix, \"  \"]\n",
+			want: []string{`profile "x"`, "wont_do_labels contains an empty label name"},
+		},
+		{
 			name: "an unknown field",
 			doc:  "profiles:\n  x:\n    provider: github\n    porject: ABC\n",
 			want: []string{testPath, "porject"},
@@ -400,7 +438,7 @@ func TestParseRewritesStrictDecodeErrors(t *testing.T) {
 			doc:  "profiles:\n  x:\n    provider: github\n    token_env: GH_TOKEN\n",
 			want: []string{
 				`unknown key "token_env" in a profile`,
-				"valid keys are provider, host, project, auth, refresh_interval",
+				"valid keys are provider, host, project, auth, refresh_interval, max_tickets, wont_do_labels",
 				"token_env belongs under auth:",
 			},
 		},
@@ -480,6 +518,15 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 			want: config.Profile{Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", Project: "groups/acme", MaxTickets: 100},
 		},
 		{
+			name: "a gitlab profile naming its own won't-do labels",
+			doc: "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n" +
+				"    wont_do_labels: [ausgemustert, \"Won't Do\"]\n",
+			want: config.Profile{
+				Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", MaxTickets: 100,
+				WontDoLabels: []string{"ausgemustert", "Won't Do"},
+			},
+		},
+		{
 			// After credential scoping a Profile is the only way a self-hosted
 			// host on a custom port can get a token, so it has to be nameable.
 			name: "a host with an explicit port",
@@ -491,7 +538,7 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := parse(t, tt.doc)
-			if got := cfg.Profiles["x"]; got != tt.want {
+			if got := cfg.Profiles["x"]; !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("profile = %+v, want %+v", got, tt.want)
 			}
 		})

@@ -37,11 +37,30 @@ func TestLinkKind(t *testing.T) {
 }
 
 func TestNewLinksOnAnEmptyList(t *testing.T) {
-	if got := newLinks(nil); got != nil {
+	if got := newLinks(nil, newWontDoSet(nil)); got != nil {
 		t.Errorf("newLinks(nil) = %+v, want nil", got)
 	}
-	if got := newLinks([]issueLinkWire{}); got != nil {
+	if got := newLinks([]issueLinkWire{}, newWontDoSet(nil)); got != nil {
 		t.Errorf("newLinks([]) = %+v, want nil", got)
+	}
+}
+
+// A link target runs through the same normalizeStatus a Ticket does, so a
+// Profile's own won't-do labels reach the LINKS table too: a Ticket reads the
+// same in the list and in a Detail view.
+func TestNewLinkTargetHonoursAConfiguredWontDoList(t *testing.T) {
+	issue := issueWire{IID: 7, State: "closed", Labels: []string{"backend", "workflow::Ausgemustert"}}
+
+	target := newLinkTarget(issue, newWontDoSet([]string{"ausgemustert"}))
+	if target.Status != model.StatusCancelled || target.NativeStatus != "workflow::Ausgemustert" {
+		t.Errorf("configured list: (%v, %q), want (Cancelled, \"workflow::Ausgemustert\")",
+			target.Status, target.NativeStatus)
+	}
+
+	// The same label under the built-in list is an ordinary closed Ticket.
+	target = newLinkTarget(issue, newWontDoSet(nil))
+	if target.Status != model.StatusDone || target.NativeStatus != "closed" {
+		t.Errorf("built-in list: (%v, %q), want (Done, \"closed\")", target.Status, target.NativeStatus)
 	}
 }
 

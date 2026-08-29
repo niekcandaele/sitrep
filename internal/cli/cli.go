@@ -1260,9 +1260,9 @@ func (d Deps) newJira(
 // Unlike Jira, a GitLab Ref needs no Profile: a user with `glab auth login`
 // done is a supported zero-config setup, exactly as on GitHub. What a Profile
 // adds is a default path — which is what makes the bare "&12" reference form
-// typeable — and a named token variable. The path declares its own scope in its
-// spelling, which only the driver reads: the Profile's project is passed through
-// verbatim.
+// typeable — a named token variable, and the site's own won't-do labels. The
+// path declares its own scope in its spelling, which only the driver reads: the
+// Profile's project is passed through verbatim.
 //
 // Translating a config.Credential into the driver's own token happens here,
 // deliberately: it is what keeps internal/provider/gitlab free of any knowledge
@@ -1286,7 +1286,8 @@ func (d Deps) newGitLab(host, path string, prof *config.Profile, maxTickets int)
 	return gitlab.New(host,
 		gitlab.WithPath(path),
 		gitlab.WithTokenSource(d.gitLabTokenSource(prof)),
-		gitlab.WithMaxTickets(maxTickets)), nil
+		gitlab.WithMaxTickets(maxTickets),
+		gitlab.WithWontDoLabels(profileWontDoLabels(prof))), nil
 }
 
 // gitLabTokenSource layers a Profile's auth reference on top of the GitLab
@@ -1304,6 +1305,15 @@ func profileProject(prof *config.Profile) string {
 		return ""
 	}
 	return prof.Project
+}
+
+// profileWontDoLabels is a Profile's won't-do label names, or nil when there is
+// no Profile — which is the driver's "keep the built-in list" input.
+func profileWontDoLabels(prof *config.Profile) []string {
+	if prof == nil {
+		return nil
+	}
+	return prof.WontDoLabels
 }
 
 func (d Deps) newGitHub(host string, prof *config.Profile, maxTickets int) provider.Provider {

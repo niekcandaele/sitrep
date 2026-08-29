@@ -147,7 +147,7 @@ type yamlSection struct {
 // because it is a key anyone should use.
 var yamlSections = map[string]yamlSection{
 	"config.Config":  {label: "the top level", keys: []string{"profiles"}},
-	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval", "max_tickets"}},
+	"config.Profile": {label: "a profile", keys: []string{"provider", "host", "project", "auth", "refresh_interval", "max_tickets", "wont_do_labels"}},
 	"config.Auth":    {label: "auth", keys: []string{"token_env", "user", "user_env"}},
 }
 
@@ -230,6 +230,9 @@ func (c Config) validateProfile(p *Profile) error {
 		return err
 	}
 	if err := c.validateProject(*p); err != nil {
+		return err
+	}
+	if err := c.validateWontDoLabels(*p); err != nil {
 		return err
 	}
 	if err := c.validateAuth(*p); err != nil {
@@ -321,6 +324,34 @@ func (c Config) validateProject(p Profile) error {
 	// has to be a shape the Ref grammar can produce.
 	if ref.KeyPrefix(p.Project+"-1") != strings.ToUpper(p.Project) {
 		return c.profileErrorf(p.Name, "project %q is not a Jira project key", p.Project)
+	}
+	return nil
+}
+
+// validateWontDoLabels checks the GitLab won't-do label list. A Profile that
+// writes nothing keeps sitrep's built-in list; a Profile that writes the key has
+// to mean something by it.
+func (c Config) validateWontDoLabels(p Profile) error {
+	if p.WontDoLabels == nil {
+		return nil
+	}
+	if p.Provider != providerGitLab {
+		// Accepting and ignoring it is the worst thing a config file can do, and
+		// there is nothing to honour: GitHub's not_planned and Jira's resolution
+		// say outright what a label can only imply.
+		return c.profileErrorf(p.Name, "wont_do_labels is only used by a gitlab profile "+
+			"(GitHub and Jira report cancellation natively)")
+	}
+	if len(p.WontDoLabels) == 0 {
+		// Honouring an empty list would silently turn the inference off and
+		// flatter every Epic containing abandoned work.
+		return c.profileErrorf(p.Name,
+			"wont_do_labels names no labels — remove the key to use sitrep's built-in list")
+	}
+	for _, label := range p.WontDoLabels {
+		if strings.TrimSpace(label) == "" {
+			return c.profileErrorf(p.Name, "wont_do_labels contains an empty label name")
+		}
 	}
 	return nil
 }

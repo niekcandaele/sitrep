@@ -36,8 +36,9 @@
 //     basic-auth flow wants. The Ref it receives carries Key (upper-cased) and
 //     Host (completed from the Profile); Number is zero.
 //   - A GitLab driver is constructed from Profile.Host, Profile.Project (the
-//     project or group path, project-scoped unless written "groups/<path>")
-//     and Credential.Token. Reading the tracker's own CLI
+//     project or group path, project-scoped unless written "groups/<path>"),
+//     Profile.WontDoLabels (the site's own won't-do label names) and
+//     Credential.Token. Reading the tracker's own CLI
 //     first (`glab auth token`) belongs in its own TokenSource-shaped seam,
 //     mirroring GitHub's, with the Profile's token_env layered on top as a
 //     preference.
@@ -107,6 +108,16 @@ type Profile struct {
 	MaxTickets int `yaml:"-"`
 	// RawMaxTickets retains the scalar as written for precise validation errors.
 	RawMaxTickets string `yaml:"max_tickets"`
+	// WontDoLabels are the GitLab label names that mean cancelled on this site.
+	// It is used by a gitlab Profile only — GitHub and Jira report cancellation
+	// natively — and it *replaces* sitrep's built-in list rather than extending
+	// it, so a site that has an opinion has the whole opinion. Nil means "use the
+	// built-in list"; a written but empty list is a config error.
+	//
+	// Names are matched after the GitLab driver's own label normalization, so
+	// case, punctuation and a "scope::" prefix do not matter: "Won't Fix",
+	// "wontfix" and "workflow::wontfix" are one entry.
+	WontDoLabels []string `yaml:"wont_do_labels"`
 }
 
 // Auth is a Profile's auth reference: the names of the environment variables

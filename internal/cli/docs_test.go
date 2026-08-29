@@ -39,6 +39,7 @@ func TestDocumentationContract(t *testing.T) {
 		"jira issue list",
 		"max_tickets",
 		"refresh_interval",
+		"wont_do_labels",
 		"when no Profile is selected",
 		"has at most one selected Profile",
 		"Mouse capture is on by default",

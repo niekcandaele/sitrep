@@ -242,10 +242,10 @@ func (e epicWire) key(group string) string {
 //
 // Description is deliberately not read: this runs on the polled hot path, and a
 // description belongs on Detail (ADR-0003).
-func newEpicFromEpic(e epicWire, host, group string) model.Epic {
+func newEpicFromEpic(e epicWire, host, group string, wontDo wontDoSet) model.Epic {
 	// An epic has no closed-as-duplicate link in REST, so the one hard Cancelled
 	// signal an issue has is unavailable here and only the labels remain.
-	status, native := normalizeStatus(e.State, e.Labels, false)
+	status, native := normalizeStatus(e.State, e.Labels, false, wontDo)
 	return model.Epic{
 		ID:           target{kind: kindEpic, path: group, iid: e.IID}.ticketID(),
 		Key:          e.key(group),
@@ -265,8 +265,8 @@ func newEpicFromEpic(e epicWire, host, group string) model.Epic {
 // newEpicFromIssue maps a project issue onto sitrep's Epic, for the Ref
 // that turned out to name a plain Ticket. Reporting it is all this driver does
 // about it: which screen that opens is internal/cli's decision (ADR-0003).
-func newEpicFromIssue(i issueWire) model.Epic {
-	status, native := normalizeStatus(i.State, i.Labels, i.closedAsDuplicate())
+func newEpicFromIssue(i issueWire, wontDo wontDoSet) model.Epic {
+	status, native := normalizeStatus(i.State, i.Labels, i.closedAsDuplicate(), wontDo)
 	return model.Epic{
 		ID:           i.ticketID(),
 		Key:          i.key(),
@@ -304,8 +304,8 @@ func newTicketFromEpic(epic model.Epic) model.Ticket {
 // sub-epics are not expanded and an issue's own child work items (tasks) are
 // not read, so this driver does not claim to know whether descendants are
 // included.
-func newTicketFromIssue(i issueWire) model.Ticket {
-	status, native := normalizeStatus(i.State, i.Labels, i.closedAsDuplicate())
+func newTicketFromIssue(i issueWire, wontDo wontDoSet) model.Ticket {
+	status, native := normalizeStatus(i.State, i.Labels, i.closedAsDuplicate(), wontDo)
 	return model.Ticket{
 		ID:           i.ticketID(),
 		Key:          i.key(),
