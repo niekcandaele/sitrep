@@ -43,6 +43,8 @@ Flags:
       --interval <dur>    how often the monitor refreshes (default 60s)
       --no-mouse          start the monitor without mouse capture
       --json              print a one-shot JSON report and exit
+      --links             with --json, add Actionable and each Ticket's unmet
+                          blockers; costs one Detail fetch per Ticket
       --plain             print a one-shot Watchlist or Ticket report and exit
       --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
                           matched from the route or Refs)

@@ -23,6 +23,8 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/buildinfo"
 	"github.com/niekcandaele/sitrep/internal/config"
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
+	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -104,6 +106,8 @@ Flags:
       --interval <dur>    how often the monitor refreshes (default 60s)
       --no-mouse          start the monitor without mouse capture
       --json              print a one-shot JSON report and exit
+      --links             with --json, add Actionable and each Ticket's unmet
+                          blockers; costs one Detail fetch per Ticket
       --plain             print a one-shot Watchlist or Ticket report and exit
       --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
                           matched from the route or Refs)
@@ -241,6 +245,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	showVersion := fs.Bool("version", false, "show version information and exit")
 	asJSON := fs.Bool("json", false, "print a one-shot JSON report and exit")
 	asPlain := fs.Bool("plain", false, "print a one-shot Watchlist or Ticket report and exit")
+	withLinks := fs.Bool("links", false, "with --json, add Actionable and unmet blockers (per-Ticket fetch)")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
@@ -265,6 +270,15 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// one would hide a scripting mistake.
 	if *asJSON && *asPlain {
 		return usageError(stderr, "--json and --plain are mutually exclusive")
+	}
+
+	// Unlike --interval, --links is never a default a script inherited from a
+	// Profile: it is only ever present because someone typed it, and typing it
+	// means "give me blocking data", which neither --plain nor the monitor will
+	// produce. Failing is the honest answer; ignoring it would silently drop the
+	// data the caller asked for.
+	if *withLinks && !*asJSON {
+		return usageError(stderr, "--links requires --json")
 	}
 
 	// --interval only means anything to the monitor. Rejecting it beside a
@@ -387,8 +401,21 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	switch {
 	case *asJSON:
+		blocking := blockingGraphFor(ctx, p, snap, *withLinks)
+		// A ctrl+c during the fan-out ends the run. Emitting the half-fetched
+		// document would be a lie by omission: most Tickets would say
+		// links_known: false because the user pressed a key, not because the
+		// Tracker could not answer.
+		if code, ok := interrupted(ctx); ok {
+			return code
+		}
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return jsonout.RenderWatchlist(w, snap, selector, p.Name())
+			return jsonout.RenderWatchlist(w, jsonout.WatchlistDocument{
+				Snapshot:     snap,
+				Selector:     selector,
+				ProviderName: p.Name(),
+				Blocking:     blocking,
+			})
 		})
 	case *asPlain:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
@@ -404,6 +431,42 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		Interval:     refresh,
 		NoMouse:      *noMouse,
 	})
+}
+
+// blockingGraphFor reads every member's Detail and derives the Watchlist's
+// blocking graph, or returns nil when the caller did not ask for one or the
+// Provider cannot express blocking at all.
+//
+// nil is what makes --json's default free: ADR-0003 still forbids a render from
+// fanning FetchDetail out, and Amendment 4 permits it here only because --links
+// is an explicit user action. An undeclared BlockingLinks Capability is silent
+// rather than an error, the same way pull_requests is: the keys are simply
+// absent, and emitting actionable: false everywhere would read as a computed
+// negative when BuildBlockingGraph in fact claims nothing.
+//
+// A failed FetchDetail is not fatal and is not reported: the Ticket is left out
+// of the links map, which is exactly the unreadable-Links tri-state, and the
+// document says so per Ticket with links_known: false.
+func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.WatchlistSnapshot, withLinks bool) *model.BlockingGraph {
+	if !withLinks || !snap.Capabilities.BlockingLinks {
+		return nil
+	}
+
+	// A one-shot run holds no Detail cache, so nothing is skipped; Plan is still
+	// the way in, for its canonical order and its empty-ID skip.
+	ids := detailfanout.Plan(snap.Tickets, nil)
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	//nolint:errcheck // Run's only error is ctx.Err(), which RunWith reads back
+	// through interrupted(ctx) so that an interrupt stays an interrupt rather
+	// than becoming a rendering failure.
+	_ = detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
+		if o.Err == nil {
+			details[o.ID] = o.Detail
+		}
+	})
+
+	graph := model.BuildBlockingGraph(snap.Tickets, detailfanout.Links(details), snap.Capabilities)
+	return &graph
 }
 
 // stdinSelection recognizes the transport sentinel only in argv. It must be

@@ -61,11 +61,20 @@ Tracker/Profile:
 ```sh
 ./sitrep <ref> <ref> --plain
 ./sitrep <ref> <ref> --json |
-  jq -e '.schema_version == 2 and .watchlist.selector.kind == "ref_list"'
+  jq -e '.schema_version == 3 and .watchlist.selector.kind == "ref_list"'
 printf '%s\n' <ref> <ref> | ./sitrep --plain -
 ./sitrep --profile <profile> --query '<native query>' --json |
-  jq -e '.schema_version == 2 and .watchlist.selector.kind == "query"'
+  jq -e '.schema_version == 3 and .watchlist.selector.kind == "query"'
 ./sitrep <ref> <ref>              # open the Watchlist monitor once, then q
+```
+
+`--links` costs one Detail fetch per Ticket, so smoke it against a small Watchlist whose
+blocking Links you can eyeball. Every Ticket must carry the three booleans, and a Provider
+without the `blocking_links` Capability must instead emit none of them and exit `0`:
+
+```sh
+./sitrep <ref> <ref> --json --links |
+  jq -e '.blocking.cycles != null and ([.tickets[] | has("actionable")] | all)'
 ```
 
 Also test one Ref known to decode directly to a plain Ticket; its unchanged Ticket/Detail
@@ -79,9 +88,15 @@ JSON remains schema v1:
 ## Versioning
 
 Tags are `vMAJOR.MINOR.PATCH`. The JSON `schema_version` is independent of the tag and of
-other document families. Watchlist documents are schema v2 in the unreleased source tree;
+other document families. Watchlist documents are schema v3 in the unreleased source tree;
 decoded Ticket/Detail documents remain schema v1. Additive optional fields keep a document's
 schema version, while a breaking change to that document's shape or tokens increments it.
+
+Watchlist v3 is the documented exception to that additive rule: `--links` makes the
+Watchlist field set invocation-dependent, so the version has to say which fields the binary
+can emit at all rather than which ones this run did. It is `3` on every Watchlist document,
+`--links` or not — a version that flipped with a flag would describe the invocation instead
+of the schema.
 
 sitrep is pre-1.0. The CLI surface may still move between minor versions; the JSON document
 schemas carry the compatibility promise.

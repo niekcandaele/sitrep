@@ -145,7 +145,11 @@ func TestRenderWatchlistAlwaysEmitsATicketArray(t *testing.T) {
 	var buf bytes.Buffer
 	empty := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
 	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "1"}}
-	if err := jsonout.RenderWatchlist(&buf, empty, selector, "fake"); err != nil {
+	if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+		Snapshot:     empty,
+		Selector:     selector,
+		ProviderName: "fake",
+	}); err != nil {
 		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
@@ -163,7 +167,11 @@ func TestRenderRefListSelectorAndOmitsEpic(t *testing.T) {
 	}}
 
 	var buf bytes.Buffer
-	if err := jsonout.RenderWatchlist(&buf, snap, selector, "fake"); err != nil {
+	if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+		Snapshot:     snap,
+		Selector:     selector,
+		ProviderName: "fake",
+	}); err != nil {
 		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
@@ -180,8 +188,8 @@ func TestRenderRefListSelectorAndOmitsEpic(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if doc.SchemaVersion != 2 {
-		t.Errorf("schema_version = %d, want 2", doc.SchemaVersion)
+	if doc.SchemaVersion != 3 {
+		t.Errorf("schema_version = %d, want 3", doc.SchemaVersion)
 	}
 	if doc.Watchlist.Selector.Kind != "ref_list" {
 		t.Errorf("selector.kind = %q, want ref_list", doc.Watchlist.Selector.Kind)
@@ -207,7 +215,11 @@ func TestRenderQueryLimitReachedIsOptionalAndStructured(t *testing.T) {
 	render := func(t *testing.T, snap model.WatchlistSnapshot, selector provider.Selector) []byte {
 		t.Helper()
 		var buf bytes.Buffer
-		if err := jsonout.RenderWatchlist(&buf, snap, selector, p.Name()); err != nil {
+		if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+			Snapshot:     snap,
+			Selector:     selector,
+			ProviderName: p.Name(),
+		}); err != nil {
 			t.Fatalf("RenderWatchlist: %v", err)
 		}
 		return buf.Bytes()
@@ -231,8 +243,8 @@ func TestRenderQueryLimitReachedIsOptionalAndStructured(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if doc.SchemaVersion != 2 || doc.Watchlist.Selector.Kind != "query" || doc.Watchlist.Selector.Query != query {
-		t.Errorf("schema/selector = %d/%+v, want schema 2 and exact Query", doc.SchemaVersion, doc.Watchlist.Selector)
+	if doc.SchemaVersion != 3 || doc.Watchlist.Selector.Kind != "query" || doc.Watchlist.Selector.Query != query {
+		t.Errorf("schema/selector = %d/%+v, want schema 3 and exact Query", doc.SchemaVersion, doc.Watchlist.Selector)
 	}
 	if doc.Watchlist.LimitReached == nil || !*doc.Watchlist.LimitReached {
 		t.Errorf("limit_reached = %v, want present true", doc.Watchlist.LimitReached)
@@ -258,7 +270,11 @@ func TestRenderQueryLimitReachedIsOptionalAndStructured(t *testing.T) {
 
 func TestRenderWatchlistRejectsUnsupportedSelector(t *testing.T) {
 	var buf bytes.Buffer
-	if err := jsonout.RenderWatchlist(&buf, model.WatchlistSnapshot{}, nil, "fake"); err == nil {
+	if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+		Snapshot:     model.WatchlistSnapshot{},
+		Selector:     nil,
+		ProviderName: "fake",
+	}); err == nil {
 		t.Fatal("RenderWatchlist accepted a nil Selector")
 	}
 }
@@ -276,7 +292,11 @@ func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 
 	var watchlistBuf bytes.Buffer
 	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}
-	if err := jsonout.RenderWatchlist(&watchlistBuf, snap, selector, p.Name()); err != nil {
+	if err := jsonout.RenderWatchlist(&watchlistBuf, jsonout.WatchlistDocument{
+		Snapshot:     snap,
+		Selector:     selector,
+		ProviderName: p.Name(),
+	}); err != nil {
 		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
@@ -284,7 +304,7 @@ func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 		raw     []byte
 		version float64
 	}{
-		"watchlist": {raw: watchlistBuf.Bytes(), version: 2},
+		"watchlist": {raw: watchlistBuf.Bytes(), version: 3},
 		"detail":    {raw: renderDetail(t, p, richTicket), version: 1},
 	}
 	for name, document := range documents {
@@ -337,7 +357,11 @@ func TestRenderWatchlistPullRequestTotalIsOptionalAndCapabilityGated(t *testing.
 		snap.FetchedAt = generatedAt
 
 		var buf bytes.Buffer
-		if err := jsonout.RenderWatchlist(&buf, snap, provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}, p.Name()); err != nil {
+		if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+			Snapshot:     snap,
+			Selector:     provider.EpicSelector{Ref: ref.Ref{Raw: "111"}},
+			ProviderName: p.Name(),
+		}); err != nil {
 			t.Fatalf("RenderWatchlist: %v", err)
 		}
 		return buf.Bytes()

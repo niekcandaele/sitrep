@@ -34,7 +34,7 @@ func TestHelpMatchesGolden(t *testing.T) {
 		"sitrep [flags] <ref> <ref>...\n",
 		"sitrep [flags] -\n",
 		"sitrep [flags] --query <query>\n",
-		"--plain", "--json", "--profile", "--provider", "--interval", "--no-mouse",
+		"--plain", "--json", "--links", "--profile", "--provider", "--interval", "--no-mouse",
 		"A sole \"-\" reads whitespace-separated Refs", "one stdin Ref keeps exact Ref-list semantics",
 	} {
 		if !strings.Contains(help, marker) {

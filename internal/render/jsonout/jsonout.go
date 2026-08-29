@@ -10,7 +10,7 @@
 //
 // Conventions, all pinned by golden tests:
 //
-//   - Keys are snake_case; schema_version comes first. Watchlists use schema v2;
+//   - Keys are snake_case; schema_version comes first. Watchlists use schema v3;
 //     Detail and decoded-Ticket documents remain schema v1.
 //   - Times are RFC 3339 in UTC.
 //   - tickets is always present and always an array, never null.
@@ -19,6 +19,12 @@
 //     absence is the normal, silent way to say "this Tracker does not do that",
 //     and it is also how an absent pull_request_total says "this Provider
 //     cannot tell you how many there are".
+//   - The blocking fields — the top-level blocking object and each Ticket's
+//     actionable, links_known, in_cycle and unmet_blockers — appear only when
+//     the caller computed a BlockingGraph, which takes both the --links flag and
+//     the BlockingLinks Capability. Uncomputed, they are absent: never null and
+//     never false. With --links a false is a computed answer, and absence must
+//     not be mistaken for one.
 //
 // Tickets are emitted flat, in Provider order, with a status field on each and
 // a computed progress block alongside. Grouping is presentation: it belongs to
@@ -38,9 +44,16 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// Watchlist documents use schema v2; Detail and decoded-Ticket documents use schema v1.
+// Watchlist documents use schema v3; Detail and decoded-Ticket documents use schema v1.
+//
+// v3 is a deliberate exception to the rule that additive optional fields need no
+// bump — the rule that let pull_request_total land inside v2. The Watchlist
+// field set is now invocation-dependent: --links adds keys a plain --json run
+// omits, so the version is what tells a consumer which fields this binary is
+// capable of emitting at all. Left at 2, a consumer could not tell an old binary
+// that rejects --links from a new one that was simply not asked for blockers.
 const (
-	watchlistSchemaVersion = 2
+	watchlistSchemaVersion = 3
 	detailSchemaVersion    = 1
 )
 
@@ -113,6 +126,37 @@ type ticketDoc struct {
 	// PullRequestTotal is how many pull requests the Tracker says the Ticket
 	// has, present only when the serving Provider can supply a total.
 	PullRequestTotal int `json:"pull_request_total,omitempty"`
+	// Actionable, LinksKnown and InCycle are pointers so that a computed false
+	// still encodes as false while an uncomputed field is omitted entirely. A
+	// plain bool with omitempty would collapse those two into one absent key.
+	Actionable    *bool        `json:"actionable,omitempty"`
+	LinksKnown    *bool        `json:"links_known,omitempty"`
+	InCycle       *bool        `json:"in_cycle,omitempty"`
+	UnmetBlockers []blockerDoc `json:"unmet_blockers,omitempty"`
+}
+
+// blockerDoc is one Ticket standing between another Ticket and being picked up.
+// Satisfied blockers are not emitted: an agent's question is what is holding
+// this Ticket.
+type blockerDoc struct {
+	linkTargetDoc
+	// Member is false for a Ghost Ticket and for an anonymous Link target.
+	Member bool `json:"member"`
+	// StatusKnown is false when the blocker's Status could not be read. It is
+	// emitted even though it is currently derivable from status != "unknown":
+	// the wire contract should not make consumers re-derive sitrep's own
+	// fail-closed rule.
+	StatusKnown bool `json:"status_known"`
+}
+
+// blockingDoc is the Watchlist-level blocking result. Ghost Tickets get no
+// listing of their own: a Ghost is fully described inline in the unmet_blockers
+// entry that names it, and a second listing would only invite the two to
+// disagree.
+type blockingDoc struct {
+	// Cycles is always an array, [] when there are none, like tickets. A cycle
+	// is reported rather than silently rendered as permanently-blocked rows.
+	Cycles [][]model.TicketID `json:"cycles"`
 }
 
 type selectorDoc struct {
@@ -134,6 +178,7 @@ type watchlistDocument struct {
 	Provider      providerDoc  `json:"provider"`
 	Watchlist     watchlistDoc `json:"watchlist"`
 	Progress      progressDoc  `json:"progress"`
+	Blocking      *blockingDoc `json:"blocking,omitempty"`
 	Tickets       []ticketDoc  `json:"tickets"`
 }
 
@@ -202,26 +247,96 @@ type TicketDocument struct {
 	GeneratedAt time.Time
 }
 
-// RenderWatchlist writes the schema-v2 Watchlist document for one snapshot.
-// selector records how membership was chosen; providerName identifies the
-// serving Provider.
-func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot, selector provider.Selector, providerName string) error {
-	watchlist, err := newWatchlistDoc(snap, selector)
+// WatchlistDocument is everything the Watchlist renderer needs. It is a struct
+// rather than a growing argument list for the same reason TicketDocument is: the
+// optional half belongs in a named field, and a second entry point taking the
+// optional half would let the two drift.
+type WatchlistDocument struct {
+	// Snapshot is the resolved Watchlist.
+	Snapshot model.WatchlistSnapshot
+	// Selector records how membership was chosen.
+	Selector provider.Selector
+	// ProviderName identifies the serving Provider.
+	ProviderName string
+	// Blocking is the Watchlist's blocking graph, present only when the caller
+	// was asked for it with --links and the Provider declares BlockingLinks.
+	// nil means "not computed", which is why every blocking key is then absent
+	// rather than null: absence is honest, null invites a wrong reading.
+	Blocking *model.BlockingGraph
+}
+
+// RenderWatchlist writes the schema-v3 Watchlist document for one snapshot.
+//
+// This package renders; it never computes. It takes a finished BlockingGraph or
+// nothing, and neither builds one nor fetches the Details one would need.
+func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
+	snap := doc.Snapshot
+	watchlist, err := newWatchlistDoc(snap, doc.Selector)
 	if err != nil {
 		return err
 	}
-	doc := watchlistDocument{
+	out := watchlistDocument{
 		SchemaVersion: watchlistSchemaVersion,
 		GeneratedAt:   wireTime(snap.FetchedAt),
-		Provider:      newWatchlistProviderDoc(providerName, snap.Capabilities),
+		Provider:      newWatchlistProviderDoc(doc.ProviderName, snap.Capabilities),
 		Watchlist:     watchlist,
 		Progress:      newProgressDoc(model.ComputeProgress(snap.Tickets)),
 		Tickets:       make([]ticketDoc, 0, len(snap.Tickets)),
 	}
-	for _, t := range snap.Tickets {
-		doc.Tickets = append(doc.Tickets, newTicketDoc(t, snap.Capabilities))
+
+	// Members are walked positionally against snap.Tickets rather than looked up
+	// by ID: a Ref-list Watchlist may legitimately contain the same Ticket
+	// twice, and BlockingGraph.For would collapse those rows onto one another.
+	var members []model.Actionability
+	if doc.Blocking != nil {
+		members = doc.Blocking.Members()
+		if len(members) != len(snap.Tickets) {
+			return fmt.Errorf("json: blocking graph has %d members for %d Tickets",
+				len(members), len(snap.Tickets))
+		}
+		out.Blocking = &blockingDoc{Cycles: cyclesDoc(doc.Blocking.Cycles())}
 	}
-	return encode(w, doc)
+
+	for i, t := range snap.Tickets {
+		ticket := newTicketDoc(t, snap.Capabilities)
+		if members != nil {
+			addBlocking(&ticket, members[i])
+		}
+		out.Tickets = append(out.Tickets, ticket)
+	}
+	return encode(w, out)
+}
+
+// addBlocking writes one member's computed blocking state onto its wire Ticket.
+// The three booleans are always written, false included: with --links, false is
+// an answer and absence would mean the run never looked.
+//
+// unmet_blockers is exactly Actionability.Unmet(), nothing added and nothing
+// held back. A member whose own Links were unreadable usually has no blockers to
+// list, but it can still carry one discovered through another member's Blocks
+// Link — that blocker was genuinely read, so suppressing it would hide real
+// information. links_known: false is what tells the consumer the list may be
+// incomplete; it never means the list was invented.
+func addBlocking(doc *ticketDoc, a model.Actionability) {
+	doc.Actionable = &a.Actionable
+	doc.LinksKnown = &a.LinksKnown
+	doc.InCycle = &a.InCycle
+	for _, b := range a.Unmet() {
+		doc.UnmetBlockers = append(doc.UnmetBlockers, blockerDoc{
+			linkTargetDoc: newLinkTargetDoc(b.Target),
+			Member:        b.Member,
+			StatusKnown:   b.StatusKnown,
+		})
+	}
+}
+
+// cyclesDoc normalizes the graph's cycles for the wire, where the key is always
+// an array rather than null.
+func cyclesDoc(cycles [][]model.TicketID) [][]model.TicketID {
+	if cycles == nil {
+		return [][]model.TicketID{}
+	}
+	return cycles
 }
 
 func newWatchlistDoc(snap model.WatchlistSnapshot, selector provider.Selector) (watchlistDoc, error) {
@@ -318,18 +433,26 @@ func newDetailDocument(d model.Detail, caps model.Capabilities, providerName str
 		doc.Links = append(doc.Links, linkDoc{
 			Kind:        l.Kind,
 			NativeLabel: l.NativeLabel,
-			Target: linkTargetDoc{
-				ID:           l.Target.ID,
-				Key:          l.Target.Key,
-				Title:        l.Target.Title,
-				URL:          l.Target.URL,
-				Status:       l.Target.Status,
-				NativeStatus: l.Target.NativeStatus,
-			},
+			Target:      newLinkTargetDoc(l.Target),
 		})
 	}
 
 	return doc
+}
+
+// newLinkTargetDoc is the one wire shape for a Ticket named by a Link, whether
+// it is the target of a links entry or an unmet blocker. An anonymous target
+// keeps its empty identity: dropping it would make a blocked Ticket look
+// actionable.
+func newLinkTargetDoc(t model.LinkTarget) linkTargetDoc {
+	return linkTargetDoc{
+		ID:           t.ID,
+		Key:          t.Key,
+		Title:        t.Title,
+		URL:          t.URL,
+		Status:       t.Status,
+		NativeStatus: t.NativeStatus,
+	}
 }
 
 // wireTime normalizes a timestamp for the wire: UTC, second precision. Sitrep
