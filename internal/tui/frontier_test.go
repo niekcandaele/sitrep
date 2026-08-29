@@ -504,7 +504,9 @@ func TestFrontierRefreshOnlyRetriesWhatFailed(t *testing.T) {
 	before := p.DetailCalls()
 
 	s.tm.Send(keyPress("r"))
-	s.waitFor(t, "actionable")
+	waitUntil(t, "the retry of #211", func() bool {
+		return p.DetailCallsFor("acme/widgets#211") == 2
+	})
 	m, _ := s.finish(t)
 
 	// #211 has no fixture Detail, so it is the only read left to retry.
