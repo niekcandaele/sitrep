@@ -1,0 +1,40 @@
+#111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
+#115  Reconcile widget IDs across shards                                   https://tracker.example.test/acme/widgets/115
+
+
+DESCRIPTION
+
+  Shard IDs drifted apart during the first migration.
+
+
+COMMENTS
+
+No comments yet.
+
+LINKS (2)
+
+  blocks         #120  Write the sync v2 runbook      [open]
+  is blocked by  #112  Draft the shard sync protocol  [In Review]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down

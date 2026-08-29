@@ -200,6 +200,21 @@ func TestInitialFrame(t *testing.T) {
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: the monitor never fetches Detail", n)
 	}
+	// The load-bearing pairs of the Native Status rule, spelled out so the
+	// intent is legible without diffing the golden: a Native Status that adds
+	// something to its group heading is kept, one that only restates it is
+	// dropped, and dropping it never costs a row anything else it was saying.
+	frame := string(got)
+	for _, want := range []string{"[In Review]", "[Selected for Development]", "@tobias", "#504 merged"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("the frame lost %q:\n%s", want, frame)
+		}
+	}
+	for _, unwanted := range []string{"[open]", "[closed]", "[Done]", "[In Progress]", "[not planned]"} {
+		if strings.Contains(frame, unwanted) {
+			t.Errorf("the frame repeats its group heading with %q:\n%s", unwanted, frame)
+		}
+	}
 }
 
 func TestRefListInitialFrame(t *testing.T) {

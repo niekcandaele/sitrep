@@ -7,7 +7,7 @@ IN PROGRESS (1)
 
 TODO (1)
   #115     Reconcile widget IDs across shards
-           [open]
+
 
 
 

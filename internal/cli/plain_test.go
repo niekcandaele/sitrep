@@ -39,6 +39,20 @@ func TestPlainEpicReport(t *testing.T) {
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: rendering a list must not fetch detail", n)
 	}
+	// The Native Status rule, spelled out so the intent is legible without
+	// diffing the golden: a word that adds something to its Status Category
+	// heading is kept, one that only restates it is dropped, and nothing else
+	// on the meta line goes with it.
+	for _, want := range []string{"[In Review]", "[Selected for Development]", "@tobias", "#504 merged"} {
+		if !strings.Contains(got.stdout, want) {
+			t.Errorf("stdout lost %q:\n%s", want, got.stdout)
+		}
+	}
+	for _, unwanted := range []string{"[open]", "[closed]", "[Done]", "[In Progress]", "[not planned]"} {
+		if strings.Contains(got.stdout, unwanted) {
+			t.Errorf("stdout repeats its group heading with %q:\n%s", unwanted, got.stdout)
+		}
+	}
 }
 
 func TestPlainRefListReport(t *testing.T) {

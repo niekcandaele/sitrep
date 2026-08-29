@@ -147,6 +147,10 @@ func writeLinks(b *strings.Builder, in TicketSnapshot) {
 	fmt.Fprintf(b, "LINKS (%d)\n\n", len(links))
 	for i, l := range links {
 		line := PadKey(linkLabel(l), labelColumn) + PadKey(l.Target.Key, keyColumn)
+		// The LINKS table is deliberately exempt from ShowsNativeStatus: no
+		// Status Category heading groups these rows, so a link target's
+		// Native Status is the only status signal the reader gets. Do not
+		// "fix" the inconsistency with the meta lines; it is the rule working.
 		if l.Target.NativeStatus == "" {
 			fmt.Fprintf(b, "%s%s\n", line, titles[i])
 			continue

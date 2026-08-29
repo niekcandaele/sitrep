@@ -1375,7 +1375,10 @@ func TestDoubleClickWhileSearchingCommitsTheLiveFilter(t *testing.T) {
 
 func TestListMouseHitMapAndNoOps(t *testing.T) {
 	first := ticket("#1", model.StatusInProgress)
-	first.NativeStatus = "In Progress"
+	// "In Review" rather than "In Progress": a Native Status that only
+	// restates its Status Category is suppressed, and this test needs a row
+	// two lines tall to have a second line to click.
+	first.NativeStatus = "In Review"
 	second := ticket("#2", model.StatusTodo)
 	m := mouseListModel(t, Options{}, []model.Ticket{first, second}, 40, 18)
 

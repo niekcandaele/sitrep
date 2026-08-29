@@ -23,25 +23,23 @@ IN PROGRESS (8)
 
 TODO (3)
   #7               --plain snapshot renderer
-                   [open]
   #97              The agent's pull request was rejected
-                   [open]  #106 closed
+                   #106 closed
   #101             A pull request from the future
-                   [open]  #113 state unknown
+                   #113 state unknown
 
 DONE (4)
   #3               Rails: bootstrap, CI gates, release pipeline
-                   [closed]  #17 merged
+                   #17 merged
   #4               Walking skeleton: domain model, Provider interface, fake Provider, --json
-                   [closed]  #18 merged
+                   #18 merged
   #93              Closed for a reason sitrep has never heard of
                    [reason from the future]
   #94              Closed with no reason at all
-                   [closed]
 
 CANCELLED (2)
   acme/widgets#91  Widget adapter for the sitrep epic
-                   [not planned]  @dana  #7 closed
+                   @dana  #7 closed
   #92              Duplicate of the ref grammar ticket
                    [duplicate]
 

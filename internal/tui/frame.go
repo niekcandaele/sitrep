@@ -181,18 +181,21 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 // same question as ticketMeta returning "", without building the string, so
 // the window arithmetic does not depend on a style set.
 func hasMeta(t model.Ticket, caps model.Capabilities) bool {
-	return t.NativeStatus != "" || len(t.Assignees) > 0 ||
+	return plain.ShowsNativeStatus(t) || len(t.Assignees) > 0 ||
 		(caps.PullRequests && len(t.PullRequests) > 0)
 }
 
 // ticketMeta builds a Ticket's second line: its Native Status, its assignees
 // and its lead pull request, in the same order and with the same words the
-// --plain report uses. Native Status is printed as the Tracker wrote it and
-// never branched on.
+// --plain report uses. The Native Status word is printed exactly as the
+// Tracker wrote it and never branched on for meaning; plain.ShowsNativeStatus
+// decides only whether it is printed at all, by reading the Status Category
+// the row already sits under. hasMeta calls the same predicate, so the row
+// height and what is drawn cannot disagree.
 func ticketMeta(t model.Ticket, caps model.Capabilities, s Styles) string {
 	var parts []string
 
-	if t.NativeStatus != "" {
+	if plain.ShowsNativeStatus(t) {
 		parts = append(parts, s.NativeStatus.Render("["+t.NativeStatus+"]"))
 	}
 	if handles := assignees(t.Assignees); handles != "" {

@@ -447,6 +447,11 @@ func linkLabel(l model.Link) string {
 
 // nativeStatusTag renders a link target's Native Status the way a list row does,
 // or nothing when the Tracker supplied none.
+//
+// The LINKS table is deliberately exempt from plain.ShowsNativeStatus: no
+// Status Category heading groups these rows, so a link target's Native Status
+// is the only status signal the reader gets. Do not "fix" the inconsistency
+// with the list and Detail header meta lines; it is the rule working.
 func nativeStatusTag(native string) string {
 	if native == "" {
 		return ""
