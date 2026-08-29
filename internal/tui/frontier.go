@@ -65,10 +65,11 @@ type frontierState struct {
 	focusID          model.TicketID
 	hasFocus         bool
 	offsetX, offsetY int
-	// queued are the Ticket IDs not yet issued; inflight is how many fetch
-	// commands are out.
-	queued   []model.TicketID
-	inflight int
+	// queued are the Ticket IDs not yet issued. The in-flight count lives on
+	// Model, not here: re-seating frontierState on every entry would reset it
+	// to zero while the previous entry's fetches are still running, and N
+	// toggles would then run N concurrent Parallelism-sized batches.
+	queued []model.TicketID
 	// resolved is true once every planned fetch has answered. Actionable and
 	// blocked emphasis is drawn only then: fail-closed plus a progressive fetch
 	// means a half-loaded Frontier gives wrong answers to anyone glancing at it.
@@ -148,13 +149,50 @@ func (m Model) issueFrontierFetches() (tea.Model, tea.Cmd) {
 	if m.mode == modeFrontier {
 		cmds = append(cmds, repaint)
 	}
-	for len(m.frontier.queued) > 0 && m.frontier.inflight < detailfanout.Parallelism {
+	adopted := false
+	for len(m.frontier.queued) > 0 && m.detailFanoutInflight < detailfanout.Parallelism {
 		id := m.frontier.queued[0]
 		m.frontier.queued = m.frontier.queued[1:]
-		m.frontier.inflight++
+		// The plan was made before these answers landed. A Ticket read since —
+		// by a fan-out this seat replaced, or by hand — is already paid for,
+		// and paying twice is exactly what this screen's cost discipline is
+		// about.
+		if entry, cached := m.details[id]; cached {
+			m = m.seatFanoutLinks(id, entry.detail.Links)
+			m.frontier.done++
+			adopted = true
+			continue
+		}
+		m.detailFanoutInflight++
 		cmds = append(cmds, m.frontierFetchCmd(m.frontierGeneration, id))
 	}
+	if adopted {
+		m = m.settleFrontier().rebuildFrontier()
+	}
 	return m, tea.Batch(cmds...)
+}
+
+// seatFanoutLinks writes one Ticket's Links into the seated input. Key presence
+// is the tri-state that makes fail-closed Actionable real, so this is the only
+// way a Ticket becomes verified.
+func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
+	if m.frontier.input.Links == nil {
+		m.frontier.input.Links = make(map[model.TicketID][]model.Link)
+	}
+	m.frontier.input.Links[id] = links
+	return m
+}
+
+// settleFrontier marks the fan-out resolved once this seat's own plan has been
+// answered in full, from the Tracker or from the session cache. It counts this
+// seat's bookkeeping rather than the shared in-flight counter: a fetch left
+// running by a seat the user walked away from holds a slot but says nothing
+// about this one.
+func (m Model) settleFrontier() Model {
+	if m.frontier.done == m.frontier.planned && len(m.frontier.queued) == 0 {
+		m.frontier.resolved = true
+	}
+	return m
 }
 
 // frontierFetchCmd reads one Ticket's Detail on Bubble Tea's goroutine pool,
@@ -172,30 +210,59 @@ func (m Model) frontierFetchCmd(generation int, id model.TicketID) tea.Cmd {
 // tri-state that makes fail-closed Actionable real, so a Ticket whose Links
 // could not be read stays unknown rather than looking unblocked.
 func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
-	if msg.generation != m.frontierGeneration {
-		return m, nil
+	// The read was paid for whether or not this screen still wants it, so the
+	// counter and the session cache are settled before the generation guard.
+	// A re-entered Frontier then plans around what the abandoned one fetched
+	// instead of asking the Tracker again.
+	m.detailFanoutInflight--
+	if msg.err == nil {
+		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
 	}
-	m.frontier.inflight--
+	if msg.generation != m.frontierGeneration {
+		// The answer belongs to an abandoned seat, but the slot it held is free
+		// now, so whatever the current seat has queued can start.
+		return m.issueFrontierFetches()
+	}
 	m.frontier.done++
 
 	if msg.err != nil {
 		m.frontier.failed++
 		m.frontier.lastErr = msg.err
 	} else {
-		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
-		if m.frontier.input.Links == nil {
-			m.frontier.input.Links = make(map[model.TicketID][]model.Link)
-		}
-		m.frontier.input.Links[msg.id] = msg.detail.Links
+		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
 	}
-	if m.frontier.inflight == 0 && len(m.frontier.queued) == 0 {
-		m.frontier.resolved = true
-	}
+	m = m.settleFrontier()
 	// The badges, and therefore the geometry a queued mouse callback captured,
 	// may have changed.
 	m.mouseEpoch++
 	m = m.rebuildFrontier()
 	return m.issueFrontierFetches()
+}
+
+// adoptCachedLinks folds Details read since the fan-out into the seated input.
+// One Ticket, one answer: a member whose fan-out read failed and was then
+// opened by hand has Links in the session cache, and leaving the Frontier's own
+// map without the key would keep the card UNVERIFIED and the footer claiming a
+// read that has since succeeded could not be made — while the list, which reads
+// the cache directly, draws the Ticket as Actionable.
+func (m Model) adoptCachedLinks() Model {
+	for _, t := range m.frontier.input.Tickets {
+		if _, seated := m.frontier.input.Links[t.ID]; seated {
+			continue
+		}
+		entry, cached := m.details[t.ID]
+		if !cached {
+			continue
+		}
+		m = m.seatFanoutLinks(t.ID, entry.detail.Links)
+		if m.frontier.failed > 0 {
+			m.frontier.failed--
+		}
+	}
+	if m.frontier.failed == 0 {
+		m.frontier.lastErr = nil
+	}
+	return m
 }
 
 // rebuildFrontier recomputes everything derived from the seated input: the
@@ -311,7 +378,7 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	outstanding := detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
-	if len(outstanding) == 0 || m.frontier.inflight > 0 || len(m.frontier.queued) > 0 {
+	if len(outstanding) == 0 || m.detailFanoutInflight > 0 || len(m.frontier.queued) > 0 {
 		return m, nil
 	}
 	m.frontier.queued = outstanding

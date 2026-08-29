@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
@@ -184,8 +186,9 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 }
 
 // esc mid-fetch returns to a readable list, and a late answer from the
-// abandoned generation changes nothing: that is what makes the fan-out
-// interruptible.
+// abandoned generation moves nothing on screen: that is what makes the fan-out
+// interruptible. The read itself still warms the session cache — see
+// TestAnAbandonedFanOutAnswerStillWarmsTheCache.
 func TestFrontierFetchIsInterruptible(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
@@ -622,6 +625,175 @@ func frontierMouseModel(t *testing.T, tickets []model.Ticket,
 		t.Fatal("the fan-out never resolved")
 	}
 	return m
+}
+
+// One cache, one answer. A fan-out read that failed leaves no Links key, so the
+// card is UNVERIFIED and the footer counts it; opening that Ticket by hand fills
+// the session cache, and coming back must adopt it. Otherwise the Frontier keeps
+// claiming a read failed that has since succeeded, while the list — which reads
+// the same cache directly — draws the Ticket as Actionable, and r is a silent
+// no-op because there is genuinely nothing left to plan.
+func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second", Status: model.StatusTodo},
+	}
+	in := ListInput{
+		Header:       Header{Key: "#0", Title: "adopt"},
+		Tickets:      tickets,
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return model.Detail{TicketID: id}, in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+
+	// The fan-out answers: #2 lands, #1 fails. The Frontier opens focused on
+	// the list's selection, which is #1.
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-2",
+		detail: model.Detail{TicketID: "T-2"}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-1", err: errors.New("context deadline exceeded"),
+	})
+	m = updated.(Model)
+
+	if !strings.Contains(m.View().Content, "UNVERIFIED") {
+		t.Fatalf("the failed read left no UNVERIFIED card:\n%s", m.View().Content)
+	}
+	if m.frontier.focusID != "T-1" {
+		t.Fatalf("focus = %q, want the Ticket whose read failed", m.frontier.focusID)
+	}
+
+	// Open it by hand, let the read land, and come back.
+	updated, cmd := m.Update(keyPress("enter"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("opening the unread Ticket issued no fetch")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	updated, _ = m.Update(escKey)
+	m = updated.(Model)
+
+	if m.mode != modeFrontier {
+		t.Fatalf("esc landed in %v, want the Frontier", m.mode)
+	}
+	frame := m.View().Content
+	if strings.Contains(frame, "UNVERIFIED") {
+		t.Errorf("the card is still unverified after its Detail was read by hand:\n%s", frame)
+	}
+	if strings.Contains(frame, "could not be read") {
+		t.Errorf("the footer still reports a failed read:\n%s", frame)
+	}
+	if strings.Contains(frame, "context deadline exceeded") {
+		t.Errorf("the footer still shows the stale error:\n%s", frame)
+	}
+	if _, seated := m.frontier.input.Links["T-1"]; !seated {
+		t.Error("the Frontier's Links map still lacks the key the session cache holds")
+	}
+}
+
+// Leaving the Frontier drops the answer but not the fetch behind it, so the
+// in-flight count lives on the Model: re-seating frontierState must not reset
+// it to zero and let a second toggle start a second full-width batch.
+func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	release := make(chan struct{})
+	source := blockedDetailSource(release, TicketDetailSource(p))
+	var peak, live int
+	var mu sync.Mutex
+	counting := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+		mu.Lock()
+		live++
+		peak = max(peak, live)
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			live--
+			mu.Unlock()
+		}()
+		return source(ctx, id)
+	}
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: counting,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+
+	for range 3 {
+		s.tm.Send(keyPress("v"))
+		s.waitFor(t, "reading Detail")
+		s.tm.Send(keyPress("v"))
+		s.waitFor(t, "TODO")
+	}
+	close(release)
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "actionable")
+
+	s.finish(t)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > detailfanout.Parallelism {
+		t.Errorf("peak concurrent reads = %d, want at most %d: a toggle started a second batch",
+			peak, detailfanout.Parallelism)
+	}
+}
+
+// The other half of the same defect: an answer the screen no longer wants was
+// discarded entirely, so a re-entered Frontier paid the Tracker again for a read
+// that had already been made. The abandoned seat's bookkeeping still stays out.
+func TestAnAbandonedFanOutAnswerStillWarmsTheCache(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := ListInput{
+		Header:       Header{Key: "#0", Title: "abandoned"},
+		Tickets:      []model.Ticket{{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return model.Detail{TicketID: id}, in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	abandoned := m.frontierGeneration
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: abandoned, id: "T-1",
+		detail: model.Detail{TicketID: "T-1"}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+
+	if !m.haveDetail("T-1") {
+		t.Error("the answer was discarded, so re-entering the Frontier would pay for it again")
+	}
+	if m.frontier.done != 0 {
+		t.Errorf("frontier.done = %d, want 0: an abandoned seat's answer is not this seat's progress",
+			m.frontier.done)
+	}
 }
 
 func frontierMouse(t *testing.T, m Model, msg tea.MouseMsg) tea.Msg {
