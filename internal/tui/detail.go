@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -20,12 +22,9 @@ const (
 	modeList mode = iota
 	// modeDetail is one Ticket's Detail.
 	//
-	// The Detail screen is entered from the list today, and it is deliberately
-	// not written that way: it renders a DetailInput seated on the Model, so a
-	// future caller — a bare Ticket Ref decoded straight into Detail — can seat
-	// one before the first frame instead of teaching this screen a second way to
-	// find its data. That is why the breadcrumb is a Header field on DetailInput
-	// rather than a read of the list's own Header.
+	// List drill-in and direct Ticket-Ref decoding both seat a DetailInput before
+	// rendering. That is why the breadcrumb is carried on DetailInput rather than
+	// read from list state.
 	modeDetail
 )
 
@@ -52,13 +51,12 @@ type DetailHeader struct {
 	Repository string
 }
 
-// DetailInput is everything the Detail screen renders.
+// DetailInput contains the current Detail seat's Provider-backed rendering data.
 type DetailInput struct {
 	// Ticket identifies what is being read.
 	Ticket DetailHeader
-	// Parent is the collection this Ticket was reached through, drawn as a
-	// breadcrumb above the Ticket's own identity. The zero Header draws no
-	// breadcrumb.
+	// Parent is the root Watchlist crumb shown before any Trail entries. A zero
+	// Header omits that root crumb; prior Trail Tickets may still be shown.
 	Parent Header
 	// Detail is the expensive per-ticket data, exactly as the Provider returned
 	// it.
@@ -70,9 +68,9 @@ type DetailInput struct {
 	FetchedAt time.Time
 }
 
-// DetailFromTicket adapts one Ticket and the Detail just fetched for it to the
-// Detail-view contract. It is the only adapter this ticket needs; a later caller
-// that never had a Ticket in a list builds a DetailInput of its own.
+// DetailFromTicket adapts a Ticket and its Detail to the Detail-view contract.
+// Rich list Tickets and deliberately thin Link targets both enter through this
+// boundary, so the Detail screen never enriches a seat from list state.
 func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	parent Header, fetchedAt time.Time) DetailInput {
 	return DetailInput{
@@ -93,13 +91,13 @@ func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	}
 }
 
-// OpenTicket is the decoder's entry: the Ticket to open, and the collection it
+// OpenTicket is the decoder's entry: the Ticket to open, and the Watchlist it
 // was reached through. A zero Parent means no breadcrumb and no walk-up — a
 // Ticket with no parent opens in Detail like any other.
 type OpenTicket struct {
 	// Ticket is the Ticket being decoded, in list-model form.
 	Ticket model.Ticket
-	// Parent is the collection drawn as the breadcrumb above it.
+	// Parent is the Watchlist drawn as the breadcrumb above it.
 	Parent Header
 	// Capabilities decide which Detail sections may be drawn.
 	Capabilities model.Capabilities
@@ -107,8 +105,8 @@ type OpenTicket struct {
 
 // DetailSource fetches one Ticket's Detail. It is the seam between the Detail
 // screen and the Provider, held as a plain function so the screen knows nothing
-// about auth, GraphQL or Epic Refs. One call is exactly one FetchDetail and
-// never a FetchEpic (ADR-0003).
+// about auth, GraphQL or Refs. One call is exactly one FetchDetail and
+// never a Resolve (ADR-0003).
 type DetailSource func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error)
 
 // TicketDetailSource returns a DetailSource reading from p.
@@ -151,6 +149,28 @@ type detailState struct {
 	lastErr error
 	// offset is the first body line on screen.
 	offset int
+	// linkFocus is the stable identity of the focused relationship. The separate
+	// bit distinguishes an absent focus from a valid zero-value identity.
+	linkFocus        detailLinkIdentity
+	hasLinkFocus     bool
+	markdownSections detailMarkdownSections
+}
+
+// detailTrailEntry is a stable snapshot of one prior Detail seat. In-flight
+// state and generations are intentionally absent: navigation invalidates that
+// work, and popping must never restore a reading state whose command was lost.
+// Width and body height distinguish an exact round trip from a seat reflowed
+// while a child was open.
+type detailTrailEntry struct {
+	ticket       model.Ticket
+	input        DetailInput
+	loaded       bool
+	lastErr      error
+	offset       int
+	linkFocus    detailLinkIdentity
+	hasLinkFocus bool
+	width        int
+	bodyHeight   int
 }
 
 // detailFetchedMsg carries the outcome of one DetailSource call. It is guarded
@@ -183,7 +203,7 @@ func detailStaleness(fetchedAt, now time.Time, loading bool) string {
 }
 
 // selectedTicket returns the Ticket the cursor is on. A list with no selectable
-// row — an empty collection, or a filter matching nothing — has none, and that
+// row — an empty Watchlist, or a filter matching nothing — has none, and that
 // is an ordinary state rather than an error.
 func (m Model) selectedTicket() (model.Ticket, bool) {
 	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].Selectable() {
@@ -192,57 +212,234 @@ func (m Model) selectedTicket() (model.Ticket, bool) {
 	return m.rows[m.selected].Ticket, true
 }
 
-// openDetail switches to the Detail screen for the selected Ticket, fetching its
-// Detail at that moment and never before (ADR-0003).
-//
-// Nothing above m.mode is touched here: the selection, the scroll offset and the
-// session's Filter are simply left alone, which is why esc puts the screen back
-// exactly as it was without any code putting it there.
+// openDetail switches to the Detail screen for the selected list Ticket. A
+// successful session-cache entry seats immediately; only a miss fetches Detail
+// (ADR-0003). The transition leaves hidden list state untouched; root esc
+// reconciles it before drawing the list again.
 func (m Model) openDetail() (tea.Model, tea.Cmd) {
 	t, ok := m.selectedTicket()
 	if !ok {
 		return m, nil
 	}
 
-	m.mode = modeDetail
-	m.detail = detailState{ticket: t}
-
-	// A Ticket read once this session opens instantly and costs the Tracker
-	// nothing. Its own "read Ns ago" stamp keeps the reading honest rather than
-	// letting a cached Detail look as fresh as the list beside it.
-	if cached, hit := m.details[t.ID]; hit {
-		m.detail.input = DetailFromTicket(t, cached.detail, cached.caps, m.input.Header, cached.fetchedAt)
-		m.detail.loaded = true
-		return m.syncDetailKeys(), nil
-	}
-
-	// The header is drawn from the Ticket the list already had, so the loading
-	// screen can say which Ticket it is loading.
-	m.detail.input = DetailFromTicket(t, model.Detail{}, m.input.Capabilities, m.input.Header, time.Time{})
-	next, cmd := m.syncDetailKeys().startDetailFetch()
-	return next, cmd
+	m = m.clearPendingClick()
+	m.trail = nil
+	return m.seatDetail(t, m.input.Header, m.input.Capabilities)
 }
 
-// syncDetailKeys keeps the Detail keyboard in step with what is actually behind
-// this screen. It is one place with one rule, so the help line and the matcher
-// can never disagree: u is offered when there is a collection to walk up into
-// and the caller named it, and esc says "back" only when there is a list to go
-// back to.
+// seatDetail is the shared transition for a rich list Ticket and a thin Link
+// target. Every seat advances the generation, including cache hits and cycles.
+func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities) (tea.Model, tea.Cmd) {
+	m.detailGeneration++
+	m.mouseEpoch++
+	m.mode = modeDetail
+	m.detail = detailState{
+		ticket: t,
+		input:  DetailFromTicket(t, model.Detail{}, caps, parent, time.Time{}),
+	}
+
+	if t.ID == "" {
+		m.detail.lastErr = errEmptyLinkTargetID
+		return m.reconcileDetail(false), nil
+	}
+	if cached, hit := m.details[t.ID]; hit {
+		m.detail.input = DetailFromTicket(t, cached.detail, cached.caps, parent, cached.fetchedAt)
+		m.detail.loaded = true
+		return m.reconcileDetail(true), nil
+	}
+
+	m.detail.loading = true
+	m = m.reconcileDetail(false)
+	return m, m.detailFetchCmd(m.detailGeneration, t.ID)
+}
+
+// ticketFromLinkTarget is deliberately thin. A Link target never borrows rich
+// fields from a visible or hidden list row, even when the same ID is present.
+func ticketFromLinkTarget(target model.LinkTarget) model.Ticket {
+	return model.Ticket{
+		ID:           target.ID,
+		Key:          target.Key,
+		Title:        sanitizeTerminalText(target.Title),
+		URL:          target.URL,
+		Status:       target.Status,
+		NativeStatus: sanitizeTerminalText(target.NativeStatus),
+	}
+}
+
+var errEmptyLinkTargetID = errors.New("this Link target has no Ticket identity")
+
+// syncDetailKeys keeps Detail matching and help in step with the rendered
+// document. Relationship focus is re-resolved by its composite identity, never
+// by a stale row or target ID.
 func (m Model) syncDetailKeys() Model {
+	return m.syncDetailKeysFor(m.detailDocument())
+}
+
+func (m Model) detailBackDescription() string {
+	if len(m.trail) > 0 || m.listArmed {
+		return "back"
+	}
+	return "quit"
+}
+
+func (m Model) syncDetailKeysFor(doc detailDocument) Model {
 	m.detailKeys.Parent.SetEnabled(m.hasSource && m.detail.input.Parent != (Header{}))
-	if m.listArmed {
-		m.detailKeys.Back.SetHelp("esc", "back")
-	} else {
-		m.detailKeys.Back.SetHelp("esc", "quit")
+	m.detailKeys.Back.SetHelp("esc", m.detailBackDescription())
+
+	hasLinks := len(doc.LinkRows) > 0
+	m.detailKeys.NextLink.SetEnabled(hasLinks)
+	m.detailKeys.PreviousLink.SetEnabled(hasLinks)
+	m.detailKeys.MouseFollow.SetEnabled(m.mouseEnabled && hasLinks)
+	_, focused := detailLinkRowByIdentity(doc, m.detail.linkFocus)
+	focused = focused && m.detail.hasLinkFocus
+	if !focused {
+		m.detail.linkFocus = detailLinkIdentity{}
+		m.detail.hasLinkFocus = false
+	}
+	m.detailKeys.Follow.SetEnabled(focused)
+	return m
+}
+
+// reconcileDetail synchronizes dynamic keys before calculating the footer's
+// height, then clamps the body window. Callers that changed the document's
+// geometry may ask to bring a retained focus minimally back into view.
+func (m Model) reconcileDetail(ensureFocus bool) Model {
+	m = m.ensureDetailMarkdownSections()
+	doc := m.detailDocument()
+	m = m.syncDetailKeysFor(doc)
+	m.detail.offset = clampDetailOffset(m.detail.offset, len(doc.Lines), m.detailBodyHeight())
+	if ensureFocus && m.detail.hasLinkFocus {
+		if row, ok := detailLinkRowByIdentity(doc, m.detail.linkFocus); ok {
+			m.detail.offset = ensureDocumentLineVisible(row.Line, m.detail.offset, len(doc.Lines), m.detailBodyHeight())
+		}
 	}
 	return m
 }
 
-// walkUp leaves the Detail for the collection the Ticket belongs to. In a
-// decoder session it is where the list is first fetched — nothing has read it
-// until now — and from a drill-in it is esc by another name, because both mean
-// "the collection this Ticket belongs to".
+func (m Model) ensureDetailMarkdownSections() Model {
+	if !m.detail.loaded {
+		return m
+	}
+	markdown := m.effectiveMarkdownRenderers()
+	if !m.detail.markdownSections.matches(m.detail.input, m.width, markdown) {
+		m.detail.markdownSections = renderDetailMarkdownSections(m.detail.input, m.width, m.styles, markdown)
+	}
+	return m
+}
+
+func (m Model) invalidateDetailMarkdownSections() Model {
+	m.detail.markdownSections.valid = false
+	return m
+}
+
+func (m Model) moveDetailLinkFocus(direction int) Model {
+	doc := m.detailDocument()
+	if len(doc.LinkRows) == 0 {
+		return m.syncDetailKeysFor(doc)
+	}
+
+	index := -1
+	if m.detail.hasLinkFocus {
+		for i, row := range doc.LinkRows {
+			if row.Identity == m.detail.linkFocus {
+				index = i
+				break
+			}
+		}
+	}
+	if index < 0 {
+		if direction < 0 {
+			index = len(doc.LinkRows) - 1
+		} else {
+			index = 0
+		}
+	} else {
+		index = (index + direction + len(doc.LinkRows)) % len(doc.LinkRows)
+	}
+
+	m.detail.linkFocus = doc.LinkRows[index].Identity
+	m.detail.hasLinkFocus = true
+	m = m.syncDetailKeysFor(doc)
+	m.detail.offset = ensureDocumentLineVisible(doc.LinkRows[index].Line, m.detail.offset, len(doc.Lines), m.detailBodyHeight())
+	return m
+}
+
+func (m Model) focusedDetailLink(doc detailDocument) (detailLinkRow, bool) {
+	if !m.detail.hasLinkFocus {
+		return detailLinkRow{}, false
+	}
+	return detailLinkRowByIdentity(doc, m.detail.linkFocus)
+}
+
+func (m Model) detailTrailSnapshot() detailTrailEntry {
+	return detailTrailEntry{
+		ticket:       m.detail.ticket,
+		input:        m.detail.input,
+		loaded:       m.detail.loaded,
+		lastErr:      m.detail.lastErr,
+		offset:       m.detail.offset,
+		linkFocus:    m.detail.linkFocus,
+		hasLinkFocus: m.detail.hasLinkFocus,
+		width:        m.width,
+		bodyHeight:   m.detailBodyHeight(),
+	}
+}
+
+// followDetailLink re-resolves identity against the current document, archives
+// the stable source seat, then uses the same cache/fetch transition as list-open.
+func (m Model) followDetailLink(identity detailLinkIdentity) (tea.Model, tea.Cmd) {
+	doc := m.detailDocument()
+	row, ok := detailLinkRowByIdentity(doc, identity)
+	if !ok {
+		return m.syncDetailKeysFor(doc), nil
+	}
+
+	m.detail.linkFocus = identity
+	m.detail.hasLinkFocus = true
+	m = m.syncDetailKeysFor(doc)
+	m.trail = append(m.trail, m.detailTrailSnapshot())
+	return m.seatDetail(ticketFromLinkTarget(row.Link.Target), m.detail.input.Parent, m.detail.input.Capabilities)
+}
+
+func (m Model) followFocusedDetailLink() (tea.Model, tea.Cmd) {
+	doc := m.detailDocument()
+	row, ok := m.focusedDetailLink(doc)
+	if !ok {
+		return m.syncDetailKeysFor(doc), nil
+	}
+	return m.followDetailLink(row.Identity)
+}
+
+func (m Model) popDetailTrail() Model {
+	entry := m.trail[len(m.trail)-1]
+	m.trail = m.trail[:len(m.trail)-1]
+	m.detailGeneration++
+	m.mouseEpoch++
+	m.mode = modeDetail
+	m.detail = detailState{
+		ticket:       entry.ticket,
+		input:        entry.input,
+		loaded:       entry.loaded,
+		lastErr:      entry.lastErr,
+		offset:       entry.offset,
+		linkFocus:    entry.linkFocus,
+		hasLinkFocus: entry.hasLinkFocus,
+	}
+	m = m.reconcileDetail(false)
+	if m.width != entry.width || m.detailBodyHeight() != entry.bodyHeight {
+		return m.reconcileDetail(true)
+	}
+	return m
+}
+
+// walkUp leaves the entire Detail Trail for its root Watchlist. It returns to an
+// armed list immediately or fetches the list for the first time in a decoder
+// session.
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
+	m = m.clearPendingClick()
+	m.detailGeneration++
+	m.mouseEpoch++
+	m.trail = nil
 	m.mode = modeList
 	m.detail = detailState{}
 	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
@@ -254,13 +451,20 @@ func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	return next, cmd
 }
 
-// startDetailFetch begins one read of the Ticket on screen, or does nothing when
-// one is already in flight.
+// startDetailFetch begins one explicit re-read. Even a malformed empty ID
+// advances the generation and repeats its local failure without issuing a
+// Provider command, so an abandoned command can never land merely because the
+// same Ticket is seated again later.
 func (m Model) startDetailFetch() (Model, tea.Cmd) {
-	if m.detail.loading || m.detail.ticket.ID == "" {
+	if m.detail.loading {
 		return m, nil
 	}
 	m.detailGeneration++
+	if m.detail.ticket.ID == "" {
+		m.detail.loading = false
+		m.detail.lastErr = errEmptyLinkTargetID
+		return m.reconcileDetail(false), nil
+	}
 	m.detail.loading = true
 	return m, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID)
 }
@@ -289,9 +493,10 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 		// A cached Detail stays on screen behind the error: stale detail beats a
 		// blank screen.
 		m.detail.lastErr = msg.err
-		return m
+		return m.reconcileDetail(false)
 	}
 	m.detail.lastErr = nil
+	m = m.invalidateDetailMarkdownSections()
 
 	at := m.now()
 	m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: at}
@@ -299,34 +504,43 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	m.detail.input.Capabilities = msg.caps
 	m.detail.input.FetchedAt = at
 	m.detail.loaded = true
-	m.detail.offset = m.clampDetail(m.detail.offset)
-	return m
+	return m.reconcileDetail(true)
 }
 
-// onDetailKey dispatches a key press while a Ticket's Detail is open.
-//
-// esc goes back rather than quitting: after the find box and the filter, "one
-// level up" is what esc means everywhere in this program. q and ctrl+c quit
-// outright, from here as from the list, so nobody is trapped in a Detail.
-//
-// u goes up to the collection this Ticket belongs to. From a drill-in that is
-// where esc already lands, which is coherent rather than surprising; from a
-// decoded Ticket it is the way into the full monitor.
+// onDetailKey dispatches a key press while a Ticket's Detail is open. Esc pops
+// one Trail entry, returns an untrailed root to the armed list, or quits a
+// decoded root with no list. q and ctrl+c always quit. u clears the Trail and
+// jumps to the root Watchlist, fetching it first in a decoder session.
 func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.detailKeys.Quit):
 		return m.quit(msg), tea.Quit
 
+	case key.Matches(msg, m.detailKeys.NextLink):
+		return m.moveDetailLinkFocus(1), nil
+
+	case key.Matches(msg, m.detailKeys.PreviousLink):
+		return m.moveDetailLinkFocus(-1), nil
+
+	case key.Matches(msg, m.detailKeys.Follow):
+		return m.followFocusedDetailLink()
+
 	case key.Matches(msg, m.detailKeys.Parent):
 		return m.walkUp()
 
 	case key.Matches(msg, m.detailKeys.Back):
+		if len(m.trail) > 0 {
+			return m.popDetailTrail(), nil
+		}
+		m.detailGeneration++
+		m.mouseEpoch++
 		if !m.listArmed {
 			// The esc ladder's last rung: a decoded Ticket has no list behind it,
 			// so "one level up" is out of the program. q and ctrl+c still quit
 			// from everywhere, so nobody is trapped either way.
 			return m.quit(msg), tea.Quit
 		}
+		m = m.clearPendingClick()
 		m.mode = modeList
 		m.detail = detailState{}
 		// The list's own state was never touched, but the help listing may have
@@ -340,10 +554,12 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		next, cmd := m.startDetailFetch()
 		return next, cmd
 
+	case key.Matches(msg, m.detailKeys.ToggleMouse):
+		return m.toggleMouse(), nil
+
 	case key.Matches(msg, m.detailKeys.Help):
 		m.help.ShowAll = !m.help.ShowAll
-		m.detail.offset = m.clampDetail(m.detail.offset)
-		return m, nil
+		return m.reconcileDetail(true), nil
 
 	case key.Matches(msg, m.detailKeys.Up):
 		return m.scrollDetail(-1), nil
@@ -356,7 +572,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.detailKeys.Home):
 		return m.scrollDetailTo(0), nil
 	case key.Matches(msg, m.detailKeys.End):
-		return m.scrollDetailTo(len(m.detailBodyLines())), nil
+		return m.scrollDetailTo(len(m.detailDocument().Lines)), nil
 	}
 	return m, nil
 }
@@ -372,46 +588,76 @@ func (m Model) scrollDetailTo(offset int) Model {
 
 // clampDetail keeps a scroll offset inside the Detail currently on screen.
 func (m Model) clampDetail(offset int) int {
-	return clampDetailOffset(offset, len(m.detailBodyLines()), m.detailBodyHeight())
+	return clampDetailOffset(offset, len(m.detailDocument().Lines), m.detailBodyHeight())
 }
 
-// detailBodyLines is the whole Detail document as terminal lines: the Detail
-// itself once it has landed, and the state that stands in for it until then.
-//
-// The header is drawn either way, so every one of these bodies appears beneath a
-// screen that says which Ticket it is about.
-func (m Model) detailBodyLines() []string {
+// detailDocument is the complete Detail body and its explicit Link metadata for
+// the model's current state. Loading and first-read failures are documents too,
+// but deliberately have no Link rows.
+func (m Model) detailDocument() detailDocument {
 	switch {
 	case m.detail.loaded:
-		return detailLines(m.detail.input, m.width, m.styles)
-	case m.detail.lastErr != nil:
-		return []string{
-			m.styles.Error.Render(truncateLine(
-				"Could not read this Ticket's detail: "+m.detail.lastErr.Error(), m.width)),
-			"",
-			m.styles.Muted.Render("Press r to try again, esc to go back."),
+		markdown := m.effectiveMarkdownRenderers()
+		sections := m.detail.markdownSections
+		if !sections.matches(m.detail.input, m.width, markdown) {
+			// Hand-built loaded models used by embedding callers and focused tests may
+			// not have passed through a production reconciliation yet.
+			sections = renderDetailMarkdownSections(m.detail.input, m.width, m.styles, markdown)
 		}
+		return composeDetailDocumentWithSections(m.detail.input, m.width, m.styles, m.detail.linkFocus,
+			m.detail.hasLinkFocus, sections)
+	case m.detail.lastErr != nil:
+		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles, m.detailBackDescription())
 	default:
-		return []string{m.styles.Muted.Render("Reading Ticket detail…")}
+		return detailDocument{Lines: truncateDocumentLines(
+			[]string{m.styles.Muted.Render("Reading Ticket detail…")}, m.width)}
 	}
 }
+
+func initialDetailErrorDocument(err error, width int, styles Styles, backDescription string) detailDocument {
+	message := "Could not read this Ticket's detail: " + err.Error()
+	messageLines := wrapText(message, width)
+	if len(messageLines) == 0 {
+		messageLines = []string{""}
+	}
+	lines := make([]string, 0, len(messageLines)+3)
+	for _, line := range messageLines {
+		lines = append(lines, styles.Error.Render(line))
+	}
+	lines = append(lines, "")
+
+	exitAction := backDescription
+	if exitAction == "back" {
+		exitAction = "go back"
+	}
+	guidance := "Press r to try again, esc to " + exitAction + "."
+	for _, line := range wrapText(guidance, width) {
+		lines = append(lines, styles.Muted.Render(line))
+	}
+	return detailDocument{Lines: truncateDocumentLines(lines, width)}
+}
+
+// detailBodyLines remains a convenient read-only seam for focused tests.
+func (m Model) detailBodyLines() []string { return m.detailDocument().Lines }
 
 // detailFrame renders the whole Detail screen: a header that never scrolls, the
 // windowed body, and a footer carrying the help line, the scroll position and
 // any failed re-read.
-func (m Model) detailFrame() string {
-	footer := m.detailFooterLines()
+func (m Model) detailFrame(doc detailDocument) string {
+	footer := m.detailFooterLines(doc)
 	header := renderDetailHeader(m.detail.input,
-		detailStaleness(m.detail.input.FetchedAt, m.now(), m.detail.loading), m.width, m.styles)
-	body := renderDetailBody(m.detailBodyLines(), m.detail.offset, m.detailBodyHeight(), m.width)
+		"current · "+detailStaleness(m.detail.input.FetchedAt, m.now(), m.detail.loading),
+		m.width, m.styles, m.trail)
+	body := renderDetailBody(doc.Lines, m.detail.offset, m.detailBodyHeight(), m.width)
 
 	return strings.Join(append([]string{header, body}, footer...), "\n")
 }
 
-// detailFooterLines is the Detail screen's bottom block, line by line: a blank
-// spacer, the failed-re-read line when there is one, then the help line with the
-// scroll position against the right-hand edge.
-func (m Model) detailFooterLines() []string {
+// detailFooterLines is the Detail screen's bottom block, line by line: a
+// spacer, the failed-re-read line when there is one, then the help. The scroll
+// position uses the last help line when it fits and otherwise the spacer, so it
+// never clips a priority action.
+func (m Model) detailFooterLines(doc detailDocument) []string {
 	lines := []string{""}
 	// A read that failed with a Detail already on screen is a footer line, not a
 	// body: what the reader has is still worth reading.
@@ -420,12 +666,17 @@ func (m Model) detailFooterLines() []string {
 			"could not re-read this Ticket's detail: "+m.detail.lastErr.Error(), m.width)))
 	}
 
-	help := strings.Split(m.help.View(m.detailKeys), "\n")
+	help := strings.Split(m.detailHelpView(), "\n")
 	// The indicator is drawn only when there is somewhere to scroll: a Detail
 	// that fits on screen has no position to report.
-	if pos := scrollIndicator(m.detail.offset, len(m.detailBodyLines()), m.detailBodyHeight()); pos != "" {
+	if pos := scrollIndicator(m.detail.offset, len(doc.Lines), m.detailBodyHeight()); pos != "" {
 		last := len(help) - 1
-		help[last] = pairLine(help[last], m.styles.Staleness.Render(pos), m.width)
+		position := m.styles.Staleness.Render(pos)
+		if lipgloss.Width(help[last])+1+lipgloss.Width(position) <= m.width {
+			help[last] = pairLineReserved(help[last], position, m.width)
+		} else {
+			lines[0] = pairLineReserved(lines[0], position, m.width)
+		}
 	}
 	for _, line := range help {
 		lines = append(lines, truncateLine(line, m.width))
@@ -436,14 +687,14 @@ func (m Model) detailFooterLines() []string {
 // detailBodyHeight is the room left for the Detail body once the header and the
 // footer have taken theirs, floored at one line so a tiny terminal still renders.
 //
-// The footer's *height* does not depend on the scroll indicator, which is what
-// keeps this out of a loop with detailFooterLines: the indicator only decides
-// what the last help line says, never how many lines there are.
+// The footer's *height* does not depend on the scroll indicator, which keeps
+// this out of a loop with detailFooterLines: the indicator reuses either the
+// spacer or a help line and never adds a line.
 func (m Model) detailBodyHeight() int {
 	lines := 1
 	if m.detail.lastErr != nil && m.detail.loaded {
 		lines++
 	}
-	lines += len(strings.Split(m.help.View(m.detailKeys), "\n"))
+	lines += len(strings.Split(m.detailHelpView(), "\n"))
 	return max(m.height-detailHeaderHeight-lines, 1)
 }

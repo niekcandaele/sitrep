@@ -10,6 +10,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+func TestMain(m *testing.M) {
+	if err := os.Setenv("GLAMOUR_STYLE", "dark"); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
+
 // -update rewrites the golden files instead of comparing against them:
 //
 //	go test ./... -update

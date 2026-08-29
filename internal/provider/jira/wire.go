@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -101,6 +102,25 @@ type searchResponse struct {
 	IsLast        bool        `json:"isLast"`
 }
 
+// bulkFetchRequest and bulkFetchResponse are Jira v3's authoritative finite
+// issue read. IssueError.ID is Jira's issue id (not reliably the requested key),
+// so the driver identifies a failed member by comparing returned issue keys with
+// the requested chunk.
+type bulkFetchRequest struct {
+	IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+	Fields         []string `json:"fields"`
+}
+
+type bulkFetchResponse struct {
+	Issues      []issueWire      `json:"issues"`
+	IssueErrors []issueErrorWire `json:"issueErrors"`
+}
+
+type issueErrorWire struct {
+	ID           string `json:"id"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
 type commentsResponse struct {
 	Comments []commentWire `json:"comments"`
 }
@@ -126,13 +146,34 @@ type errorResponse struct {
 	Errors        map[string]string `json:"errors"`
 }
 
-// message joins an error payload into one line, or returns "" when it carries
-// nothing worth saying.
+// message joins Jira's general error messages for non-Query errors and omits
+// per-field entries. queryMessage adds deterministic per-field Query explanations.
 func (e errorResponse) message() string {
 	messages := make([]string, 0, len(e.ErrorMessages))
 	for _, m := range e.ErrorMessages {
 		if strings.TrimSpace(m) != "" {
 			messages = append(messages, strings.TrimSpace(m))
+		}
+	}
+	return strings.Join(messages, "; ")
+}
+
+// queryMessage includes Jira's per-field explanations because the JQL field is
+// exactly what a Query Selector submitted. Keys are sorted so one native error
+// payload always renders deterministically.
+func (e errorResponse) queryMessage() string {
+	messages := make([]string, 0, len(e.ErrorMessages)+len(e.Errors))
+	if message := e.message(); message != "" {
+		messages = append(messages, message)
+	}
+	keys := make([]string, 0, len(e.Errors))
+	for key := range e.Errors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if message := strings.TrimSpace(e.Errors[key]); message != "" {
+			messages = append(messages, key+": "+message)
 		}
 	}
 	return strings.Join(messages, "; ")
@@ -181,7 +222,7 @@ func browseURL(host, key string) string {
 // newEpic maps the fetched issue onto sitrep's Epic. Key is the issue key
 // verbatim: Jira keys are globally unique on a site, so there is no
 // qualification rule to mirror from GitHub, and the key round-trips through the
-// Epic Ref grammar — a key a human sees is a key they can type.
+// Ref grammar — a key a human sees is a key they can type.
 func newEpic(issue issueWire, host string) model.Epic {
 	status, native := normalizeStatus(
 		issue.Fields.categoryKey(), issue.Fields.statusName(), issue.Fields.resolutionName())

@@ -1,5 +1,29 @@
 package github
 
+import (
+	"strconv"
+	"strings"
+)
+
+const queryPageSize = 100
+
+// querySearchResultLimit is GitHub Search's documented 1,000-result ceiling.
+const querySearchResultLimit = 1000
+
+const queryMembershipDocument = `query($query:String!, $first:Int!, $after:String) {
+  search(query:$query, type:ISSUE, first:$first, after:$after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      __typename
+      ... on Issue {
+        number
+        repository { nameWithOwner }
+      }
+    }
+  }
+}`
+
 // epicQuery is the one GraphQL document the epic hot path sends. It is a
 // `query` and always will be: sitrep is read-only by design (ADR-0002) and no
 // mutation exists anywhere in this package.
@@ -8,37 +32,45 @@ package github
 // extend one visible place. Per ADR-0003 it must never grow description,
 // comments or links: those belong to FetchDetail.
 //
-// Pull request correlation rides on this same document as a nested selection,
-// not a second request per Ticket: the epic query is polled, and turning one
-// request into N is exactly what ADR-0003's split exists to prevent.
-// closedByPullRequestsReferences is GitHub's own "this pull request will close
-// this issue" linkage, which is what a `Closes #N` body produces;
-// includeClosedPrs keeps a rejected pull request visible, because "the agent's
-// work was turned down" must not look like "no work started". The head-commit
-// statusCheckRollup — rather than per-check detail — keeps the polled path
-// cheap.
+// Pull request correlation rides on this same document as two bounded nested
+// relationships, not a second request per Ticket: the epic query is polled,
+// and turning one request into N is exactly what ADR-0003's split exists to
+// prevent. closedByPullRequestsReferences is GitHub's own "this pull request
+// will close this issue" linkage, which is what a `Closes #N` body produces;
+// includeClosedPrs keeps rejected work visible. The newest twenty
+// CrossReferencedEvent timeline items add PR-sourced mentions that GitHub does
+// not classify as closing — notably references from non-default integration
+// branches. GitHub exposes no reliable native discriminator between an
+// implementation reference and an incidental PR mention when willCloseTarget
+// is false, so every usable PullRequest source is deliberately included. Issue
+// sources are ignored, and branch-name, title, body, and willCloseTarget
+// heuristics are deliberately rejected.
 //
-// closedByPullRequestsReferences is capped at twenty per Ticket and does not
-// paginate. It is a cap rather than a page because ADR-0003 makes the epic
-// document one request for the whole polled path, and paginating a nested
-// connection per Ticket is exactly the N-request fan-out that split exists to
-// prevent. Twenty is far past what a readable Ticket has, but the truncation is
-// silent: a Ticket with more than twenty closing pull requests shows twenty of
-// them and says nothing about the rest. totalCount is selected so that a
-// renderer could one day say "showing 20 of 34"; nothing renders it today.
+// Each relationship is capped at twenty per Ticket and neither paginates. The
+// closing connection keeps GitHub's first-twenty order; timelineItems(last:20)
+// favors current or replacement work and counts all cross-reference events,
+// including Issue sources the mapper ignores. Closing candidates are considered
+// first, then timeline candidates in GitHub's retained order, and stable
+// repository-plus-number identity is deduplicated first-occurrence-wins. The
+// union therefore contains at most forty pull requests. Older events and nodes
+// past either bound are silently absent: this Provider cap is not a Query
+// membership LimitReached condition. totalCount and timeline pageInfo are
+// decoded so the bounds stay explicit even though no renderer reports them.
 //
-// createdAt is selected because it is what orders the lead pull request. A
-// pull request number is unique only within its repository, so a cross-repo
-// pull request with a larger number can be the older one; see leadIndex.
+// The shared PullRequest fragment contains only thin list fields. Its aggregate
+// head-commit statusCheckRollup — rather than per-check detail — keeps the
+// polled path cheap. createdAt orders the lead pull request: a number is unique
+// only within its repository, so a cross-repo pull request with a larger number
+// can be the older one; see leadIndex.
 //
-// The root issue carries three selections its children already had — parent,
-// assignees and closedByPullRequestsReferences — because an Epic Ref may name a
-// plain Ticket rather than a collection, and the answer to "which is it, and
-// what does it hang off" has to come from this same batched call (ADR-0003, no
-// third Provider method). They are O(1) per fetch, not per Ticket: one issue's
-// parent, one issue's assignees, one issue's pull requests, whatever the epic's
-// size. `parent` is the sub-issues feature's own field and rides on the
-// GraphQL-Features header the driver already sends.
+// The root issue carries the same assignees and correlation relationships as
+// its children because a Ref may name a plain Ticket rather than a collection,
+// and the answer to "which is it, and what does it hang off" has to come from
+// this same batched call (ADR-0003, no third Provider method). They are O(1) per
+// fetch, not per Ticket: one issue's parent, one issue's assignees, and two
+// bounded relationship windows, whatever the epic's size. `parent` is the
+// sub-issues feature's own field and rides on the GraphQL-Features header the
+// driver already sends.
 const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
     kind: issueOrPullRequest(number:$number) { __typename }
@@ -47,14 +79,7 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
       repository { nameWithOwner }
       parent { id number title url repository { nameWithOwner } }
       assignees(first:10) { nodes { login name avatarUrl } }
-      closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
-        totalCount
-        nodes {
-          number title url state isDraft reviewDecision createdAt
-          repository { nameWithOwner }
-          commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
-        }
-      }
+      ...IssuePullRequestRelationships
       subIssues(first:100, after:$cursor) {
         totalCount
         pageInfo { hasNextPage endCursor }
@@ -62,18 +87,77 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
           id number title url state stateReason
           repository { nameWithOwner }
           assignees(first:10) { nodes { login name avatarUrl } }
-          closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
-            totalCount
-            nodes {
-              number title url state isDraft reviewDecision createdAt
-              repository { nameWithOwner }
-              commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
-            }
-          }
+          ...IssuePullRequestRelationships
         }
       }
     }
   }
+}
+` + issuePullRequestRelationshipsFragment + "\n" + pullRequestListFragment
+
+const issuePullRequestRelationshipsFragment = `fragment IssuePullRequestRelationships on Issue {
+  closedByPullRequestsReferences(first:20, includeClosedPrs:true) {
+    totalCount
+    nodes { ...PullRequestListFields }
+  }
+  crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT]) {
+    totalCount
+    pageInfo { hasPreviousPage startCursor }
+    nodes {
+      ... on CrossReferencedEvent {
+        source {
+          __typename
+          ... on PullRequest { ...PullRequestListFields }
+        }
+      }
+    }
+  }
+}`
+
+const pullRequestListFragment = `fragment PullRequestListFields on PullRequest {
+  number title url state isDraft reviewDecision createdAt
+  repository { nameWithOwner }
+  commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+}`
+
+// buildRefListQuery constructs one direct issue lookup per Ref. The only
+// generated text is the numeric suffix on aliases and variable names; Tracker
+// values remain in the variables map sent beside the document.
+func buildRefListQuery(count int) string {
+	var document strings.Builder
+	document.WriteString("query(")
+	for i := range count {
+		if i > 0 {
+			document.WriteString(", ")
+		}
+		suffix := strconv.Itoa(i)
+		document.WriteString("$owner" + suffix + ":String!, $repo" + suffix + ":String!, $number" + suffix + ":Int!")
+	}
+	document.WriteString(") {\n")
+	for i := range count {
+		suffix := strconv.Itoa(i)
+		document.WriteString("  ref" + suffix + ": repository(owner:$owner" + suffix + ", name:$repo" + suffix + ") {\n")
+		document.WriteString("    kind: issueOrPullRequest(number:$number" + suffix + ") { __typename }\n")
+		document.WriteString("    issue(number:$number" + suffix + ") { ...RefListTicketFields }\n")
+		document.WriteString("  }\n")
+	}
+	document.WriteString("}\n")
+	document.WriteString(refListTicketFragment)
+	document.WriteString("\n")
+	document.WriteString(issuePullRequestRelationshipsFragment)
+	document.WriteString("\n")
+	document.WriteString(pullRequestListFragment)
+	return document.String()
+}
+
+// refListTicketFragment is deliberately the same thin issue shape used for an
+// Epic's child Tickets. It excludes hierarchy and Detail fields because an
+// explicit Ref list names membership directly and remains on the polled path.
+const refListTicketFragment = `fragment RefListTicketFields on Issue {
+  id number title url state stateReason
+  repository { nameWithOwner }
+  assignees(first:10) { nodes { login name avatarUrl } }
+  ...IssuePullRequestRelationships
 }`
 
 // detailQuery is the second GraphQL document this driver sends, and it is

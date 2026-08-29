@@ -58,57 +58,71 @@ func interrupted(ctx context.Context) (int, bool) {
 	return exitFailure, false
 }
 
-const usage = `sitrep - a read-only terminal situation report on a delegated epic.
+const usage = `sitrep - a read-only terminal ticket viewer.
 
 Usage:
   sitrep [flags] <ref>
+  sitrep [flags] <ref> <ref>...
+  sitrep [flags] -
+  sitrep [flags] --query <query>
 
-Arguments:
-  <ref>   the Epic Ref to report on, in any of these forms:
-            111                                        a bare issue number
-            acme/widgets#111                           owner, repository, number
-            https://github.com/acme/widgets/issues/111  a full issue URL
-            ABC-123                                    a Jira-style key, matched
-                                                       to a Profile by its key
-                                                       prefix
-            acme&12                                    a GitLab epic reference
-            https://gitlab.com/groups/acme/-/epics/12  a GitLab group epic URL
-            acme/widgets%3                             a GitLab milestone
-                                                       reference — a milestone is
-                                                       how GitLab Free spells an
-                                                       Epic
-            https://gitlab.com/acme/widgets/-/milestones/3
-                                                       a GitLab milestone URL
-          A bare number is resolved through the origin remote of the current
-          directory's git clone; the other forms work anywhere.
-          A Ref with sub-tickets is an Epic; one without is a Ticket, which
-          sitrep reports on directly — press u there to open its Epic.
+Selectors:
+  One Ref selects an Epic Watchlist. If it resolves to a plain Ticket instead,
+  sitrep opens that Ticket's Detail.
+
+  Two or more positional Refs select exact Tickets in order. They need no common
+  Epic, but must use one Tracker and connection.
+
+  A sole "-" reads whitespace-separated Refs from stdin. It must be the only
+  positional argument; even one stdin Ref keeps exact Ref-list semantics.
+
+  --query passes the exact, opaque tracker-native Query to the selected Tracker.
+  It cannot be combined with positional Refs or stdin. Use an explicit Profile,
+  or an unambiguous supported GitHub/GitLab origin in the current clone.
+
+Ref forms:
+  111                                        bare issue number
+  #111                                       bare issue number
+  acme/widgets#111                           owner, repository, number
+  https://github.com/acme/widgets/issues/111  GitHub issue URL
+  ABC-123                                    Jira key; its prefix matches a Profile
+  https://acme.atlassian.net/browse/ABC-123   Jira browse URL
+  https://gitlab.com/acme/widgets/-/issues/7  GitLab issue/work-item URL
+  acme&12                                    GitLab native epic Ref
+  https://gitlab.com/groups/acme/-/epics/12  GitLab native epic URL
+  acme/widgets%3                             GitLab milestone Ref
+  https://gitlab.com/acme/widgets/-/milestones/3
+                                             GitLab milestone URL
+
+  A bare number is resolved through the current clone's origin remote; the other
+  forms work anywhere. GitLab's &N names a native Epic; %N is the milestone-as-
+  Epic fallback available on GitLab Free.
 
 Flags:
   -h, --help              show this help and exit
       --interval <dur>    how often the monitor refreshes (default 60s)
-      --json              print the epic as a JSON document and exit
-      --plain             print a one-shot text snapshot of the epic and exit
-      --profile <name>    the Profile to connect with, from
-                          ~/.config/sitrep/config.yml (default: matched from the
-                          ref)
-      --provider <name>   Provider to read from: "auto" (the default) picks one
-                          from the Epic Ref, "github" forces the GitHub driver,
-                          "gitlab" the GitLab driver, "jira" the Jira driver,
-                          "fake" serves a built-in fixture epic
+      --no-mouse          start the monitor without mouse capture
+      --json              print a one-shot JSON report and exit
+      --plain             print a one-shot Watchlist or Ticket report and exit
+      --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
+                          matched from the route or Refs)
+      --provider <name>   Provider to read from: "auto" (the default) detects
+                          from the route or Refs; "github", "gitlab", or "jira"
+                          forces that driver; "fake" serves a fixture Watchlist
+      --query <query>     exact tracker-native Query selecting a Watchlist
       --version           show version information and exit
 `
 
 // Deps are the injectable dependencies of a sitrep run. Every field's zero
 // value is the production behaviour, which is what Run passes.
 type Deps struct {
-	// Provider serves the run. When nil it is resolved from the Epic Ref and
+	// Provider serves the run. When nil it is resolved from the Ref and
 	// --provider; when set it wins outright and nothing is constructed.
 	Provider provider.Provider
 	// Now reads the clock for the snapshot's timestamp. When nil it is
 	// time.Now.
 	Now func() time.Time
-	// RemoteLookup reads the git remote that resolves a bare Epic Ref number.
+	// RemoteLookup reads the git remote that resolves a bare Ref number.
 	// When nil it is the real `git remote get-url`.
 	RemoteLookup ref.RemoteLookup
 	// Dir is the working directory whose git remote resolves a bare number.
@@ -120,8 +134,14 @@ type Deps struct {
 	// GitLabTokenSource discovers the GitLab API token. When nil it is
 	// gitlab.DefaultTokenSource.
 	GitLabTokenSource gitlab.TokenSource
-	// Stdin is the monitor's input. When nil it is os.Stdin.
+	// Stdin carries selector bytes for a sole "-" argument and otherwise remains
+	// the monitor's key input. When nil it is os.Stdin.
 	Stdin io.Reader
+	// OpenTTY opens the controlling terminal used for monitor keys after Stdin
+	// carried selector bytes. When nil it opens /dev/tty read-only.
+	OpenTTY func() (io.ReadCloser, error)
+	// RunMonitor starts the full-screen monitor. When nil it is tui.Run.
+	RunMonitor func(context.Context, tui.Options) error
 	// Config is the loaded global config. When non-nil it wins outright and no
 	// file is read: tests inject it, and so does any caller that has already
 	// read one.
@@ -137,18 +157,24 @@ type Deps struct {
 
 // loadConfig reads the run's global config, or decides not to read one at all.
 //
-// When Config and ConfigPath are both zero AND the run serves itself — an
-// injected Provider, or --provider fake — no config file is read. Both are a
-// test or a development run, neither can be served by a Profile, and such a run
-// must never depend on — or be broken by — whatever happens to be in the
-// developer's home directory. Do not delete this branch: without it every
-// golden in this package becomes a function of the machine it runs on.
-func (d Deps) loadConfig(providerName string) (config.Config, error) {
+// When Config and ConfigPath are both zero, no Profile was explicitly requested,
+// AND the run serves itself — an injected Provider, or --provider fake — no
+// config file is read. Both are a test or a development run, and such a run must
+// never depend on whatever happens to be in the developer's home directory. An
+// explicit --profile is the exception: naming one means the config must be read
+// and validated even when the Provider itself is injected.
+func (d Deps) loadConfig(providerName, profileName string) (config.Config, error) {
 	switch {
 	case d.Config != nil:
 		return *d.Config, nil
 	case d.ConfigPath != "":
 		return config.Load(d.ConfigPath)
+	case profileName != "":
+		path, err := config.DefaultPath(d.Env)
+		if err != nil {
+			return config.Config{}, err
+		}
+		return config.Load(path)
 	case d.Provider != nil, providerName == providerFake:
 		return config.Config{}, nil
 	}
@@ -212,11 +238,13 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	fs.Usage = func() {}
 
 	showVersion := fs.Bool("version", false, "show version information and exit")
-	asJSON := fs.Bool("json", false, "print the epic as a JSON document and exit")
-	asPlain := fs.Bool("plain", false, "print a one-shot text snapshot of the epic and exit")
+	asJSON := fs.Bool("json", false, "print a one-shot JSON report and exit")
+	asPlain := fs.Bool("plain", false, "print a one-shot Watchlist or Ticket report and exit")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
+	query := fs.String("query", "", "Tracker-native Watchlist query")
 	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
+	noMouse := fs.Bool("no-mouse", false, "start the monitor without mouse capture")
 
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -247,22 +275,36 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		}
 	}
 
-	if len(positional) == 0 {
-		return usageError(stderr, "an Epic Ref is required")
-	}
-	if len(positional) > 1 {
-		return usageError(stderr, "only one Epic Ref may be given")
-	}
-	rawRef := positional[0]
-
 	if !knownProviderName(*providerName) {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
+	}
+
+	querySelected := isFlagSet(fs, "query")
+	if querySelected && len(positional) != 0 {
+		return usageError(stderr, `--query cannot be combined with positional Refs or "-"`)
+	}
+	if !querySelected && len(positional) == 0 {
+		return usageError(stderr, `a Selector is required: pass one or more Refs, "-" for stdin, or --query`)
+	}
+
+	stdinSelected := false
+	if !querySelected {
+		stdinSelected, err = stdinSelection(positional)
+		if err != nil {
+			return usageError(stderr, err.Error())
+		}
+		if stdinSelected {
+			positional, err = readStdinRefs(deps.stdin())
+			if err != nil {
+				return runtimeError(stderr, err)
+			}
+		}
 	}
 
 	// The command line was fine, so everything from here on is a runtime
 	// failure rather than a usage error — starting with a config file that does
 	// not parse.
-	cfg, err := deps.loadConfig(*providerName)
+	cfg, err := deps.loadConfig(*providerName, *profileName)
 	if err != nil {
 		return runtimeError(stderr, err)
 	}
@@ -273,46 +315,19 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The Epic Ref is resolved once, here, before a Provider exists: the
-	// Provider is chosen from what the Ref points at, and FetchEpic is polled,
-	// so re-resolving a bare number there would re-run git forever.
-	r, err := deps.resolveRef(ctx, rawRef, *providerName)
+	selection, err := deps.resolveSelection(ctx, cfg, positional, stdinSelected, querySelected, *query, *providerName, *profileName)
 	if err != nil {
 		return runtimeError(stderr, err)
 	}
-
-	// A Profile claiming the Ref's host names that host's Tracker, which is the
-	// only way a bare number inside a self-managed GitLab clone can be told
-	// apart from a GitHub Enterprise one.
-	r = retagProfileClaimedHost(cfg, r)
-
-	// An explicit --provider is authoritative for a Ref whose Tracker the
-	// grammar had to guess at. It is applied here, before the Profile is
-	// selected, so everything downstream — Profile matching, the driver, the
-	// Ref the driver reads — agrees about which Tracker this is.
-	if *providerName != providerAuto && *providerName != providerFake {
-		if r.Tracker, err = forceTracker(*providerName, r); err != nil {
-			return runtimeError(stderr, err)
-		}
-	}
-
-	// A Profile is resolved once, here, between the Epic Ref and the Provider,
-	// and is consumed entirely at Provider-construction time. Nothing
-	// downstream — not the pre-flight fetch, not the renderers, not the TUI —
-	// knows a Profile exists.
-	prof, err := selectProfile(cfg, r, *profileName)
-	if err != nil {
-		return runtimeError(stderr, err)
-	}
-	if prof != nil {
-		r = prof.Complete(r)
-	}
+	selector := selection.selector
+	r := selection.first
+	prof := selection.profile
 
 	refresh := effectiveInterval(isFlagSet(fs, "interval"), *interval, profileInterval(prof))
 
 	p := deps.Provider
 	if p == nil {
-		if p, err = deps.newProvider(*providerName, r, prof, cfg.Path); err != nil {
+		if p, err = deps.newProvider(*providerName, selection.route, prof, cfg.Path); err != nil {
 			return runtimeError(stderr, err)
 		}
 	}
@@ -322,10 +337,10 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	// out of this call.
 	p = provider.Sanitized(p)
 
-	// One batched fetch, before the mode switch, because every mode needs its
-	// result: it is what decides whether this Ref named an Epic or a Ticket, and
-	// the monitor is seeded with it rather than fetching it again.
-	snap, err := p.FetchEpic(ctx, r)
+	// One logical batched fetch, before the mode switch, because every mode needs
+	// its result. For a single Ref it also decides whether the Ref named an Epic
+	// or a Ticket; either Selector kind seeds the monitor without fetching again.
+	snap, err := p.Resolve(ctx, selector)
 	if err != nil {
 		if code, ok := interrupted(ctx); ok {
 			return code
@@ -348,50 +363,104 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		// must not exit on one bad DNS lookup, and one wasted
 		// request in an already-failing situation is the right price for keeping
 		// that.
-		return runMonitor(ctx, stdout, stderr, deps, tui.Options{
-			Source:       tui.EpicSource(p, r, deps.clock()),
+		return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
+			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
 			Interval:     refresh,
+			NoMouse:      *noMouse,
 		})
 	}
 	snap = provider.StampSnapshot(p, snap, deps.now())
 
-	if decodesToTicket(snap) {
+	if list, ok := selector.(provider.RefListSelector); ok && len(snap.Tickets) != len(list.Refs) {
+		return runtimeError(stderr, provider.Errorf(provider.KindUnavailable,
+			"%s: Ref-list Resolve returned %d Tickets for %d Refs", p.Name(), len(snap.Tickets), len(list.Refs)))
+	}
+
+	if _, epic := selector.(provider.EpicSelector); epic && decodesToTicket(snap) {
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}
-		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, refresh)
+		return runDecodedMonitor(ctx, stdout, stderr, deps, p, r, snap, refresh, *noMouse)
 	}
 
 	switch {
 	case *asJSON:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return jsonout.RenderEpic(w, snap, p.Name())
+			return jsonout.RenderWatchlist(w, snap, selector, p.Name())
 		})
 	case *asPlain:
 		return writeReport(stdout, stderr, func(w io.Writer) error {
-			return plain.RenderEpic(w, snap)
+			return plain.RenderWatchlist(w, snap)
 		})
 	}
 
-	initial := tui.ListFromEpicSnapshot(snap)
-	return runMonitor(ctx, stdout, stderr, deps, tui.Options{
-		Source:       tui.EpicSource(p, r, deps.clock()),
+	initial := tui.ListFromWatchlistSnapshot(snap)
+	return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
+		Source:       tui.SelectorSource(p, selector, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
 		Initial:      &initial,
 		Interval:     refresh,
+		NoMouse:      *noMouse,
 	})
+}
+
+// stdinSelection recognizes the transport sentinel only in argv. It must be
+// exclusive so command-line and streamed membership can never be merged.
+func stdinSelection(positional []string) (bool, error) {
+	for _, arg := range positional {
+		if arg != "-" {
+			continue
+		}
+		if len(positional) != 1 {
+			return false, errors.New(`"-" reads Refs from stdin and must be the only positional argument`)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+const maxStdinSelectorBytes = 1 << 20
+
+func readStdinRefs(input io.Reader) ([]string, error) {
+	data, err := io.ReadAll(io.LimitReader(input, maxStdinSelectorBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading Refs from stdin: %w", err)
+	}
+	if len(data) > maxStdinSelectorBytes {
+		return nil, fmt.Errorf("stdin Selector input exceeds the %d-byte limit", maxStdinSelectorBytes)
+	}
+	refs := strings.Fields(string(data))
+	if len(refs) == 0 {
+		return nil, errors.New("no Refs were provided on stdin")
+	}
+	return refs, nil
 }
 
 // runMonitor opens the live monitor and blocks until the user quits. The
 // caller's Options carry the run's seams; the terminal and the clock are this
-// function's to fill in, so no call site can forget one.
-func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, opts tui.Options) int {
+// function's to fill in, so no call site can forget one. A stdin-selected
+// monitor has already consumed Stdin as selector data, so its keys come from
+// the controlling terminal instead.
+func runMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps, stdinSelected bool, opts tui.Options) int {
 	opts.Now = deps.clock()
 	opts.Input = deps.stdin()
 	opts.Output = stdout
 
-	code, failure := monitorExit(ctx, tui.Run(ctx, opts))
+	if stdinSelected {
+		input, err := deps.openTTY()
+		if err != nil {
+			code, failure := monitorExit(ctx, fmt.Errorf("opening controlling terminal: %w", err))
+			if failure != nil {
+				return runtimeError(stderr, failure)
+			}
+			return code
+		}
+		defer input.Close()
+		opts.Input = input
+	}
+
+	code, failure := monitorExit(ctx, deps.runTUI(ctx, opts))
 	if failure != nil {
 		return runtimeError(stderr, failure)
 	}
@@ -470,11 +539,351 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 	return set
 }
 
+type connectionRoute struct {
+	tracker    ref.Tracker
+	host       string
+	gitLabPath string
+	raw        string
+}
+
+type resolvedSelection struct {
+	selector provider.Selector
+	first    ref.Ref
+	profile  *config.Profile
+	route    connectionRoute
+}
+
+// resolveSelection resolves every supplied Ref once and turns the invocation
+// form into the Selector reused by preflight and every refresh. Routing stays a
+// startup concern: Providers never read git remotes or Profiles. forceRefList
+// preserves stdin's explicit-list meaning when it carries only one Ref.
+func (d Deps) resolveSelection(ctx context.Context, cfg config.Config, rawRefs []string, forceRefList, querySelected bool,
+	query, providerName, profileName string) (resolvedSelection, error) {
+	if querySelected {
+		return d.resolveQuerySelection(ctx, cfg, query, providerName, profileName)
+	}
+
+	refs := make([]ref.Ref, len(rawRefs))
+	for i, raw := range rawRefs {
+		r, err := d.resolveRef(ctx, raw, providerName)
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		r = retagProfileClaimedHost(cfg, r)
+		if providerName != providerAuto && providerName != providerFake {
+			if r.Tracker, err = forceTracker(providerName, r); err != nil {
+				return resolvedSelection{}, err
+			}
+		}
+		refs[i] = r
+	}
+
+	if left, right, ok := firstTrackerConflict(refs); ok {
+		completed := append([]ref.Ref(nil), refs...)
+		for i, r := range completed {
+			if prof, err := selectProfile(cfg, r, profileName); err == nil && prof != nil {
+				completed[i] = prof.Complete(r)
+			}
+		}
+		return resolvedSelection{}, mixedTrackerError(completed[left], completed[right])
+	}
+
+	profiles := make([]*config.Profile, len(refs))
+	for i, r := range refs {
+		prof, err := selectProfile(cfg, r, profileName)
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		profiles[i] = prof
+		if prof != nil {
+			refs[i] = prof.Complete(r)
+		}
+	}
+
+	if left, right, ok := firstRouteConflict(refs); ok {
+		return resolvedSelection{}, routeConflictError(refs[left], refs[right])
+	}
+	if left, right, ok := firstProfileConflict(profiles); ok {
+		//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+		return resolvedSelection{}, fmt.Errorf("Refs in one Watchlist resolve through different Profiles (%q and %q); pass --profile to choose one",
+			profileIdentity(profiles[left]), profileIdentity(profiles[right]))
+	}
+
+	selection := resolvedSelection{
+		first:   refs[0],
+		profile: profiles[0],
+		route:   routeFromRef(refs[0], profiles[0]),
+	}
+	if len(rawRefs) == 1 && !forceRefList {
+		selection.selector = provider.EpicSelector{Ref: refs[0]}
+		return selection, nil
+	}
+
+	unique := deduplicateRefs(refs)
+	selection.first = unique[0]
+	selection.route = routeFromRef(unique[0], profiles[0])
+	selection.selector = provider.RefListSelector{Refs: unique}
+	return selection, nil
+}
+
+func routeFromRef(r ref.Ref, prof *config.Profile) connectionRoute {
+	return connectionRoute{
+		tracker:    r.Tracker,
+		host:       r.Host,
+		gitLabPath: profileProject(prof),
+		raw:        r.Raw,
+	}
+}
+
+func (d Deps) resolveQuerySelection(ctx context.Context, cfg config.Config, query, providerName, profileName string) (resolvedSelection, error) {
+	selection := resolvedSelection{selector: provider.QuerySelector{Query: query}}
+
+	if profileName != "" {
+		prof, ok, err := cfg.Select(ref.Ref{}, profileName)
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		if !ok {
+			panic("an explicit Profile selection returned no Profile")
+		}
+		if providerName != providerAuto && providerName != prof.Provider {
+			return resolvedSelection{}, fmt.Errorf("provider %q does not match profile %q provider %q",
+				providerName, prof.Name, prof.Provider)
+		}
+		r := prof.Complete(ref.Ref{Raw: "--query"})
+		selection.profile = &prof
+		selection.route = connectionRoute{
+			tracker:    ref.Tracker(prof.Provider),
+			host:       r.Host,
+			gitLabPath: prof.Project,
+			raw:        "--query",
+		}
+		return selection, nil
+	}
+
+	if d.Provider != nil || providerName == providerFake {
+		return selection, nil
+	}
+
+	origin, err := ref.ResolveOrigin(ctx, ref.WithRemoteLookup(d.RemoteLookup), ref.WithDir(d.Dir))
+	if err != nil {
+		return resolvedSelection{}, fmt.Errorf("--query needs --profile or an unambiguous git origin in the current directory: %w", err)
+	}
+
+	knownTracker := ref.HostTracker(origin.Host)
+	switch providerName {
+	case providerAuto:
+		if knownTracker != ref.TrackerUnknown {
+			origin.Tracker = knownTracker
+		} else {
+			matches := profilesForHost(cfg, origin.Host)
+			switch len(matches) {
+			case 1:
+				selection.profile = &matches[0]
+				origin.Tracker = ref.Tracker(matches[0].Provider)
+			default:
+				if len(matches) > 1 {
+					names := make([]string, len(matches))
+					for i := range matches {
+						names[i] = matches[i].Name
+					}
+					return resolvedSelection{}, fmt.Errorf("profiles %s all match %s — pass --profile to choose",
+						quoteJoin(names), origin.Host)
+				}
+				return resolvedSelection{}, fmt.Errorf("cannot tell whether %s uses GitHub or GitLab — pass --profile or --provider",
+					origin.Host)
+			}
+		}
+	case providerGitHub, providerGitLab:
+		forced := ref.Tracker(providerName)
+		if knownTracker != ref.TrackerUnknown && knownTracker != forced {
+			return resolvedSelection{}, fmt.Errorf("git origin host %s is %s, not %s",
+				origin.Host, providerDisplayName(string(knownTracker)), providerDisplayName(providerName))
+		}
+		origin.Tracker = forced
+	default:
+		return resolvedSelection{}, fmt.Errorf("--query with provider %q requires --profile", providerName)
+	}
+
+	if selection.profile == nil {
+		prof, err := selectProfile(cfg, origin, "")
+		if err != nil {
+			return resolvedSelection{}, err
+		}
+		selection.profile = prof
+	}
+	selection.route = connectionRoute{
+		tracker: origin.Tracker,
+		host:    origin.Host,
+		raw:     origin.Raw,
+	}
+	if origin.Tracker == ref.TrackerGitLab {
+		selection.route.gitLabPath = strings.Trim(origin.Owner+"/"+origin.Repo, "/")
+		if selection.profile != nil && selection.profile.Project != "" {
+			selection.route.gitLabPath = selection.profile.Project
+		}
+	}
+	return selection, nil
+}
+
+func profilesForHost(cfg config.Config, host string) []config.Profile {
+	matches := make([]config.Profile, 0, len(cfg.Profiles))
+	for _, name := range cfg.Names() {
+		prof := cfg.Profiles[name]
+		effectiveHost := prof.Host
+		if prof.Provider == providerGitHub && effectiveHost == "" {
+			effectiveHost = "github.com"
+		}
+		if (prof.Provider == providerGitHub || prof.Provider == providerGitLab) &&
+			strings.EqualFold(strings.TrimSpace(effectiveHost), strings.TrimSpace(host)) {
+			matches = append(matches, prof)
+		}
+	}
+	return matches
+}
+
+func firstTrackerConflict(refs []ref.Ref) (int, int, bool) {
+	for i := range refs {
+		for j := i + 1; j < len(refs); j++ {
+			if refs[i].Tracker != ref.TrackerUnknown && refs[j].Tracker != ref.TrackerUnknown &&
+				refs[i].Tracker != refs[j].Tracker {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func firstRouteConflict(refs []ref.Ref) (int, int, bool) {
+	for i := range refs {
+		for j := i + 1; j < len(refs); j++ {
+			if refs[i].Tracker != refs[j].Tracker || !strings.EqualFold(refs[i].Host, refs[j].Host) {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func mixedTrackerError(left, right ref.Ref) error {
+	//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+	return fmt.Errorf("Refs in one Watchlist must use one Tracker; %q resolves to %s (%s), while %q resolves to %s (%s)",
+		selectorRefLabel(left), trackerDisplayName(left.Tracker), left.Host,
+		selectorRefLabel(right), trackerDisplayName(right.Tracker), right.Host)
+}
+
+func routeConflictError(left, right ref.Ref) error {
+	//nolint:staticcheck // The specified CLI sentence starts with the domain term "Refs".
+	return fmt.Errorf("Refs in one Watchlist must use one Tracker connection and host; %q resolves to the %s Provider at %s, while %q resolves to the %s Provider at %s",
+		selectorRefLabel(left), trackerDisplayName(left.Tracker), left.Host,
+		selectorRefLabel(right), trackerDisplayName(right.Tracker), right.Host)
+}
+
+func selectorRefLabel(r ref.Ref) string {
+	if raw := strings.TrimSpace(r.Raw); raw != "" {
+		return raw
+	}
+	return r.String()
+}
+
+func trackerDisplayName(tracker ref.Tracker) string {
+	if tracker == ref.TrackerUnknown {
+		return "Unknown"
+	}
+	return providerDisplayName(string(tracker))
+}
+
+func firstProfileConflict(profiles []*config.Profile) (int, int, bool) {
+	for i := range profiles {
+		for j := i + 1; j < len(profiles); j++ {
+			if profileIdentity(profiles[i]) != profileIdentity(profiles[j]) {
+				return i, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func profileIdentity(prof *config.Profile) string {
+	if prof == nil {
+		return "none"
+	}
+	return prof.Name
+}
+
+type refIdentity struct {
+	tracker ref.Tracker
+	host    string
+	owner   string
+	repo    string
+	number  int
+	key     string
+}
+
+func deduplicationIdentity(r ref.Ref) refIdentity {
+	identity := refIdentity{
+		tracker: r.Tracker,
+		host:    strings.ToLower(r.Host),
+		owner:   r.Owner,
+		repo:    r.Repo,
+		number:  r.Number,
+		key:     r.Key,
+	}
+	if r.Tracker == ref.TrackerGitHub {
+		identity.owner = strings.ToLower(identity.owner)
+		identity.repo = strings.ToLower(identity.repo)
+	}
+	return identity
+}
+
+func deduplicateRefs(refs []ref.Ref) []ref.Ref {
+	unique := make([]ref.Ref, 0, len(refs))
+	seen := make(map[refIdentity]struct{}, len(refs))
+	for _, r := range refs {
+		identity := deduplicationIdentity(r)
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+
+		// Parsed fields may alias one bulk stdin string. The selector survives for
+		// every monitor refresh, so retain only the unique Ref's own bytes.
+		r.Host = strings.Clone(r.Host)
+		r.Owner = strings.Clone(r.Owner)
+		r.Repo = strings.Clone(r.Repo)
+		r.Key = strings.Clone(r.Key)
+		r.Raw = strings.Clone(r.Raw)
+		unique = append(unique, r)
+	}
+	if !shouldCopyDeduplicatedRefs(len(unique), cap(unique)) {
+		return unique[:len(unique):len(unique)]
+	}
+	retained := make([]ref.Ref, len(unique))
+	copy(retained, unique)
+	return retained
+}
+
+// A clipped near-full slice intentionally keeps its small hidden slack rather
+// than paying for a second large allocation. Duplicate-heavy slices are always
+// copied; shallower reductions are copied only when at least 1024 Ref slots are
+// reclaimed and the copy is at most four times larger than that slack. Counting
+// slots keeps this policy independent of Ref's architecture-specific byte size.
+const compactRefSlackSlots = 1024
+
+func shouldCopyDeduplicatedRefs(retained, capacity int) bool {
+	slack := capacity - retained
+	if slack == 0 {
+		return false
+	}
+	return slack >= retained ||
+		slack >= compactRefSlackSlots && slack*4 >= retained
+}
+
 // selectProfile finds the Profile serving this Ref, returning nil when none
 // does. A Ref with no Profile is the GitHub zero-config path: `gh auth login`
 // and nothing else is a supported way to run sitrep.
 //
-// An Epic Ref that carries a Jira-style key and no host is the exception. Such
+// A Ref that carries a Jira-style key and no host is the exception. Such
 // a Ref names a project and nothing more; without a Profile there is no site to
 // ask, so an unmatched key prefix is fatal and the error says exactly what to
 // add. A Jira URL is not that case — it names its own site, and its unserved
@@ -530,11 +939,11 @@ func gitLabProfileForHostlessRef(cfg config.Config, r ref.Ref) (*config.Profile,
 		if needsProject {
 			return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on, "+
 				"and which group or project it names — add a gitlab profile with a host and a "+
-				"project to %s, or pass the epic's full URL",
+				"project to %s, or pass the Ref's full URL",
 				r.Raw, configLocation(cfg.Path))
 		}
 		return nil, fmt.Errorf("no Profile tells sitrep which GitLab instance %q is on — "+
-			"add a gitlab profile to %s, or pass the epic's full URL",
+			"add a gitlab profile to %s, or pass the Ref's full URL",
 			r.Raw, configLocation(cfg.Path))
 	default:
 		names := make([]string, len(matches))
@@ -606,6 +1015,16 @@ func profileInterval(prof *config.Profile) time.Duration {
 	return prof.RefreshInterval
 }
 
+// effectiveMaxTickets reads the construction-time Query budget from a selected
+// Profile. A nil Profile and a hand-built zero-value Profile both use the shared
+// Provider default; validated production Profiles always carry a positive value.
+func effectiveMaxTickets(prof *config.Profile) int {
+	if prof == nil || prof.MaxTickets <= 0 {
+		return provider.DefaultMaxTickets
+	}
+	return prof.MaxTickets
+}
+
 // parseArgs parses flags and positional arguments in any order. The flag
 // package stops at the first non-flag argument, which would make the natural
 // "sitrep 111 --json" a usage error; parsing what is left after each positional
@@ -675,7 +1094,8 @@ func (d Deps) clock() func() time.Time {
 	return d.Now
 }
 
-// stdin returns the monitor's input.
+// stdin returns selector input for a sole "-" argument and otherwise the
+// monitor's key input.
 func (d Deps) stdin() io.Reader {
 	if d.Stdin == nil {
 		return os.Stdin
@@ -683,9 +1103,23 @@ func (d Deps) stdin() io.Reader {
 	return d.Stdin
 }
 
-// The --provider names. The default auto-detects the Tracker from the Epic
-// Ref; the others force one driver, which is how a development run reaches the
-// fake and how a GitHub Enterprise ref can be pinned to the GitHub driver.
+func (d Deps) openTTY() (io.ReadCloser, error) {
+	if d.OpenTTY != nil {
+		return d.OpenTTY()
+	}
+	return os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+}
+
+func (d Deps) runTUI(ctx context.Context, opts tui.Options) error {
+	if d.RunMonitor != nil {
+		return d.RunMonitor(ctx, opts)
+	}
+	return tui.Run(ctx, opts)
+}
+
+// The --provider names. The default auto-detects the Tracker from the route or
+// Refs; the others force one driver, which is how a development run reaches the
+// fake and how a GitHub Enterprise Ref can be pinned to the GitHub driver.
 const (
 	providerAuto   = "auto"
 	providerGitHub = "github"
@@ -694,7 +1128,7 @@ const (
 	providerFake   = "fake"
 )
 
-// defaultProviderName auto-detects the Provider from the Epic Ref: sitrep can
+// defaultProviderName auto-detects the Provider from the Ref: sitrep can
 // tell a GitHub URL from a GitLab one, so it should not make the user say.
 const defaultProviderName = providerAuto
 
@@ -707,14 +1141,14 @@ func knownProviderName(name string) bool {
 	}
 }
 
-// resolveRef parses the user's Epic Ref, reading the working directory's git
+// resolveRef parses the user's Ref, reading the working directory's git
 // origin remote when it is a bare number.
 func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref, error) {
 	r, err := ref.Parse(ctx, raw, ref.WithRemoteLookup(d.RemoteLookup), ref.WithDir(d.Dir))
 	if err == nil {
 		return r, nil
 	}
-	// The fake serves any Epic Ref, so a Ref it cannot resolve is not fatal:
+	// The fake serves any Ref, so a Ref it cannot resolve is not fatal:
 	// development runs and the golden tests must not need a git remote.
 	if d.Provider != nil || providerName == providerFake {
 		return ref.Ref{Raw: raw}, nil
@@ -731,20 +1165,21 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 //
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
-func (d Deps) newProvider(name string, r ref.Ref, prof *config.Profile, configPath string) (provider.Provider, error) {
+func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string) (provider.Provider, error) {
+	maxTickets := effectiveMaxTickets(prof)
 	if name == providerFake {
-		return fake.New(), nil
+		return fake.New(fake.WithMaxTickets(maxTickets)), nil
 	}
 
-	switch r.Tracker {
+	switch route.tracker {
 	case ref.TrackerGitHub:
-		return d.newGitHub(r, prof), nil
+		return d.newGitHub(route.host, prof, maxTickets), nil
 	case ref.TrackerJira:
-		return d.newJira(r, prof, configPath)
+		return d.newJira(route.host, prof, configPath, maxTickets)
 	case ref.TrackerGitLab:
-		return d.newGitLab(r, prof)
+		return d.newGitLab(route.host, route.gitLabPath, prof, maxTickets)
 	default:
-		return nil, fmt.Errorf("cannot tell which tracker serves %q", r.Raw)
+		return nil, fmt.Errorf("cannot tell which tracker serves %q", route.raw)
 	}
 }
 
@@ -766,7 +1201,7 @@ func forceTracker(name string, r ref.Ref) (ref.Tracker, error) {
 	known := ref.HostTracker(r.Host)
 	keyed := ref.KeyPrefix(r.Key) != "" && forced != ref.TrackerJira
 	if (known != ref.TrackerUnknown && known != forced) || keyed {
-		return "", fmt.Errorf("%q is not a %s Epic Ref", r.Raw, providerDisplayName(name))
+		return "", fmt.Errorf("%q is not a %s Ref", r.Raw, providerDisplayName(name))
 	}
 	return forced, nil
 }
@@ -792,11 +1227,16 @@ func providerDisplayName(name string) string {
 // its own site: the site is not the problem, the credential is, and a Profile is
 // the only place an Atlassian email and a token reference come from. Saying so
 // here is more useful than letting the driver fail at its first request.
-func (d Deps) newJira(r ref.Ref, prof *config.Profile, configPath string) (provider.Provider, error) {
+func (d Deps) newJira(
+	host string,
+	prof *config.Profile,
+	configPath string,
+	maxTickets int,
+) (provider.Provider, error) {
 	if prof == nil {
 		return nil, fmt.Errorf("jira: reading %s needs a Profile — add one to %s with your "+
 			"Atlassian email and the environment variable holding your API token",
-			r.Host, configLocation(configPath))
+			host, configLocation(configPath))
 	}
 	cred, err := prof.Credential(d.env())
 	if err != nil {
@@ -805,10 +1245,12 @@ func (d Deps) newJira(r ref.Ref, prof *config.Profile, configPath string) (provi
 	// Translating a config.Credential into the driver's own Credentials happens
 	// here, deliberately: it is what keeps internal/provider/jira free of any
 	// knowledge of the config file.
-	return jira.New(r.Host, jira.WithCredentials(jira.Credentials{
-		Email: cred.User,
-		Token: cred.Token,
-	})), nil
+	return jira.New(host,
+		jira.WithCredentials(jira.Credentials{
+			Email: cred.User,
+			Token: cred.Token,
+		}),
+		jira.WithMaxTickets(maxTickets)), nil
 }
 
 // newGitLab constructs the GitLab driver from the Profile that matched this
@@ -822,7 +1264,7 @@ func (d Deps) newJira(r ref.Ref, prof *config.Profile, configPath string) (provi
 // Translating a config.Credential into the driver's own token happens here,
 // deliberately: it is what keeps internal/provider/gitlab free of any knowledge
 // of the config file.
-func (d Deps) newGitLab(r ref.Ref, prof *config.Profile) (provider.Provider, error) {
+func (d Deps) newGitLab(host, path string, prof *config.Profile, maxTickets int) (provider.Provider, error) {
 	// The Profile's credential is resolved first so that a Profile naming a
 	// variable nobody set reports *that* rather than a vaguer failure later.
 	//
@@ -838,9 +1280,10 @@ func (d Deps) newGitLab(r ref.Ref, prof *config.Profile) (provider.Provider, err
 			return nil, err
 		}
 	}
-	return gitlab.New(r.Host,
-		gitlab.WithPath(profileProject(prof)),
-		gitlab.WithTokenSource(d.gitLabTokenSource(prof))), nil
+	return gitlab.New(host,
+		gitlab.WithPath(path),
+		gitlab.WithTokenSource(d.gitLabTokenSource(prof)),
+		gitlab.WithMaxTickets(maxTickets)), nil
 }
 
 // gitLabTokenSource layers a Profile's auth reference on top of the GitLab
@@ -860,8 +1303,10 @@ func profileProject(prof *config.Profile) string {
 	return prof.Project
 }
 
-func (d Deps) newGitHub(r ref.Ref, prof *config.Profile) provider.Provider {
-	return github.New(r.Host, github.WithTokenSource(d.gitHubTokenSource(prof)))
+func (d Deps) newGitHub(host string, prof *config.Profile, maxTickets int) provider.Provider {
+	return github.New(host,
+		github.WithTokenSource(d.gitHubTokenSource(prof)),
+		github.WithMaxTickets(maxTickets))
 }
 
 // gitHubTokenSource layers a Profile's auth reference on top of the GitHub

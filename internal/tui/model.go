@@ -18,7 +18,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
-// Model is the monitor's state: the last good reading of the collection, the
+// Model is the monitor's state: the last good reading of the Watchlist, the
 // rows derived from it, and where the cursor sits.
 type Model struct {
 	fetch    func() (ListInput, error)
@@ -33,10 +33,10 @@ type Model struct {
 	lastAttempt time.Time
 	// listArmed reports whether the list holds a reading or has a fetch in
 	// flight. It starts false in decoder mode — a session opened straight on one
-	// Ticket's Detail — so the heartbeat never fetches a collection the user has
+	// Ticket's Detail — so the heartbeat never fetches a Watchlist the user has
 	// not asked to see, and it is what the walk-up key turns on.
 	listArmed bool
-	// hasSource reports whether there is a collection to monitor at all. A
+	// hasSource reports whether there is a Watchlist to monitor at all. A
 	// decoded Ticket with no parent has none, and the walk-up key is then not
 	// offered rather than offered and broken.
 	hasSource bool
@@ -56,33 +56,45 @@ type Model struct {
 	// separate so that esc can drop both in one move.
 	search textinput.Model
 
-	// mode is which screen owns the terminal. Opening and closing Detail
-	// touches nothing above this line — which is why the selection, the scroll
-	// offset and the filters survive it without any code restoring them.
+	// mode is which screen owns the terminal. Detail Trail navigation leaves the
+	// list state above untouched. Returning from a Detail root to the list may
+	// reconcile its selection and scroll geometry before drawing.
 	//
-	// A later caller may start the program in modeDetail by seating a
-	// DetailInput before the first frame — a bare Ticket Ref decoded straight
-	// into Detail — which is why detailState is a struct and why the Detail
-	// screen takes its breadcrumb as a Header field rather than reading the
-	// list's.
+	// Decoder startup can seat modeDetail before the first frame, with no list
+	// behind it. detailState therefore carries the Detail's own rendering context,
+	// including its breadcrumb, rather than reading list state.
 	mode   mode
 	detail detailState
+	// trail is the ordered path of prior Detail seats followed through explicit
+	// Links. It is session-local and deliberately permits cycles and repeats.
+	trail []detailTrailEntry
 	// details caches the Details read this session, per Ticket. It holds Detail
 	// and nothing else: no list data migrates in here, and nothing here migrates
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
-	fetchDetail      func(model.TicketID) (model.Detail, model.Capabilities, error)
+	// mouseEpoch identifies the current capture lifetime and Detail seat for queued
+	// mouse callbacks. Rereads leave it stable so callbacks can re-resolve facts
+	// from the same seat; navigation and mouse toggles advance it so an older frame
+	// cannot act after capture changes or after leaving and returning to the same ID.
+	mouseEpoch  int
+	fetchDetail func(model.TicketID) (model.Detail, model.Capabilities, error)
 
 	width, height int
 	ready         bool
 
-	keys       KeyMap
-	searchKeys SearchKeyMap
-	detailKeys DetailKeyMap
-	help       help.Model
-	styles     Styles
-	quitting   bool
+	mouseEnabled bool
+	lastClickID  model.TicketID
+	lastClickAt  time.Time
+
+	keys          KeyMap
+	searchKeys    SearchKeyMap
+	detailKeys    DetailKeyMap
+	help          help.Model
+	styles        Styles
+	markdownTheme markdownTheme
+	markdown      detailMarkdownRenderers
+	quitting      bool
 	// interrupted reports that the quit was a ctrl+c rather than a q or an esc.
 	// README states ctrl+c prints nothing and exits 130, which is true of the
 	// one-shot path because a signal reaches it; in the monitor raw mode
@@ -101,7 +113,7 @@ const interruptKey = "ctrl+c"
 // ctx is the program's lifetime, bound into the refresh command here: a Bubble
 // Tea command is handed no context of its own, and a context field on a model
 // outlives every update it was correct for. Binding it once means quitting
-// cancels an in-flight FetchEpic instead of holding the process open for the
+// cancels an in-flight Resolve instead of holding the process open for the
 // Tracker's HTTP timeout.
 func New(ctx context.Context, opts Options) Model {
 	now := opts.Now
@@ -141,20 +153,24 @@ func New(ctx context.Context, opts Options) Model {
 		now:      now,
 		interval: opts.Interval,
 		// The first refresh is already on its way out of Init.
-		generation:  1,
-		refreshing:  true,
-		lastAttempt: now(),
-		listArmed:   true,
-		hasSource:   src != nil,
-		search:      search,
-		fetchDetail: fetchDetail,
-		details:     make(map[model.TicketID]detailEntry),
-		keys:        DefaultKeyMap(),
-		searchKeys:  DefaultSearchKeyMap(),
-		detailKeys:  DefaultDetailKeyMap(),
-		help:        help.New(),
-		styles:      DefaultStyles(true),
+		generation:    1,
+		refreshing:    true,
+		lastAttempt:   now(),
+		listArmed:     true,
+		hasSource:     src != nil,
+		search:        search,
+		fetchDetail:   fetchDetail,
+		mouseEnabled:  !opts.NoMouse,
+		details:       make(map[model.TicketID]detailEntry),
+		keys:          DefaultKeyMap(),
+		searchKeys:    DefaultSearchKeyMap(),
+		detailKeys:    DefaultDetailKeyMap(),
+		help:          help.New(),
+		styles:        DefaultStyles(true),
+		markdownTheme: markdownDark,
+		markdown:      newDetailMarkdownRenderers(0, markdownDark),
 	}
+	m = m.syncMouseKeys()
 
 	if opts.Initial != nil {
 		// A reading the caller already took is folded in exactly the way a
@@ -170,23 +186,15 @@ func New(ctx context.Context, opts Options) Model {
 	}
 
 	if opts.Open != nil {
-		// Decoder mode: the screen is the Ticket's Detail from the first frame,
-		// and the read for it is already on its way out of Init the same way the
-		// list's first refresh normally is.
-		m.mode = modeDetail
-		m.detail = detailState{
-			ticket: opts.Open.Ticket,
-			input: DetailFromTicket(opts.Open.Ticket, model.Detail{}, opts.Open.Capabilities,
-				opts.Open.Parent, time.Time{}),
-			loading: true,
-		}
-		m.detailGeneration = 1
+		// Decoder mode seats the same Detail state as a list-open, but leaves the
+		// command for Init so Bubble Tea owns startup I/O.
 		if opts.Initial == nil {
 			m.refreshing = false
 			m.generation = 0
 			m.listArmed = false
 		}
-		m = m.syncDetailKeys()
+		next, _ := m.seatDetail(opts.Open.Ticket, opts.Open.Parent, opts.Open.Capabilities)
+		m = next.(Model)
 	}
 	return m
 }
@@ -195,7 +203,7 @@ func New(ctx context.Context, opts Options) Model {
 // is a wiring mistake rather than a Tracker failure, so it says which.
 var errNoDetailSource = errors.New("this monitor was opened without a Detail source")
 
-// errNoSource explains a refresh attempted with no collection behind the
+// errNoSource explains a refresh attempted with no Watchlist behind the
 // screen. A decoded Ticket with no parent has none, and the walk-up key is
 // disabled rather than offered — so reaching this is a wiring mistake.
 var errNoSource = errors.New("this monitor was opened without a collection to watch")
@@ -205,7 +213,7 @@ var errNoSource = errors.New("this monitor was opened without a collection to wa
 // decoded Ticket's Detail, or — for a seeded monitor — neither.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{heartbeat(), requestBackgroundColor}
-	if m.mode == modeDetail {
+	if m.mode == modeDetail && m.detail.loading {
 		cmds = append(cmds, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID))
 	}
 	if m.refreshing {
@@ -222,16 +230,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.help.SetWidth(msg.Width)
 		m.search.SetWidth(searchBoxWidth(msg.Width))
+		m = m.rebuildMarkdownRenderers()
+		m = m.invalidateDetailMarkdownSections()
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
-		// The Detail body is a function of width, so a resize re-wraps it and
-		// the offset has to come back inside the re-wrapped document. A resize
-		// that scrolls the reader into the void is the bug this clamp exists
-		// for.
-		m.detail.offset = m.clampDetail(m.detail.offset)
+		if m.mode == modeDetail {
+			m = m.reconcileDetail(true)
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
-		m.styles = DefaultStyles(msg.IsDark())
+		isDark := msg.IsDark()
+		m.styles = DefaultStyles(isDark)
+		if isDark {
+			m.markdownTheme = markdownDark
+		} else {
+			m.markdownTheme = markdownLight
+		}
+		m = m.rebuildMarkdownRenderers()
+		m = m.invalidateDetailMarkdownSections()
+		if m.mode == modeDetail {
+			m = m.reconcileDetail(true)
+		}
 		return m, nil
 
 	case heartbeatMsg:
@@ -243,23 +262,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case detailFetchedMsg:
 		return m.onDetailFetched(msg), nil
 
+	case listMouseClickMsg:
+		if m.mode != modeList || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onListMouseClick(msg)
+
+	case listMouseWheelMsg:
+		if m.mode != modeList || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
+			return m, nil
+		}
+		return m.onListMouseWheel(msg), nil
+
+	case detailMouseWheelMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseWheel(msg), nil
+
+	case detailMouseLinkMsg:
+		if m.mode != modeDetail {
+			return m, nil
+		}
+		return m.onDetailMouseLink(msg)
+
 	case tea.KeyPressMsg:
 		// The mode decides who owns the keyboard, before any binding is
 		// consulted: while the box is open every list command is text, and while
 		// Detail is open the list's commands are not on this screen at all.
 		switch {
 		case m.searching:
-			return m.onSearchKey(msg)
+			return m.clearPendingClick().onSearchKey(msg)
 		case m.mode == modeDetail:
-			return m.onDetailKey(msg)
+			return m.clearPendingClick().onDetailKey(msg)
 		}
-		return m.onKey(msg)
+		return m.clearPendingClick().onKey(msg)
 
 	case tea.PasteMsg:
 		// A pasted Ticket key is the obvious way to use this box, and a paste
 		// arrives as its own message rather than as key presses.
 		if m.searching {
-			return m.updateSearch(msg)
+			return m.clearPendingClick().updateSearch(msg)
 		}
 	}
 	return m, nil
@@ -270,6 +313,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	v := tea.NewView("")
 	v.AltScreen = true
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	if !m.ready {
 		// Before the terminal has reported its size there is nothing honest to
 		// draw: a frame guessed at 80x24 flashes the wrong layout for one
@@ -278,13 +326,20 @@ func (m Model) View() tea.View {
 	}
 
 	if m.mode == modeDetail {
-		v.SetContent(m.detailFrame())
+		doc := m.detailDocument()
+		v.SetContent(m.detailFrame(doc))
+		if m.mouseEnabled {
+			v.OnMouse = m.detailMouseHandler(doc)
+		}
 		return v
 	}
 
 	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, m.styles)
 	v.SetContent(strings.Join(append([]string{header, m.renderBody()}, m.footerLines()...), "\n"))
 	v.Cursor = m.cursor()
+	if m.mouseEnabled {
+		v.OnMouse = m.listMouseHandler()
+	}
 	return v
 }
 
@@ -301,7 +356,7 @@ func (m Model) cursor() *tea.Cursor {
 	}
 	// The box is drawn at column 0 of the filter line, so only the row needs
 	// shifting: past the header, past the body, and past the footer's blank
-	// spacer and any refresh error above it.
+	// spacer plus any cutoff notice or refresh error above it.
 	c.Y += headerHeight + m.bodyHeight() + m.filterLineIndex()
 	return c
 }
@@ -318,8 +373,8 @@ func (m Model) visibleTickets() []model.Ticket { return m.filter.Apply(m.input.T
 // without a data change.
 func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
 	// An unarmed list is a decoder session that has not walked up yet: the beat
-	// still drives the staleness indicator, but there is no collection anyone
-	// asked to see and FetchEpic must not be called at all.
+	// still drives the staleness indicator, but there is no Watchlist anyone
+	// asked to see and Resolve must not be called at all.
 	if !m.listArmed || m.refreshing || m.now().Sub(m.lastAttempt) < m.interval {
 		return m, heartbeat()
 	}
@@ -457,6 +512,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Quit):
 		return m.quit(msg), tea.Quit
+
+	case key.Matches(msg, m.keys.ToggleMouse):
+		return m.toggleMouse(), nil
 
 	case key.Matches(msg, m.keys.Help):
 		// The expanded listing eats body height, so the window has to be
@@ -606,7 +664,7 @@ func (m Model) selectRow(i int) Model {
 	return m
 }
 
-// renderBody draws the list, or the state that stands in for it: a collection
+// renderBody draws the list, or the state that stands in for it: a Watchlist
 // with no Tickets, or a first fetch that has not landed yet.
 func (m Model) renderBody() string {
 	height := m.bodyHeight()
@@ -615,7 +673,7 @@ func (m Model) renderBody() string {
 	case m.hasData && len(m.rows) > 0:
 		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities, m.styles)
 	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
-		// Distinct from the empty collection below on purpose: "there is
+		// Distinct from the empty Watchlist below on purpose: "there is
 		// nothing here" and "you are hiding everything" look identical on
 		// screen, and a user who cannot tell them apart thinks sitrep is
 		// broken.
@@ -637,15 +695,20 @@ func (m Model) renderBody() string {
 }
 
 // footerLines is the always-visible bottom block, line by line: a blank
-// spacer, the refresh error when there is one, the filter state when there is
-// one, then the help line. The error is a single truncated line, not a modal
-// and not a stack trace — the list behind it is still the point.
+// spacer, the Query cutoff notice when there is one, the refresh error when
+// there is one, the filter state when there is one, then the help line. The
+// notice and error are single truncated lines, not modals — the list behind
+// them is still the point.
 //
 // It is returned as lines rather than a block because the footer's height is
 // what the body is measured against, and because the find box needs to know
 // which row it was drawn on to put the cursor there.
 func (m Model) footerLines() []string {
 	lines := []string{""}
+	if m.hasData && m.input.LimitReached {
+		lines = append(lines, m.styles.Muted.Render(truncateLine(
+			plain.LimitNotice(len(m.input.Tickets)), m.width)))
+	}
 	if m.lastErr != nil && m.hasData {
 		remaining := m.interval - m.now().Sub(m.lastAttempt)
 		lines = append(lines, m.styles.Error.Render(truncateLine(
@@ -712,28 +775,81 @@ func searchBoxWidth(terminalWidth int) int {
 }
 
 // filterLineIndex is which footer row the filter line occupies: after the blank
-// spacer and after the refresh error, when there is one.
+// spacer, the optional cutoff notice and the optional refresh error.
 func (m Model) filterLineIndex() int {
-	if m.lastErr != nil && m.hasData {
-		return 2
+	index := 1
+	if m.hasData && m.input.LimitReached {
+		index++
 	}
-	return 1
+	if m.lastErr != nil && m.hasData {
+		index++
+	}
+	return index
 }
 
 // helpKeys is the keyboard surface the *list's* footer describes, which is the
 // one the keyboard is on whenever that footer is drawn. A footer offering list
 // commands while the find box holds the keyboard would be describing a program
 // the user is not in.
-//
-// The Detail screen's footer names m.detailKeys directly rather than going
-// through here: the list's body height is measured against this footer, and a
-// list whose window silently re-measured itself because another screen is open
-// would not come back the way it left.
 func (m Model) helpKeys() help.KeyMap {
 	if m.searching {
-		return m.searchKeys
+		return m.responsiveHelpKeys(m.searchKeys)
 	}
-	return m.keys
+	return m.responsiveHelpKeys(m.keys)
+}
+
+type responsiveHelpKeyMap struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (k responsiveHelpKeyMap) ShortHelp() []key.Binding  { return k.short }
+func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
+
+// responsiveHelpKeys keeps list and search help actionable at narrow widths.
+// Detail owns its richer role-aware layout in detailhelp.go.
+func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
+	short := append([]key.Binding(nil), keys.ShortHelp()...)
+	groups := keys.FullHelp()
+	full := make([][]key.Binding, len(groups))
+	for i := range groups {
+		full[i] = append([]key.Binding(nil), groups[i]...)
+	}
+
+	if m.width > 0 && m.width <= 42 {
+		for i := range full {
+			for j := range full[i] {
+				help := full[i][j].Help()
+				if help.Key == "m" && help.Desc == mouseEnabledHelp {
+					full[i][j].SetHelp("m", mouseEnabledCompactHelp)
+				}
+			}
+		}
+	}
+
+	unbounded := m.help
+	unbounded.SetWidth(0)
+	if len(short) >= 3 && short[0].Help().Key == "m" &&
+		short[0].Help().Desc == mouseEnabledHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("m", mouseEnabledCompactHelp)
+	}
+	if len(short) >= 3 && short[0].Help().Key == "shift-drag" &&
+		short[0].Help().Desc == searchMouseHintHelp &&
+		lipgloss.Width(unbounded.ShortHelpView(short[:3])) > m.width {
+		short[0].SetHelp("shift-drag", searchMouseHintCompactHelp)
+	}
+	if listKeys, ok := keys.(KeyMap); ok && m.help.ShowAll &&
+		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
+		full = compactListFullHelp(listKeys)
+	} else if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
+		stacked := make([]key.Binding, 0)
+		for _, group := range full {
+			stacked = append(stacked, group...)
+		}
+		full = [][]key.Binding{stacked}
+	}
+	return responsiveHelpKeyMap{short: short, full: full}
 }
 
 // staleness is the header's age indicator, read from the injected clock. It is

@@ -84,13 +84,18 @@
 //
 // # The request budget
 //
-// One polled refresh costs 1 + ceil(N/100) + N + C + A requests, where N is the
-// Ticket count, C ≤ N is the number of Tickets something is actually closing —
-// only those pay the second correlation request — and A ≤ C is the number whose
-// lead merge request is still live. For a thirty-Ticket Epic that is roughly
-// forty to ninety requests a refresh. Correlation is bounded to
-// mergeRequestWorkers concurrent requests and is fully context-cancellable; a
-// reader deciding whether to raise --interval deserves the number.
+// An expanded Epic refresh costs 1 + ceil(N/100) + N + C + A requests,
+// where N is the Ticket count, C ≤ N is the number of Tickets something is
+// actually closing — only those pay the second correlation request — and A ≤ C
+// is the number whose lead merge request is still live. An explicit Ref-list
+// costs R + I + C + A: one direct root read for each of R Refs, then correlation
+// for its I issue roots; a Query also pays its membership pages before those
+// same exact-root and correlation costs. Epic and milestone roots skip
+// correlation. Exact roots run with at most exactRootWorkers requests in flight;
+// correlation is separately bounded to mergeRequestWorkers concurrent requests
+// and is fully context-cancellable. For a thirty-Ticket Epic that is roughly
+// forty to ninety requests a refresh; a reader deciding whether to raise
+// --interval deserves the number.
 package gitlab
 
 import (
@@ -113,10 +118,11 @@ import (
 // pageSize is GitLab's documented maximum page, and maxPages bounds the loop.
 // An epic with five thousand children is a bug somewhere, not a situation
 // report, and an unbounded loop against a paging API is how a polling tool
-// hangs.
+// hangs. exactRootWorkers separately bounds Query and Ref-list direct reads.
 const (
-	pageSize = 100
-	maxPages = 50
+	pageSize         = 100
+	maxPages         = 50
+	exactRootWorkers = 8
 )
 
 // notePageSize is how many notes a drill-in reads. Nothing paginates: one
@@ -137,6 +143,7 @@ type Provider struct {
 	httpClient  *http.Client
 	tokenSource TokenSource
 	userAgent   string
+	maxTickets  int
 
 	tokenMu sync.Mutex
 	token   string
@@ -157,6 +164,7 @@ func New(host string, opts ...Option) *Provider {
 		httpClient:  &http.Client{Timeout: requestTimeout},
 		tokenSource: DefaultTokenSource,
 		userAgent:   buildinfo.Name + "/" + buildinfo.Version,
+		maxTickets:  provider.DefaultMaxTickets,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -185,7 +193,7 @@ func WithBaseURL(rawurl string) Option {
 }
 
 // WithPath sets the default group or project path — the Profile's project —
-// used for an Epic Ref that names none, such as the bare reference form "&12".
+// used for a Ref that names none, such as the bare reference form "&12".
 func WithPath(path string) Option {
 	return func(p *Provider) { p.path = strings.TrimSpace(path) }
 }
@@ -209,6 +217,16 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
+		}
+	}
+}
+
 // Name returns "gitlab". It is the --provider value and the provider field in
 // --json.
 func (p *Provider) Name() string { return "gitlab" }
@@ -220,65 +238,650 @@ func (p *Provider) Capabilities() model.Capabilities {
 		BlockingLinks: true, // the issue links endpoint, with its own link_type
 		Comments:      true, // notes, minus GitLab's system notes
 		PullRequests:  true, // related merge requests, with review posture and pipeline status
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
-// FetchEpic returns the Epic named by r and, for a group epic or a milestone,
-// every child issue GitLab lists under it.
-//
-// A milestone is an Epic that GitLab addresses differently, and nothing after
-// the mapping knows the difference: the same children, the same pagination, the
-// same correlation, the same Detail screen.
-//
-// A project issue Ref comes back with no Tickets, the issue's own identity on
-// Epic and its epic — or, failing that, its milestone — on Parent: GitLab's
-// hierarchy in v1 is collection → issues, and an issue's own child work items
-// (tasks) are not expanded. internal/cli decodes that into a Detail screen; the
-// driver never decides which screen opens (ADR-0003).
-//
-// Child epics are not expanded either — whatever the children endpoint returns
-// is exactly what sitrep shows.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
-	t, err := targetFor(r, p.path)
+// Resolve performs the authoritative read for selector. An Epic Selector expands
+// its GitLab root according to resolveEpic, a Ref-list Selector reads its exact
+// roots, and a Query Selector chooses membership before authoritatively reading
+// those roots.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	switch s := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, s)
+	case provider.RefListSelector:
+		return p.resolveRefList(ctx, s)
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, s.Query)
+	default:
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
+	}
+}
+
+// resolveEpic expands a group Epic or milestone by one child level. A project
+// issue returns as the decoded root with no child Tickets.
+func (p *Provider) resolveEpic(ctx context.Context, selector provider.EpicSelector) (model.WatchlistSnapshot, error) {
+	t, err := targetFor(selector.Ref, p.path)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	// Tickets starts non-nil so an Epic with no children renders as "no
 	// Tickets" rather than as null.
-	snap := model.EpicSnapshot{Tickets: []model.Ticket{}, Capabilities: p.Capabilities()}
+	snap := model.WatchlistSnapshot{Tickets: []model.Ticket{}, Capabilities: p.Capabilities()}
 
 	switch {
 	case t.kind == kindIssue:
 		if err := p.fetchIssueSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
+		snap.Header = provider.EpicHeader(snap.Epic)
 		// FetchedAt is left zero for the caller to stamp.
 		return snap, nil
 
 	case t.isMilestone():
 		if err := p.fetchMilestoneSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 
 	default:
 		if err := p.fetchEpicSnapshot(ctx, t, &snap); err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 	}
 
 	if err := p.correlate(ctx, snap.Tickets); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
+	snap.Header = provider.EpicHeader(snap.Epic)
 	return snap, nil
 }
 
-// fetchIssueSnapshot reads the single issue an Epic Ref turned out to name,
+func (p *Provider) resolveRefList(ctx context.Context, selector provider.RefListSelector) (model.WatchlistSnapshot, error) {
+	if len(selector.Refs) == 0 {
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"gitlab: a Ref-list Selector must contain at least one Ref")
+	}
+
+	tickets, err := p.readExactRefs(ctx, selector.Refs)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(tickets)),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	membershipPath := p.queryMembershipPath()
+	membershipPageSize := min(pageSize, p.maxTickets)
+	initialCapacity := membershipPageSize
+	refs := make([]ref.Ref, 0, initialCapacity)
+	seen := make(map[string]struct{}, initialCapacity)
+	page := 1
+	rawQuery := queryMembershipRawQuery(query, membershipPageSize, page)
+	seenRequests := map[string]struct{}{
+		queryMembershipRequestIdentity(membershipPath, rawQuery): {},
+	}
+	consumed := 0
+	followedContinuation := false
+	limitReached := false
+
+	for {
+		remaining := p.maxTickets - consumed
+		issues, header, err := p.searchQueryMembership(ctx, membershipPath, rawQuery, query)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+
+		overflow := len(issues) > remaining
+		if overflow {
+			issues = issues[:remaining]
+		}
+		for _, issue := range issues {
+			path := issue.projectPath()
+			if path == "" || issue.ProjectID <= 0 || issue.IID <= 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query search returned an issue with an invalid identity")
+			}
+			identity := strconv.Itoa(issue.ProjectID) + "#" + strconv.Itoa(issue.IID)
+			if _, duplicate := seen[identity]; duplicate {
+				continue
+			}
+			seen[identity] = struct{}{}
+			owner, repo, _ := strings.Cut(path, "/")
+			if owner == "" || repo == "" {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query search returned an issue with invalid project path %q", path)
+			}
+			refs = append(refs, ref.Ref{
+				Tracker: ref.TrackerGitLab,
+				Host:    p.host,
+				Owner:   owner,
+				Repo:    repo,
+				Number:  issue.IID,
+				Raw:     path + "#" + strconv.Itoa(issue.IID),
+			})
+		}
+		consumed += len(issues)
+		if followedContinuation && len(issues) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"gitlab: query pagination returned an empty continuation page")
+		}
+
+		nextPage := strings.TrimSpace(header.Get("x-next-page"))
+		nextCursor := strings.TrimSpace(header.Get("x-next-cursor"))
+		switch {
+		case overflow:
+			limitReached = true
+		case consumed == p.maxTickets:
+			limitReached = nextPage != "" || nextCursor != ""
+			if !limitReached {
+				_, limitReached, err = nextLink(header.Values("Link"))
+				if err != nil {
+					return model.WatchlistSnapshot{}, err
+				}
+			}
+		case nextPage != "":
+			if len(issues) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query reports more results but returned an empty page")
+			}
+			nextPageNumber, err := strconv.Atoi(nextPage)
+			if err != nil || nextPageNumber <= page {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query reports a malformed or non-forward next page")
+			}
+			nextRawQuery := queryMembershipRawQuery(query, membershipPageSize, nextPageNumber)
+			identity := queryMembershipRequestIdentity(membershipPath, nextRawQuery)
+			if _, repeated := seenRequests[identity]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query pagination repeated a continuation request")
+			}
+			seenRequests[identity] = struct{}{}
+			page = nextPageNumber
+			rawQuery = nextRawQuery
+			followedContinuation = true
+			continue
+		default:
+			next, found, err := nextLink(header.Values("Link"))
+			if err != nil {
+				return model.WatchlistSnapshot{}, err
+			}
+			if !found {
+				if nextCursor != "" {
+					return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+						"gitlab: query returned a cursor without a usable next link")
+				}
+				break
+			}
+			if len(issues) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query reports more results but returned an empty page")
+			}
+			nextRawQuery, identity, err := p.validateQueryContinuation(
+				membershipPath, rawQuery, query, next, membershipPageSize)
+			if err != nil {
+				return model.WatchlistSnapshot{}, err
+			}
+			if _, repeated := seenRequests[identity]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"gitlab: query pagination repeated a continuation request")
+			}
+			seenRequests[identity] = struct{}{}
+			rawQuery = nextRawQuery
+			followedContinuation = true
+			continue
+		}
+		break
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		var err error
+		tickets, err = p.readExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		LimitReached: limitReached,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+func (p *Provider) queryMembershipPath() string {
+	if p.path != "" {
+		return "/projects/" + url.PathEscape(p.path) + "/issues"
+	}
+	return "/issues"
+}
+
+func queryMembershipRawQuery(query string, perPage, page int) string {
+	rawQuery := query
+	if rawQuery != "" && !strings.HasSuffix(rawQuery, "&") {
+		rawQuery += "&"
+	}
+	return rawQuery + "per_page=" + strconv.Itoa(perPage) + "&page=" + strconv.Itoa(page)
+}
+
+func queryMembershipRequestIdentity(path, rawQuery string) string {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return path + "?" + rawQuery
+	}
+	return path + "?" + values.Encode()
+}
+
+func (p *Provider) searchQueryMembership(
+	ctx context.Context,
+	path, rawQuery, query string,
+) ([]issueWire, http.Header, error) {
+	var issues []issueWire
+	header, err := p.doQuery(ctx, path, rawQuery, query, &issues)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issues, header, nil
+}
+
+var queryPaginationParameters = map[string]struct{}{
+	"cursor":     {},
+	"id_after":   {},
+	"id_before":  {},
+	"page":       {},
+	"pagination": {},
+}
+
+func (p *Provider) validateQueryContinuation(
+	membershipPath, currentRawQuery, originalQuery, next string,
+	perPage int,
+) (string, string, error) {
+	current, err := url.Parse(p.baseURL + apiBase + membershipPath)
+	if err != nil {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: building the query pagination endpoint: %w", err)
+	}
+	current.RawQuery = currentRawQuery
+
+	reference, err := url.Parse(next)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	candidate := current.ResolveReference(reference)
+	if candidate.Opaque != "" || candidate.User != nil || candidate.Fragment != "" ||
+		!strings.EqualFold(candidate.Scheme, current.Scheme) ||
+		!strings.EqualFold(candidate.Host, current.Host) || candidate.Path != current.Path {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: query pagination returned an unsafe next link")
+	}
+
+	values, err := url.ParseQuery(candidate.RawQuery)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	membership, err := url.ParseQuery(originalQuery)
+	if err != nil {
+		return "", "", malformedQueryPaginationError()
+	}
+	remaining := cloneQueryValues(values)
+	for name, expected := range membership {
+		for _, value := range expected {
+			actual := remaining[name]
+			match := -1
+			for i := range actual {
+				if actual[i] == value {
+					match = i
+					break
+				}
+			}
+			if match < 0 {
+				return "", "", changedQueryMembershipError()
+			}
+			remaining[name] = append(actual[:match], actual[match+1:]...)
+		}
+	}
+
+	perPageValues := remaining["per_page"]
+	if len(perPageValues) != 1 || perPageValues[0] != strconv.Itoa(perPage) {
+		return "", "", provider.Errorf(provider.KindUnavailable,
+			"gitlab: query pagination changed the Provider page size")
+	}
+	delete(remaining, "per_page")
+	for name, entries := range remaining {
+		if len(entries) == 0 {
+			continue
+		}
+		if _, paging := queryPaginationParameters[name]; !paging {
+			return "", "", changedQueryMembershipError()
+		}
+	}
+	return candidate.RawQuery, membershipPath + "?" + values.Encode(), nil
+}
+
+func cloneQueryValues(values url.Values) url.Values {
+	clone := make(url.Values, len(values))
+	for name, entries := range values {
+		clone[name] = append([]string(nil), entries...)
+	}
+	return clone
+}
+
+func changedQueryMembershipError() error {
+	return provider.Errorf(provider.KindUnavailable,
+		"gitlab: query pagination changed the Selector membership")
+}
+
+func malformedQueryPaginationError() error {
+	return provider.Errorf(provider.KindUnavailable,
+		"gitlab: query returned malformed pagination links")
+}
+
+func nextLink(headers []string) (string, bool, error) {
+	if len(headers) == 0 {
+		return "", false, nil
+	}
+	values, err := splitLinkHeader(strings.Join(headers, ","))
+	if err != nil {
+		return "", false, malformedQueryPaginationError()
+	}
+
+	var next string
+	for _, value := range values {
+		target, relations, err := parseLinkValue(value)
+		if err != nil {
+			return "", false, malformedQueryPaginationError()
+		}
+		for _, relation := range relations {
+			if !strings.EqualFold(relation, "next") {
+				continue
+			}
+			if next != "" {
+				return "", false, malformedQueryPaginationError()
+			}
+			next = target
+		}
+	}
+	return next, next != "", nil
+}
+
+func splitLinkHeader(header string) ([]string, error) {
+	var values []string
+	start := 0
+	inTarget := false
+	inQuote := false
+	escaped := false
+	for i, r := range header {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
+		case inQuote && r == '"':
+			inQuote = false
+		case inQuote:
+		case inTarget && r == '>':
+			inTarget = false
+		case inTarget:
+		case r == '<':
+			inTarget = true
+		case r == '"':
+			inQuote = true
+		case r == ',':
+			value := strings.TrimSpace(header[start:i])
+			if value == "" {
+				return nil, malformedQueryPaginationError()
+			}
+			values = append(values, value)
+			start = i + 1
+		}
+	}
+	if inTarget || inQuote || escaped {
+		return nil, malformedQueryPaginationError()
+	}
+	value := strings.TrimSpace(header[start:])
+	if value == "" {
+		return nil, malformedQueryPaginationError()
+	}
+	return append(values, value), nil
+}
+
+func parseLinkValue(value string) (string, []string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "<") {
+		return "", nil, malformedQueryPaginationError()
+	}
+	end := strings.IndexByte(value, '>')
+	if end < 2 {
+		return "", nil, malformedQueryPaginationError()
+	}
+	target := strings.TrimSpace(value[1:end])
+	rest := strings.TrimSpace(value[end+1:])
+	if target == "" || (rest != "" && !strings.HasPrefix(rest, ";")) {
+		return "", nil, malformedQueryPaginationError()
+	}
+
+	var relations []string
+	seenRel := false
+	for rest != "" {
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, ";"))
+		if rest == "" {
+			return "", nil, malformedQueryPaginationError()
+		}
+		parameter, remaining, err := takeLinkParameter(rest)
+		if err != nil {
+			return "", nil, err
+		}
+		rest = remaining
+		name, rawValue, ok := strings.Cut(parameter, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			return "", nil, malformedQueryPaginationError()
+		}
+		decoded, err := decodeLinkParameter(strings.TrimSpace(rawValue))
+		if err != nil {
+			return "", nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "rel") {
+			if seenRel {
+				return "", nil, malformedQueryPaginationError()
+			}
+			seenRel = true
+			relations = strings.Fields(decoded)
+		}
+	}
+	return target, relations, nil
+}
+
+func takeLinkParameter(rest string) (string, string, error) {
+	inQuote := false
+	escaped := false
+	for i, r := range rest {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuote && r == '\\':
+			escaped = true
+		case r == '"':
+			inQuote = !inQuote
+		case !inQuote && r == ';':
+			return strings.TrimSpace(rest[:i]), rest[i:], nil
+		}
+	}
+	if inQuote || escaped {
+		return "", "", malformedQueryPaginationError()
+	}
+	return strings.TrimSpace(rest), "", nil
+}
+
+func decodeLinkParameter(value string) (string, error) {
+	if value == "" {
+		return "", malformedQueryPaginationError()
+	}
+	if value[0] != '"' {
+		if strings.ContainsAny(value, " \t\r\n\"") {
+			return "", malformedQueryPaginationError()
+		}
+		return value, nil
+	}
+
+	var decoded strings.Builder
+	escaped := false
+	for i := 1; i < len(value); i++ {
+		switch {
+		case escaped:
+			decoded.WriteByte(value[i])
+			escaped = false
+		case value[i] == '\\':
+			escaped = true
+		case value[i] == '"':
+			if strings.TrimSpace(value[i+1:]) != "" {
+				return "", malformedQueryPaginationError()
+			}
+			return decoded.String(), nil
+		default:
+			decoded.WriteByte(value[i])
+		}
+	}
+	return "", malformedQueryPaginationError()
+}
+
+func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, out any) (http.Header, error) {
+	token, err := p.resolveToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint, err := url.Parse(p.baseURL + apiBase + path)
+	if err != nil {
+		return nil, provider.Errorf(provider.KindUnavailable, "gitlab: building the request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, provider.Errorf(provider.KindUnavailable, "gitlab: building the request: %w", err)
+	}
+	// Query is already a tracker-native URL query component. Assign it only after
+	// NewRequest has parsed the endpoint: converting a URL carrying a literal '#'
+	// to a string and parsing it again would reinterpret the rest as a fragment.
+	req.URL.RawQuery = rawQuery
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, provider.Errorf(provider.KindUnavailable, "gitlab: requesting %s: %w",
+			apiBase+path, provider.RedactedTransportError(err))
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity {
+		message := errorPayload(res)
+		if message == "" {
+			message = "the Tracker rejected the query"
+		}
+		message = provider.RedactQuery(message, query)
+		return nil, provider.Errorf(provider.KindBadRef, "gitlab: query rejected: %s", message)
+	}
+	if err := checkStatus(res, "query", apiBase+path, p.host); err != nil {
+		return nil, provider.RedactQueryError(err, query)
+	}
+	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+		return nil, provider.Errorf(provider.KindUnavailable,
+			"gitlab: decoding the response from %s: %w", apiBase+path, err)
+	}
+	return res.Header, nil
+}
+
+// readExactRefs authoritatively reads each named root as one thin Ticket. All
+// Refs are validated before the first request. The bounded root fan-out writes
+// by Selector index and reports errors in that same order; merge-request
+// correlation runs only after every direct read succeeds.
+func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	targets := make([]target, len(refs))
+	for i, r := range refs {
+		t, err := targetFor(r, p.path)
+		if err != nil {
+			return nil, err
+		}
+		targets[i] = t
+	}
+
+	tickets := make([]model.Ticket, len(targets))
+	errs := make([]error, len(targets))
+	indices := make(chan int, len(targets))
+	for i := range targets {
+		indices <- i
+	}
+	close(indices)
+
+	var wg sync.WaitGroup
+	for range min(len(targets), exactRootWorkers) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range indices {
+				if err := ctx.Err(); err != nil {
+					errs[i] = err
+					continue
+				}
+				tickets[i], errs[i] = p.fetchRootTicket(ctx, targets[i])
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := p.correlate(ctx, tickets); err != nil {
+		return nil, err
+	}
+	return tickets, nil
+}
+
+func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket, error) {
+	switch {
+	case t.kind == kindIssue:
+		var issue issueWire
+		if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromIssue(issue), nil
+
+	case t.isMilestone():
+		milestone, err := p.fetchMilestone(ctx, t)
+		if err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromEpic(newEpicFromMilestone(milestone, p.host, t)), nil
+
+	default:
+		var epic epicWire
+		if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
+			return model.Ticket{}, err
+		}
+		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path)), nil
+	}
+}
+
+// fetchIssueSnapshot reads the single issue a Ref turned out to name,
 // including the merge requests moving it: model.Epic.PullRequests exists for
 // exactly this decoded Detail header, and cli.decodedTicket copies it onto the
 // Ticket it renders. One extra request, on a path that is a drill-in by
 // definition.
-func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	var issue issueWire
 	if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 		return err
@@ -296,7 +899,7 @@ func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model
 }
 
 // fetchEpicSnapshot reads a group epic and its children.
-func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	var epic epicWire
 	if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 		return err
@@ -324,7 +927,7 @@ func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.
 // A group milestone's issues span projects, so each Ticket's Repository and
 // project-qualified Key differ; newTicketFromIssue already derives both from the
 // issue's own references.full, so this needs no code of its own.
-func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *model.EpicSnapshot) error {
+func (p *Provider) fetchMilestoneSnapshot(ctx context.Context, t target, snap *model.WatchlistSnapshot) error {
 	milestone, err := p.fetchMilestone(ctx, t)
 	if err != nil {
 		return err
@@ -407,7 +1010,7 @@ func pagedGet[T any](ctx context.Context, p *Provider, t target, path, noun stri
 }
 
 // FetchDetail returns one Ticket's description, comments and, for an issue, its
-// links. id is what FetchEpic put on every Ticket; see the package doc for what
+// links. id is what Resolve put on every Ticket; see the package doc for what
 // it encodes.
 //
 // This is three requests where the polled path is two, and that is the point of
@@ -481,7 +1084,7 @@ func (p *Provider) fetchEpicDetail(ctx context.Context, t target, id model.Ticke
 
 // fetchMilestoneDetail reads a milestone's Detail, which a Ref naming a
 // milestone with no issues decodes to. It is one request: the same iids[] lookup
-// FetchEpic makes, which is what the iid-carrying TicketID trades for.
+// Resolve makes, which is what the iid-carrying TicketID trades for.
 //
 // Comments stays nil because GitLab has no milestone notes endpoint at all —
 // not because the Comments Capability is a lie. A Capability is a Provider-level

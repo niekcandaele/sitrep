@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
@@ -65,6 +67,33 @@ func TestRenderDetailRich(t *testing.T) {
 	}
 }
 
+func TestRenderDetailKeepsMarkdownSourceLiteral(t *testing.T) {
+	markdown := "# Heading\n\n- [x] task\n\n```go\nfmt.Println(\"raw\")\n```\n\nSee #12, @alice, and [docs](https://example.test/docs)."
+	var output bytes.Buffer
+	if err := jsonout.RenderDetail(&output, model.Detail{
+		TicketID:    "acme/widgets#40",
+		Description: markdown,
+		Comments:    []model.Comment{{Body: markdown}},
+	}, model.Capabilities{Comments: true}, "fake", generatedAt); err != nil {
+		t.Fatalf("RenderDetail: %v", err)
+	}
+	var document struct {
+		Description string `json:"description"`
+		Comments    []struct {
+			Body string `json:"body"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &document); err != nil {
+		t.Fatalf("unmarshal Detail: %v", err)
+	}
+	if document.Description != markdown || len(document.Comments) != 1 || document.Comments[0].Body != markdown {
+		t.Errorf("JSON changed raw Markdown: description %q, comments %+v", document.Description, document.Comments)
+	}
+	if strings.Contains(output.String(), "\x1b]8;") || strings.Contains(output.String(), "https://github.com/") {
+		t.Errorf("JSON rendered or rewrote Markdown: %q", output.String())
+	}
+}
+
 func TestRenderDetailMinimal(t *testing.T) {
 	got := renderDetail(t, fake.New(), minimalTicket)
 
@@ -112,15 +141,125 @@ func TestRenderDetailWithoutCommentsCapability(t *testing.T) {
 	}
 }
 
-func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
+func TestRenderWatchlistAlwaysEmitsATicketArray(t *testing.T) {
 	var buf bytes.Buffer
-	empty := model.EpicSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
-	if err := jsonout.RenderEpic(&buf, empty, "fake"); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	empty := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}, FetchedAt: generatedAt}
+	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "1"}}
+	if err := jsonout.RenderWatchlist(&buf, empty, selector, "fake"); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
 	if !strings.Contains(buf.String(), `"tickets": []`) {
 		t.Errorf("an epic with no tickets must emit an empty array, got:\n%s", buf.String())
+	}
+}
+
+func TestRenderRefListSelectorAndOmitsEpic(t *testing.T) {
+	snap := fake.FixtureRefListSnapshot()
+	snap.FetchedAt = generatedAt
+	selector := provider.RefListSelector{Refs: []ref.Ref{
+		{Raw: "  acme/widgets#121  "},
+		{Owner: "acme", Repo: "widgets", Number: 112},
+	}}
+
+	var buf bytes.Buffer
+	if err := jsonout.RenderWatchlist(&buf, snap, selector, "fake"); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
+	}
+
+	var doc struct {
+		SchemaVersion int `json:"schema_version"`
+		Watchlist     struct {
+			Selector struct {
+				Kind string   `json:"kind"`
+				Refs []string `json:"refs"`
+			} `json:"selector"`
+			Epic *json.RawMessage `json:"epic"`
+		} `json:"watchlist"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.SchemaVersion != 2 {
+		t.Errorf("schema_version = %d, want 2", doc.SchemaVersion)
+	}
+	if doc.Watchlist.Selector.Kind != "ref_list" {
+		t.Errorf("selector.kind = %q, want ref_list", doc.Watchlist.Selector.Kind)
+	}
+	wantRefs := []string{"acme/widgets#121", "acme/widgets#112"}
+	if !reflect.DeepEqual(doc.Watchlist.Selector.Refs, wantRefs) {
+		t.Errorf("selector.refs = %q, want %q", doc.Watchlist.Selector.Refs, wantRefs)
+	}
+	if doc.Watchlist.Epic != nil {
+		t.Error("Ref-list Watchlist emitted an epic")
+	}
+}
+
+func TestRenderQueryLimitReachedIsOptionalAndStructured(t *testing.T) {
+	const query = "state=opened&labels=ready"
+	p := fake.New(fake.WithMaxTickets(2))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	snap.FetchedAt = generatedAt
+
+	render := func(t *testing.T, snap model.WatchlistSnapshot, selector provider.Selector) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := jsonout.RenderWatchlist(&buf, snap, selector, p.Name()); err != nil {
+			t.Fatalf("RenderWatchlist: %v", err)
+		}
+		return buf.Bytes()
+	}
+
+	raw := render(t, snap, provider.QuerySelector{Query: query})
+	var doc struct {
+		SchemaVersion int `json:"schema_version"`
+		Watchlist     struct {
+			Selector struct {
+				Kind  string `json:"kind"`
+				Query string `json:"query"`
+			} `json:"selector"`
+			LimitReached *bool `json:"limit_reached"`
+		} `json:"watchlist"`
+		Progress struct {
+			Total int `json:"total"`
+		} `json:"progress"`
+		Tickets []json.RawMessage `json:"tickets"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.SchemaVersion != 2 || doc.Watchlist.Selector.Kind != "query" || doc.Watchlist.Selector.Query != query {
+		t.Errorf("schema/selector = %d/%+v, want schema 2 and exact Query", doc.SchemaVersion, doc.Watchlist.Selector)
+	}
+	if doc.Watchlist.LimitReached == nil || !*doc.Watchlist.LimitReached {
+		t.Errorf("limit_reached = %v, want present true", doc.Watchlist.LimitReached)
+	}
+	if len(doc.Tickets) != 2 || doc.Progress.Total != 2 {
+		t.Errorf("tickets/progress.total = %d/%d, want 2/2", len(doc.Tickets), doc.Progress.Total)
+	}
+	for _, forbidden := range []string{"max_tickets", `"total_matches"`, "Limit reached"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("limited Query JSON contains unsupported %q: %s", forbidden, raw)
+		}
+	}
+
+	snap.LimitReached = false
+	if raw := render(t, snap, provider.QuerySelector{Query: query}); strings.Contains(string(raw), `"limit_reached"`) {
+		t.Errorf("exhausted Query emitted limit_reached: %s", raw)
+	}
+	snap.LimitReached = true
+	if raw := render(t, snap, provider.RefListSelector{Refs: []ref.Ref{{Raw: "acme/widgets#112"}}}); strings.Contains(string(raw), `"limit_reached"`) {
+		t.Errorf("Ref-list emitted Query-only limit_reached: %s", raw)
+	}
+}
+
+func TestRenderWatchlistRejectsUnsupportedSelector(t *testing.T) {
+	var buf bytes.Buffer
+	if err := jsonout.RenderWatchlist(&buf, model.WatchlistSnapshot{}, nil, "fake"); err == nil {
+		t.Fatal("RenderWatchlist accepted a nil Selector")
 	}
 }
 
@@ -129,29 +268,33 @@ func TestRenderEpicAlwaysEmitsATicketArray(t *testing.T) {
 func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 	p := fake.New()
 
-	snap, err := p.FetchEpic(context.Background(), ref.Ref{Raw: "111"})
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{Raw: "111"}})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	snap.FetchedAt = generatedAt
 
-	var epicBuf bytes.Buffer
-	if err := jsonout.RenderEpic(&epicBuf, snap, p.Name()); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	var watchlistBuf bytes.Buffer
+	selector := provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}
+	if err := jsonout.RenderWatchlist(&watchlistBuf, snap, selector, p.Name()); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 
-	documents := map[string][]byte{
-		"epic":   epicBuf.Bytes(),
-		"detail": renderDetail(t, p, richTicket),
+	documents := map[string]struct {
+		raw     []byte
+		version float64
+	}{
+		"watchlist": {raw: watchlistBuf.Bytes(), version: 2},
+		"detail":    {raw: renderDetail(t, p, richTicket), version: 1},
 	}
-	for name, raw := range documents {
+	for name, document := range documents {
 		var doc map[string]any
-		if err := json.Unmarshal(raw, &doc); err != nil {
+		if err := json.Unmarshal(document.raw, &doc); err != nil {
 			t.Errorf("the %s document is not valid JSON: %v", name, err)
 			continue
 		}
-		if got := doc["schema_version"]; got != float64(1) {
-			t.Errorf("%s schema_version = %v, want 1", name, got)
+		if got := doc["schema_version"]; got != document.version {
+			t.Errorf("%s schema_version = %v, want %v", name, got, document.version)
 		}
 		if got := doc["generated_at"]; got != "2026-01-15T12:00:00Z" {
 			t.Errorf("%s generated_at = %v, want an RFC 3339 UTC timestamp", name, got)

@@ -1,0 +1,21 @@
+{
+  "id": 198100005,
+  "iid": 7,
+  "project_id": 51000123,
+  "title": "Publish the release archives",
+  "description": "Authoritative direct description, dropped from the thin Ticket.",
+  "state": "opened",
+  "labels": [],
+  "milestone": null,
+  "assignees": [],
+  "web_url": "https://gitlab.com/gitlab-org/platform/core/-/work_items/7",
+  "references": {
+    "short": "#7",
+    "relative": "gitlab-org/platform/core#7",
+    "full": "gitlab-org/platform/core#7"
+  },
+  "_links": {
+    "self": "https://gitlab.com/api/v4/projects/51000123/issues/7",
+    "closed_as_duplicate_of": null
+  }
+}

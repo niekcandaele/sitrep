@@ -1,7 +1,7 @@
 # GitHub driver fixtures
 
 These payloads are replayed by the local test server in `github_test.go`. They are the
-GitHub driver's only test seam: assertions target the normalized `model.EpicSnapshot`, and
+GitHub driver's only test seam: assertions target the normalized `model.WatchlistSnapshot`, and
 no test in this repository ever calls the live API.
 
 ## Provenance
@@ -57,8 +57,66 @@ The shapes and what each one proves:
 | #100 | one with `commits.nodes: []`, one with `statusCheckRollup: null` | no CI, no panic |
 | #101 | an unknown `state`, `reviewDecision` and rollup, and a null `repository` | unknown never reads as green |
 
+### Cross-referenced pull requests
+
+`cross_reference_prs.json` was added on **2026-08-23** and is a small,
+**hand-written** aliased exact-Ref response, not a live recording. Its recognizable
+row reproduces the observed relationship between `niekcandaele/sitrep#44` and PR
+`#50`: the closing connection was empty while a PR-sourced
+`CrossReferencedEvent` linked the two. In the observed case, PR #50 targeted
+`epic/sitrep-v0.2`, a non-default integration branch. The fixture deliberately
+omits `baseRefName` and every other branch field because the native relationship,
+not a branch-name heuristic, is the behavior under test.
+
+The #44/#50 payload is deliberately edited to an open, review-required state so
+list normalization can be asserted after the historical PR merged. The remaining
+rows (#144/#150, #244/#250, and #344/#350) are clearly numbered synthetic copies:
+they add a cross-repository draft PR, an explicitly closed Ticket with a merged
+PR, and the same PR in both relationships with repository casing changed. An
+Issue-sourced event beside #50 proves non-PR sources are ignored. Aggregate
+checks, review values, timestamps, timeline `totalCount`, and retained-window
+`pageInfo` are all deliberate test values; no credentials or personal payloads
+were captured.
+
 `epic_empty.json` is the same real epic node with an empty `subIssues` page: an issue with
 no sub-issues is not an error, it is a Ticket someone pointed sitrep at.
+
+## Native queries
+
+The Query fixtures were added on **2026-08-22** and are **hand-written** to GitHub's
+GraphQL search response and error shapes; no live native query was recorded. They contain
+no credentials or personal data. The authoritative second stage deliberately reuses the
+existing aliased exact-Ref fixtures described below rather than introducing another copy of
+those issue payloads.
+
+| Fixture | deliberate shape and purpose |
+|---|---|
+| `query_membership.json` | cross-repository Issue identities in search order, `issueCount` evidence, a PullRequest node to ignore, a case-varied duplicate identity, and stale title data that cannot reach output |
+| `query_empty.json` | an empty `search.nodes` array, proving a zero-match Query succeeds without an exact-root request |
+| `query_invalid.json` | a documented GraphQL error envelope carrying `SEARCH_QUERY_ERROR` and an unclosed-quotation explanation, proving malformed native Query classification and prose |
+
+## Explicit Ref lists
+
+The Ref-list fixtures were added on **2026-08-22** and replay the dynamic aliased GraphQL
+response shape. They are deliberately hand-edited fixture payloads, not fresh live recordings:
+the successful nodes and pull-request shapes are derived from `epic_page1.json` and
+`epic_page2.json`, while the second repository and failure identities are fictional. The
+payload contains no credentials; avatar URLs are the already-grafted examples from the Epic
+fixtures, so no additional redaction was needed.
+
+`ref_list.json` orders its JSON members as `ref2`, `ref0`, `ref3`, `ref1` even though the
+Selector order is `ref0` through `ref3`. That edit proves response-object order cannot change
+Watchlist order. It combines two repositories and one open pull request so the direct-read
+path also exercises qualified keys and derived InProgress status.
+
+The failure payloads each include valid data before the failing member so returning a partial
+Watchlist would be visible:
+
+| Fixture | deliberate edit and purpose |
+|---|---|
+| `ref_list_missing.json` | `ref1` is a null repository, representing a missing or inaccessible target |
+| `ref_list_pull_request.json` | `ref1.issue` is null while `issueOrPullRequest.__typename` is `PullRequest` |
+| `ref_list_errors.json` | a `NOT_FOUND` GraphQL error carries path `["ref1"]`, alongside valid `ref0` data |
 
 ## Refs that name a Ticket
 

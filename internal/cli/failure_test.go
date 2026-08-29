@@ -14,7 +14,6 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
-	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // authFailure is what a rejected credential looks like coming out of a driver:
@@ -32,7 +31,7 @@ func TestNonRetryablePreflightFailureNeverOpensTheMonitor(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	code := cli.RunWith([]string{"111"}, &stdout, &stderr, cli.Deps{
-		Provider: fake.New(fake.WithEpicError(authFailure)),
+		Provider: fake.New(fake.WithResolveError(authFailure)),
 		Stdin:    strings.NewReader(""),
 	})
 
@@ -70,7 +69,7 @@ func TestRetryablePreflightFailureStillOpensTheMonitor(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 
 			code := cli.RunWith([]string{"111"}, &stdout, &stderr, cli.Deps{
-				Provider: fake.New(fake.WithEpicError(failure)),
+				Provider: fake.New(fake.WithResolveError(failure)),
 				Stdin:    strings.NewReader(""),
 			})
 
@@ -85,11 +84,83 @@ func TestRetryablePreflightFailureStillOpensTheMonitor(t *testing.T) {
 	}
 }
 
+func TestNonRetryableQueryPreflightNeverOpensTheMonitor(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *fake.Provider
+		want string
+	}{
+		{
+			name: "malformed",
+			p: fake.New(fake.WithResolveError(
+				provider.Errorf(provider.KindBadRef, "fake: query rejected: invalid syntax"))),
+			want: "sitrep: fake: query rejected: invalid syntax\n",
+		},
+		{
+			name: "unsupported",
+			p: fake.New(fake.WithCapabilities(model.Capabilities{Selectors: model.SelectorCapabilities{
+				Epic: true, RefList: true,
+			}})),
+			want: "sitrep: fake: Query Selector is not supported\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith([]string{"--query", " label:bug "}, &stdout, &stderr, cli.Deps{
+				Provider: tt.p,
+				Stdin:    strings.NewReader(""),
+				OpenTTY:  panicTTY,
+			})
+
+			if code != 1 || stdout.Len() != 0 {
+				t.Fatalf("result = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if stderr.String() != tt.want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.want)
+			}
+			selector, ok := tt.p.LastSelector().(provider.QuerySelector)
+			if !ok || selector.Query != " label:bug " {
+				t.Errorf("selector = %#v, want exact Query", tt.p.LastSelector())
+			}
+			if tt.p.ResolveCalls() != 1 || tt.p.DetailCalls() != 0 {
+				t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", tt.p.ResolveCalls(), tt.p.DetailCalls())
+			}
+		})
+	}
+}
+
+func TestRetryableQueryPreflightStillOpensTheMonitor(t *testing.T) {
+	p := fake.New(fake.WithResolveError(
+		provider.Errorf(provider.KindUnavailable, "fake: requesting the API: network down")))
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"--query", " label:bug "}, &stdout, &stderr, cli.Deps{
+		Provider: p,
+		Stdin:    strings.NewReader(""),
+		OpenTTY:  panicTTY,
+	})
+
+	if code != 1 || stdout.Len() != 0 {
+		t.Fatalf("result = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "needs a terminal") {
+		t.Errorf("stderr = %q, want monitor terminal failure", stderr.String())
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != " label:bug " {
+		t.Errorf("selector = %#v, want exact Query", p.LastSelector())
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
 // A one-shot mode prints the failure whatever its class: there is no monitor to
 // keep open, so retryability changes nothing there.
 func TestOneShotModesPrintEveryFailureClass(t *testing.T) {
 	for _, mode := range []string{"--json", "--plain"} {
-		got := run([]string{"111", mode}, fake.New(fake.WithEpicError(authFailure)))
+		got := run([]string{"111", mode}, fake.New(fake.WithResolveError(authFailure)))
 
 		if got.code != 1 {
 			t.Errorf("%s: exit code = %d, want 1", mode, got.code)
@@ -116,12 +187,12 @@ func (interruptingProvider) FetchDetail(context.Context, model.TicketID) (model.
 	return model.Detail{}, errors.New("fake: not reached")
 }
 
-func (interruptingProvider) FetchEpic(ctx context.Context, _ ref.Ref) (model.EpicSnapshot, error) {
+func (interruptingProvider) Resolve(ctx context.Context, _ provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 	<-ctx.Done()
-	return model.EpicSnapshot{}, provider.Errorf(provider.KindUnavailable,
+	return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 		"fake: requesting the API: %w", ctx.Err())
 }
 

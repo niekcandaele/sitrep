@@ -34,7 +34,7 @@ const (
 	barEmptyRune  = "░"
 )
 
-// renderHeader draws the block above the list: the collection's identity, then
+// renderHeader draws the block above the list: the Watchlist's identity, then
 // its progress bar, counts and staleness indicator.
 //
 // The progress it reports is computed from every Ticket in the reading, never
@@ -59,11 +59,15 @@ func rightAlign(s string, width int) string {
 	return truncateLine(s, width)
 }
 
-// headerIdentity draws "#111  Widget sync v2 …" with the collection's URL
-// right-aligned when there is room for it. The URL is a convenience, not
-// load-bearing: it is the first thing dropped on a narrow terminal.
-func headerIdentity(h Header, width int, s Styles) string {
-	left := s.HeaderKey.Render(h.Key)
+// headerIdentity draws a Header's key and title, with its URL right-aligned
+// when there is room for it. The URL is a convenience, not load-bearing: it is
+// the first thing dropped on a narrow terminal.
+func headerIdentity(h Header, width int, s Styles, hyperlinkKey ...bool) string {
+	key := s.HeaderKey.Render(h.Key)
+	if len(hyperlinkKey) > 0 && hyperlinkKey[0] {
+		key = renderHyperlink(s.HeaderKey, h.Key, h.URL)
+	}
+	left := key
 	if h.Key != "" && h.Title != "" {
 		left += "  "
 	}
@@ -72,7 +76,7 @@ func headerIdentity(h Header, width int, s Styles) string {
 	if h.URL == "" {
 		return truncateLine(left, width)
 	}
-	right := s.HeaderURL.Render(h.URL)
+	right := renderHyperlink(s.HeaderURL, h.URL, h.URL)
 	if lipgloss.Width(left)+2+lipgloss.Width(right) > width {
 		return truncateLine(left, width)
 	}
@@ -109,6 +113,20 @@ func pairLine(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+// pairLineReserved keeps the right fragment visible by clipping the left one
+// before delegating to pairLine. It is used where the right-hand fact is
+// load-bearing, such as a scroll position.
+func pairLineReserved(left, right string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(right) >= width {
+		return rightAlign(ansi.Truncate(right, width, ""), width)
+	}
+	left = ansi.Truncate(left, width-lipgloss.Width(right)-1, "")
+	return pairLine(left, right, width)
+}
+
 // renderBar draws the completion bar. The fill count comes from plain.BarFill
 // so the monitor and the --plain report round identically.
 func renderBar(p model.Progress, width int, s Styles) string {
@@ -142,7 +160,9 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 
 	titleWidth := width - selectionGutter - keyColumn
 	title := titleStyle.Render(plain.Truncate(r.Ticket.Title, titleWidth))
-	lines := []string{marker + s.TicketKey.Render(plain.PadKey(r.Ticket.Key, keyColumn)) + title}
+	keyPadding := strings.Repeat(" ", max(keyColumn-len([]rune(r.Ticket.Key)), 0))
+	key := renderHyperlink(s.TicketKey, r.Ticket.Key, r.Ticket.URL) + keyPadding
+	lines := []string{marker + key + title}
 
 	if meta := ticketMeta(r.Ticket, caps, s); meta != "" {
 		// The meta line is clipped here, with an ellipsis, rather than left to
@@ -205,11 +225,12 @@ func pullRequest(t model.Ticket, caps model.Capabilities, s Styles) string {
 		return ""
 	}
 	lead := t.PullRequests[0]
-	summary := plain.PullRequestSummary(lead, t.Repository)
+	style := s.pullRequest(lead)
+	summary := renderHyperlink(style, plain.PullRequestSummary(lead, t.Repository), lead.URL)
 	if rest := len(t.PullRequests) - 1; rest > 0 {
-		summary += fmt.Sprintf(" +%d more", rest)
+		summary += style.Render(fmt.Sprintf(" +%d more", rest))
 	}
-	return s.pullRequest(lead).Render(summary)
+	return summary
 }
 
 // rowHeights returns how many terminal lines each row occupies, which is what
@@ -230,6 +251,22 @@ func rowHeights(rows []Row, caps model.Capabilities) []int {
 		}
 	}
 	return heights
+}
+
+// rowAt maps a zero-based line in the rendered list body back to the row that
+// owns it. The height map is authoritative: a later group heading owns its
+// spacer and heading lines, while a Ticket owns both its title and meta lines.
+func rowAt(heights []int, offset, y int) (int, bool) {
+	if len(heights) == 0 || offset < 0 || offset >= len(heights) || y < 0 {
+		return 0, false
+	}
+	for i := offset; i < len(heights); i++ {
+		if y < heights[i] {
+			return i, true
+		}
+		y -= heights[i]
+	}
+	return 0, false
 }
 
 // ensureVisible returns the offset that keeps the selected row inside a window

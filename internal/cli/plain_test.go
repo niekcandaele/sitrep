@@ -9,6 +9,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/cli"
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
@@ -32,11 +33,136 @@ func TestPlainEpicReport(t *testing.T) {
 	checkGolden(t, "epic_plain.golden.txt", []byte(got.stdout))
 
 	// ADR-0003: the epic path is one batched fetch and never touches Detail.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1 batched fetch", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1 batched fetch", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: rendering a list must not fetch detail", n)
+	}
+}
+
+func TestPlainRefListReport(t *testing.T) {
+	p := fake.New(fake.WithMaxTickets(1))
+	got := run([]string{
+		"acme/widgets#112",
+		"--plain",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}, p)
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	checkGolden(t, "ref_list_plain.golden.txt", []byte(got.stdout))
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  4 tickets\n") {
+		t.Errorf("plain output starts %q, want Ref-list Header", got.stdout[:min(len(got.stdout), 40)])
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestPlainQueryReportKeepsFullHeader(t *testing.T) {
+	p := fake.New()
+	query := "state=opened&labels=agent"
+
+	got := run([]string{"--query", query, "--plain"}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if got.stderr != "" {
+		t.Errorf("stderr = %q, want empty", got.stderr)
+	}
+	checkGolden(t, "query_plain.golden.txt", []byte(strings.TrimSuffix(got.stdout, "\n")))
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  "+query+"\n") {
+		t.Errorf("plain output does not preserve full Query Header: %q", got.stdout[:min(len(got.stdout), 80)])
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d, Detail %d; want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestPlainQueryLimitNotice(t *testing.T) {
+	p := fake.New(fake.WithMaxTickets(2))
+	got := run([]string{"--query", "state=opened", "--plain"}, p)
+	if got.code != 0 || got.stderr != "" {
+		t.Fatalf("result = code %d stderr %q", got.code, got.stderr)
+	}
+
+	const notice = "Limit reached — showing 2 tickets."
+	if strings.Count(got.stdout, notice) != 1 {
+		t.Errorf("notice count = %d, want 1:\n%s", strings.Count(got.stdout, notice), got.stdout)
+	}
+	if !strings.Contains(got.stdout, notice+"\n\nIN PROGRESS (2)\n") {
+		t.Errorf("notice is not the final header line before the Ticket groups:\n%s", got.stdout)
+	}
+	if strings.Contains(got.stdout, "total") || strings.Contains(got.stdout, "max_tickets") {
+		t.Errorf("limited report claims an unknown total or configured max:\n%s", got.stdout)
+	}
+}
+
+func TestPlainEmptyQueryWatchlistUsesGenericEmptyState(t *testing.T) {
+	p := fake.New(fake.WithSnapshots(model.WatchlistSnapshot{Tickets: []model.Ticket{}}))
+
+	got := run([]string{"--plain", "--query", "state=none"}, p)
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	checkGolden(t, "query_plain_empty.golden.txt", []byte(strings.TrimSuffix(got.stdout, "\n")))
+	if !strings.Contains(got.stdout, "This Watchlist has no Tickets") {
+		t.Errorf("stdout = %q, want generic empty Watchlist wording", got.stdout)
+	}
+}
+
+func TestPlainStdinRefListMatchesPositionalSelection(t *testing.T) {
+	input := "acme/widgets#112\nacme/widgets#115 acme/widgets#118\tacme/widgets#121\n"
+	before := runStdin([]string{"--plain", "-"}, input, fake.New(fake.WithMaxTickets(1)))
+	after := runStdin([]string{"-", "--plain"}, input, fake.New(fake.WithMaxTickets(1)))
+	positional := run([]string{
+		"--plain",
+		"acme/widgets#112",
+		"acme/widgets#115",
+		"acme/widgets#118",
+		"acme/widgets#121",
+	}, fake.New(fake.WithMaxTickets(1)))
+
+	if before.code != 0 || after.code != 0 {
+		t.Fatalf("stdin runs failed: before=%q after=%q", before.stderr, after.stderr)
+	}
+	if before.stdout != after.stdout || before.stdout != positional.stdout {
+		t.Error("stdin and positional Refs produced different plain Watchlists")
+	}
+	checkGolden(t, "ref_list_plain.golden.txt", []byte(before.stdout))
+}
+
+func TestPlainSingleStdinRefUsesOneTicketHeader(t *testing.T) {
+	got := runStdin([]string{"--plain", "-"}, "acme/widgets#112", fake.New(fake.WithMaxTickets(1)))
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if !strings.HasPrefix(got.stdout, "\nWatchlist  1 ticket\n") {
+		t.Errorf("plain output starts %q, want one-ticket Header", got.stdout[:min(len(got.stdout), 40)])
+	}
+}
+
+func TestStdinBareRefsUseCWDRemoteForEveryMember(t *testing.T) {
+	p := fake.New()
+	lookups := 0
+	got := runWith([]string{"--json", "-"}, cli.Deps{
+		Provider: p,
+		Stdin:    strings.NewReader("112\t115"),
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			lookups++
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if lookups != 2 || len(selector.Refs) != 2 || selector.Refs[0].Number != 112 || selector.Refs[1].Number != 115 {
+		t.Errorf("lookups = %d selector = %+v, want two resolved bare Refs", lookups, selector)
 	}
 }
 
@@ -58,7 +184,10 @@ func TestPlainHasNoEscapeSequences(t *testing.T) {
 // An undeclared Capability is silently absent, never an error: with pull
 // requests off no Ticket carries pull request text and nothing complains.
 func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 
 	got := run([]string{"111", "--plain"}, p)
 
@@ -82,10 +211,15 @@ func TestPlainOmitsUndeclaredCapabilities(t *testing.T) {
 //
 // It is asserted against the renderer rather than through the CLI because a Ref
 // that answers with no Tickets is decoded as a Ticket now (decodesToTicket). The
-// body is still reachable — a collection whose Tickets have all gone renders it,
+// body is still reachable — a Watchlist whose Tickets have all gone renders it,
 // and the monitor's empty state is its twin — so it is still worth a golden.
 func TestPlainEmptyEpic(t *testing.T) {
-	empty := model.EpicSnapshot{
+	empty := model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{
+			Key:   "#900",
+			Title: "Widget sync v3: nothing planned yet",
+			URL:   "https://tracker.example.test/acme/widgets/900",
+		},
 		Epic: model.Epic{
 			ID:           "acme/widgets#900",
 			Key:          "#900",
@@ -97,8 +231,8 @@ func TestPlainEmptyEpic(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := plain.RenderEpic(&buf, empty); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, empty); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	checkGolden(t, "epic_plain_empty.golden.txt", buf.Bytes())
 }
@@ -123,7 +257,7 @@ func TestPlainGitHubEpicReport(t *testing.T) {
 // A half-written report followed by an error would leave a human reading a
 // truncated epic, so a failed fetch leaves stdout untouched.
 func TestPlainProviderFailure(t *testing.T) {
-	p := fake.New(fake.WithEpicError(errors.New("boom")))
+	p := fake.New(fake.WithResolveError(errors.New("boom")))
 
 	got := run([]string{"111", "--plain"}, p)
 
@@ -149,6 +283,33 @@ func TestPlainFlagOrderDoesNotMatter(t *testing.T) {
 	if before.stdout != after.stdout || before.code != after.code {
 		t.Errorf("flag order changed the run: %d/%d bytes, codes %d and %d",
 			len(before.stdout), len(after.stdout), before.code, after.code)
+	}
+}
+
+func TestPlainInterspersedBareRefListResolvesEachMemberOnce(t *testing.T) {
+	source := model.WatchlistSnapshot{Tickets: []model.Ticket{
+		{ID: "acme/widgets#38", Key: "#38", Title: "Thirty eight"},
+		{ID: "acme/widgets#39", Key: "#39", Title: "Thirty nine"},
+	}}
+	p := fake.New(fake.WithSnapshot(source))
+	lookups := 0
+	got := runWith([]string{"38", "--plain", "#39"}, cli.Deps{
+		Provider: p,
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			lookups++
+			return "git@github.com:acme/widgets.git", nil
+		},
+	})
+
+	if got.code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
+	}
+	if lookups != 2 {
+		t.Errorf("origin lookups = %d, want one per Ref at startup", lookups)
+	}
+	selector := p.LastSelector().(provider.RefListSelector)
+	if len(selector.Refs) != 2 || selector.Refs[0].Number != 38 || selector.Refs[1].Number != 39 {
+		t.Errorf("selector = %+v, want ordered 38, 39", selector)
 	}
 }
 
@@ -190,7 +351,7 @@ func TestPlainBareNumberResolvesThroughTheOriginRemote(t *testing.T) {
 		Tracker: ref.TrackerGitHub, Host: "github.com",
 		Owner: "acme", Repo: "widgets", Number: 111, Raw: "111",
 	}
-	if p.LastRef() != want {
-		t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), want)
+	if p.LastSelector().(provider.EpicSelector).Ref != want {
+		t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, want)
 	}
 }

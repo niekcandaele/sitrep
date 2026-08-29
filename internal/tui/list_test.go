@@ -85,22 +85,24 @@ func TestGroupHeadersAreNotSelectable(t *testing.T) {
 	}
 }
 
-// ListFromEpicSnapshot is the only place in the package that knows what an
-// Epic is; everything downstream sees a collection and a header.
-func TestListFromEpicSnapshot(t *testing.T) {
-	snap := model.EpicSnapshot{
-		Epic:         model.Epic{Key: "#111", Title: "Widget sync", URL: "https://example.test/111"},
+// ListFromWatchlistSnapshot copies the generic Header without deriving an
+// identity from the snapshot's Epic.
+func TestListFromWatchlistSnapshot(t *testing.T) {
+	snap := model.WatchlistSnapshot{
+		Header:       model.WatchlistHeader{Title: "4 tickets"},
+		Epic:         model.Epic{Key: "ignored", Title: "ignored", URL: "ignored"},
 		Tickets:      []model.Ticket{ticket("#1", model.StatusTodo)},
+		LimitReached: true,
 		Capabilities: model.Capabilities{PullRequests: true},
 	}
 
-	in := ListFromEpicSnapshot(snap)
+	in := ListFromWatchlistSnapshot(snap)
 
-	if in.Header.Key != "#111" || in.Header.Title != "Widget sync" || in.Header.URL != "https://example.test/111" {
-		t.Errorf("header = %+v, want the Epic's identity", in.Header)
+	if in.Header.Key != "" || in.Header.Title != "4 tickets" || in.Header.URL != "" {
+		t.Errorf("header = %+v, want the snapshot Header", in.Header)
 	}
-	if len(in.Tickets) != 1 || !in.Capabilities.PullRequests {
-		t.Errorf("input = %+v, want the Epic's Tickets and Capabilities", in)
+	if len(in.Tickets) != 1 || !in.LimitReached || !in.Capabilities.PullRequests {
+		t.Errorf("input = %+v, want Tickets, LimitReached, and Capabilities", in)
 	}
 }
 

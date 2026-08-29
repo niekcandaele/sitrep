@@ -16,7 +16,7 @@ func noLookup() ref.Option {
 	})
 }
 
-// The Jira-style key form: the third shape of the Epic Ref grammar. A key
+// The Jira-style key form: the third shape of the Ref grammar. A key
 // carries no host — only a Profile knows the site — and no number.
 func TestParseJiraStyleKey(t *testing.T) {
 	tests := []struct {

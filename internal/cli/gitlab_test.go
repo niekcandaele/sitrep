@@ -83,7 +83,7 @@ func replayGitLab(t *testing.T) *httptest.Server {
 			milestonePages++
 		case strings.HasSuffix(path, "/issues") && strings.Contains(path, "/milestones/"):
 			file = "milestone_issues_empty.json"
-		// The first Ticket of each collection carries a real merge request, so
+		// The first Ticket of each Watchlist carries a real merge request, so
 		// the whole-program assertion has something to find; the rest carry none.
 		case strings.HasSuffix(path, "/issues/101/closed_by"),
 			strings.HasSuffix(path, "/issues/201/closed_by"),
@@ -170,8 +170,8 @@ func TestJSONGitLabEpicDocument(t *testing.T) {
 
 	var doc struct {
 		Provider struct {
-			Name         string          `json:"name"`
-			Capabilities map[string]bool `json:"capabilities"`
+			Name         string                     `json:"name"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
 		} `json:"provider"`
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
@@ -181,7 +181,7 @@ func TestJSONGitLabEpicDocument(t *testing.T) {
 	if doc.Provider.Name != "gitlab" {
 		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
 	}
-	if !doc.Provider.Capabilities["pull_requests"] {
+	if string(doc.Provider.Capabilities["pull_requests"]) != "true" {
 		t.Error("provider.capabilities.pull_requests = false; this driver correlates merge requests")
 	}
 	if len(doc.Tickets) != 10 {
@@ -213,10 +213,12 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 
 	var doc struct {
 		Provider struct {
-			Name         string          `json:"name"`
-			Capabilities map[string]bool `json:"capabilities"`
+			Name         string                     `json:"name"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
 		} `json:"provider"`
-		Epic    map[string]json.RawMessage   `json:"epic"`
+		Watchlist struct {
+			Epic map[string]json.RawMessage `json:"epic"`
+		} `json:"watchlist"`
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
 	if err := json.Unmarshal([]byte(got.stdout), &doc); err != nil {
@@ -225,13 +227,13 @@ func TestJSONGitLabMilestoneDocument(t *testing.T) {
 	if doc.Provider.Name != "gitlab" {
 		t.Errorf("provider.name = %q, want gitlab", doc.Provider.Name)
 	}
-	if !doc.Provider.Capabilities["pull_requests"] {
+	if string(doc.Provider.Capabilities["pull_requests"]) != "true" {
 		t.Error("provider.capabilities.pull_requests = false, want true")
 	}
 	if len(doc.Tickets) != 7 {
 		t.Errorf("got %d tickets, want the fixture milestone's 7", len(doc.Tickets))
 	}
-	if got := string(doc.Epic["key"]); got != `"gitlab-org/cli%3"` {
+	if got := string(doc.Watchlist.Epic["key"]); got != `"gitlab-org/cli%3"` {
 		t.Errorf("epic.key = %s, want GitLab's own milestone reference", got)
 	}
 	if _, ok := doc.Tickets[0]["pull_requests"]; !ok {
@@ -395,8 +397,8 @@ func TestBareNumberInAGitLabCloneReachesTheGitLabDriver(t *testing.T) {
 		Tracker: ref.TrackerGitLab, Host: "gitlab.com",
 		Owner: "acme", Repo: "widgets", Number: 7, Raw: "7",
 	}
-	if p.LastRef() != want {
-		t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), want)
+	if p.LastSelector().(provider.EpicSelector).Ref != want {
+		t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, want)
 	}
 }
 
@@ -427,7 +429,7 @@ profiles:
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Tracker != ref.TrackerGitLab || r.Host != "git.acme.test" {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Tracker != ref.TrackerGitLab || r.Host != "git.acme.test" {
 		t.Errorf("the Provider was given %+v, want gitlab at git.acme.test", r)
 	}
 }
@@ -447,7 +449,7 @@ func TestSelfManagedCloneWithNoProfileIsStillGitHub(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if r := p.LastRef(); r.Tracker != ref.TrackerGitHub {
+	if r := p.LastSelector().(provider.EpicSelector).Ref; r.Tracker != ref.TrackerGitHub {
 		t.Errorf("the Provider was given %+v, want the GitHub Enterprise reading unchanged", r)
 	}
 }
@@ -488,8 +490,8 @@ func TestGitLabReferenceFormsResolveThroughAProfile(t *testing.T) {
 			if got.code != 0 {
 				t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 			}
-			if p.LastRef() != tt.want {
-				t.Errorf("the Provider was given %+v, want %+v", p.LastRef(), tt.want)
+			if p.LastSelector().(provider.EpicSelector).Ref != tt.want {
+				t.Errorf("the Provider was given %+v, want %+v", p.LastSelector().(provider.EpicSelector).Ref, tt.want)
 			}
 		})
 	}
@@ -505,7 +507,7 @@ func TestBareGitLabReferenceWithNoProfile(t *testing.T) {
 	if got.stdout != "" {
 		t.Errorf("stdout = %q, want empty on failure", got.stdout)
 	}
-	for _, want := range []string{"which GitLab instance", `"&12"`, "add a gitlab profile", "full URL"} {
+	for _, want := range []string{"which GitLab instance", `"&12"`, "add a gitlab profile", "pass the Ref's full URL"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}
@@ -601,7 +603,7 @@ func TestProviderGitLabRejectsAGitHubRef(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"is not a GitLab Epic Ref", "acme/widgets#111"} {
+	for _, want := range []string{"is not a GitLab Ref", "acme/widgets#111"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}

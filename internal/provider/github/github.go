@@ -1,5 +1,5 @@
 // Package github is sitrep's GitHub Tracker driver: it turns an issue with
-// sub-issues into a normalized Epic with its Tickets.
+// sub-issues or an explicit list of issues into a normalized Watchlist.
 //
 // The driver speaks GraphQL over plain net/http. A GraphQL client is a POST
 // with a JSON body, and hand-rolling it keeps sitrep free of runtime
@@ -34,6 +34,11 @@ const defaultHost = "github.com"
 // an unbounded loop against a paging API is how a polling tool hangs.
 const maxPages = 50
 
+// maxRefListAliases bounds one dynamically aliased GraphQL document. Larger
+// explicit lists are finite, known membership and are read in consecutive
+// chunks without changing their Selector order.
+const maxRefListAliases = 100
+
 // requestTimeout is the default per-request budget when the caller supplies no
 // HTTP client of its own.
 const requestTimeout = 30 * time.Second
@@ -46,6 +51,7 @@ type Provider struct {
 	httpClient  *http.Client
 	tokenSource TokenSource
 	userAgent   string
+	maxTickets  int
 
 	tokenMu sync.Mutex
 	token   string
@@ -68,6 +74,7 @@ func New(host string, opts ...Option) *Provider {
 		httpClient:  &http.Client{Timeout: requestTimeout},
 		tokenSource: DefaultTokenSource,
 		userAgent:   buildinfo.Name + "/" + buildinfo.Version,
+		maxTickets:  provider.DefaultMaxTickets,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -114,6 +121,16 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
+		}
+	}
+}
+
 // endpointFor derives the GraphQL endpoint from a host: github.com has its own
 // API domain, and every GitHub Enterprise host mounts the API under itself.
 func endpointFor(host string) string {
@@ -135,25 +152,46 @@ func (p *Provider) Capabilities() model.Capabilities {
 		Hierarchy:     true, // sub-issues are how an Epic is assembled
 		BlockingLinks: true, // blockedBy / blocking on the detail query
 		Comments:      true, // comments on the detail query
-		PullRequests:  true, // closedByPullRequestsReferences on the epic query
+		PullRequests:  true, // closing references and PR-sourced cross-reference events
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
-// FetchEpic returns the Epic named by r and every one of its sub-issues,
-// following sub-issue pagination to the last page. Cross-repo children need no
-// special handling: they arrive as ordinary nodes carrying their own
-// repository, and are attributed to it.
+// Resolve performs the authoritative read selected by selector. An Epic Selector
+// expands paged sub-issues, a Ref-list Selector reads its exact roots, and a Query
+// Selector chooses membership before authoritatively reading those roots.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	switch selected := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, selected.Ref)
+	case provider.RefListSelector:
+		return p.resolveRefList(ctx, selected.Refs)
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, selected.Query)
+	default:
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
+	}
+}
+
+// resolveEpic returns the named Epic and every one of its sub-issues, following
+// sub-issue pagination to the last page. Cross-repo children need no special
+// handling: they arrive as ordinary nodes carrying their own repository.
 //
 // Only one level of the sub-issue graph is fetched — sub-issues of sub-issues
 // are not expanded — so ParentID stays empty and every Ticket hangs directly
 // off the Epic.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistSnapshot, error) {
 	if err := checkRef(r); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	var (
-		snap     model.EpicSnapshot
+		snap     model.WatchlistSnapshot
 		epicRepo string
 		cursor   string
 		haveEpic bool
@@ -165,14 +203,14 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// A collection larger than sitrep's cap is a stable property of the
 			// ref: it will be exactly as large on the next tick, so retrying
 			// buys nothing.
-			return model.EpicSnapshot{}, provider.Errorf(provider.KindBadRef,
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
 				"github: %s has more than %d sub-issues; refusing to keep paging",
 				refKey(r), maxPages*100)
 		}
 
 		issue, err := p.fetchPage(ctx, r, cursor)
 		if err != nil {
-			return model.EpicSnapshot{}, err
+			return model.WatchlistSnapshot{}, err
 		}
 
 		if !haveEpic {
@@ -180,7 +218,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// a title edited mid-fetch cannot produce a half-updated snapshot.
 			snap.Epic = newEpic(issue)
 			epicRepo = issue.Repository.NameWithOwner
-			// The fetched issue's own parent, for an Epic Ref that turns out to
+			// The fetched issue's own parent, for a Ref that turns out to
 			// name a plain Ticket. Reporting it is all this driver does about it:
 			// which screen that opens is internal/cli's decision.
 			snap.Parent = newParent(issue.Parent, epicRepo)
@@ -199,20 +237,216 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 			// A server that reports a next page and hands over no usable cursor
 			// is misbehaving, not a ref the user got wrong — so it stays
 			// retryable, on the same terms as a 500.
-			return model.EpicSnapshot{}, provider.Errorf(provider.KindUnavailable,
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"github: %s reports more sub-issues but returned no new page cursor", refKey(r))
 		}
 		cursor = next.EndCursor
 	}
 
+	snap.Header = provider.EpicHeader(snap.Epic)
 	snap.Capabilities = p.Capabilities()
 	return snap, nil
+}
+
+// resolveQuery searches for membership identities page by page up to the
+// Provider's configured budget, then re-reads every accepted member through the
+// authoritative exact-root path. Search payload fields can therefore never
+// become rendered Ticket state.
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	membershipLimit := min(p.maxTickets, querySearchResultLimit)
+	initialCapacity := min(membershipLimit, queryPageSize)
+	refs := make([]ref.Ref, 0, initialCapacity)
+	seen := make(map[string]struct{}, initialCapacity)
+	seenCursors := make(map[string]struct{})
+	cursor := ""
+	consumed := 0
+	strongestIssueCount := 0
+	limitReached := false
+
+	for {
+		remaining := membershipLimit - consumed
+		variables := map[string]any{
+			"query": query,
+			"first": min(queryPageSize, remaining),
+			"after": nil,
+		}
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+
+		var response queryResponse
+		header, status, err := p.doGraphQL(ctx, queryMembershipDocument, variables, &response, true)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		if err := response.err(p.endpoint, header, query); err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		if status != http.StatusOK {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"github: unexpected response %d from %s", status, p.endpoint)
+		}
+
+		strongestIssueCount = max(strongestIssueCount, response.Data.Search.IssueCount)
+		nodes := response.Data.Search.Nodes
+		overflow := len(nodes) > remaining
+		if overflow {
+			nodes = nodes[:remaining]
+		}
+		for _, node := range nodes {
+			if node.TypeName != "Issue" {
+				continue
+			}
+			owner, repo, ok := strings.Cut(node.Repository.NameWithOwner, "/")
+			if !ok || owner == "" || repo == "" || node.Number <= 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query search returned an Issue with an invalid identity")
+			}
+			identity := strings.ToLower(node.Repository.NameWithOwner) + "#" + strconv.Itoa(node.Number)
+			if _, duplicate := seen[identity]; duplicate {
+				continue
+			}
+			seen[identity] = struct{}{}
+			refs = append(refs, ref.Ref{
+				Tracker: ref.TrackerGitHub,
+				Host:    p.host,
+				Owner:   owner,
+				Repo:    repo,
+				Number:  node.Number,
+				Raw:     node.Repository.NameWithOwner + "#" + strconv.Itoa(node.Number),
+			})
+		}
+		consumed += len(nodes)
+		if cursor != "" && len(nodes) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"github: query pagination returned an empty continuation page")
+		}
+
+		pageInfo := response.Data.Search.PageInfo
+		switch {
+		case overflow:
+			limitReached = true
+		case consumed == membershipLimit:
+			limitReached = pageInfo.HasNextPage || strongestIssueCount > consumed
+		case !pageInfo.HasNextPage:
+			limitReached = strongestIssueCount > consumed
+		default:
+			if len(nodes) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but returned an empty page")
+			}
+			if pageInfo.EndCursor == "" {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but returned no new page cursor")
+			}
+			if _, repeated := seenCursors[pageInfo.EndCursor]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"github: query reports more results but repeated a page cursor")
+			}
+			seenCursors[pageInfo.EndCursor] = struct{}{}
+			cursor = pageInfo.EndCursor
+			continue
+		}
+		break
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		var err error
+		tickets, err = p.readExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		LimitReached: limitReached,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+// resolveRefList wraps the direct authoritative read in the Ref-list snapshot
+// shape. No outer Epic or Parent is synthesized from the named members.
+func (p *Provider) resolveRefList(ctx context.Context, refs []ref.Ref) (model.WatchlistSnapshot, error) {
+	if len(refs) == 0 {
+		return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+			"github: a Ref-list selector requires at least one Ref")
+	}
+
+	tickets, err := p.readExactRefs(ctx, refs)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(refs)),
+		Tickets:      tickets,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+// readExactRefs authoritatively reads the named issue roots in bounded aliased
+// GraphQL batches. It validates the complete set before I/O and returns no
+// Tickets when any chunk or member fails, so callers cannot expose a partial
+// Watchlist. Query selectors can reuse this exact-root read after resolving
+// their own membership.
+func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	for _, r := range refs {
+		if err := checkExactRef(r); err != nil {
+			return nil, err
+		}
+	}
+
+	tickets := make([]model.Ticket, 0, len(refs))
+	for start := 0; start < len(refs); start += maxRefListAliases {
+		end := min(start+maxRefListAliases, len(refs))
+		chunk, err := p.readExactRefChunk(ctx, refs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		tickets = append(tickets, chunk...)
+	}
+	return tickets, nil
+}
+
+func (p *Provider) readExactRefChunk(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	variables := make(map[string]any, len(refs)*3)
+	for i, r := range refs {
+		suffix := strconv.Itoa(i)
+		variables["owner"+suffix] = r.Owner
+		variables["repo"+suffix] = r.Repo
+		variables["number"+suffix] = r.Number
+	}
+
+	var resp refListResponse
+	header, err := p.do(ctx, buildRefListQuery(len(refs)), variables, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.err(refs, p.endpoint, header); err != nil {
+		return nil, err
+	}
+
+	tickets := make([]model.Ticket, 0, len(refs))
+	for i, r := range refs {
+		repository := resp.Data["ref"+strconv.Itoa(i)]
+		if repository == nil || repository.Issue == nil {
+			if repository != nil && repository.Kind != nil && repository.Kind.TypeName == "PullRequest" {
+				return nil, provider.Errorf(provider.KindBadRef,
+					"github: %s is a pull request, not a Ticket", refKey(r))
+			}
+			return nil, provider.Errorf(provider.KindBadRef,
+				"github: %s not found (or you lack access)", refKey(r))
+		}
+		tickets = append(tickets, newTicket(*repository.Issue, ""))
+	}
+	return tickets, nil
 }
 
 // FetchDetail returns one Ticket's description, comments and blocked-by/blocks
 // links in a single request, sending detailQuery rather than widening the polled
 // epic document (ADR-0003). id is GitHub's GraphQL node ID, which is what
-// FetchEpic put on every Ticket.
+// Resolve put on every Ticket.
 //
 // Nothing here paginates: one drill-in is one request, and the caps in
 // detailQuery say what a very long discussion or dependency list gives up.
@@ -243,7 +477,17 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // checkRef rejects a Ref this driver cannot serve before any network call.
 func checkRef(r ref.Ref) error {
 	if r.Tracker != ref.TrackerGitHub {
-		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Epic Ref", r.Raw)
+		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Ref", r.Raw)
+	}
+	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
+		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)
+	}
+	return nil
+}
+
+func checkExactRef(r ref.Ref) error {
+	if r.Tracker != ref.TrackerGitHub {
+		return provider.Errorf(provider.KindBadRef, "github: %q is not a GitHub Ticket Ref", r.Raw)
 	}
 	if r.Owner == "" || r.Repo == "" || r.Number <= 0 {
 		return provider.Errorf(provider.KindBadRef, "github: %q does not name a GitHub issue", r.Raw)
@@ -300,16 +544,32 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 // returning the response headers.
 //
 // The document is a parameter so that every query this driver sends — the
-// polled epic one and the Detail one — shares exactly one place that knows about
-// auth, headers, status handling and decoding.
+// polled Epic and Ref-list reads and the Detail one — shares exactly one place
+// that knows about auth, headers, status handling and decoding.
 //
 // The headers come back because GitHub reports an exhausted GraphQL point
 // budget as an errors[] entry on a *200*, and only the headers say when it
 // refills; see graphQLErrors.
 func (p *Provider) do(ctx context.Context, document string, variables map[string]any, out any) (http.Header, error) {
+	header, _, err := p.doGraphQL(ctx, document, variables, out, false)
+	return header, err
+}
+
+// doGraphQL is the transport shared by ordinary documents and native Query
+// membership. GitHub normally returns GraphQL errors under HTTP 200, but also
+// uses 400/422 for some rejected search strings. Only the Query path decodes
+// those two statuses so its errors[] payload can decide whether the user's
+// native query was bad; every other non-200 keeps the established status path.
+func (p *Provider) doGraphQL(
+	ctx context.Context,
+	document string,
+	variables map[string]any,
+	out any,
+	decodeQueryRejection bool,
+) (http.Header, int, error) {
 	token, err := p.resolveToken(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	body, err := json.Marshal(struct {
@@ -317,12 +577,12 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 		Variables map[string]any `json:"variables"`
 	}{Query: document, Variables: variables})
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: encoding the query: %w", err)
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: encoding the query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: building the request: %w", err)
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -335,18 +595,25 @@ func (p *Provider) do(ctx context.Context, document string, variables map[string
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable, "github: requesting %s: %w", p.endpoint, err)
+		if decodeQueryRejection {
+			err = provider.RedactedTransportError(err)
+		}
+		return nil, 0, provider.Errorf(provider.KindUnavailable, "github: requesting %s: %w", p.endpoint, err)
 	}
 	defer res.Body.Close()
 
-	if err := p.checkStatus(res); err != nil {
-		return nil, err
+	queryRejection := decodeQueryRejection &&
+		(res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnprocessableEntity)
+	if !queryRejection {
+		if err := p.checkStatus(res); err != nil {
+			return nil, res.StatusCode, err
+		}
 	}
 	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return nil, provider.Errorf(provider.KindUnavailable,
+		return nil, res.StatusCode, provider.Errorf(provider.KindUnavailable,
 			"github: decoding the response from %s: %w", p.endpoint, err)
 	}
-	return res.Header, nil
+	return res.Header, res.StatusCode, nil
 }
 
 // checkStatus turns a non-200 response into the clearest one-line explanation

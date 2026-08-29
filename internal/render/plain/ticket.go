@@ -9,13 +9,13 @@ import (
 )
 
 // TicketSnapshot is everything the one-shot Ticket report renders: the decoded
-// Ticket, the collection it belongs to, and the Detail read for it. It is the
+// Ticket, the Watchlist it belongs to, and the Detail read for it. It is the
 // --plain twin of the Detail screen, and like everything else in this package it
 // is rendered as a pure function of its input.
 type TicketSnapshot struct {
 	// Ticket is the decoded Ticket in list-model form.
 	Ticket model.Ticket
-	// Parent is the collection it belongs to. The zero Parent draws no Epic
+	// Parent is the Watchlist it belongs to. The zero Parent draws no Epic
 	// line.
 	Parent model.Parent
 	// Detail is the expensive per-ticket data, exactly as the Provider returned

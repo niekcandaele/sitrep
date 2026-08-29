@@ -1,0 +1,16 @@
+#111 · Widget sync v2                   current · never read
+#112  Draft the shard sync protocol
+[In Review]  @mara-vos  #501 open ci ok changes req
+
+
+@mara-vos · 2026-01-13 08:30 UTC
+    Version byte it is. Updating the draft.
+
+
+LINKS (3)
+
+  is blocked by     #115  Reconcile w…  [open]
+  blocks            #116  Protocol co…  [Selected for Develo
+▸ is duplicated by  #7    Teach the g…  [In Progress]
+                                                        100%
+m/⇧drag·esc back·q·follow↵·tab/⇧ links·? help·u watchlist

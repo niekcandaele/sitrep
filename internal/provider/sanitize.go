@@ -3,9 +3,11 @@ package provider
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
 // Sanitized wraps a Provider so that every piece of tracker-controlled text it
@@ -35,8 +37,8 @@ func Sanitized(p Provider) Provider {
 
 type sanitized struct{ Provider }
 
-func (s sanitized) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
-	snap, err := s.Provider.FetchEpic(ctx, r)
+func (s sanitized) Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error) {
+	snap, err := s.Provider.Resolve(ctx, selector)
 	return sanitizeSnapshot(snap), err
 }
 
@@ -45,7 +47,10 @@ func (s sanitized) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return sanitizeDetail(detail), err
 }
 
-func sanitizeSnapshot(snap model.EpicSnapshot) model.EpicSnapshot {
+func sanitizeSnapshot(snap model.WatchlistSnapshot) model.WatchlistSnapshot {
+	snap.Header.Key = SanitizeLine(snap.Header.Key)
+	snap.Header.Title = SanitizeLine(snap.Header.Title)
+	snap.Header.URL = SanitizeLine(snap.Header.URL)
 	snap.Epic = sanitizeEpic(snap.Epic)
 	snap.Parent = sanitizeParent(snap.Parent)
 	for i := range snap.Tickets {
@@ -104,11 +109,11 @@ func sanitizePullRequests(prs []model.PullRequest) []model.PullRequest {
 }
 
 func sanitizeDetail(d model.Detail) model.Detail {
-	d.Description = sanitizeText(d.Description)
+	d.Description = SanitizeText(d.Description)
 	for i := range d.Comments {
 		d.Comments[i].ID = SanitizeLine(d.Comments[i].ID)
 		d.Comments[i].Author = sanitizeUsers([]model.User{d.Comments[i].Author})[0]
-		d.Comments[i].Body = sanitizeText(d.Comments[i].Body)
+		d.Comments[i].Body = SanitizeText(d.Comments[i].Body)
 		d.Comments[i].URL = SanitizeLine(d.Comments[i].URL)
 	}
 	for i := range d.Links {
@@ -130,13 +135,49 @@ func SanitizeLine(s string) string {
 	return sanitize(s, false)
 }
 
-// sanitizeText cleans a field that is legitimately multi-line — a Ticket's
-// description and a comment body. Newlines and tabs survive because they are
-// the text's own structure; "\r\n" is normalized to "\n" so a tracker's line
-// endings do not reach a terminal as carriage returns. Everything else
-// SanitizeLine removes is removed here too.
-func sanitizeText(s string) string {
+// SanitizeText cleans a field that is legitimately multi-line — a Ticket's
+// description and a comment body. It is the terminal-control boundary for body
+// text; an eventual Markdown or HTML sanitizer is only a second, different
+// boundary. Complete terminal sequences and their payloads are removed before
+// malformed UTF-8 is discarded. Newlines and tabs survive, CRLF becomes LF,
+// and printable Unicode and Markdown punctuation remain unchanged.
+func SanitizeText(s string) string {
+	// ANSI parsers recognize the byte form of C1 controls. Canonicalize their
+	// valid UTF-8 spelling first so OSC, DCS, CSI, and their ST terminators have
+	// the same terminal semantics whichever spelling a caller supplied.
+	s = ansi.Strip(c1Bytes(s))
+	s = strings.ToValidUTF8(s, "")
 	return sanitize(s, true)
+}
+
+// c1Bytes converts valid UTF-8 C1 code points to the single-byte form consumed
+// by the ANSI state machine. All resulting invalid bytes are either part of a
+// stripped sequence or discarded by strings.ToValidUTF8 immediately after it.
+func c1Bytes(s string) string {
+	if !containsC1Rune(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		if size > 1 && r >= 0x80 && r <= 0x9f {
+			b.WriteByte(byte(r))
+		} else {
+			b.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
+	return b.String()
+}
+
+func containsC1Rune(s string) bool {
+	for _, r := range s {
+		if r >= 0x80 && r <= 0x9f {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitize(s string, keepLayout bool) string {

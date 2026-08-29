@@ -37,4 +37,4 @@ CANCELLED (1)
 
 
 /shard                                                                                                   4 of 10 Tickets
-enter apply • esc cancel • ↑/↓ move • ctrl+c quit
+shift-drag to select text • esc cancel • enter apply • ↑/↓ move • ctrl+c quit

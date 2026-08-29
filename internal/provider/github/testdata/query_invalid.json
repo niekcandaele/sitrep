@@ -1,0 +1,14 @@
+{
+  "data": {
+    "search": {
+      "nodes": []
+    }
+  },
+  "errors": [
+    {
+      "type": "SEARCH_QUERY_ERROR",
+      "message": "The search query is invalid: Unclosed quotation mark.",
+      "path": ["search"]
+    }
+  ]
+}

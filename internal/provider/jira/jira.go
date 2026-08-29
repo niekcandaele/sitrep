@@ -4,22 +4,23 @@
 //
 // The driver speaks REST/JSON over plain net/http and encoding/json. There is
 // no Jira SDK and there will not be one (ADR-0001): hand-rolling a handful of
-// GET requests keeps sitrep free of runtime dependencies and keeps the test seam
-// at the HTTP boundary, where recorded payloads can be replayed by a local
-// server.
+// requests keeps sitrep free of runtime dependencies and keeps the test seam at
+// the HTTP boundary, where fixture payloads can be replayed by a local server.
 //
-// Everything here is read-only (ADR-0002): every request this package sends is
-// a GET. No POST, PUT, PATCH or DELETE exists anywhere in it, not even behind a
-// flag.
+// Everything here is read-only (ADR-0002). Jira's authoritative bulk issue read
+// is a POST because its finite key list is a JSON body; it still only reads
+// Tracker state. No mutation endpoint exists anywhere in this package.
 //
-// # REST API v2, not v3
+// # REST API v2, with one v3 bulk read
 //
 // v3 returns descriptions and comment bodies as ADF — the Atlassian Document
 // Format, a JSON document tree — which model.Detail cannot hold: it stores raw
-// text exactly as the Tracker returned it, unrendered. v2 is fully supported on
-// Jira Cloud and returns those same fields as text, which is exactly that
-// contract. The visible consequence is that a Jira description reads as Jira
-// wiki markup rather than markdown, and sitrep displays it verbatim either way.
+// text exactly as the Tracker returned it, unrendered. Epic and Detail reads
+// therefore stay on v2. The authoritative Ref-list read uses v3's bulk fetch
+// endpoint but selects no description or comments, so ADF never enters the thin
+// Ticket model. The visible consequence for Detail is that a Jira description
+// reads as Jira wiki markup rather than markdown, and sitrep displays it
+// verbatim either way.
 //
 // # Epic membership is the modern parent field
 //
@@ -35,6 +36,7 @@
 package jira
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,24 +53,31 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// apiBase is the one place the REST API version is decided; see the package doc
-// for why it is v2 and not v3.
+// apiBase is where the existing Epic and Detail reads choose REST v2; see the
+// package doc for why those paths do not use v3.
 const apiBase = "/rest/api/2"
 
 // The paths this driver reads. searchPath is the enhanced search endpoint,
 // which pages with a nextPageToken cursor; the removed startAt/total /search
 // endpoint is deliberately not used, and there is no fallback that probes both
 // — a driver that sends two requests per refresh to find out which one works is
-// worse than one that is wrong loudly.
+// worse than one that is wrong loudly. bulkFetchPath includes its v3 API base
+// because it is the one intentional exception to apiBase.
 const (
 	searchPath    = "/search/jql"
 	linkTypesPath = "/issueLinkType"
+	bulkFetchPath = "/rest/api/3/issue/bulkfetch"
 )
 
 // epicFields is what the polled path reads: identity, status, the assignee, the
 // parent and the project, and nothing else. Descriptions, comments and links
 // belong to FetchDetail (ADR-0003).
 const epicFields = "summary,status,resolution,assignee,parent,project"
+
+// bulkFetchMaxIssues is Jira Cloud's documented bound for one bulk-fetch body.
+// Ref-list membership is already finite, so exceeding it means bounded chunks,
+// not search pagination or truncation.
+const bulkFetchMaxIssues = 1000
 
 // detailFields is what a drill-in reads. It adds the two expensive fields and
 // keeps the identity ones, so a Detail can render its own links' targets.
@@ -101,6 +110,7 @@ type Provider struct {
 	credentials      Credentials
 	credentialSource CredentialSource
 	userAgent        string
+	maxTickets       int
 
 	credentialsOnce sync.Once
 	credentialsErr  error
@@ -124,6 +134,7 @@ func New(host string, opts ...Option) *Provider {
 		baseURL:    "https://" + host,
 		httpClient: &http.Client{Timeout: requestTimeout},
 		userAgent:  buildinfo.Name + "/" + buildinfo.Version,
+		maxTickets: provider.DefaultMaxTickets,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -178,6 +189,16 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
+		}
+	}
+}
+
 // Name returns "jira".
 func (p *Provider) Name() string { return "jira" }
 
@@ -194,30 +215,202 @@ func (p *Provider) Capabilities() model.Capabilities {
 		// smart commit either. The capability being off is what makes the pull
 		// request section silently absent rather than empty or broken.
 		PullRequests: false,
+		Selectors: model.SelectorCapabilities{
+			Epic: true, RefList: true, Query: true,
+		},
 	}
 }
 
-// FetchEpic returns the Epic named by r and every issue naming it as their
-// parent, following the search endpoint's cursor to the last page.
-// Cross-project children need no special handling: they arrive carrying their
-// own project and are attributed to it.
+// Resolve performs the authoritative read for selector. An Epic Selector reads
+// the root and its children, a Ref-list Selector bulk-reads exact issues, and a
+// Query Selector chooses membership before authoritatively bulk-reading it.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	switch selected := selector.(type) {
+	case provider.EpicSelector:
+		return p.resolveEpic(ctx, selected.Ref)
+	case provider.RefListSelector:
+		if len(selected.Refs) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"jira: a Ref-list Selector must name at least one Jira issue")
+		}
+		tickets, err := p.fetchExactRefs(ctx, selected.Refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+		return model.WatchlistSnapshot{
+			Header:       provider.RefListHeader(len(tickets)),
+			Tickets:      tickets,
+			Capabilities: p.Capabilities(),
+		}, nil
+	case provider.QuerySelector:
+		return p.resolveQuery(ctx, selected.Query)
+	default:
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
+	}
+}
+
+func (p *Provider) resolveQuery(ctx context.Context, query string) (model.WatchlistSnapshot, error) {
+	initialCapacity := min(p.maxTickets, pageSize)
+	refs := make([]ref.Ref, 0, initialCapacity)
+	seen := make(map[string]struct{}, initialCapacity)
+	seenTokens := make(map[string]struct{})
+	token := ""
+	consumed := 0
+	limitReached := false
+
+	for {
+		remaining := p.maxTickets - consumed
+		response, err := p.searchQueryMembership(ctx, query, min(pageSize, remaining), token)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+
+		issues := response.Issues
+		overflow := len(issues) > remaining
+		if overflow {
+			issues = issues[:remaining]
+		}
+		for _, issue := range issues {
+			key, ok := normalizeKey(issue.Key)
+			if !ok {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query search returned an issue with invalid key %q", issue.Key)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			refs = append(refs, ref.Ref{
+				Tracker: ref.TrackerJira,
+				Host:    p.host,
+				Key:     key,
+				Raw:     key,
+			})
+		}
+		consumed += len(issues)
+		if token != "" && len(issues) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+				"jira: query pagination returned an empty continuation page")
+		}
+
+		switch {
+		case overflow:
+			limitReached = true
+		case consumed == p.maxTickets:
+			limitReached = !response.IsLast
+		case response.IsLast:
+		default:
+			if len(issues) == 0 {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but returned an empty page")
+			}
+			if response.NextPageToken == "" {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but returned no new page cursor")
+			}
+			if _, repeated := seenTokens[response.NextPageToken]; repeated {
+				return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
+					"jira: query reports more results but repeated a page cursor")
+			}
+			seenTokens[response.NextPageToken] = struct{}{}
+			token = response.NextPageToken
+			continue
+		}
+		break
+	}
+
+	tickets := []model.Ticket{}
+	if len(refs) > 0 {
+		var err error
+		tickets, err = p.fetchExactRefs(ctx, refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.QueryHeader(query),
+		Tickets:      tickets,
+		LimitReached: limitReached,
+		Capabilities: p.Capabilities(),
+	}, nil
+}
+
+func (p *Provider) searchQueryMembership(ctx context.Context, jql string, maxResults int, token string) (searchResponse, error) {
+	credentials, err := p.resolveCredentials(ctx)
+	if err != nil {
+		return searchResponse{}, err
+	}
+
+	query := url.Values{
+		"jql":        {jql},
+		"fields":     {"key"},
+		"maxResults": {fmt.Sprint(maxResults)},
+	}
+	if token != "" {
+		query.Set("nextPageToken", token)
+	}
+	path := apiBase + searchPath
+	endpoint := p.baseURL + path + "?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable, "jira: building the request: %w", err)
+	}
+	req.Header.Set("Authorization", credentials.header())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable,
+			"jira: requesting %s: %w", p.baseURL+path, provider.RedactedTransportError(err))
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusBadRequest {
+		message := queryErrorPayload(res)
+		if message == "" {
+			message = "the Tracker rejected the query"
+		}
+		message = provider.RedactQuery(message, jql)
+		return searchResponse{}, provider.Errorf(provider.KindBadRef, "jira: query rejected: %s", message)
+	}
+	if err := checkStatus(res, "query", path, p.host); err != nil {
+		return searchResponse{}, provider.RedactQueryError(err, jql)
+	}
+	var response searchResponse
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return searchResponse{}, provider.Errorf(provider.KindUnavailable,
+			"jira: decoding the response from %s: %w", path, err)
+	}
+	return response, nil
+}
+
+// resolveEpic returns the named Epic and every issue naming it as their parent,
+// following the search endpoint's cursor to the last page. Cross-project
+// children need no special handling: they arrive carrying their own project and
+// are attributed to it.
 //
 // Only one level of the parent graph is fetched — sub-tasks of children are not
 // expanded — exactly as the GitHub driver fetches one level of sub-issues.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistSnapshot, error) {
 	key, err := checkRef(r)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	issue, err := p.fetchIssue(ctx, key, epicFields)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
-	snap := model.EpicSnapshot{
-		Epic: newEpic(issue, p.host),
-		// The fetched issue's own parent, for an Epic Ref that turns out to name
+	epic := newEpic(issue, p.host)
+	snap := model.WatchlistSnapshot{
+		Header: provider.EpicHeader(epic),
+		Epic:   epic,
+		// The fetched issue's own parent, for a Ref that turns out to name
 		// a plain Ticket. Reporting it is all this driver does about it: which
 		// screen that opens is internal/cli's decision (ADR-0003).
 		Parent:  newParent(issue.Fields.Parent, p.host),
@@ -226,7 +419,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 
 	tickets, err := p.fetchChildren(ctx, key)
 	if err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 	snap.Tickets = append(snap.Tickets, tickets...)
 
@@ -235,7 +428,7 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 }
 
 // FetchDetail returns one Ticket's description, comments and links. id is the
-// issue key, which is what FetchEpic put on every Ticket and what every REST
+// issue key, which is what Resolve put on every Ticket and what every REST
 // path takes.
 //
 // This is three requests where the polled path is two, and that is the point of
@@ -278,7 +471,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // returns the issue key it names.
 func checkRef(r ref.Ref) (string, error) {
 	if r.Tracker != ref.TrackerJira {
-		return "", provider.Errorf(provider.KindBadRef, "jira: %q is not a Jira Epic Ref", r.Raw)
+		return "", provider.Errorf(provider.KindBadRef, "jira: %q is not a Jira Ref", r.Raw)
 	}
 	key, ok := normalizeKey(r.Key)
 	if !ok {
@@ -293,16 +486,152 @@ func checkRef(r ref.Ref) (string, error) {
 	return key, nil
 }
 
-// normalizeKey upper-cases an issue key and validates it against the Epic Ref
-// grammar's own key shape. It is both the input check and the injection defence
-// — nothing that fails it can reach a JQL string or a URL path — which is what
-// makes "what can reach JQL" one readable predicate.
+// normalizeKey upper-cases an issue key and validates it against the Ref
+// grammar's own key shape. It is both the input check and the injection defence:
+// nothing that fails it can reach a JQL string, URL path or bulk-fetch body.
 func normalizeKey(s string) (string, bool) {
 	key := strings.ToUpper(strings.TrimSpace(s))
 	if ref.KeyPrefix(key) == "" {
 		return "", false
 	}
 	return key, true
+}
+
+// fetchExactRefs authoritatively reads the finite, already-resolved membership
+// in refs. It is deliberately separate from Selector and Header handling so a
+// future membership selector can reuse the same direct-read path.
+func (p *Provider) fetchExactRefs(ctx context.Context, refs []ref.Ref) ([]model.Ticket, error) {
+	keys := make([]string, len(refs))
+	for i, r := range refs {
+		key, err := checkExactRef(r)
+		if err != nil {
+			return nil, err
+		}
+		keys[i] = key
+	}
+
+	tickets := make([]model.Ticket, 0, len(keys))
+	for start := 0; start < len(keys); start += bulkFetchMaxIssues {
+		end := min(start+bulkFetchMaxIssues, len(keys))
+		chunk := keys[start:end]
+		request := bulkFetchRequest{
+			IssueIDsOrKeys: chunk,
+			Fields:         strings.Split(epicFields, ","),
+		}
+
+		var response bulkFetchResponse
+		if err := p.doBulkFetch(ctx, request, chunk[0], &response); err != nil {
+			return nil, err
+		}
+
+		issues := make(map[string]issueWire, len(response.Issues))
+		for _, issue := range response.Issues {
+			key, ok := normalizeKey(issue.Key)
+			if !ok {
+				return nil, provider.Errorf(provider.KindUnavailable,
+					"jira: bulk fetch returned an issue with invalid key %q", issue.Key)
+			}
+			issues[key] = issue
+		}
+
+		missingKey := ""
+		for _, key := range chunk {
+			if _, ok := issues[key]; !ok {
+				missingKey = key
+				break
+			}
+		}
+		if len(response.IssueErrors) > 0 {
+			key := missingKey
+			if key == "" {
+				// A successful issue and an error for the same request would be a
+				// contradictory response. It still cannot become partial output.
+				key = chunk[0]
+				if candidate, ok := normalizeKey(response.IssueErrors[0].ID); ok {
+					key = candidate
+				}
+			}
+			return nil, provider.Errorf(provider.KindBadRef,
+				"jira: %s not found (or you lack access)", key)
+		}
+		if missingKey != "" {
+			// Jira can omit missing or inaccessible issues without adding an
+			// issueErrors entry. Exact membership still makes that a bad Ref.
+			return nil, provider.Errorf(provider.KindBadRef,
+				"jira: %s not found (or you lack access)", missingKey)
+		}
+
+		for _, key := range chunk {
+			tickets = append(tickets, newTicket(issues[key], p.host, ""))
+		}
+	}
+	return tickets, nil
+}
+
+// checkExactRef validates every explicit member before the first request. The
+// Ref-list seam promises one completed Jira Ref per member, but validating here
+// keeps malformed or injected keys away from both JSON bodies and Tracker I/O.
+func checkExactRef(r ref.Ref) (string, error) {
+	if r.Tracker != ref.TrackerJira {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q is not a Jira issue Ref", r.Raw)
+	}
+	key, ok := normalizeKey(r.Key)
+	if !ok {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q does not name a Jira issue", r.Raw)
+	}
+	if strings.TrimSpace(r.Host) == "" {
+		return "", provider.Errorf(provider.KindBadRef,
+			"jira: %q names no Jira site — its Profile is missing a host", r.Raw)
+	}
+	return key, nil
+}
+
+// doBulkFetch performs the authenticated read-only v3 JSON POST. do performs
+// the v2 GET reads used by Epic and Detail operations.
+func (p *Provider) doBulkFetch(
+	ctx context.Context,
+	body bulkFetchRequest,
+	resource string,
+	out *bulkFetchResponse,
+) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: encoding the bulk fetch request: %w", err)
+	}
+
+	credentials, err := p.resolveCredentials(ctx)
+	if err != nil {
+		return err
+	}
+
+	endpoint := p.baseURL + bulkFetchPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable, "jira: building the request: %w", err)
+	}
+	req.Header.Set("Authorization", credentials.header())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", p.userAgent)
+
+	res, err := p.httpClient.Do(req)
+	if err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: requesting %s: %w", endpoint, err)
+	}
+	defer res.Body.Close()
+
+	if err := checkStatus(res, resource, bulkFetchPath, p.host); err != nil {
+		return err
+	}
+	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+		return provider.Errorf(provider.KindUnavailable,
+			"jira: decoding the response from %s: %w", bulkFetchPath, err)
+	}
+	return nil
 }
 
 // fetchIssue reads one issue with the given field selection.
@@ -327,10 +656,8 @@ func childJQL(key string) string {
 
 // fetchChildren pages the children search to the last page.
 func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticket, error) {
-	var (
-		tickets []model.Ticket
-		token   string
-	)
+	tickets := []model.Ticket{}
+	var token string
 
 	for page := 0; ; page++ {
 		if page >= maxPages {
@@ -380,10 +707,10 @@ func (p *Provider) fetchChildren(ctx context.Context, key string) ([]model.Ticke
 	}
 }
 
-// do performs one GET and decodes the response into out. It is the single place
-// that knows about auth, headers, status handling and decoding, so every
-// request this driver sends — the two polled ones and the three a drill-in
-// makes — shares exactly one of each.
+// do performs one v2 GET and decodes the response into out. It is the single
+// place that knows about auth, headers, status handling and decoding for the
+// existing Epic and Detail requests, so those paths share exactly one of each.
+// The read-only v3 bulk POST is deliberately narrow and lives in doBulkFetch.
 //
 // resource is what the request was asking for, named in the errors that have
 // somewhere to point.
@@ -486,18 +813,28 @@ func isCaptchaChallenge(header http.Header) bool {
 		"CAPTCHA_CHALLENGE")
 }
 
-// errorPayload reads Jira's own error document, or "" when the body is not one
-// or says nothing.
+// errorPayload reads Jira's own general error messages, or "" when the body is
+// not an error document or says nothing.
 func errorPayload(res *http.Response) string {
+	return readErrorPayload(res).message()
+}
+
+// queryErrorPayload also reads per-field explanations because malformed JQL is
+// reported in Jira's errors map rather than errorMessages on some deployments.
+func queryErrorPayload(res *http.Response) string {
+	return readErrorPayload(res).queryMessage()
+}
+
+func readErrorPayload(res *http.Response) errorResponse {
 	body, err := io.ReadAll(io.LimitReader(res.Body, errorBodyLimit))
 	if err != nil {
-		return ""
+		return errorResponse{}
 	}
 	var payload errorResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
+		return errorResponse{}
 	}
-	return payload.message()
+	return payload
 }
 
 // retryAfter renders when a rate-limited caller may try again: the Retry-After

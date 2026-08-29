@@ -1,0 +1,16 @@
+#111 · Widget sync v2 current · never read
+#112  Draft the shard sync protocol
+[In Review]  @mara-vos  #501 open ci ok ch
+
+▸ is blocked by     #115  Reconcile w…  [o
+
+m          off, shift-drag
+wheel      scroll body
+click Link follow
+esc/u      back/watchlist
+tab/⇧tab   links
+enter      follow
+r/?/q      refresh/help/quit
+↑/↓/k/j    scroll
+pgup/pgdn  page
+g/G        first/last                  95%

@@ -1,24 +1,31 @@
 # Jira driver fixtures
 
 These payloads are replayed by the local test server in `jira_test.go`, routed by request
-path. They are the Jira driver's only test seam: assertions target the normalized
-`model.EpicSnapshot` and `model.Detail`, and no test in this repository ever calls a live
-Jira site, reads an environment variable, or needs a credential.
+path. They are the Jira driver's only test seam: assertions target normalized
+`model.WatchlistSnapshot` and `model.Detail` values, and no test in this
+repository ever calls a live Jira site, reads an environment variable, or needs
+a credential.
 
 ## Provenance
 
-**Every file here is hand-written**, to the response shapes Atlassian's REST API v2
-documentation specifies. Nothing in this directory is a recording: the author had no Jira
-Cloud site to record from. Where a real payload carries more fields than the driver reads —
-`self` URLs, `statusCategory.colorName`, avatar sizes, `startAt`/`total` on the comment
-response — a representative sample of them is included, precisely so that the tests prove
-the driver ignores what it does not read.
+**Every file here is hand-written**, to the response shapes Atlassian's REST API
+v2 and v3 documentation specified when checked on 2026-08-22. Nothing in this
+directory is a recording: the author had no Jira Cloud site to record from.
+Where a real payload carries more fields than the driver reads — `self` URLs,
+`statusCategory.colorName`, avatar sizes, `startAt`/`total` on the comment
+response — a representative sample of them is included, precisely so that the
+tests prove the driver ignores what it does not read.
 
 If you do have a site and want to replace a file with recorded bytes, record it with
 
 ```
 curl -s -u "$EMAIL:$JIRA_API_TOKEN" -H 'Accept: application/json' \
   "https://<site>.atlassian.net/rest/api/2/issue/<KEY>?fields=summary,status,resolution,assignee,parent,project"
+
+curl -s -u "$EMAIL:$JIRA_API_TOKEN" -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  --data '{"issueIdsOrKeys":["<KEY>"],"fields":["summary","status","resolution","assignee","parent","project"]}' \
+  "https://<site>.atlassian.net/rest/api/3/issue/bulkfetch"
 ```
 
 and **redact the site host, account ids, emails and avatar URLs before committing** — a
@@ -38,6 +45,35 @@ is `ABC-1`.
 | `epic_children_truncated.json` | page 2 with `isLast: false` and an empty `nextPageToken`: Jira saying there is more and handing over no way to ask for it, which must be an error rather than a short epic |
 | `epic_children_empty.json` | `issues: []`, `isLast: true` — a Ref that named a plain Ticket, which is not an error |
 | `ticket_with_parent.json` | an issue carrying `fields.parent`: the decoder's breadcrumb and the `u` walk-up |
+
+## Native queries
+
+The Query fixtures were added on **2026-08-22** and, like every Jira fixture in this
+directory, are **hand-written** to Atlassian's enhanced-search response schema. The
+successful second stage deliberately reuses the v3 bulk-fetch fixtures below. No live JQL
+was recorded, and the payloads contain only synthetic site and issue data.
+
+| File | What it proves |
+|---|---|
+| `query_membership.json` | one exhausted membership page with minimal keys in search order, a lower-case/upper-case duplicate, and stale summary/status fields that cannot reach output |
+| `query_empty.json` | `issues: []` — a zero-match JQL Query succeeds without a bulk-fetch request |
+
+Malformed-JQL tests use a compact error payload emitted directly by the replay server so
+they can assert both `errorMessages` and deterministically ordered per-field `errors`
+without adding a fixture file.
+
+## Exact Ref-list bulk reads
+
+The two v3 bulk-fetch fixtures were hand-written on 2026-08-22 from
+Atlassian's published `BulkIssueResults` schema. Their issue field objects are
+redacted, deliberately reduced copies of the existing v2 fixture issues; the
+selected fields have the same JSON representation in this endpoint. Hosts,
+account ids, names, and avatar URLs remain the package's synthetic values.
+
+| File | What it proves |
+|---|---|
+| `ref_list.json` | four successful issues returned in Jira's ascending-id order rather than Selector order, including two projects, a real parent, several status categories, and an empty `issueErrors` list |
+| `ref_list_error.json` | three successful issues plus one v3 `IssueError` (`id` and singular `errorMessage`), proving one inaccessible member prevents a partial Watchlist |
 
 ## Link types
 

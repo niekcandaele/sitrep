@@ -1,0 +1,35 @@
+{
+  "data": {
+    "search": {
+      "issueCount": 5,
+      "nodes": [
+        {
+          "__typename": "Issue",
+          "number": 5,
+          "repository": { "nameWithOwner": "niekcandaele/sitrep" },
+          "title": "stale search title that must not be rendered"
+        },
+        {
+          "__typename": "PullRequest",
+          "number": 19,
+          "repository": { "nameWithOwner": "niekcandaele/sitrep" }
+        },
+        {
+          "__typename": "Issue",
+          "number": 91,
+          "repository": { "nameWithOwner": "acme/widgets" }
+        },
+        {
+          "__typename": "Issue",
+          "number": 5,
+          "repository": { "nameWithOwner": "NIEKCANDAELE/SITREP" }
+        },
+        {
+          "__typename": "Issue",
+          "number": 3,
+          "repository": { "nameWithOwner": "niekcandaele/sitrep" }
+        }
+      ]
+    }
+  }
+}

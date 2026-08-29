@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-01-15T12:00:00Z",
   "provider": {
     "name": "github",
@@ -7,16 +7,27 @@
       "hierarchy": true,
       "blocking_links": true,
       "comments": true,
-      "pull_requests": true
+      "pull_requests": true,
+      "selectors": {
+        "epic": true,
+        "ref_list": true,
+        "query": true
+      }
     }
   },
-  "epic": {
-    "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
-    "key": "niekcandaele/sitrep#2",
-    "title": "Epic: sitrep v1 — cross-tracker epic monitor",
-    "url": "https://github.com/niekcandaele/sitrep/issues/2",
-    "status": "todo",
-    "native_status": "open"
+  "watchlist": {
+    "selector": {
+      "kind": "epic",
+      "ref": "https://github.com/niekcandaele/sitrep/issues/2"
+    },
+    "epic": {
+      "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+      "key": "niekcandaele/sitrep#2",
+      "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+      "url": "https://github.com/niekcandaele/sitrep/issues/2",
+      "status": "todo",
+      "native_status": "open"
+    }
   },
   "progress": {
     "todo": 3,

@@ -10,7 +10,7 @@ import (
 )
 
 // decodedTicket is the fixture Ticket #112 as a decoder hands it over: the
-// Ticket itself, and the collection it was reached through.
+// Ticket itself, and the Watchlist it was reached through.
 func decodedTicket() OpenTicket {
 	snap := fake.FixtureSnapshot()
 	return OpenTicket{
@@ -21,7 +21,7 @@ func decodedTicket() OpenTicket {
 }
 
 // startDecoded runs the program the way the decoder starts it: on one Ticket's
-// Detail, with a Source for the collection behind it that nothing has read yet.
+// Detail, with a Source for the Watchlist behind it that nothing has read yet.
 func startDecoded(t *testing.T, c *clock, p *fake.Provider, open OpenTicket, source Source) *session {
 	t.Helper()
 
@@ -39,11 +39,11 @@ func startDecoded(t *testing.T, c *clock, p *fake.Provider, open OpenTicket, sou
 func TestDecodedFrame(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := startDecoded(t, c, p, decodedTicket(), epicSource(p, c))
+	s := startDecoded(t, c, p, decodedTicket(), selectorSource(p, c))
 	s.waitFor(t, "DESCRIPTION")
 
 	// Several beats past the interval: a decoder session that never walks up
-	// must not fetch a collection nobody asked to see.
+	// must not fetch a Watchlist nobody asked to see.
 	for range 3 {
 		c.advance(61 * time.Second)
 		s.beat()
@@ -58,15 +58,15 @@ func TestDecodedFrame(t *testing.T) {
 	if n := p.DetailCalls(); n != 1 {
 		t.Errorf("DetailCalls() = %d, want exactly 1", n)
 	}
-	if n := p.EpicCalls(); n != 0 {
-		t.Errorf("EpicCalls() = %d, want 0 until the user walks up", n)
+	if n := p.ResolveCalls(); n != 0 {
+		t.Errorf("ResolveCalls() = %d, want 0 until the user walks up", n)
 	}
 	// The footer line is the whole affordance for the walk-up: no second help
 	// line, no box.
 	if !m.detailKeys.Parent.Enabled() {
 		t.Error("the walk-up binding is disabled with a parent and a Source")
 	}
-	if !strings.Contains(string(got), "u epic") {
+	if !strings.Contains(string(got), "u watchlist") {
 		t.Errorf("the footer does not make the walk-up discoverable:\n%s", got)
 	}
 }
@@ -90,10 +90,10 @@ func TestDecodedFrameWithNoParent(t *testing.T) {
 	if m.mode != modeDetail {
 		t.Error("u left the Detail screen with no collection to go to")
 	}
-	if n := p.EpicCalls(); n != 0 {
-		t.Errorf("EpicCalls() = %d, want 0", n)
+	if n := p.ResolveCalls(); n != 0 {
+		t.Errorf("ResolveCalls() = %d, want 0", n)
 	}
-	if strings.Contains(string(got), "u epic") {
+	if strings.Contains(string(got), "u watchlist") {
 		t.Errorf("the footer offers a walk-up this Ticket has no parent for:\n%s", got)
 	}
 	// The breadcrumb line is the zero-Parent one: staleness and nothing else.
@@ -108,14 +108,14 @@ func TestDecodedFrameWithNoParent(t *testing.T) {
 func TestWalkUpOpensTheCollection(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := startDecoded(t, c, p, decodedTicket(), epicSource(p, c))
+	s := startDecoded(t, c, p, decodedTicket(), selectorSource(p, c))
 	s.waitFor(t, "DESCRIPTION")
 
 	s.tm.Send(keyPress("u"))
 	s.waitFor(t, "IN PROGRESS (3)")
 
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1: the walk-up is the first list read", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1: the walk-up is the first list read", n)
 	}
 
 	m, got := s.finish(t)
@@ -126,21 +126,21 @@ func TestWalkUpOpensTheCollection(t *testing.T) {
 	}
 }
 
-// From the collection the walk-up landed in, the heartbeat refreshes exactly as
+// From the Watchlist the walk-up landed in, the heartbeat refreshes exactly as
 // it does in a monitor opened directly: the list is armed now, and nothing
 // about it is special.
 func TestWalkUpArmsTheHeartbeat(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := startDecoded(t, c, p, decodedTicket(), epicSource(p, c))
+	s := startDecoded(t, c, p, decodedTicket(), selectorSource(p, c))
 	s.waitFor(t, "DESCRIPTION")
 
 	s.tm.Send(keyPress("u"))
-	waitUntil(t, "the first list read", func() bool { return p.EpicCalls() >= 1 })
+	waitUntil(t, "the first list read", func() bool { return p.ResolveCalls() >= 1 })
 
 	c.advance(61 * time.Second)
 	s.beat()
-	waitUntil(t, "the auto-refresh after the walk-up", func() bool { return p.EpicCalls() >= 2 })
+	waitUntil(t, "the auto-refresh after the walk-up", func() bool { return p.ResolveCalls() >= 2 })
 
 	s.finish(t)
 }
@@ -153,7 +153,7 @@ func TestWalkUpReusesTheDecodedDetail(t *testing.T) {
 
 	p := fake.New()
 	c := newClock()
-	s := startDecoded(t, c, p, decodedTicket(), epicSource(p, c))
+	s := startDecoded(t, c, p, decodedTicket(), selectorSource(p, c))
 	s.waitFor(t, "DESCRIPTION")
 
 	s.tm.Send(keyPress("u"))
@@ -192,19 +192,19 @@ func TestSeededMonitorDrawsWithoutRefetching(t *testing.T) {
 	snap := fake.FixtureSnapshot()
 	c := newClock()
 	snap.FetchedAt = c.now()
-	initial := ListFromEpicSnapshot(snap)
+	initial := ListFromWatchlistSnapshot(snap)
 
 	p := fake.New()
 	s := startWith(t, c, Options{
-		Source:   epicSource(p, c),
+		Source:   selectorSource(p, c),
 		Initial:  &initial,
 		Interval: time.Minute,
 		Now:      c.now,
 	})
 	s.waitFor(t, "Widget sync v2")
 
-	if n := p.EpicCalls(); n != 0 {
-		t.Fatalf("EpicCalls() = %d, want 0: the seeded reading was re-fetched", n)
+	if n := p.ResolveCalls(); n != 0 {
+		t.Fatalf("ResolveCalls() = %d, want 0: the seeded reading was re-fetched", n)
 	}
 
 	m, got := s.finish(t)
@@ -223,11 +223,11 @@ func TestSeededMonitorRefreshesOnTheReadingsAge(t *testing.T) {
 	snap := fake.FixtureSnapshot()
 	c := newClock()
 	snap.FetchedAt = c.now()
-	initial := ListFromEpicSnapshot(snap)
+	initial := ListFromWatchlistSnapshot(snap)
 
 	p := fake.New()
 	s := startWith(t, c, Options{
-		Source:   epicSource(p, c),
+		Source:   selectorSource(p, c),
 		Initial:  &initial,
 		Interval: time.Minute,
 		Now:      c.now,
@@ -237,17 +237,17 @@ func TestSeededMonitorRefreshesOnTheReadingsAge(t *testing.T) {
 	c.advance(30 * time.Second)
 	s.beat()
 	s.waitFor(t, "updated 30s ago")
-	if n := p.EpicCalls(); n != 0 {
-		t.Fatalf("EpicCalls() = %d after 30s of a 60s interval, want 0", n)
+	if n := p.ResolveCalls(); n != 0 {
+		t.Fatalf("ResolveCalls() = %d after 30s of a 60s interval, want 0", n)
 	}
 
 	c.advance(31 * time.Second)
 	s.beat()
-	waitUntil(t, "the first auto-refresh", func() bool { return p.EpicCalls() >= 1 })
+	waitUntil(t, "the first auto-refresh", func() bool { return p.ResolveCalls() >= 1 })
 
 	s.finish(t)
 
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1", n)
 	}
 }

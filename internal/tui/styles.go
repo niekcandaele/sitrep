@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"strings"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // Styles is every Lip Gloss style the monitor draws with, in one place, so a
@@ -15,11 +18,11 @@ import (
 // carried by words ("ci FAIL"), case (uppercase headings) and a glyph ("▸"),
 // so a monochrome terminal or a pipe still reads.
 type Styles struct {
-	// HeaderKey styles the collection's key.
+	// HeaderKey styles the Watchlist's key.
 	HeaderKey lipgloss.Style
-	// HeaderTitle styles the collection's title.
+	// HeaderTitle styles the Watchlist's title.
 	HeaderTitle lipgloss.Style
-	// HeaderURL styles the collection's URL.
+	// HeaderURL styles the Watchlist's URL.
 	HeaderURL lipgloss.Style
 	// BarFilled styles the completed part of the progress bar.
 	BarFilled lipgloss.Style
@@ -56,7 +59,7 @@ type Styles struct {
 	// EmptyFilter styles the notice that stands in for a list a filter has
 	// emptied.
 	EmptyFilter lipgloss.Style
-	// Breadcrumb styles the Detail screen's parent-collection line.
+	// Breadcrumb styles the root Watchlist and prior Trail Tickets in Detail.
 	Breadcrumb lipgloss.Style
 	// SectionHeader styles a Detail section heading, e.g. "COMMENTS (3)".
 	SectionHeader lipgloss.Style
@@ -69,7 +72,7 @@ type Styles struct {
 	Body lipgloss.Style
 	// Error styles the refresh error line.
 	Error lipgloss.Style
-	// Muted styles secondary prose, such as the empty-collection notice.
+	// Muted styles secondary prose, such as the empty Watchlist notice.
 	Muted lipgloss.Style
 }
 
@@ -127,6 +130,23 @@ func DefaultStyles(isDark bool) Styles {
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 	}
+}
+
+// sanitizeTerminalText repeats the Provider's single-line policy at direct TUI
+// input seams. Normalizing malformed UTF-8 first keeps raw C1 bytes from
+// bypassing the rune-based policy.
+func sanitizeTerminalText(text string) string {
+	return provider.SanitizeLine(strings.ToValidUTF8(text, ""))
+}
+
+// renderHyperlink is the TUI's only OSC 8 creation seam.
+func renderHyperlink(style lipgloss.Style, text, url string) string {
+	text = sanitizeTerminalText(text)
+	url = sanitizeTerminalText(url)
+	if url == "" {
+		return style.Render(text)
+	}
+	return style.Hyperlink(url).Render(text)
 }
 
 // groupHeader returns the style for a Status Category heading, falling back to

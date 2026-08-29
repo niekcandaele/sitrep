@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & telemetry                                                              reading…
+#111 · Widget sync v2: shards, retries & telemetry                                                    current · reading…
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
 [In Review]  @mara-vos  #501 open ci ok changes req
 
@@ -37,4 +37,4 @@ Reading Ticket detail…
 
 
 
-↑/k up • ↓/j down • esc back • u epic • r refresh • ? help • q quit
+m off · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh

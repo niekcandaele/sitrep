@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,9 +32,74 @@ type graphQLResponse struct {
 	Errors []graphQLError `json:"errors"`
 }
 
+type queryResponse struct {
+	Data struct {
+		Search struct {
+			IssueCount int `json:"issueCount"`
+			PageInfo   struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+			Nodes []queryMembershipNode `json:"nodes"`
+		} `json:"search"`
+	} `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
+type queryMembershipNode struct {
+	TypeName   string        `json:"__typename"`
+	Number     int           `json:"number"`
+	Repository repositoryRef `json:"repository"`
+}
+
+func (r queryResponse) err(endpoint string, header http.Header, query string) error {
+	if len(r.Errors) == 0 {
+		return nil
+	}
+	for _, graphErr := range r.Errors {
+		if isNativeQueryError(graphErr) {
+			message := strings.TrimSpace(graphErr.Message)
+			if message == "" {
+				message = "the Tracker rejected the query"
+			}
+			message = provider.RedactQuery(message, query)
+			return provider.Errorf(provider.KindBadRef, "github: query rejected: %s", message)
+		}
+	}
+	redacted := append([]graphQLError(nil), r.Errors...)
+	for i := range redacted {
+		redacted[i].Message = provider.RedactQuery(redacted[i].Message, query)
+	}
+	return graphQLErrors(redacted, "github: query returned no searchable issues", endpoint, header)
+}
+
+func isNativeQueryError(graphErr graphQLError) bool {
+	switch strings.ToUpper(strings.TrimSpace(graphErr.Type)) {
+	case "SEARCH_QUERY_ERROR":
+		return true
+	case "BAD_USER_INPUT", "UNPROCESSABLE":
+		return len(graphErr.Path) > 0 && graphErr.Path[0] == "search"
+	default:
+		return false
+	}
+}
+
+type refListResponse struct {
+	Data   map[string]*refListRepository `json:"data"`
+	Errors []graphQLError                `json:"errors"`
+}
+
+type refListRepository struct {
+	Issue *issueNode `json:"issue"`
+	Kind  *struct {
+		TypeName string `json:"__typename"`
+	} `json:"kind"`
+}
+
 type graphQLError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+	Path    []any  `json:"path"`
 }
 
 type repositoryRef struct {
@@ -52,7 +118,8 @@ type issueNode struct {
 	Assignees   struct {
 		Nodes []assigneeNode `json:"nodes"`
 	} `json:"assignees"`
-	ClosedByPullRequestsReferences *pullRequestConnection `json:"closedByPullRequestsReferences"`
+	ClosedByPullRequestsReferences *pullRequestConnection    `json:"closedByPullRequestsReferences"`
+	CrossReferences                *crossReferenceConnection `json:"crossReferences"`
 	SubIssues                      struct {
 		TotalCount int `json:"totalCount"`
 		PageInfo   struct {
@@ -135,8 +202,31 @@ func (r graphQLResponse) err(target ref.Ref, endpoint string, header http.Header
 		fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint, header)
 }
 
+// err applies the existing GraphQL classification while naming the Ref whose
+// alias GitHub attached to a NOT_FOUND error. If GitHub omits a path, the first
+// Ref is the stable fallback rather than an unordered response-map member.
+func (r refListResponse) err(targets []ref.Ref, endpoint string, header http.Header) error {
+	target := targets[0]
+	for _, graphErr := range r.Errors {
+		if !strings.EqualFold(graphErr.Type, "NOT_FOUND") || len(graphErr.Path) == 0 {
+			continue
+		}
+		alias, ok := graphErr.Path[0].(string)
+		if !ok || !strings.HasPrefix(alias, "ref") {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(alias, "ref"))
+		if err == nil && index >= 0 && index < len(targets) {
+			target = targets[index]
+			break
+		}
+	}
+	return graphQLErrors(r.Errors,
+		fmt.Sprintf("github: %s not found (or you lack access)", refKey(target)), endpoint, header)
+}
+
 // err turns the Detail query's errors[] payload into one line, naming the node
-// id the caller asked for rather than an Epic Ref it does not have.
+// id the caller asked for rather than a Ref it does not have.
 func (r detailResponse) err(id model.TicketID, endpoint string, header http.Header) error {
 	return graphQLErrors(r.Errors, detailNotFound(id), endpoint, header)
 }
@@ -209,14 +299,14 @@ func isAuthErrorType(t string) bool {
 // is what a human can paste straight back into sitrep.
 //
 // The assignees and pull requests are the same selections every child already
-// carries, read here because an Epic Ref may name a plain Ticket: the decoded
+// carries, read here because a Ref may name a plain Ticket: the decoded
 // Ticket's Detail header is built from this Epic and has to read exactly the way
 // the same Ticket's row reads in a list. That is also why the pull-request rule
 // for in-progress runs here as it does in newTicket — one node must not describe
 // itself two different ways depending on which Ref reached it.
 func newEpic(n issueNode) model.Epic {
 	status, native := normalizeStatus(n.State, n.StateReason)
-	prs := newPullRequests(n.ClosedByPullRequestsReferences)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences, n.CrossReferences)
 	return model.Epic{
 		ID:           model.TicketID(n.ID),
 		Key:          issueKey(n, ""),
@@ -260,7 +350,7 @@ func newParent(p *parentNode, issueRepo string) model.Parent {
 // yet.
 func newTicket(n issueNode, epicRepo string) model.Ticket {
 	status, native := normalizeStatus(n.State, n.StateReason)
-	prs := newPullRequests(n.ClosedByPullRequestsReferences)
+	prs := newPullRequests(n.ClosedByPullRequestsReferences, n.CrossReferences)
 	return model.Ticket{
 		ID:    model.TicketID(n.ID),
 		Key:   issueKey(n, epicRepo),
@@ -281,7 +371,7 @@ func newTicket(n issueNode, epicRepo string) model.Ticket {
 
 // issueKey renders the display identity: "#112" for a child of the Epic's own
 // repository, "owner/repo#112" for a child from anywhere else. Both forms round
-// -trip through sitrep's Epic Ref grammar, so a key a human sees is a key they
+// -trip through sitrep's Ref grammar, so a key a human sees is a key they
 // can type.
 func issueKey(n issueNode, epicRepo string) string {
 	if repo := n.Repository.NameWithOwner; repo != "" && repo != epicRepo {
@@ -359,7 +449,7 @@ func newLinks(n detailNode) []model.Link {
 }
 
 // newLink maps one linked issue onto a Link. ticketRepo is the *opened*
-// Ticket's repository, not the Epic's: at Detail time the driver has no Epic Ref
+// Ticket's repository, not the Epic's: at Detail time the driver has no Ref
 // in hand and re-deriving one would cost a request. So a target living beside
 // the Ticket renders "#115" and anything else "owner/repo#115" — identical to
 // what the list shows whenever the Epic and the Ticket share a repository, which

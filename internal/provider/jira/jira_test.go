@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,19 +43,28 @@ const fixtureHost = "acme.atlassian.net"
 // sent" compares against literals rather than against the driver's own
 // constants.
 const (
-	epicPath     = "/rest/api/2/issue/ABC-1"
-	ticketPath   = "/rest/api/2/issue/ABC-12"
-	commentsPath = "/rest/api/2/issue/ABC-12/comment"
-	searchPath   = "/rest/api/2/search/jql"
-	linkTypePath = "/rest/api/2/issueLinkType"
+	epicPath      = "/rest/api/2/issue/ABC-1"
+	ticketPath    = "/rest/api/2/issue/ABC-12"
+	commentsPath  = "/rest/api/2/issue/ABC-12/comment"
+	searchPath    = "/rest/api/2/search/jql"
+	linkTypePath  = "/rest/api/2/issueLinkType"
+	bulkFetchPath = "/rest/api/3/issue/bulkfetch"
 )
 
-// epicRef is the Epic Ref the fixtures were written for.
+// epicRef is the Ref the fixtures were written for.
 var epicRef = ref.Ref{
 	Tracker: ref.TrackerJira,
 	Host:    fixtureHost,
 	Key:     "ABC-1",
 	Raw:     "ABC-1",
+}
+
+// refListRefs deliberately differs from Jira's ascending-id response order.
+var refListRefs = []ref.Ref{
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "DEF-4", Raw: "DEF-4"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-7", Raw: "ABC-7"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-1", Raw: "ABC-1"},
+	{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-3", Raw: "ABC-3"},
 }
 
 // response is one replayed answer: a status code and either a fixture file or a
@@ -73,6 +84,7 @@ type recordedRequest struct {
 	path    string
 	query   map[string][]string
 	headers http.Header
+	body    []byte
 }
 
 // replayServer serves recorded payloads, routed by request path. Jira answers
@@ -97,12 +109,20 @@ func newReplayServer(t *testing.T, responses map[string][]response) *replayServe
 
 	s := &replayServer{responses: responses, served: map[string]int{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading the request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
 		s.mu.Lock()
 		s.requests = append(s.requests, recordedRequest{
 			method:  r.Method,
 			path:    r.URL.Path,
 			query:   r.URL.Query(),
 			headers: r.Header.Clone(),
+			body:    body,
 		})
 		queue, ok := s.responses[r.URL.Path]
 		n := s.served[r.URL.Path]
@@ -171,6 +191,12 @@ func newProvider(s *replayServer, opts ...jira.Option) *jira.Provider {
 	return jira.New(fixtureHost, append(base, opts...)...)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // fullEpic serves the two-page fixture epic.
 func fullEpic(t *testing.T) *replayServer {
 	t.Helper()
@@ -180,18 +206,50 @@ func fullEpic(t *testing.T) *replayServer {
 	})
 }
 
+func jiraQueryPage(keys []string, isLast bool, token string) response {
+	issues := make([]string, len(keys))
+	for i, key := range keys {
+		issues[i] = fmt.Sprintf(`{"key":%q}`, key)
+	}
+	return response{body: fmt.Sprintf(
+		`{"issues":[%s],"isLast":%t,"nextPageToken":%q}`,
+		strings.Join(issues, ","), isLast, token)}
+}
+
+func jiraBulkIssue(key string) map[string]any {
+	return map[string]any{
+		"key": key,
+		"fields": map[string]any{
+			"summary":    "Bulk member " + key,
+			"status":     map[string]any{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
+			"resolution": nil,
+			"assignee":   nil,
+			"parent":     nil,
+			"project":    map[string]any{"key": "ABC"},
+		},
+	}
+}
+
+func ticketKeys(tickets []model.Ticket) []string {
+	keys := make([]string, len(tickets))
+	for i := range tickets {
+		keys[i] = tickets[i].Key
+	}
+	return keys
+}
+
 func TestName(t *testing.T) {
 	if p := jira.New(fixtureHost); p.Name() != "jira" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "jira")
 	}
 }
 
-func TestFetchEpicNormalizesTheEpic(t *testing.T) {
+func TestResolveNormalizesTheEpic(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -211,6 +269,9 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
 	}
+	if got, headerWant := snap.Header, provider.EpicHeader(want); got != headerWant {
+		t.Errorf("Header = %+v, want the Epic identity %+v", got, headerWant)
+	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the fixture epic hangs off nothing", snap.Parent)
 	}
@@ -223,12 +284,12 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
+func TestResolveReturnsEveryChildAcrossBothPages(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	type want struct {
@@ -286,12 +347,12 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 	}
 }
 
-func TestFetchEpicSendsExactlyWhatItNeeds(t *testing.T) {
+func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if n := len(s.requestsTo(epicPath)); n != 1 {
@@ -348,19 +409,890 @@ func TestFetchEpicSendsExactlyWhatItNeeds(t *testing.T) {
 	}
 }
 
-// ADR-0002 with teeth: this driver reads and never writes.
-func TestEveryRequestIsAGet(t *testing.T) {
+func TestResolveQuerySearchesMembershipThenBulkFetchesExactTickets(t *testing.T) {
+	const query = `  project in (ABC, DEF) AND labels = "agent ready" & text ~ "σ"  `
 	s := newReplayServer(t, map[string][]response{
-		epicPath:     {{file: "epic_issue.json"}},
-		searchPath:   {{file: "epic_children_page1.json"}, {file: "epic_children_page2.json"}},
-		ticketPath:   {{file: "detail_full.json"}},
-		commentsPath: {{file: "comments_page.json"}},
-		linkTypePath: {{file: "issue_link_types.json"}},
+		searchPath:    {{file: "query_membership.json"}},
+		bulkFetchPath: {{file: "ref_list.json"}},
 	})
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Header != provider.QueryHeader(query) {
+		t.Errorf("Header = %+v, want exact Query", snap.Header)
+	}
+	if !snap.FetchedAt.IsZero() || snap.Capabilities != p.Capabilities() {
+		t.Errorf("FetchedAt/Capabilities = %v/%+v", snap.FetchedAt, snap.Capabilities)
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	for i, want := range wantKeys {
+		if snap.Tickets[i].Key != want {
+			t.Errorf("Tickets[%d].Key = %q, want %q", i, snap.Tickets[i].Key, want)
+		}
+	}
+	if got := snap.Tickets[0].Title; got != "A child living in another project" {
+		t.Errorf("first Ticket title = %q, want bulk-fetch state rather than stale search state", got)
+	}
+
+	searches := s.requestsTo(searchPath)
+	if len(searches) != 1 {
+		t.Fatalf("membership searches = %d, want exactly one first page", len(searches))
+	}
+	membership := searches[0]
+	if membership.method != http.MethodGet {
+		t.Errorf("membership method = %s, want GET", membership.method)
+	}
+	if got := membership.query["jql"]; len(got) != 1 || got[0] != query {
+		t.Errorf("jql = %q, want exact %q", got, query)
+	}
+	if got := membership.query["fields"]; len(got) != 1 || got[0] != "key" {
+		t.Errorf("membership fields = %q, want identity only", got)
+	}
+	if got := membership.query["maxResults"]; len(got) != 1 || got[0] != "100" {
+		t.Errorf("maxResults = %q, want maximal first page", got)
+	}
+	if len(membership.query) != 3 || membership.query["nextPageToken"] != nil || membership.query["startAt"] != nil {
+		t.Errorf("membership query params = %v, want only jql, fields and maxResults", membership.query)
+	}
+
+	bulk := s.requestsTo(bulkFetchPath)
+	if len(bulk) != 1 {
+		t.Fatalf("bulk reads = %d, want one exact-root read", len(bulk))
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		Fields         []string `json:"fields"`
+	}
+	if err := json.Unmarshal(bulk[0].body, &body); err != nil {
+		t.Fatalf("decoding bulk body: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("bulk issue keys = %v, want search order/de-duplication %v", body.IssueIDsOrKeys, wantKeys)
+	}
+	wantFields := []string{"summary", "status", "resolution", "assignee", "parent", "project"}
+	if !reflect.DeepEqual(body.Fields, wantFields) {
+		t.Errorf("bulk fields = %v, want thin exact-root fields %v", body.Fields, wantFields)
+	}
+	if got := len(s.recorded()); got != 2 {
+		t.Errorf("all requests = %d, want membership plus exact-root only", got)
+	}
+}
+
+func TestResolveQueryPaginatesBeforeBulkFetch(t *testing.T) {
+	const query = `  project = ABC AND text ~ "ready & waiting"  `
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {
+			jiraQueryPage([]string{"DEF-4", "ABC-7", "DEF-4"}, false, "page-two"),
+			jiraQueryPage([]string{"ABC-1"}, true, ""),
+		},
+		bulkFetchPath: {{file: "ref_list.json"}},
+	})
+	p := newProvider(s, jira.WithMaxTickets(5))
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true below an exhausted budget")
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1"}
+	if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("Ticket keys = %v, want %v", got, wantKeys)
+	}
+
+	searches := s.requestsTo(searchPath)
+	if len(searches) != 2 {
+		t.Fatalf("membership searches = %d, want two", len(searches))
+	}
+	for i, want := range []struct {
+		maxResults string
+		token      []string
+	}{{"5", nil}, {"2", []string{"page-two"}}} {
+		if got := searches[i].query["jql"]; len(got) != 1 || got[0] != query {
+			t.Errorf("page %d jql = %q, want exact %q", i+1, got, query)
+		}
+		if got := searches[i].query["maxResults"]; len(got) != 1 || got[0] != want.maxResults {
+			t.Errorf("page %d maxResults = %q, want %q", i+1, got, want.maxResults)
+		}
+		if got := searches[i].query["nextPageToken"]; !reflect.DeepEqual(got, want.token) {
+			t.Errorf("page %d nextPageToken = %q, want %q", i+1, got, want.token)
+		}
+	}
+	bulk := s.requestsTo(bulkFetchPath)
+	if len(bulk) != 1 {
+		t.Fatalf("bulk reads = %d, want one after all membership pages", len(bulk))
+	}
+	all := s.recorded()
+	if len(all) != 3 || all[0].path != searchPath || all[1].path != searchPath || all[2].path != bulkFetchPath {
+		t.Fatalf("request order = %v, want membership page 1, membership page 2, then bulk read", all)
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+	}
+	if err := json.Unmarshal(bulk[0].body, &body); err != nil {
+		t.Fatalf("decoding bulk body: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("bulk keys = %v, want stable membership order %v", body.IssueIDsOrKeys, wantKeys)
+	}
+}
+
+func TestResolveQueryCutoffAccounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		keys       []string
+		isLast     bool
+		maxTickets int
+		wantKeys   []string
+		wantLimit  bool
+	}{
+		{
+			name:       "exact boundary exhausted",
+			keys:       []string{"DEF-4", "ABC-7"},
+			isLast:     true,
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+		},
+		{
+			name:       "exact boundary with continuation",
+			keys:       []string{"DEF-4", "ABC-7"},
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "oversized response is clipped",
+			keys:       []string{"DEF-4", "ABC-7", "ABC-1"},
+			isLast:     true,
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4", "ABC-7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "duplicate consumes native budget before de-duplication",
+			keys:       []string{"DEF-4", "DEF-4"},
+			maxTickets: 2,
+			wantKeys:   []string{"DEF-4"},
+			wantLimit:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				searchPath:    {jiraQueryPage(tt.keys, tt.isLast, "")},
+				bulkFetchPath: {{file: "ref_list.json"}},
+			})
+			snap, err := newProvider(s, jira.WithMaxTickets(tt.maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
+				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryRejectsNonProgressingPagination(t *testing.T) {
+	tests := []struct {
+		name  string
+		pages []response
+	}{
+		{
+			name:  "missing first continuation token",
+			pages: []response{jiraQueryPage([]string{"DEF-4"}, false, "")},
+		},
+		{
+			name: "repeated continuation token",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "same"),
+				jiraQueryPage([]string{"ABC-7"}, false, "same"),
+			},
+		},
+		{
+			name: "non-adjacent token cycle",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "a"),
+				jiraQueryPage([]string{"ABC-7"}, false, "b"),
+				jiraQueryPage([]string{"ABC-1"}, false, "a"),
+			},
+		},
+		{
+			name: "empty continuation page",
+			pages: []response{
+				jiraQueryPage([]string{"DEF-4"}, false, "next"),
+				jiraQueryPage(nil, true, ""),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{searchPath: tt.pages})
+			snap, err := newProvider(s, jira.WithMaxTickets(4)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(searchPath)); got != len(tt.pages) {
+				t.Errorf("membership requests = %d, want %d", got, len(tt.pages))
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 0 {
+				t.Errorf("bulk reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "server failure",
+			resp: response{status: http.StatusInternalServerError, body: `{"message":"down"}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"unexpected response", "500"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"issues": [`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed native query",
+			resp: response{status: http.StatusBadRequest, body: `{"errors":{"jql":"bad query"}}`},
+			want: providertest.Want{Kind: provider.KindBadRef, Contains: []string{"query rejected"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				searchPath: {
+					jiraQueryPage([]string{"DEF-4"}, false, "next"),
+					tt.resp,
+				},
+			})
+			snap, err := newProvider(s, jira.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(searchPath)); got != 2 {
+				t.Errorf("membership requests = %d, want 2", got)
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 0 {
+				t.Errorf("bulk reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryEmptyMembershipNeedsNoBulkRead(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{file: "query_empty.json"}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+	if len(s.recorded()) != 1 || len(s.requestsTo(bulkFetchPath)) != 0 {
+		t.Errorf("requests = %+v, want membership only", s.recorded())
+	}
+}
+
+func TestResolveQueryHugeLimitDoesNotPreallocateTheBudget(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{file: "query_empty.json"}},
+	})
+	p := newProvider(s, jira.WithMaxTickets(int(^uint(0)>>1)))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+}
+
+func TestResolveQueryRejectsMalformedJQLWithNativeExplanation(t *testing.T) {
+	const query = `project in (ABC`
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{
+			status: http.StatusBadRequest,
+			body: `{"errorMessages":["The query project in (ABC is invalid."],` +
+				`"errors":{"jql":"Expected ')' before end of query.","zfield":"Unknown field."}}`,
+		}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind: provider.KindBadRef,
+		Contains: []string{
+			"query rejected",
+			"The query [query] is invalid.",
+			"jql: Expected ')' before end of query.",
+			"zfield: Unknown field.",
+		},
+		Secret: query,
+	})
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("error = %q, leaked credential", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if provider.KindOf(err).Retryable() {
+		t.Error("malformed JQL must not be retryable")
+	}
+}
+
+func TestResolveQueryRedactsDecodedAndNormalizedNativeExplanation(t *testing.T) {
+	const query = "project%20%3D%20Caf%C3%A9"
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{
+			status: http.StatusBadRequest,
+			body: `{"errorMessages":["project = Café is invalid",` +
+				`"project+%3D+Caf%C3%A9 was normalized"],"errors":{"jql":"check the project field"}}`,
+		}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "is invalid", "was normalized", "check the project field", "[query]"},
+		Secret:   query,
+	})
+	for _, sensitive := range []string{"project = Café", "project+%3D+Caf%C3%A9", fixtureToken} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked sensitive form %q", err, sensitive)
+		}
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if len(s.recorded()) != 1 || len(s.requestsTo(bulkFetchPath)) != 0 {
+		t.Errorf("requests = %+v, want membership error only", s.recorded())
+	}
+}
+
+func TestResolveQueryPreservesMembershipFailureClasses(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, file: "errors_auth.json"},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"errorMessages":["Rate limit exceeded"]}`, headers: map[string]string{"Retry-After": "30"}},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit", "30"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `{"issues": [`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{searchPath: {tt.resp}})
+			snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want none", snap)
+			}
+			if len(s.recorded()) != 1 {
+				t.Errorf("requests = %d, want membership stage only", len(s.recorded()))
+			}
+		})
+	}
+}
+
+func TestResolveQueryTransportErrorDoesNotExposeQuery(t *testing.T) {
+	const query = "SECRET_QUERY_47"
+	transportErr := errors.New("dial failed")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	p := jira.New(fixtureHost,
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}),
+		jira.WithHTTPClient(client),
+	)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"transport failure"},
+		Secret:   query,
+	})
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(%v, transportErr) = false, want true", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveQueryBulkFailureReturnsNoPartialSnapshot(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath:    {{file: "query_membership.json"}},
+		bulkFetchPath: {{file: "ref_list_error.json"}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial membership", snap)
+	}
+	if len(s.recorded()) != 2 {
+		t.Errorf("requests = %d, want membership plus failed exact-root read", len(s.recorded()))
+	}
+}
+
+func TestResolveQueryRejectsInvalidSearchIdentity(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		searchPath: {{body: `{"issues":[{"key":"not a key"}],"isLast":true}`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q"})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"invalid key", "not a key"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveRefListUsesAuthoritativeBulkFetch(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		bulkFetchPath: {{file: "ref_list.json"}},
+	})
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if snap.Tickets == nil {
+		t.Fatal("Tickets = nil, want a successful non-nil Ticket slice")
+	}
+	wantKeys := []string{"DEF-4", "ABC-7", "ABC-1", "ABC-3"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("got %d Tickets, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	wantParents := []model.TicketID{"ABC-1", "ABC-1", "", "ABC-1"}
+	wantRepositories := []string{"DEF", "ABC", "ABC", "ABC"}
+	wantStatuses := []model.StatusCategory{
+		model.StatusInProgress, model.StatusCancelled, model.StatusTodo, model.StatusInProgress,
+	}
+	for i, key := range wantKeys {
+		got := snap.Tickets[i]
+		if got.Key != key || got.ParentID != wantParents[i] ||
+			got.Repository != wantRepositories[i] || got.Status != wantStatuses[i] {
+			t.Errorf("Tickets[%d] = {%s parent=%s project=%s status=%s}, want {%s parent=%s project=%s status=%s}",
+				i, got.Key, got.ParentID, got.Repository, got.Status,
+				key, wantParents[i], wantRepositories[i], wantStatuses[i])
+		}
+	}
+	if got, want := snap.Header, provider.RefListHeader(4); got != want {
+		t.Errorf("Header = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) {
+		t.Errorf("Epic = %+v, want the zero Epic", snap.Epic)
+	}
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero outer Parent", snap.Parent)
+	}
+	if snap.Capabilities != p.Capabilities() {
+		t.Errorf("Capabilities = %+v, want %+v", snap.Capabilities, p.Capabilities())
+	}
+	if !snap.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %s, want the zero time", snap.FetchedAt)
+	}
+
+	requests := s.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("got %d requests, want exactly one bulk fetch", len(requests))
+	}
+	request := requests[0]
+	if request.path != bulkFetchPath || request.method != http.MethodPost {
+		t.Errorf("request = %s %s, want POST %s", request.method, request.path, bulkFetchPath)
+	}
+	if len(request.query) != 0 {
+		t.Errorf("bulk fetch query = %v, want none", request.query)
+	}
+	var rawBody map[string]json.RawMessage
+	if err := json.Unmarshal(request.body, &rawBody); err != nil {
+		t.Fatalf("decoding the bulk fetch request body: %v", err)
+	}
+	if len(rawBody) != 2 || rawBody["issueIdsOrKeys"] == nil || rawBody["fields"] == nil {
+		t.Errorf("bulk fetch body keys = %v, want exactly issueIdsOrKeys and fields", reflect.ValueOf(rawBody).MapKeys())
+	}
+	var body struct {
+		IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		Fields         []string `json:"fields"`
+	}
+	if err := json.Unmarshal(request.body, &body); err != nil {
+		t.Fatalf("decoding the bulk fetch request body fields: %v", err)
+	}
+	if !reflect.DeepEqual(body.IssueIDsOrKeys, wantKeys) {
+		t.Errorf("issueIdsOrKeys = %v, want %v", body.IssueIDsOrKeys, wantKeys)
+	}
+	wantFields := []string{"summary", "status", "resolution", "assignee", "parent", "project"}
+	if !reflect.DeepEqual(body.Fields, wantFields) {
+		t.Errorf("fields = %v, want exactly %v", body.Fields, wantFields)
+	}
+	if got := request.headers.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := request.headers.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got)
+	}
+	if got := request.headers.Get("User-Agent"); got != "sitrep/test" {
+		t.Errorf("User-Agent = %q, want sitrep/test", got)
+	}
+	wantAuthorization := "Basic " + base64.StdEncoding.EncodeToString(
+		[]byte(fixtureEmail+":"+fixtureToken))
+	if got := request.headers.Get("Authorization"); got != wantAuthorization {
+		t.Error("Authorization does not carry the configured Basic email:token credential")
+	}
+}
+
+func TestResolveRefListIssueErrorPreventsPartialOutput(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		bulkFetchPath: {{file: "ref_list_error.json"}},
+	})
+
+	snap, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refListRefs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("Resolve returned a partial snapshot %+v, want the zero snapshot", snap)
+	}
+	if n := len(s.requestsTo(bulkFetchPath)); n != 1 {
+		t.Errorf("got %d bulk requests, want 1", n)
+	}
+}
+
+func TestResolveRefListSilentBulkOmissionPreventsPartialOutput(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		bulkFetchPath: {{body: `{"issues":[{"key":"DEF-4"},{"key":"ABC-1"}],"issueErrors":[]}`}},
+	})
+
+	snap, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refListRefs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"ABC-7 not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("Resolve returned a partial snapshot %+v, want the zero snapshot", snap)
+	}
+	if n := len(s.requestsTo(bulkFetchPath)); n != 1 {
+		t.Errorf("got %d bulk requests, want 1", n)
+	}
+}
+
+func TestResolveRefListBulkFailureBoundariesReturnNoPartialSnapshot(t *testing.T) {
+	t.Run("transport", func(t *testing.T) {
+		cause := errors.New("bulk transport failed")
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, cause
+		})}
+		p := jira.New(fixtureHost,
+			jira.WithBaseURL("https://jira.example.test"),
+			jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}),
+			jira.WithHTTPClient(client))
+		snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs[:1]})
+		providertest.CheckError(t, "jira", err, providertest.Want{
+			Kind: provider.KindUnavailable, Contains: []string{"requesting", bulkFetchPath}, Secret: fixtureToken,
+		})
+		if !errors.Is(err, cause) {
+			t.Errorf("errors.Is(%v, cause) = false", err)
+		}
+		if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+			t.Errorf("snapshot = %+v, want zero", snap)
+		}
+	})
+
+	for _, tt := range []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "non-2xx",
+			resp: response{status: http.StatusServiceUnavailable, body: `{"errorMessages":["temporarily unavailable"]}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"API error", "temporarily unavailable"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed success body",
+			resp: response{body: `{"issues":[`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response", bulkFetchPath}, Secret: fixtureToken},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{bulkFetchPath: {tt.resp}})
+			snap, err := newProvider(s).Resolve(
+				context.Background(), provider.RefListSelector{Refs: refListRefs[:1]})
+			providertest.CheckError(t, "jira", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want zero", snap)
+			}
+			if got := len(s.requestsTo(bulkFetchPath)); got != 1 {
+				t.Errorf("bulk requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestResolveRefListSecondBulkChunkFailureReturnsNoPartialSnapshot(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		chunks [][]string
+	)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode bulk request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		chunks = append(chunks, append([]string(nil), body.IssueIDsOrKeys...))
+		requestNumber := len(chunks)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if requestNumber == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"errorMessages":["second chunk failed"]}`))
+			return
+		}
+		issues := make([]map[string]any, len(body.IssueIDsOrKeys))
+		for i, key := range body.IssueIDsOrKeys {
+			issues[i] = jiraBulkIssue(key)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"issues": issues, "issueErrors": []any{}}); err != nil {
+			t.Errorf("encode bulk response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 1001)
+	for i := range refs {
+		key := fmt.Sprintf("ABC-%d", i+1)
+		refs[i] = ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: key, Raw: key}
+	}
+	p := jira.New(fixtureHost,
+		jira.WithBaseURL(s.URL),
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind: provider.KindUnavailable, Contains: []string{"API error", "second chunk failed"}, Secret: fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want zero after later-chunk failure", snap)
+	}
+	mu.Lock()
+	gotChunks := append([][]string(nil), chunks...)
+	mu.Unlock()
+	sizes := make([]int, len(gotChunks))
+	for i := range gotChunks {
+		sizes[i] = len(gotChunks[i])
+	}
+	if !reflect.DeepEqual(sizes, []int{1000, 1}) {
+		t.Fatalf("bulk chunk sizes = %v, want [1000 1]", sizes)
+	}
+	if gotChunks[0][0] != "ABC-1" || gotChunks[0][999] != "ABC-1000" || gotChunks[1][0] != "ABC-1001" {
+		t.Errorf("bulk chunk order = first %q..%q second %q, want Selector order",
+			gotChunks[0][0], gotChunks[0][999], gotChunks[1][0])
+	}
+}
+
+func TestResolveRefListValidatesEveryKeyBeforeIO(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{})
+	refs := append([]ref.Ref(nil), refListRefs[:1]...)
+	refs = append(refs, ref.Ref{
+		Tracker: ref.TrackerJira,
+		Host:    fixtureHost,
+		Key:     `ABC-7" OR "1`,
+		Raw:     `ABC-7" OR "1`,
+	})
+
+	_, err := newProvider(s).Resolve(
+		context.Background(), provider.RefListSelector{Refs: refs})
+	providertest.CheckError(t, "jira", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"does not name a Jira issue"},
+	})
+	if n := len(s.recorded()); n != 0 {
+		t.Errorf("%d requests reached the server; every key must validate before I/O", n)
+	}
+}
+
+func TestResolveRejectsEmptyAndUnknownSelectorsBeforeIO(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector provider.Selector
+		want     string
+	}{
+		{name: "empty Ref list", selector: provider.RefListSelector{}, want: "must name at least one"},
+		{name: "nil Selector", selector: nil, want: "unsupported Watchlist selector"},
+		{name: "pointer Selector", selector: &provider.EpicSelector{Ref: epicRef}, want: "unsupported Watchlist selector"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{})
+			_, err := newProvider(s).Resolve(context.Background(), tt.selector)
+			providertest.CheckError(t, "jira", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.want},
+			})
+			if n := len(s.recorded()); n != 0 {
+				t.Errorf("%d requests reached the server; an unsupported Selector must fail immediately", n)
+			}
+		})
+	}
+}
+
+func TestResolveRefListChunksOnlyAtTheBulkFetchBound(t *testing.T) {
+	var (
+		mu         sync.Mutex
+		chunkSizes []int
+	)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != bulkFetchPath {
+			t.Errorf("request = %s %s, want POST %s", r.Method, r.URL.Path, bulkFetchPath)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			IssueIDsOrKeys []string `json:"issueIdsOrKeys"`
+			Fields         []string `json:"fields"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		chunkSizes = append(chunkSizes, len(body.IssueIDsOrKeys))
+		mu.Unlock()
+
+		issues := make([]map[string]any, 0, len(body.IssueIDsOrKeys))
+		for _, key := range body.IssueIDsOrKeys {
+			issues = append(issues, map[string]any{
+				"key": key,
+				"fields": map[string]any{
+					"summary":    "Bulk member " + key,
+					"status":     map[string]any{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
+					"resolution": nil,
+					"assignee":   nil,
+					"parent":     nil,
+					"project":    map[string]any{"key": "ABC"},
+				},
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"issues": issues, "issueErrors": []any{},
+		}); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	refs := make([]ref.Ref, 1001)
+	for i := range refs {
+		key := fmt.Sprintf("ABC-%d", i+1)
+		refs[i] = ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: key, Raw: key}
+	}
+	p := jira.New(fixtureHost,
+		jira.WithBaseURL(s.URL),
+		jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
+
+	snap, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refs})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(snap.Tickets) != len(refs) {
+		t.Errorf("got %d Tickets, want %d", len(snap.Tickets), len(refs))
+	}
+	mu.Lock()
+	gotSizes := append([]int(nil), chunkSizes...)
+	mu.Unlock()
+	if want := []int{1000, 1}; !reflect.DeepEqual(gotSizes, want) {
+		t.Errorf("bulk request sizes = %v, want %v", gotSizes, want)
+	}
+}
+
+// ADR-0002 with teeth: every operation reads. Jira requires POST for the bulk
+// read body, but no request may target a mutation endpoint.
+func TestEveryRequestIsARead(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		epicPath:      {{file: "epic_issue.json"}},
+		searchPath:    {{file: "epic_children_page1.json"}, {file: "epic_children_page2.json"}},
+		bulkFetchPath: {{file: "ref_list.json"}},
+		ticketPath:    {{file: "detail_full.json"}},
+		commentsPath:  {{file: "comments_page.json"}},
+		linkTypePath:  {{file: "issue_link_types.json"}},
+	})
+	p := newProvider(s)
+
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("resolving the Epic: %v", err)
+	}
+	if _, err := p.Resolve(context.Background(), provider.RefListSelector{Refs: refListRefs}); err != nil {
+		t.Fatalf("resolving the Ref list: %v", err)
 	}
 	if _, err := p.FetchDetail(context.Background(), "ABC-12"); err != nil {
 		t.Fatalf("FetchDetail: %v", err)
@@ -371,8 +1303,16 @@ func TestEveryRequestIsAGet(t *testing.T) {
 		t.Fatal("no requests were recorded")
 	}
 	for _, r := range recorded {
-		if r.method != http.MethodGet {
-			t.Errorf("a %s went to %s; every request this driver sends is a GET", r.method, r.path)
+		wantMethod := http.MethodGet
+		if r.path == bulkFetchPath {
+			wantMethod = http.MethodPost
+		}
+		if r.method != wantMethod {
+			t.Errorf("request to %s used %s, want read method %s", r.path, r.method, wantMethod)
+		}
+		switch r.method {
+		case http.MethodPut, http.MethodPatch, http.MethodDelete:
+			t.Errorf("a mutation method %s reached %s", r.method, r.path)
 		}
 	}
 }
@@ -386,9 +1326,9 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 		t.Error("Capabilities().PullRequests = true, want false")
 	}
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Epic.PullRequests != nil {
 		t.Errorf("Epic.PullRequests = %+v, want nil", snap.Epic.PullRequests)
@@ -400,8 +1340,8 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := plain.RenderEpic(&buf, snap); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, snap); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	for _, unwanted := range []string{"pull request", "PR ", "#pr"} {
 		if strings.Contains(strings.ToLower(buf.String()), strings.ToLower(unwanted)) {
@@ -413,7 +1353,7 @@ func TestNoPullRequestsAnywhere(t *testing.T) {
 // A Ref that named a plain Ticket: no children, the fetched issue's identity on
 // Epic and its own parent on Parent. Which screen that opens is internal/cli's
 // decision, asserted at this seam rather than through the CLI.
-func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
+func TestResolveOnARefThatNamesAPlainTicket(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		ticketPath: {{file: "ticket_with_parent.json"}},
 		searchPath: {{file: "epic_children_empty.json"}},
@@ -421,9 +1361,9 @@ func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
 	p := newProvider(s)
 
 	r := ref.Ref{Tracker: ref.TrackerJira, Host: fixtureHost, Key: "ABC-12", Raw: "ABC-12"}
-	snap, err := p.FetchEpic(context.Background(), r)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: r})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if snap.Tickets == nil {
@@ -446,7 +1386,7 @@ func TestFetchEpicOnARefThatNamesAPlainTicket(t *testing.T) {
 	}
 }
 
-func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
+func TestResolveRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		r    ref.Ref
@@ -455,7 +1395,7 @@ func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 		{
 			name: "a GitHub Ref",
 			r:    ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 1, Raw: "acme/widgets#1"},
-			want: "is not a Jira Epic Ref",
+			want: "is not a Jira Ref",
 		},
 		{
 			name: "an empty key",
@@ -484,7 +1424,7 @@ func TestFetchEpicRejectsBadRefsBeforeAnyRequest(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
 			p := newProvider(s)
 
-			_, err := p.FetchEpic(context.Background(), tt.r)
+			_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			providertest.CheckError(t, "jira", err, providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{tt.want},
@@ -504,7 +1444,7 @@ type epicFailure struct {
 }
 
 // epicFailures is the driver's failure table, hoisted out of the test that
-// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// iterates it so that TestResolveFailuresCoverTheNamedClasses can assert what
 // it covers rather than trusting a comment.
 func epicFailures() []epicFailure {
 	return []epicFailure{
@@ -608,6 +1548,16 @@ func epicFailures() []epicFailure {
 			},
 		},
 		{
+			name: "a non-Query request ignores field errors",
+			resp: response{status: http.StatusBadRequest,
+				body: `{"errorMessages":[],"errors":{"jql":"query-field-only-message"}}`},
+			want: providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"unexpected response 400"},
+				Secret:   "query-field-only-message",
+			},
+		},
+		{
 			name: "a malformed body",
 			resp: response{body: `{"key": "ABC-1", "fields": `},
 			want: providertest.Want{
@@ -619,12 +1569,12 @@ func epicFailures() []epicFailure {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
+func TestResolveFailures(t *testing.T) {
 	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "jira", err, tt.want)
 		})
 	}
@@ -633,7 +1583,7 @@ func TestFetchEpicFailures(t *testing.T) {
 // The ticket's promise is per-driver: a bad ref, an auth failure and rate
 // limiting each explain themselves on this Tracker. This asserts the table
 // above actually exercises all three.
-func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+func TestResolveFailuresCoverTheNamedClasses(t *testing.T) {
 	kinds := []provider.Kind{}
 	for _, tt := range epicFailures() {
 		kinds = append(kinds, tt.want.Kind)
@@ -666,7 +1616,7 @@ func TestMissingCredentials(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {{file: "epic_issue.json"}}})
 			p := jira.New(fixtureHost, jira.WithBaseURL(s.URL), jira.WithCredentials(tt.credentials))
 
-			_, err := p.FetchEpic(context.Background(), epicRef)
+			_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "jira", err, providertest.Want{
 				Kind:     provider.KindAuth,
 				Contains: tt.want,
@@ -727,9 +1677,9 @@ func TestParentIDNamesOnlyANonEpicParent(t *testing.T) {
 		searchPath: {{body: children}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(snap.Tickets) != 2 {
 		t.Fatalf("got %d Tickets, want 2", len(snap.Tickets))
@@ -751,9 +1701,9 @@ func TestPaginationSafety(t *testing.T) {
 		})
 		p := newProvider(s)
 
-		_, err := p.FetchEpic(context.Background(), epicRef)
+		_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about the repeated cursor")
+			t.Fatal("Resolve succeeded, want an error about the repeated cursor")
 		}
 		// A server that reports more and hands over the same cursor is
 		// misbehaving, which is what KindUnavailable means — and it stays
@@ -778,9 +1728,9 @@ func TestPaginationSafety(t *testing.T) {
 		})
 		p := newProvider(s)
 
-		snap, err := p.FetchEpic(context.Background(), epicRef)
+		snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatalf("FetchEpic returned %d children and no error; want an error",
+			t.Fatalf("Resolve returned %d children and no error; want an error",
 				len(snap.Tickets))
 		}
 		providertest.CheckError(t, "jira", err, providertest.Want{
@@ -814,9 +1764,9 @@ func TestPaginationSafety(t *testing.T) {
 			jira.WithBaseURL(s.URL),
 			jira.WithCredentials(jira.Credentials{Email: fixtureEmail, Token: fixtureToken}))
 
-		_, err := p.FetchEpic(context.Background(), epicRef)
+		_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 		if err == nil {
-			t.Fatal("FetchEpic succeeded, want an error about refusing to keep paging")
+			t.Fatal("Resolve succeeded, want an error about refusing to keep paging")
 		}
 		// A collection past the cap is a stable property of the ref, so the
 		// monitor prints one line and exits rather than retrying forever.
@@ -848,13 +1798,13 @@ func TestPollingRefetches(t *testing.T) {
 			return jira.Credentials{Email: fixtureEmail, Token: fixtureToken}, nil
 		}))
 
-	first, err := p.FetchEpic(context.Background(), epicRef)
+	first, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("the first FetchEpic: %v", err)
+		t.Fatalf("the first Resolve: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), epicRef)
+	second, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("the second FetchEpic: %v", err)
+		t.Fatalf("the second Resolve: %v", err)
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Error("two fetches of an unchanged epic returned different snapshots")
@@ -878,8 +1828,8 @@ func TestTheHotPathStaysCold(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	for _, r := range s.recorded() {

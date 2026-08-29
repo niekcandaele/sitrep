@@ -6,49 +6,49 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
-// Header is the block above the Ticket list: what this collection is, and how
-// far along it is. It is deliberately not an Epic — a future ad-hoc Ticket set
-// or query result fills the same three fields.
+// Header is the block above the Ticket list: what this Watchlist is, and how
+// far along it is.
 type Header struct {
-	// Key is the collection's display identity, e.g. "#111". May be empty.
+	// Key is the Watchlist's display identity, e.g. "#111". May be empty.
 	Key string
-	// Title is the collection's one-line summary.
+	// Title is the Watchlist's one-line summary.
 	Title string
-	// URL points at the collection in its Tracker. May be empty.
+	// URL points at the Watchlist in its Tracker. May be empty.
 	URL string
 }
 
-// ListInput is everything the monitor's list screen renders: a collection of
+// ListInput is everything the monitor's list screen renders: a Watchlist of
 // Tickets plus a Header, the Capabilities that decide what may be shown, and
-// the moment the collection was read.
+// the moment the Watchlist was read.
 //
 // Progress is deliberately absent: it is a function of the Tickets, and
 // storing it alongside them invites the two to drift.
 type ListInput struct {
-	// Header identifies the collection being watched.
+	// Header identifies the Watchlist being shown.
 	Header Header
-	// Tickets are the collection's members in the Provider's own order.
+	// Tickets are the Watchlist's members in the Provider's own order.
 	Tickets []model.Ticket
 	// Capabilities decide what a row may show; an undeclared Capability is
 	// silently absent, never an error.
 	Capabilities model.Capabilities
+	// LimitReached reports that Query membership consumed its configured budget.
+	LimitReached bool
 	// FetchedAt is when this reading was taken, from the caller's clock.
 	FetchedAt time.Time
 }
 
-// ListFromEpicSnapshot adapts one batched Epic read to the list-view contract.
-// It is the only place in the TUI that knows what an Epic is: everything
-// downstream — the Model, the frame renderer — sees a collection of Tickets
-// and a Header, so a future ad-hoc Ticket set feeds the same screen.
-func ListFromEpicSnapshot(s model.EpicSnapshot) ListInput {
+// ListFromWatchlistSnapshot adapts one Watchlist snapshot to the list-view
+// contract. The Model and frame renderer see only a Header and Tickets.
+func ListFromWatchlistSnapshot(s model.WatchlistSnapshot) ListInput {
 	return ListInput{
 		Header: Header{
-			Key:   s.Epic.Key,
-			Title: s.Epic.Title,
-			URL:   s.Epic.URL,
+			Key:   s.Header.Key,
+			Title: s.Header.Title,
+			URL:   s.Header.URL,
 		},
 		Tickets:      s.Tickets,
 		Capabilities: s.Capabilities,
+		LimitReached: s.LimitReached,
 		FetchedAt:    s.FetchedAt,
 	}
 }

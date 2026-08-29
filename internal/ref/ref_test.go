@@ -3,6 +3,7 @@ package ref_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -224,12 +225,28 @@ func TestParseBareNumberInAnUnrecognisedClone(t *testing.T) {
 	}
 }
 
+func TestEmptyRefUsesGenericRefVocabulary(t *testing.T) {
+	for _, raw := range []string{"", " \t\n"} {
+		_, err := ref.Parse(context.Background(), raw)
+		if err == nil {
+			t.Fatalf("Parse(%q) succeeded, want an error", raw)
+		}
+		if got, want := err.Error(), "a Ref is required"; got != want {
+			t.Errorf("Parse(%q) error = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // Rule 4 of the prose contract: an error names the fix. "cannot parse this"
 // with no accepted form beside it is a dead end.
 func TestUnparseableRefNamesTheAcceptedForms(t *testing.T) {
 	_, err := ref.Parse(context.Background(), "not a ref at all")
 	if err == nil {
 		t.Fatal("Parse succeeded on nonsense, want an error")
+	}
+	const wantMessage = `cannot parse "not a ref at all" as a Ref — pass an issue URL, "owner/repo#123", "PROJ-123" or a bare number inside a clone (run "sitrep --help" for every accepted form)`
+	if got := err.Error(); got != wantMessage {
+		t.Errorf("error = %q, want exact short diagnostic %q", got, wantMessage)
 	}
 	for _, want := range []string{"not a ref at all", "owner/repo#123", "PROJ-123", "bare number", "--help"} {
 		if !strings.Contains(err.Error(), want) {
@@ -238,6 +255,53 @@ func TestUnparseableRefNamesTheAcceptedForms(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "\n") {
 		t.Errorf("error %q spans more than one line", err)
+	}
+}
+
+func TestUnparseableRefDiagnosticIsBoundedAndTerminalSafe(t *testing.T) {
+	cutMultibyte := strings.Repeat("a", 79) + "é" + string([]byte{0xff}) + "\x1b\nremaining"
+	tests := []struct {
+		name        string
+		raw         string
+		wantPreview string
+		wantLength  bool
+	}{
+		{name: "80 byte boundary", raw: strings.Repeat("a", 80), wantPreview: strings.Repeat("a", 80)},
+		{name: "81 byte boundary", raw: strings.Repeat("b", 81), wantPreview: strings.Repeat("b", 80), wantLength: true},
+		{name: "cut multibyte and controls", raw: cutMultibyte, wantPreview: strings.Repeat("a", 79) + `\xc3`, wantLength: true},
+		{name: "large token", raw: strings.Repeat("z", 100_000), wantPreview: strings.Repeat("z", 80), wantLength: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ref.Parse(context.Background(), tt.raw)
+			if err == nil {
+				t.Fatal("Parse succeeded on malformed Ref, want an error")
+			}
+			message := err.Error()
+			if !strings.Contains(message, tt.wantPreview) {
+				t.Errorf("error = %q, want bounded quoted prefix %q", message, tt.wantPreview)
+			}
+			trimmedBytes := len(strings.TrimSpace(tt.raw))
+			lengthText := fmt.Sprintf("(%d bytes)", trimmedBytes)
+			if tt.wantLength != strings.Contains(message, lengthText) {
+				t.Errorf("error = %q, length metadata presence = %t, want %t", message, strings.Contains(message, lengthText), tt.wantLength)
+			}
+			if tt.wantLength && strings.Contains(message, tt.raw) {
+				t.Error("error contains the complete oversized Ref")
+			}
+			if strings.ContainsAny(message, "\n\r\x1b") {
+				t.Errorf("error contains a physical line break or terminal escape: %q", message)
+			}
+			if len(message) >= 1024 {
+				t.Errorf("error is %d bytes, want a compact diagnostic", len(message))
+			}
+			for _, guidance := range []string{"owner/repo#123", "PROJ-123", "bare number", "--help"} {
+				if !strings.Contains(message, guidance) {
+					t.Errorf("error %q lost guidance %q", message, guidance)
+				}
+			}
+		})
 	}
 }
 
@@ -290,7 +354,7 @@ func TestParseRemoteURL(t *testing.T) {
 }
 
 // A Ref renders the way a human writes one, which means it can be typed back
-// in: the display key of a cross-repo child is a working Epic Ref.
+// in: the display key of a cross-repo child is a working Ref.
 func TestRefStringRoundTrips(t *testing.T) {
 	raws := []string{
 		"acme/widgets#111",

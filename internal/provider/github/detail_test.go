@@ -14,7 +14,7 @@ import (
 )
 
 // detailID is the node ID the Detail fixtures were recorded for. It is a
-// model.TicketID because that is exactly what FetchEpic puts on every Ticket:
+// model.TicketID because that is exactly what Resolve puts on every Ticket:
 // GitHub's GraphQL node ID is the Ticket's identity for this driver.
 const detailID = model.TicketID("I_kwDOT_WhQ88AAAABNqYEOA")
 
@@ -33,7 +33,10 @@ func fetchDetail(t *testing.T, file string) (*replayServer, model.Detail) {
 // A Capability declares what the driver returns today. Detail is served now, so
 // Comments and BlockingLinks are on — flipped in the same change as the data.
 func TestCapabilitiesIncludeDetail(t *testing.T) {
-	want := model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
+	want := model.Capabilities{
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
+	}
 	if got := github.New("github.com").Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
@@ -227,8 +230,8 @@ func TestFetchDetailIsOneRequest(t *testing.T) {
 func TestTheEpicQueryCarriesNoDetailSelection(t *testing.T) {
 	s := fullEpic(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	requests := s.recorded()

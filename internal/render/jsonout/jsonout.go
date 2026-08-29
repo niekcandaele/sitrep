@@ -1,7 +1,7 @@
-// Package jsonout renders sitrep's machine-readable output: the --json epic
-// document, the matching Ticket detail document, and the decoder's ticket
-// document — the detail document plus the Ticket's own identity and its parent,
-// which is what --json emits for an Epic Ref that named a Ticket.
+// Package jsonout renders sitrep's machine-readable output: the --json
+// Watchlist document, the matching Ticket detail document, and the decoder's
+// Ticket document — the detail document plus the Ticket's own identity and its
+// parent, which is what --json emits for a Ref that named a Ticket.
 //
 // The wire format is a contract, so it lives here as its own layer of DTO
 // structs with json tags rather than tags scattered over the domain model.
@@ -10,7 +10,8 @@
 //
 // Conventions, all pinned by golden tests:
 //
-//   - Keys are snake_case; schema_version comes first and is always 1.
+//   - Keys are snake_case; schema_version comes first. Watchlists use schema v2;
+//     Detail and decoded-Ticket documents remain schema v1.
 //   - Times are RFC 3339 in UTC.
 //   - tickets is always present and always an array, never null.
 //   - Optional strings and capability-gated arrays are omitted when empty. An
@@ -25,15 +26,21 @@ package jsonout
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/ref"
 )
 
-// schemaVersion is the version of the documents this package emits. Bump it
-// only for a breaking change to the shape.
-const schemaVersion = 1
+// Watchlist documents use schema v2; Detail and decoded-Ticket documents use schema v1.
+const (
+	watchlistSchemaVersion = 2
+	detailSchemaVersion    = 1
+)
 
 type providerDoc struct {
 	Name         string          `json:"name"`
@@ -41,10 +48,17 @@ type providerDoc struct {
 }
 
 type capabilitiesDoc struct {
-	Hierarchy     bool `json:"hierarchy"`
-	BlockingLinks bool `json:"blocking_links"`
-	Comments      bool `json:"comments"`
-	PullRequests  bool `json:"pull_requests"`
+	Hierarchy     bool                     `json:"hierarchy"`
+	BlockingLinks bool                     `json:"blocking_links"`
+	Comments      bool                     `json:"comments"`
+	PullRequests  bool                     `json:"pull_requests"`
+	Selectors     *selectorCapabilitiesDoc `json:"selectors,omitempty"`
+}
+
+type selectorCapabilitiesDoc struct {
+	Epic    bool `json:"epic"`
+	RefList bool `json:"ref_list"`
+	Query   bool `json:"query"`
 }
 
 type userDoc struct {
@@ -96,13 +110,26 @@ type ticketDoc struct {
 	PullRequests []pullRequestDoc     `json:"pull_requests,omitempty"`
 }
 
-type epicDocument struct {
-	SchemaVersion int         `json:"schema_version"`
-	GeneratedAt   time.Time   `json:"generated_at"`
-	Provider      providerDoc `json:"provider"`
-	Epic          epicDoc     `json:"epic"`
-	Progress      progressDoc `json:"progress"`
-	Tickets       []ticketDoc `json:"tickets"`
+type selectorDoc struct {
+	Kind  string   `json:"kind"`
+	Ref   string   `json:"ref,omitempty"`
+	Refs  []string `json:"refs,omitempty"`
+	Query *string  `json:"query,omitempty"`
+}
+
+type watchlistDoc struct {
+	Selector     selectorDoc `json:"selector"`
+	Epic         *epicDoc    `json:"epic,omitempty"`
+	LimitReached bool        `json:"limit_reached,omitempty"`
+}
+
+type watchlistDocument struct {
+	SchemaVersion int          `json:"schema_version"`
+	GeneratedAt   time.Time    `json:"generated_at"`
+	Provider      providerDoc  `json:"provider"`
+	Watchlist     watchlistDoc `json:"watchlist"`
+	Progress      progressDoc  `json:"progress"`
+	Tickets       []ticketDoc  `json:"tickets"`
 }
 
 type commentDoc struct {
@@ -157,8 +184,7 @@ type detailDocument struct {
 type TicketDocument struct {
 	// Ticket is the decoded Ticket in list-model form.
 	Ticket model.Ticket
-	// Parent is the collection it belongs to. The zero Parent emits no parent
-	// key at all.
+	// Parent is the Ticket's parent. The zero Parent emits no parent key at all.
 	Parent model.Parent
 	// Detail is the expensive per-ticket data, exactly as the Provider returned
 	// it.
@@ -167,29 +193,25 @@ type TicketDocument struct {
 	Capabilities model.Capabilities
 	// ProviderName is the serving Provider's Name.
 	ProviderName string
-	// GeneratedAt is the caller's clock reading, matching generated_at in the
-	// epic document.
+	// GeneratedAt is the caller's clock reading for the wire document.
 	GeneratedAt time.Time
 }
 
-// RenderEpic writes the epic document for one snapshot to w. providerName is
-// the serving Provider's Name; the snapshot supplies everything else, including
-// the generated_at timestamp its caller stamped into FetchedAt.
-func RenderEpic(w io.Writer, snap model.EpicSnapshot, providerName string) error {
-	doc := epicDocument{
-		SchemaVersion: schemaVersion,
+// RenderWatchlist writes the schema-v2 Watchlist document for one snapshot.
+// selector records how membership was chosen; providerName identifies the
+// serving Provider.
+func RenderWatchlist(w io.Writer, snap model.WatchlistSnapshot, selector provider.Selector, providerName string) error {
+	watchlist, err := newWatchlistDoc(snap, selector)
+	if err != nil {
+		return err
+	}
+	doc := watchlistDocument{
+		SchemaVersion: watchlistSchemaVersion,
 		GeneratedAt:   wireTime(snap.FetchedAt),
-		Provider:      newProviderDoc(providerName, snap.Capabilities),
-		Epic: epicDoc{
-			ID:           snap.Epic.ID,
-			Key:          snap.Epic.Key,
-			Title:        snap.Epic.Title,
-			URL:          snap.Epic.URL,
-			Status:       snap.Epic.Status,
-			NativeStatus: snap.Epic.NativeStatus,
-		},
-		Progress: newProgressDoc(model.ComputeProgress(snap.Tickets)),
-		Tickets:  make([]ticketDoc, 0, len(snap.Tickets)),
+		Provider:      newWatchlistProviderDoc(providerName, snap.Capabilities),
+		Watchlist:     watchlist,
+		Progress:      newProgressDoc(model.ComputeProgress(snap.Tickets)),
+		Tickets:       make([]ticketDoc, 0, len(snap.Tickets)),
 	}
 	for _, t := range snap.Tickets {
 		doc.Tickets = append(doc.Tickets, newTicketDoc(t, snap.Capabilities))
@@ -197,9 +219,48 @@ func RenderEpic(w io.Writer, snap model.EpicSnapshot, providerName string) error
 	return encode(w, doc)
 }
 
+func newWatchlistDoc(snap model.WatchlistSnapshot, selector provider.Selector) (watchlistDoc, error) {
+	switch s := selector.(type) {
+	case provider.EpicSelector:
+		epic := epicDoc{
+			ID:           snap.Epic.ID,
+			Key:          snap.Epic.Key,
+			Title:        snap.Epic.Title,
+			URL:          snap.Epic.URL,
+			Status:       snap.Epic.Status,
+			NativeStatus: snap.Epic.NativeStatus,
+		}
+		return watchlistDoc{
+			Selector: selectorDoc{Kind: "epic", Ref: selectorRef(s.Ref)},
+			Epic:     &epic,
+		}, nil
+	case provider.RefListSelector:
+		refs := make([]string, 0, len(s.Refs))
+		for _, r := range s.Refs {
+			refs = append(refs, selectorRef(r))
+		}
+		return watchlistDoc{Selector: selectorDoc{Kind: "ref_list", Refs: refs}}, nil
+	case provider.QuerySelector:
+		query := s.Query
+		return watchlistDoc{
+			Selector:     selectorDoc{Kind: "query", Query: &query},
+			LimitReached: snap.LimitReached,
+		}, nil
+	default:
+		return watchlistDoc{}, fmt.Errorf("json: unsupported Watchlist Selector %T", selector)
+	}
+}
+
+func selectorRef(r ref.Ref) string {
+	if raw := strings.TrimSpace(r.Raw); raw != "" {
+		return raw
+	}
+	return r.String()
+}
+
 // RenderDetail writes the detail document for one Ticket to w. caps decides
 // which optional sections appear at all, and generatedAt is the caller's clock
-// reading, matching generated_at in the epic document.
+// reading for the wire document.
 func RenderDetail(w io.Writer, d model.Detail, caps model.Capabilities, providerName string, generatedAt time.Time) error {
 	return encode(w, newDetailDocument(d, caps, providerName, generatedAt))
 }
@@ -228,7 +289,7 @@ func RenderTicket(w io.Writer, doc TicketDocument) error {
 // emit, so the two cannot drift about capability gating or timestamps.
 func newDetailDocument(d model.Detail, caps model.Capabilities, providerName string, generatedAt time.Time) detailDocument {
 	doc := detailDocument{
-		SchemaVersion: schemaVersion,
+		SchemaVersion: detailSchemaVersion,
 		GeneratedAt:   wireTime(generatedAt),
 		Provider:      newProviderDoc(providerName, caps),
 		TicketID:      d.TicketID,
@@ -271,6 +332,16 @@ func newDetailDocument(d model.Detail, caps model.Capabilities, providerName str
 // people and scripts read.
 func wireTime(t time.Time) time.Time {
 	return t.UTC().Truncate(time.Second)
+}
+
+func newWatchlistProviderDoc(name string, caps model.Capabilities) providerDoc {
+	doc := newProviderDoc(name, caps)
+	doc.Capabilities.Selectors = &selectorCapabilitiesDoc{
+		Epic:    caps.Selectors.Epic,
+		RefList: caps.Selectors.RefList,
+		Query:   caps.Selectors.Query,
+	}
+	return doc
 }
 
 func newProviderDoc(name string, caps model.Capabilities) providerDoc {

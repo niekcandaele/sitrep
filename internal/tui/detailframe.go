@@ -2,13 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // detailHeaderHeight is what renderDetailHeader always draws: the breadcrumb,
@@ -16,6 +17,99 @@ import (
 // body's arithmetic does not have to ask whether a Ticket happens to have
 // assignees.
 const detailHeaderHeight = 4
+
+// detailDocument is the complete, ephemeral Detail body for one frame. LinkRows
+// is produced while Lines is assembled, so keyboard and mouse navigation use
+// the same geometry the renderer drew rather than reverse-engineering strings.
+type detailDocument struct {
+	Lines    []string
+	LinkRows []detailLinkRow
+}
+
+// detailMarkdownSections is the expensive, width- and theme-bound part of a
+// loaded Detail document. Link rows stay outside it so focus and navigation
+// geometry can be recomposed on every frame without invoking Goldmark or
+// Glamour.
+type detailMarkdownSections struct {
+	description []string
+	comments    []string
+	valid       bool
+
+	sourceDescription string
+	sourceComments    []detailMarkdownCommentSource
+	ticketURL         string
+	commentsEnabled   bool
+	width             int
+	theme             markdownTheme
+	glamourStyle      string
+}
+
+type detailMarkdownCommentSource struct {
+	body      string
+	author    string
+	createdAt string
+}
+
+func (sections detailMarkdownSections) matches(
+	in DetailInput, width int, markdown detailMarkdownRenderers,
+) bool {
+	if !sections.valid || sections.sourceDescription != in.Detail.Description ||
+		sections.ticketURL != in.Ticket.URL || sections.commentsEnabled != in.Capabilities.Comments ||
+		sections.width != width || sections.theme != markdown.theme ||
+		sections.glamourStyle != os.Getenv("GLAMOUR_STYLE") ||
+		len(sections.sourceComments) != len(in.Detail.Comments) {
+		return false
+	}
+	for i, comment := range in.Detail.Comments {
+		source := sections.sourceComments[i]
+		if source.body != comment.Body || source.author != comment.Author.Login ||
+			source.createdAt != comment.CreatedAt.UTC().Format(commentTimeLayout) {
+			return false
+		}
+	}
+	return true
+}
+
+func renderDetailMarkdownSections(
+	in DetailInput, width int, s Styles, markdown detailMarkdownRenderers,
+) detailMarkdownSections {
+	comments := make([]detailMarkdownCommentSource, len(in.Detail.Comments))
+	for i, comment := range in.Detail.Comments {
+		comments[i] = detailMarkdownCommentSource{
+			body:      comment.Body,
+			author:    comment.Author.Login,
+			createdAt: comment.CreatedAt.UTC().Format(commentTimeLayout),
+		}
+	}
+	return detailMarkdownSections{
+		description:       describeDetail(in, width, s, markdown.description),
+		comments:          commentLines(in, width, s, markdown.comment),
+		valid:             true,
+		sourceDescription: in.Detail.Description,
+		sourceComments:    comments,
+		ticketURL:         in.Ticket.URL,
+		commentsEnabled:   in.Capabilities.Comments,
+		width:             width,
+		theme:             markdown.theme,
+		glamourStyle:      os.Getenv("GLAMOUR_STYLE"),
+	}
+}
+
+// detailLinkIdentity identifies one displayed relationship across re-reads and
+// reflow. Mutable target display fields are deliberately absent. Occurrence
+// disambiguates otherwise identical relationships without collapsing them.
+type detailLinkIdentity struct {
+	TargetID    model.TicketID
+	Kind        model.LinkKind
+	NativeLabel string
+	Occurrence  int
+}
+
+type detailLinkRow struct {
+	Line     int
+	Identity detailLinkIdentity
+	Link     model.Link
+}
 
 // commentIndent is the two columns a comment body is inset by, so a wrapped
 // comment reads as one block under its author rather than running into the next.
@@ -27,34 +121,121 @@ const commentIndent = "  "
 // Amsterdam and fails in CI.
 const commentTimeLayout = "2006-01-02 15:04"
 
-// renderDetailHeader draws the block above the Detail body: the breadcrumb of
-// the collection this Ticket was reached through, the Ticket's own identity, and
-// the same meta line the list row shows for it.
+// renderDetailHeader draws the block above the Detail body: the root Watchlist
+// and prior Trail Tickets as a breadcrumb, the current Ticket's identity, and a
+// meta line using the same field renderer as list rows.
 //
 // It is drawn in every state — loading, failed, loaded — because a screen that
 // cannot say which Ticket it is reading is worse than the list it replaced.
-func renderDetailHeader(in DetailInput, staleness string, width int, s Styles) string {
+func renderDetailHeader(in DetailInput, staleness string, width int, s Styles, trail []detailTrailEntry) string {
 	return strings.Join([]string{
-		pairLine(renderBreadcrumb(in.Parent, width, s), s.Staleness.Render(staleness), width),
-		headerIdentity(Header{Key: in.Ticket.Key, Title: in.Ticket.Title, URL: in.Ticket.URL}, width, s),
+		renderDetailTopLine(in.Parent, trail, staleness, width, s),
+		headerIdentity(Header{Key: in.Ticket.Key, Title: in.Ticket.Title, URL: in.Ticket.URL}, width, s, true),
 		truncateLine(ticketMeta(detailMetaTicket(in.Ticket), in.Capabilities, s), width),
 		"",
 	}, "\n")
 }
 
-// renderBreadcrumb draws the collection a Ticket was reached through. The zero
-// Header draws nothing at all: a Ticket opened without a list behind it has no
-// parent to name, and an empty breadcrumb is the honest way to say so.
-func renderBreadcrumb(parent Header, width int, s Styles) string {
-	switch {
-	case parent.Key == "" && parent.Title == "":
+type detailBreadcrumbCrumb struct {
+	text string
+	url  string
+}
+
+const (
+	breadcrumbDivider  = " › "
+	breadcrumbCollapse = "… › "
+)
+
+// renderDetailTopLine reserves the current Detail's age before fitting the
+// newest complete Trail crumbs into the remaining cells. This keeps the fixed
+// header stable even when a cyclic Trail grows without bound.
+func renderDetailTopLine(parent Header, trail []detailTrailEntry, staleness string, width int, s Styles) string {
+	if width <= 0 {
 		return ""
-	case parent.Key == "":
-		return truncateLine(s.Breadcrumb.Render(plain.Truncate(parent.Title, width)), width)
-	case parent.Title == "":
-		return truncateLine(s.Breadcrumb.Render(parent.Key), width)
 	}
-	return truncateLine(s.Breadcrumb.Render(parent.Key+separator+plain.Truncate(parent.Title, width)), width)
+	right := s.Staleness.Render(staleness)
+	if lipgloss.Width(right) >= width {
+		right = ansi.Truncate(right, width, "")
+		return strings.Repeat(" ", max(width-lipgloss.Width(right), 0)) + right
+	}
+
+	crumbWidth := width - lipgloss.Width(right) - 1
+	left := renderBreadcrumbCrumbs(detailBreadcrumbs(parent, trail), crumbWidth, s)
+	return pairLine(left, right, width)
+}
+
+func detailBreadcrumbs(parent Header, trail []detailTrailEntry) []detailBreadcrumbCrumb {
+	crumbs := make([]detailBreadcrumbCrumb, 0, len(trail)+1)
+	if text := breadcrumbHeaderText(parent); text != "" {
+		crumbs = append(crumbs, detailBreadcrumbCrumb{text: text, url: parent.URL})
+	}
+	for _, entry := range trail {
+		text := entry.ticket.Key
+		if text == "" {
+			text = entry.ticket.Title
+		}
+		if text != "" {
+			crumbs = append(crumbs, detailBreadcrumbCrumb{text: text, url: entry.ticket.URL})
+		}
+	}
+	return crumbs
+}
+
+func breadcrumbHeaderText(parent Header) string {
+	switch {
+	case parent.Key == "":
+		return parent.Title
+	case parent.Title == "":
+		return parent.Key
+	default:
+		return parent.Key + separator + parent.Title
+	}
+}
+
+func renderBreadcrumbCrumbs(crumbs []detailBreadcrumbCrumb, width int, s Styles) string {
+	if width <= 0 || len(crumbs) == 0 {
+		return ""
+	}
+
+	rendered := make([]string, len(crumbs))
+	for i, crumb := range crumbs {
+		rendered[i] = renderHyperlink(s.Breadcrumb, crumb.text, crumb.url)
+	}
+	all := strings.Join(rendered, breadcrumbDivider)
+	if lipgloss.Width(all) <= width {
+		return all
+	}
+
+	newest := rendered[len(rendered)-1]
+	used := lipgloss.Width(newest)
+	if used > width {
+		return ansi.Truncate(newest, width, "")
+	}
+
+	first := len(rendered) - 1
+	for i := first - 1; i >= 0; i-- {
+		candidate := lipgloss.Width(rendered[i]) + lipgloss.Width(breadcrumbDivider)
+		prefix := 0
+		if i > 0 {
+			prefix = lipgloss.Width(breadcrumbCollapse)
+		}
+		if used+candidate+prefix > width {
+			break
+		}
+		used += candidate
+		first = i
+	}
+
+	left := strings.Join(rendered[first:], breadcrumbDivider)
+	if first > 0 && lipgloss.Width(breadcrumbCollapse)+lipgloss.Width(left) <= width {
+		left = breadcrumbCollapse + left
+	}
+	return left
+}
+
+// renderBreadcrumb is the root-only compatibility seam used by focused tests.
+func renderBreadcrumb(parent Header, width int, s Styles) string {
+	return renderBreadcrumbCrumbs(detailBreadcrumbs(parent, nil), width, s)
 }
 
 // detailMetaTicket rebuilds the Ticket fields ticketMeta reads. The Detail
@@ -73,23 +254,52 @@ func detailMetaTicket(h DetailHeader) model.Ticket {
 	}
 }
 
-// detailLines renders a DetailInput into the terminal lines its body occupies,
-// wrapped to width. It is the whole Detail document, not the visible window:
-// scrolling is choosing a slice of it, which is what makes the window arithmetic
-// testable without a terminal.
-//
-// The body is wrapped here rather than handed to bubbles/viewport on purpose.
-// The wrapping and the height arithmetic have to exist in this package anyway —
-// the list renderer reaches the same conclusion — viewport carries its own KeyMap
-// and mutable state into a package whose renderers are pure, and a golden of a
-// viewport is a golden of somebody else's scrollbar.
+// detailLines is the compatibility seam for callers that only need the body.
+// composeDetailDocument is authoritative for both rendered lines and Link rows.
 func detailLines(in DetailInput, width int, s Styles) []string {
-	lines := describeDetail(in, width, s)
-	if comments := commentLines(in, width, s); len(comments) > 0 {
-		lines = append(append(lines, ""), comments...)
+	return composeDetailDocument(in, width, s, detailLinkIdentity{}, false).Lines
+}
+
+// composeDetailDocument is the compatibility seam for focused rendering tests.
+// The live Model supplies its cached, width-bound renderers instead.
+func composeDetailDocument(in DetailInput, width int, s Styles, focused detailLinkIdentity, hasFocus bool) detailDocument {
+	markdown := newDetailMarkdownRenderers(width, markdownDark)
+	return composeDetailDocumentWithMarkdown(in, width, s, focused, hasFocus, markdown)
+}
+
+// composeDetailDocumentWithMarkdown renders a DetailInput and records the exact
+// document line occupied by every capability-visible Link. Description and
+// comment rendering never creates Link rows: only linkDocument owns that
+// navigation metadata.
+func composeDetailDocumentWithMarkdown(in DetailInput, width int, s Styles, focused detailLinkIdentity,
+	hasFocus bool, markdown detailMarkdownRenderers) detailDocument {
+	sections := renderDetailMarkdownSections(in, width, s, markdown)
+	return composeDetailDocumentWithSections(in, width, s, focused, hasFocus, sections)
+}
+
+func composeDetailDocumentWithSections(in DetailInput, width int, s Styles, focused detailLinkIdentity,
+	hasFocus bool, sections detailMarkdownSections) detailDocument {
+	doc := detailDocument{Lines: append([]string(nil), sections.description...)}
+	if len(sections.comments) > 0 {
+		doc.Lines = append(append(doc.Lines, ""), sections.comments...)
 	}
-	if links := linkLines(in, width, s); len(links) > 0 {
-		lines = append(append(lines, ""), links...)
+	links, rows := linkDocument(in, width, s, focused, hasFocus)
+	if len(links) > 0 {
+		doc.Lines = append(doc.Lines, "")
+		base := len(doc.Lines)
+		doc.Lines = append(doc.Lines, links...)
+		for i := range rows {
+			rows[i].Line += base
+		}
+		doc.LinkRows = rows
+	}
+	doc.Lines = truncateDocumentLines(doc.Lines, width)
+	return doc
+}
+
+func truncateDocumentLines(lines []string, width int) []string {
+	for i := range lines {
+		lines[i] = truncateLine(lines[i], width)
 	}
 	return lines
 }
@@ -97,22 +307,34 @@ func detailLines(in DetailInput, width int, s Styles) []string {
 // describeDetail renders the description section, which is always drawn: an
 // empty description is a fact about the Ticket, and a screen that answers a
 // drill-in with nothing at all reads as a bug.
-func describeDetail(in DetailInput, width int, s Styles) []string {
+func describeDetail(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	lines := []string{s.SectionHeader.Render("DESCRIPTION"), ""}
-	if strings.TrimSpace(in.Detail.Description) == "" {
+	body := provider.SanitizeText(in.Detail.Description)
+	if strings.TrimSpace(body) == "" {
 		return append(lines, s.Muted.Render("No description."))
 	}
-	for _, line := range wrapText(in.Detail.Description, width) {
-		lines = append(lines, s.Body.Render(line))
+	return append(lines, renderMarkdownBody(body, in.Ticket.URL, width, s, renderer)...)
+}
+
+func renderMarkdownBody(body, ticketURL string, width int, s Styles, renderer markdownRenderer) []string {
+	lines, err := renderer.render(body, ticketURL)
+	if err == nil {
+		return lines
 	}
-	return lines
+
+	message := "Could not render Markdown: " + sanitizeTerminalText(err.Error())
+	fallback := []string{s.Error.Render(truncateLine(message, width))}
+	for _, line := range wrapText(body, width) {
+		fallback = append(fallback, s.Body.Render(line))
+	}
+	return fallback
 }
 
 // commentLines renders the comments section, or nothing at all when the Provider
 // does not declare the Comments Capability. That silence is the point: an
 // undeclared Capability is absent, never an error and never a placeholder. With
 // the Capability and no comments there is something to say, so it is said.
-func commentLines(in DetailInput, width int, s Styles) []string {
+func commentLines(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	if !in.Capabilities.Comments {
 		return nil
 	}
@@ -129,8 +351,10 @@ func commentLines(in DetailInput, width int, s Styles) []string {
 			lines = append(lines, "")
 		}
 		lines = append(lines, truncateLine(s.CommentAuthor.Render(commentByline(c)), width))
-		for _, line := range wrapText(c.Body, width-len(commentIndent)) {
-			lines = append(lines, commentIndent+s.Body.Render(line))
+		body := provider.SanitizeText(c.Body)
+		for _, line := range renderMarkdownBody(body, in.Ticket.URL,
+			width-lipgloss.Width(commentIndent), s, renderer) {
+			lines = append(lines, commentIndent+line)
 		}
 	}
 	return lines
@@ -146,43 +370,65 @@ func commentByline(c model.Comment) string {
 	return "@" + login + separator + c.CreatedAt.UTC().Format(commentTimeLayout) + " UTC"
 }
 
-// linkLines renders the links section as aligned columns: the Tracker's own
-// label, the target's key, its title, and its Native Status. The label is the
-// meaning — it is displayed and never interpreted — so nothing here branches on
-// the Kind except to pick a colour.
-func linkLines(in DetailInput, width int, s Styles) []string {
+// linkDocument renders the links section and records each relationship at the
+// final zero-based line it occupies inside the returned section.
+func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentity, hasFocus bool) ([]string, []detailLinkRow) {
 	links := model.VisibleLinks(in.Detail.Links, in.Capabilities)
 	if len(links) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	labels := make([]string, len(links))
+	statuses := make([]string, len(links))
+	identities := make([]detailLinkIdentity, len(links))
+	seen := make(map[detailLinkIdentity]int, len(links))
 	labelWidth, keyWidth, titleWidth, statusWidth := 0, 0, 0, 0
 	for i, l := range links {
-		labels[i] = linkLabel(l)
+		labels[i] = sanitizeTerminalText(linkLabel(l))
+		statuses[i] = sanitizeTerminalText(nativeStatusTag(l.Target.NativeStatus))
 		labelWidth = max(labelWidth, lipgloss.Width(labels[i]))
 		keyWidth = max(keyWidth, lipgloss.Width(l.Target.Key))
 		titleWidth = max(titleWidth, lipgloss.Width(l.Target.Title))
-		statusWidth = max(statusWidth, lipgloss.Width(nativeStatusTag(l.Target.NativeStatus)))
+		statusWidth = max(statusWidth, lipgloss.Width(statuses[i]))
+
+		identity := detailLinkIdentity{TargetID: l.Target.ID, Kind: l.Kind, NativeLabel: l.NativeLabel}
+		occurrence := seen[identity]
+		seen[identity] = occurrence + 1
+		identity.Occurrence = occurrence
+		identities[i] = identity
 	}
-	// The title is what gives on a narrow terminal: the label carries the
-	// relationship and the key is how a human finds the Ticket again.
-	titleWidth = min(titleWidth, max(width-labelWidth-keyWidth-statusWidth-6, minLinkTitleWidth))
+	// The relationship label gives first on a narrow terminal. Reserve both
+	// inter-column gutters, the target key, and a useful title before assigning its
+	// width; a trailing Native Status can then disappear under the row's final
+	// truncation without hiding the target identity. The fixed focus gutter is
+	// removed before either column budget is calculated.
+	contentWidth := max(width-selectionGutter, 0)
+	labelWidth = min(labelWidth, max(contentWidth-keyWidth-minLinkTitleWidth-4, 0))
+	titleWidth = min(titleWidth, max(contentWidth-labelWidth-keyWidth-statusWidth-6, minLinkTitleWidth))
 
 	lines := []string{s.SectionHeader.Render(fmt.Sprintf("LINKS (%d)", len(links))), ""}
+	rows := make([]detailLinkRow, 0, len(links))
 	for i, l := range links {
-		line := column(s.LinkLabel.Render(labels[i]), labels[i], labelWidth) +
-			column(s.TicketKey.Render(l.Target.Key), l.Target.Key, keyWidth)
+		label := ansi.Truncate(labels[i], labelWidth, "…")
+		line := column(s.LinkLabel.Render(label), label, labelWidth) +
+			column(renderHyperlink(s.TicketKey, l.Target.Key, l.Target.URL), l.Target.Key, keyWidth)
 
-		title := plain.Truncate(l.Target.Title, titleWidth)
-		if tag := nativeStatusTag(l.Target.NativeStatus); tag != "" {
-			line += column(s.TicketTitle.Render(title), title, titleWidth) + s.NativeStatus.Render(tag)
+		title := ansi.Truncate(l.Target.Title, titleWidth, "…")
+		styledTitle := renderHyperlink(s.TicketTitle, title, l.Target.URL)
+		if tag := statuses[i]; tag != "" {
+			line += column(styledTitle, title, titleWidth) + s.NativeStatus.Render(tag)
 		} else {
-			line += s.TicketTitle.Render(title)
+			line += styledTitle
 		}
-		lines = append(lines, truncateLine(line, width))
+
+		marker := unselectedMarker
+		if hasFocus && identities[i] == focused {
+			marker = selectedMarker
+		}
+		rows = append(rows, detailLinkRow{Line: len(lines), Identity: identities[i], Link: l})
+		lines = append(lines, truncateLine(marker+line, width))
 	}
-	return lines
+	return lines, rows
 }
 
 // minLinkTitleWidth is how much of a link target's title survives on a terminal
@@ -243,6 +489,30 @@ func wrapText(text string, width int) []string {
 // been re-wrapped by a resize or replaced by a re-fetch.
 func clampDetailOffset(offset, lineCount, height int) int {
 	return min(max(offset, 0), max(lineCount-max(height, 1), 0))
+}
+
+// ensureDocumentLineVisible moves a line-oriented window only when target is
+// above or below it. It leaves an already-visible target and its reader-chosen
+// offset untouched.
+func ensureDocumentLineVisible(target, offset, lineCount, height int) int {
+	offset = clampDetailOffset(offset, lineCount, height)
+	height = max(height, 1)
+	if target < offset {
+		return clampDetailOffset(target, lineCount, height)
+	}
+	if target >= offset+height {
+		return clampDetailOffset(target-height+1, lineCount, height)
+	}
+	return offset
+}
+
+func detailLinkRowByIdentity(doc detailDocument, identity detailLinkIdentity) (detailLinkRow, bool) {
+	for _, row := range doc.LinkRows {
+		if row.Identity == identity {
+			return row, true
+		}
+	}
+	return detailLinkRow{}, false
 }
 
 // renderDetailBody returns exactly height lines starting at offset, padding the

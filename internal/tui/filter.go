@@ -8,7 +8,7 @@ import (
 
 // Filter narrows the Tickets the monitor lists. It is view state, not model
 // state: it never reaches a Provider, never changes what was fetched, and never
-// touches the progress header, which reports the whole collection whatever the
+// touches the progress header, which reports the whole Watchlist whatever the
 // list is showing.
 //
 // The zero Filter admits every Ticket.
@@ -22,7 +22,7 @@ type Filter struct {
 }
 
 // Active reports whether the Filter narrows anything, i.e. whether the user
-// needs to be told the list is not the whole collection.
+// needs to be told the list is not the whole Watchlist.
 func (f Filter) Active() bool {
 	return f.HideFinished || len(strings.Fields(f.Query)) > 0
 }

@@ -2,8 +2,8 @@ package model
 
 import "math"
 
-// Progress is the epic-level completion arithmetic. Cancelled Tickets count in
-// Total but are excluded from Denominator, so an epic reads as "7/11 done, 1
+// Progress is Watchlist completion arithmetic. Cancelled Tickets count in Total
+// but are excluded from Denominator, so a Watchlist reads as "7/11 done, 1
 // cancelled" rather than being permanently short of 100%.
 type Progress struct {
 	// Todo counts Tickets in StatusTodo.
@@ -26,7 +26,7 @@ type Progress struct {
 	PercentDone int
 }
 
-// ComputeProgress counts Tickets by Status Category and derives the epic's
+// ComputeProgress counts Tickets by Status Category and derives the Watchlist's
 // completion. It reads only Ticket.Status: a Ticket's Native Status can say
 // anything without changing the arithmetic.
 func ComputeProgress(tickets []Ticket) Progress {

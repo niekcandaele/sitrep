@@ -26,7 +26,7 @@ type KeyMap struct {
 	// Refresh forces a refresh now.
 	Refresh key.Binding
 	// Open opens the selected Ticket's Detail. With nothing selectable — an
-	// empty collection, or a filter matching nothing — it does nothing.
+	// empty Watchlist, or a filter matching nothing — it does nothing.
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
@@ -36,6 +36,14 @@ type KeyMap struct {
 	// filter is active, which is what keeps esc from claiming two meanings at
 	// once: with nothing filtered the same key falls through to Quit.
 	ClearFilter key.Binding
+	// ToggleMouse enables or disables terminal mouse capture.
+	ToggleMouse key.Binding
+	// MouseSelect describes list click selection in expanded help only.
+	MouseSelect key.Binding
+	// MouseOpen describes list double-click opening in expanded help only.
+	MouseOpen key.Binding
+	// MouseWheel describes list wheel selection in expanded help only.
+	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -90,6 +98,13 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("esc", "clear filter"),
 			key.WithDisabled(),
 		),
+		ToggleMouse: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", mouseEnabledHelp),
+		),
+		MouseSelect: helpOnlyBinding("click", "select Ticket"),
+		MouseOpen:   helpOnlyBinding("double-click", "open Ticket"),
+		MouseWheel:  helpOnlyBinding("wheel", "move selection"),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -101,41 +116,56 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the one-line footer shows. ClearFilter appears
-// only when it is enabled, so the footer never offers to clear a filter that is
-// not there — and Quit is advertised as "q", never as "esc", because esc means
-// whichever rung of the ladder the session is on.
-//
-// Open is in the footer because drill-in is the monitor's headline feature and
-// nothing else advertises it: a key nobody knows about is a key nobody presses.
-//
-// Refresh is not, and that is the trade this line pays for it: all nine
-// bindings measure eighty-seven cells, which an eighty-column terminal clips.
-// Refresh is the one to lose — the monitor refreshes on its own interval
-// anyway, so the hint saves a wait; drill-in does not happen at all if nobody
-// knows the key. `?` still lists every binding, Refresh included.
+// ShortHelp returns the bindings the one-line footer shows. The mouse escape
+// hatch comes first so terminals too narrow for the normal primary-action trio
+// still explain how to recover text selection. Open and quit follow, keeping all
+// three visible at 80 columns. Every binding remains available in FullHelp.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Open, k.HideFinished, k.Find, k.ClearFilter, k.Help, k.Quit}
+	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find, k.ClearFilter, k.Help}
 }
 
-// FullHelp returns every binding, grouped into the columns "?" expands to.
+// FullHelp returns every binding in two dense columns. The model stacks these
+// groups into one column when they would not fit side by side, so expanded help
+// remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.Home, k.End, k.Open},
-		{k.HideFinished, k.Find, k.ClearFilter},
-		{k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Refresh, k.Help, k.Quit},
+		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
 
-// DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses the
-// list's bindings wherever the key and the meaning are the same, so the two
-// screens cannot come to disagree about what pgdn does, and adds exactly one of
-// its own: Back.
-//
-// Quit is deliberately not the list's: there esc is the last rung of the filter
-// ladder, and here esc means "one level up" — back to the list. q and ctrl+c
-// still quit outright from both, so a Detail can never trap anyone.
+func compactListFullHelp(k KeyMap) [][]key.Binding {
+	mouse := k.ToggleMouse
+	if mouse.Help().Desc == mouseEnabledHelp {
+		mouse.SetHelp("m", mouseEnabledCompactHelp)
+	}
+	bindings := []key.Binding{
+		mouse,
+		k.MouseSelect,
+		k.MouseOpen,
+		k.MouseWheel,
+		helpOnlyBinding("↑/↓/k/j", "move"),
+		helpOnlyBinding("pgup/pgdn", "page"),
+		helpOnlyBinding("g/G", "first/last"),
+		helpOnlyBinding("enter/r", "open/refresh"),
+		helpOnlyBinding("d /", "hide finished/find"),
+		helpOnlyBinding("?/q", "help/quit"),
+	}
+	if k.ClearFilter.Enabled() {
+		bindings = append(bindings, k.ClearFilter)
+	}
+	return [][]key.Binding{bindings}
+}
+
+func helpOnlyBinding(keyText, description string) key.Binding {
+	return key.NewBinding(key.WithKeys("__help_only"), key.WithHelp(keyText, description))
+}
+
+// DetailKeyMap is the keyboard while a Ticket's Detail is open. It reuses list
+// bindings where key and meaning match and adds relationship focus/follow
+// actions. Quit is separate from Back: q and ctrl+c always quit, while Esc pops
+// the Trail, returns a root Detail to its armed list, or quits a decoded root
+// with no list.
 type DetailKeyMap struct {
 	// Up scrolls the body up one line.
 	Up key.Binding
@@ -151,13 +181,24 @@ type DetailKeyMap struct {
 	End key.Binding
 	// Refresh re-reads this Ticket's Detail, and only this Ticket's.
 	Refresh key.Binding
-	// Back returns to the list, leaving it exactly as it was. With no list
-	// behind the screen — a Ticket decoded straight into Detail — there is
-	// nowhere to go back to and esc is the ladder's last rung: it quits.
+	// NextLink moves focus to the next capability-visible relationship.
+	NextLink key.Binding
+	// PreviousLink moves focus to the previous capability-visible relationship.
+	PreviousLink key.Binding
+	// Follow opens the focused Link target in Detail.
+	Follow key.Binding
+	// Back pops one Trail entry first. At the root it returns to the armed list,
+	// or quits when a directly decoded Ticket has no list behind it.
 	Back key.Binding
-	// Parent opens the collection this Ticket belongs to in the monitor. It is
-	// enabled only when there is one to walk up into.
+	// Parent opens the root Watchlist context and is enabled only when one is
+	// available.
 	Parent key.Binding
+	// ToggleMouse enables or disables terminal mouse capture.
+	ToggleMouse key.Binding
+	// MouseWheel describes body scrolling in expanded help only.
+	MouseWheel key.Binding
+	// MouseFollow describes clicking a visible Link in expanded help only.
+	MouseFollow key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
 	// Quit ends the program.
@@ -175,16 +216,34 @@ func DefaultDetailKeyMap() DetailKeyMap {
 		Home:     list.Home,
 		End:      list.End,
 		Refresh:  list.Refresh,
+		NextLink: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "next link"),
+			key.WithDisabled(),
+		),
+		PreviousLink: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("⇧tab", "previous link"),
+			key.WithDisabled(),
+		),
+		Follow: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "follow"),
+			key.WithDisabled(),
+		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "back"),
 		),
 		Parent: key.NewBinding(
 			key.WithKeys("u"),
-			key.WithHelp("u", "epic"),
+			key.WithHelp("u", "watchlist"),
 			key.WithDisabled(),
 		),
-		Help: list.Help,
+		ToggleMouse: list.ToggleMouse,
+		MouseWheel:  helpOnlyBinding("wheel", "scroll body"),
+		MouseFollow: helpOnlyBinding("click Link", "follow"),
+		Help:        list.Help,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -193,21 +252,16 @@ func DefaultDetailKeyMap() DetailKeyMap {
 }
 
 // ShortHelp returns the bindings the Detail screen's one-line footer shows.
-// Parent appears only when it is enabled, so the footer never offers to open a
-// collection this Ticket has none of — and that footer line is the whole
-// affordance for the walk-up: no second help line, no box.
+// Parent appears only when a root Watchlist context is available. This footer
+// line is the complete walk-up affordance: no second help line and no box.
 func (k DetailKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Back, k.Parent, k.Refresh, k.Help, k.Quit}
+	return detailHelpRolesFrom(k).defaultShortBindings()
 }
 
-// FullHelp returns every binding, grouped into the columns "?" expands to.
+// FullHelp keeps the mouse escape hatch and essential Detail actions together;
+// the model stacks both groups when the terminal cannot show them side by side.
 func (k DetailKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.Up, k.Down, k.PageUp, k.PageDown},
-		{k.Home, k.End},
-		{k.Back, k.Parent, k.Refresh},
-		{k.Help, k.Quit},
-	}
+	return detailHelpRolesFrom(k).fullGroups()
 }
 
 // SearchKeyMap is the keyboard while the find box is open. It is deliberately
@@ -220,6 +274,9 @@ type SearchKeyMap struct {
 	Cancel key.Binding
 	// Move steps the list selection without leaving the box.
 	Move key.Binding
+	// MouseHint explains how to select terminal text while capture is enabled. It
+	// has no command path and is hidden when capture is disabled.
+	MouseHint key.Binding
 	// Quit ends the program from inside the box. Only ctrl+c: a plain q is
 	// text here.
 	Quit key.Binding
@@ -240,6 +297,10 @@ func DefaultSearchKeyMap() SearchKeyMap {
 			key.WithKeys("up", "down", "pgup", "pgdown"),
 			key.WithHelp("↑/↓", "move"),
 		),
+		MouseHint: key.NewBinding(
+			key.WithKeys("shift+drag"),
+			key.WithHelp("shift-drag", searchMouseHintHelp),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
@@ -249,7 +310,7 @@ func DefaultSearchKeyMap() SearchKeyMap {
 
 // ShortHelp returns the bindings the find box's footer shows.
 func (k SearchKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Apply, k.Cancel, k.Move, k.Quit}
+	return []key.Binding{k.MouseHint, k.Cancel, k.Apply, k.Move, k.Quit}
 }
 
 // FullHelp returns the same bindings: the find box has no second tier.

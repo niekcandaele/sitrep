@@ -19,7 +19,7 @@ const apiBase = "/api/v4"
 
 // kind says which GitLab node a target names: a group epic, a project issue, or
 // a milestone in either scope. GitLab addresses each through different
-// endpoints, and the Epic Ref grammar distinguishes them by the "&" or the "%"
+// endpoints, and the Ref grammar distinguishes them by the "&" or the "%"
 // in a reference, so the driver decides once, here.
 type kind int
 
@@ -44,7 +44,7 @@ func (t target) isMilestone() bool {
 	return t.kind == kindProjectMilestone || t.kind == kindGroupMilestone
 }
 
-// targetFor reads an Epic Ref as the GitLab node it names. defaultPath is the
+// targetFor reads a Ref as the GitLab node it names. defaultPath is the
 // Profile's project, used for a reference that names no group or project.
 //
 // Every rejection this function makes happens before any network call: a Ref
@@ -52,7 +52,7 @@ func (t target) isMilestone() bool {
 // after a round trip.
 func targetFor(r ref.Ref, defaultPath string) (target, error) {
 	if r.Tracker != ref.TrackerGitLab {
-		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Epic Ref", r.Raw)
+		return target{}, provider.Errorf(provider.KindBadRef, "gitlab: %q is not a GitLab Ref", r.Raw)
 	}
 
 	t := target{kind: kindIssue, iid: r.Number}
@@ -119,7 +119,7 @@ const groupScopePrefix = "groups/"
 // id GitLab's milestone endpoints take: the iid is what the web URL, the "%"
 // reference and every human-facing form spell, so it is what an opaque id that
 // has to survive a test failure should read as. FetchDetail pays one iids[]
-// lookup to recover the API id, which is the same request FetchEpic makes.
+// lookup to recover the API id, which is the same request Resolve makes.
 func (t target) ticketID() model.TicketID {
 	switch t.kind {
 	case kindEpic:

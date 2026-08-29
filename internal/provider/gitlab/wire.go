@@ -262,7 +262,7 @@ func newEpicFromEpic(e epicWire, host, group string) model.Epic {
 	}
 }
 
-// newEpicFromIssue maps a project issue onto sitrep's Epic, for the Epic Ref
+// newEpicFromIssue maps a project issue onto sitrep's Epic, for the Ref
 // that turned out to name a plain Ticket. Reporting it is all this driver does
 // about it: which screen that opens is internal/cli's decision (ADR-0003).
 func newEpicFromIssue(i issueWire) model.Epic {
@@ -276,6 +276,23 @@ func newEpicFromIssue(i issueWire) model.Epic {
 		NativeStatus: native,
 		Assignees:    newAssignees(i.Assignees),
 		Repository:   i.projectPath(),
+	}
+}
+
+// newTicketFromEpic preserves the thin root identity when an explicit Ref-list
+// member is a native epic or a milestone. In a Ref-list it is an ordinary
+// Ticket; there is no synthetic outer Epic or Parent.
+func newTicketFromEpic(epic model.Epic) model.Ticket {
+	return model.Ticket{
+		ID:           epic.ID,
+		Key:          epic.Key,
+		Title:        epic.Title,
+		URL:          epic.URL,
+		Status:       epic.Status,
+		NativeStatus: epic.NativeStatus,
+		Assignees:    epic.Assignees,
+		Repository:   epic.Repository,
+		PullRequests: epic.PullRequests,
 	}
 }
 
@@ -341,7 +358,7 @@ func newParentFromEpicObject(e *issueEpicWire, host string) model.Parent {
 // newParentFromEpic maps an epic's parent_iid onto sitrep's Parent.
 //
 // Title is left empty, deliberately: the epic payload does not carry the
-// parent's title, and FetchEpic is the polled hot path — spending one request
+// parent's title, and Resolve is the polled hot path — spending one request
 // per refresh on a breadcrumb's title is the wrong trade. Key and URL are built
 // from the group and the iid, which is everything the walk-up needs.
 func newParentFromEpic(e epicWire, host, group string) model.Parent {

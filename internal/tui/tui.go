@@ -3,14 +3,14 @@
 //
 // # The list-view contract
 //
-// The screen consumes a ListInput — a collection of Tickets plus a Header, the
+// The screen consumes a ListInput — a Watchlist of Tickets plus a Header, the
 // Capabilities that decide what may be shown, and when the reading was taken —
-// not an Epic. ListFromEpicSnapshot is the only function in this package
+// not an Epic. ListFromWatchlistSnapshot is the only function in this package
 // allowed to mention model.Epic; nothing downstream of it takes an Epic
 // parameter. That is deliberate: a future ad-hoc Ticket set or query result
 // feeds the same screen by producing a ListInput, without the screen learning
 // a second shape. Where those Tickets come from is the Source seam, which the
-// TUI holds as a plain function so it knows nothing about Epic Refs, auth or
+// TUI holds as a plain function so it knows nothing about Refs, auth or
 // GraphQL.
 //
 // # Progress is computed from every Ticket
@@ -40,21 +40,23 @@
 // a q — because a find box that quits when you search for "queue" is worse
 // than no find box.
 //
-// # The Detail screen is a second mode over the same model
+// # Detail seats and Trail share a second mode
 //
-// enter opens one Ticket's Detail; esc closes it. Both are a change to one mode
-// field: the list's state — the reading, the rows, the selection, the scroll
-// offset, the Filter — is never touched while Detail is open, which is why the
-// position and the filters survive the round trip without any code restoring
-// them. The golden that proves it is a byte-for-byte comparison against the
-// unfiltered list frame, not a golden of its own.
+// Enter on the list changes mode and seats the selected Ticket's Detail. Inside
+// Detail, following a focused Link archives the current seat in the session-local
+// Trail and seats the target without leaving Detail mode. esc first pops one Trail
+// seat; only an untrailed root returns to its armed list or quits when a decoded
+// Ticket has no list behind it. u clears the Trail and jumps to the root Watchlist.
 //
-// Detail is fetched on drill-in and at no other moment, and is cached per Ticket
-// for the session: re-opening a Ticket costs the Tracker nothing, r in Detail
-// re-reads that one Ticket, and no list refresh — automatic or forced — ever
-// calls FetchDetail (ADR-0003). A cached Detail carries its own "read Ns ago"
-// stamp so a stale reading is visible rather than looking as fresh as the list
-// beside it.
+// Trail seat pushes and pops leave the hidden list state untouched. Root esc
+// and u instead resume or arm the list through its normal reconciliation, which
+// may clamp the selection and scroll offset to the current rows before drawing.
+//
+// A Ticket's Detail is fetched only when a seated Ticket misses the session cache
+// or r explicitly re-reads it: re-opening a cached Ticket costs the Tracker
+// nothing, and no list refresh — automatic or forced — ever calls FetchDetail
+// (ADR-0003). A cached Detail carries its own "read Ns ago" stamp so a stale
+// reading is visible rather than looking as fresh as the list beside it.
 //
 // The screen consumes a DetailInput — a Ticket header, an optional parent
 // breadcrumb and the Detail itself — the same way the list consumes a ListInput.
@@ -65,13 +67,13 @@
 // # The program can start in Detail, and can be seeded
 //
 // Options.Open starts the program on one Ticket's Detail — the decoder entry for
-// an Epic Ref that named a Ticket rather than a collection — with the parent
+// a Ref that named a Ticket rather than a Watchlist — with the parent
 // breadcrumb the Detail screen already had a seat for, and u to open that parent
 // in the monitor. Until the user presses it the list is never fetched at all.
 // Options.Initial seats a reading the caller already took, so a monitor draws
 // data on its first frame rather than re-fetching what its caller just fetched.
 //
-// Neither teaches this package about Epic Refs: the walk-up is a Source the
+// Neither teaches this package about Refs: the walk-up is a Source the
 // caller built, and the breadcrumb is a Header the caller filled.
 //
 // The body is wrapped into lines once and scrolled by slicing them, for the same
@@ -112,16 +114,16 @@ import (
 // Options are the monitor's injectable dependencies. Every zero value that has
 // a sensible production default takes it.
 type Options struct {
-	// Source produces one reading of the collection on every refresh. It may be
-	// nil when Open is set and the decoded Ticket has no collection behind it:
+	// Source produces one reading of the Watchlist on every refresh. It may be
+	// nil when Open is set and the decoded Ticket has no Watchlist behind it:
 	// there is then nothing to monitor, and the walk-up key is not offered.
 	Source Source
-	// DetailSource reads one Ticket's Detail when the user opens it, and at no
-	// other moment (ADR-0003). A monitor without one still lists Tickets; enter
-	// then says why it cannot open them.
+	// DetailSource reads one seated Ticket's Detail on a session-cache miss and
+	// when the user explicitly re-reads it. A monitor without one still lists
+	// Tickets; enter then says why it cannot open them.
 	DetailSource DetailSource
 	// Open, when non-nil, starts the program on one Ticket's Detail instead of
-	// the list: the decoder entry point for an Epic Ref that named a Ticket. The
+	// the list: the decoder entry point for a Ref that named a Ticket. The
 	// Detail itself is read from DetailSource on the first frame, the same way a
 	// drill-in reads it, and the list is not fetched at all until the user walks
 	// up into it.
@@ -136,6 +138,9 @@ type Options struct {
 	// Now reads the clock the staleness indicator and the refresh schedule are
 	// measured against. When nil it is time.Now.
 	Now func() time.Time
+	// NoMouse starts the monitor without terminal mouse capture. The user can
+	// enable it at runtime with m.
+	NoMouse bool
 	// Input is the terminal the monitor reads keys from.
 	Input io.Reader
 	// Output is the terminal the monitor draws to.

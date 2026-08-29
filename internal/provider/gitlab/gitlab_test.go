@@ -2,6 +2,7 @@ package gitlab_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
@@ -104,7 +107,7 @@ func noMergeRequests(responses map[string][]response, project string, iids ...in
 	return responses
 }
 
-// The Epic Ref and the TicketIDs the fixtures were written for.
+// The Ref and the TicketIDs the fixtures were written for.
 var (
 	epicRef = ref.Ref{
 		Tracker: ref.TrackerGitLab,
@@ -142,10 +145,11 @@ type response struct {
 // method, the paths and the paging parameters sitrep sends without reaching
 // inside the driver.
 type recordedRequest struct {
-	method  string
-	path    string
-	query   map[string][]string
-	headers http.Header
+	method   string
+	path     string
+	rawQuery string
+	query    map[string][]string
+	headers  http.Header
 }
 
 // replayServer serves recorded payloads, routed by request path — GitLab
@@ -176,10 +180,11 @@ func newReplayServer(t *testing.T, responses map[string][]response) *replayServe
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests = append(s.requests, recordedRequest{
-			method:  r.Method,
-			path:    r.URL.EscapedPath(),
-			query:   r.URL.Query(),
-			headers: r.Header.Clone(),
+			method:   r.Method,
+			path:     r.URL.EscapedPath(),
+			rawQuery: r.URL.RawQuery,
+			query:    r.URL.Query(),
+			headers:  r.Header.Clone(),
 		})
 		path := r.URL.EscapedPath()
 		if _, configured := s.responses[path]; !configured {
@@ -267,6 +272,12 @@ func newProvider(s *replayServer, opts ...gitlab.Option) *gitlab.Provider {
 	return gitlab.New(fixtureHost, append(base, opts...)...)
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // fullEpic serves the two-page fixture epic, with every child correlating to no
 // merge requests. A test about merge requests configures its own answers.
 func fullEpic(t *testing.T) *replayServer {
@@ -286,6 +297,115 @@ func fullEpic(t *testing.T) *replayServer {
 	return newReplayServer(t, responses)
 }
 
+const (
+	queryGlobalIssues  = "/api/v4/issues"
+	queryCLI101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+	queryPlatform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+	queryCLI101MRs     = queryCLI101Path + "/closed_by"
+	queryPlatform7MRs  = queryPlatform7Path + "/closed_by"
+
+	queryIssueCLI101 = `{"iid":101,"project_id":34675721,"references":{"full":"gitlab-org/cli#101"}}`
+	queryIssueCore7  = `{"iid":7,"project_id":51000123,"references":{"full":"gitlab-org/platform/core#7"}}`
+)
+
+func queryPage(issues string, next string) response {
+	return response{
+		body:    "[" + issues + "]",
+		headers: map[string]string{"X-Next-Page": next},
+	}
+}
+
+func queryResponses(pages ...response) map[string][]response {
+	return map[string][]response{
+		queryGlobalIssues:  pages,
+		queryCLI101Path:    {{file: "query_issue_cli_101.json"}},
+		queryPlatform7Path: {{file: "query_issue_core_7.json"}},
+		queryCLI101MRs:     {{file: "closed_by_empty.json"}},
+		queryPlatform7MRs:  {{file: "closed_by_empty.json"}},
+	}
+}
+
+func ticketKeys(tickets []model.Ticket) []string {
+	keys := make([]string, len(tickets))
+	for i := range tickets {
+		keys[i] = tickets[i].Key
+	}
+	return keys
+}
+
+func syntheticGitLabIssue(iid int) map[string]any {
+	return map[string]any{
+		"id":         100000 + iid,
+		"iid":        iid,
+		"project_id": 7001,
+		"title":      "Exact " + strconv.Itoa(iid),
+		"state":      "opened",
+		"labels":     []string{},
+		"assignees":  []any{},
+		"web_url":    "https://gitlab.com/acme/widgets/-/issues/" + strconv.Itoa(iid),
+		"references": map[string]any{
+			"short":    "#" + strconv.Itoa(iid),
+			"relative": "#" + strconv.Itoa(iid),
+			"full":     "acme/widgets#" + strconv.Itoa(iid),
+		},
+	}
+}
+
+func syntheticGitLabRef(iid int) ref.Ref {
+	return ref.Ref{
+		Tracker: ref.TrackerGitLab,
+		Host:    fixtureHost,
+		Owner:   "acme",
+		Repo:    "widgets",
+		Number:  iid,
+		Raw:     "acme/widgets#" + strconv.Itoa(iid),
+	}
+}
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Errorf("encode response: %v", err)
+	}
+}
+
+func providerAtGitLabServer(rawURL string, opts ...gitlab.Option) *gitlab.Provider {
+	base := []gitlab.Option{
+		gitlab.WithBaseURL(rawURL),
+		gitlab.WithUserAgent("sitrep/test"),
+		gitlab.WithTokenSource(func(context.Context, string) (string, error) {
+			return fixtureToken, nil
+		}),
+	}
+	return gitlab.New(fixtureHost, append(base, opts...)...)
+}
+
+func receiveWithin[T any](t *testing.T, ch <-chan T, event string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", event)
+		var zero T
+		return zero
+	}
+}
+
+func exactIssueIID(path string) (int, bool) {
+	const prefix = "/api/v4/projects/acme%2Fwidgets/issues/"
+	if !strings.HasPrefix(path, prefix) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(path, prefix)
+	if strings.Contains(suffix, "/") {
+		return 0, false
+	}
+	iid, err := strconv.Atoi(suffix)
+	return iid, err == nil
+}
+
 func TestName(t *testing.T) {
 	if p := gitlab.New(fixtureHost); p.Name() != "gitlab" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "gitlab")
@@ -293,18 +413,21 @@ func TestName(t *testing.T) {
 }
 
 func TestCapabilities(t *testing.T) {
-	want := model.Capabilities{Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true}
+	want := model.Capabilities{
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
+	}
 	if got := gitlab.New(fixtureHost).Capabilities(); got != want {
 		t.Errorf("Capabilities() = %+v, want %+v", got, want)
 	}
 }
 
-func TestFetchEpicNormalizesTheEpic(t *testing.T) {
+func TestResolveNormalizesTheEpic(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -319,6 +442,9 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
 	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the Epic display identity", snap.Header)
+	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the recorded epic hangs off nothing", snap.Parent)
 	}
@@ -331,12 +457,12 @@ func TestFetchEpicNormalizesTheEpic(t *testing.T) {
 	}
 }
 
-func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
+func TestResolveReturnsEveryChildAcrossBothPages(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	type want struct {
@@ -405,12 +531,12 @@ func TestFetchEpicReturnsEveryChildAcrossBothPages(t *testing.T) {
 
 // ADR-0003 with teeth: GitLab sends every child's description on the polled
 // path whether sitrep wants it or not, and none of it may reach a model.Ticket.
-func TestFetchEpicPutsNoDescriptionOnTheHotPath(t *testing.T) {
+func TestResolvePutsNoDescriptionOnTheHotPath(t *testing.T) {
 	p := newProvider(fullEpic(t))
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	const leak = "polled path"
@@ -431,11 +557,11 @@ func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 	epic.responses[mergeRequestApprovalsPath] = []response{{file: "approvals_pending.json"}}
 	milestone := fullProjectMilestone(t)
 
-	if _, err := newProvider(epic).FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic on the epic: %v", err)
+	if _, err := newProvider(epic).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve on the epic: %v", err)
 	}
-	if _, err := newProvider(milestone).FetchEpic(context.Background(), projectMilestoneRef); err != nil {
-		t.Fatalf("FetchEpic on the milestone: %v", err)
+	if _, err := newProvider(milestone).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef}); err != nil {
+		t.Fatalf("Resolve on the milestone: %v", err)
 	}
 
 	var seen int
@@ -464,12 +590,12 @@ func TestEveryRequestIsAGetIncludingMilestonesAndMergeRequests(t *testing.T) {
 	}
 }
 
-func TestFetchEpicSendsExactlyWhatItNeeds(t *testing.T) {
+func TestResolveSendsExactlyWhatItNeeds(t *testing.T) {
 	s := fullEpic(t)
 	p := newProvider(s)
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if n := len(s.requestsTo(epicPath)); n != 1 {
@@ -520,8 +646,8 @@ func TestNamespacedPathsAreEscapedWhole(t *testing.T) {
 
 	r := ref.Ref{Tracker: ref.TrackerGitLab, Host: fixtureHost,
 		Owner: "acme", Repo: "platform", Number: 12, Key: "acme/platform&12", Raw: "acme/platform&12"}
-	if _, err := p.FetchEpic(context.Background(), r); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: r}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 	if n := len(s.requestsTo(path)); n != 1 {
 		t.Errorf("%d requests to the escaped epic path, want 1", n)
@@ -530,15 +656,15 @@ func TestNamespacedPathsAreEscapedWhole(t *testing.T) {
 
 // An epic someone pointed sitrep at that has no children is a Ticket, not an
 // error — and its Tickets slice is empty rather than null.
-func TestFetchEpicWithNoChildren(t *testing.T) {
+func TestResolveWithNoChildren(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		epicPath:       {{file: "epic.json"}},
 		epicIssuesPath: {{file: "epic_children_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if snap.Tickets == nil {
 		t.Fatal("Tickets is nil; an epic with no children renders as none, not as null")
@@ -551,15 +677,15 @@ func TestFetchEpicWithNoChildren(t *testing.T) {
 // An epic's parent breadcrumb is built from parent_iid, with no Title: the
 // payload does not carry one and the polled path will not spend a request per
 // refresh on it.
-func TestFetchEpicReportsItsOwnParent(t *testing.T) {
+func TestResolveReportsItsOwnParent(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		epicPath:       {{file: "epic_with_parent.json"}},
 		epicIssuesPath: {{file: "epic_children_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	want := model.Parent{
 		ID:  "epic:gitlab-org&4200",
@@ -573,15 +699,15 @@ func TestFetchEpicReportsItsOwnParent(t *testing.T) {
 
 // The decoder's input, asserted at this seam: a project issue Ref comes back
 // with no Tickets, the issue's own identity on Epic, and its epic on Parent.
-func TestFetchEpicOnAnIssueRef(t *testing.T) {
+func TestResolveOnAnIssueRef(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue_with_epic.json"}},
 		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	if len(snap.Tickets) != 0 {
@@ -604,6 +730,9 @@ func TestFetchEpicOnAnIssueRef(t *testing.T) {
 	if !reflect.DeepEqual(snap.Epic, wantEpic) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, wantEpic)
 	}
+	if snap.Header != provider.EpicHeader(wantEpic) {
+		t.Errorf("Header = %+v, want the decoded issue's display identity", snap.Header)
+	}
 
 	// The embedded epic object is a complete breadcrumb for no extra request.
 	wantParent := model.Parent{
@@ -617,24 +746,23 @@ func TestFetchEpicOnAnIssueRef(t *testing.T) {
 	}
 }
 
-func TestFetchEpicOnAnIssueWithNoEpic(t *testing.T) {
+func TestResolveOnAnIssueWithNoEpic(t *testing.T) {
 	s := newReplayServer(t, map[string][]response{
 		issuePath:    {{file: "issue.json"}},
 		issueMRsPath: {{file: "closed_by_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if !snap.Parent.IsZero() {
 		t.Errorf("Parent = %+v, want the zero Parent: the recorded issue has epic: null", snap.Parent)
 	}
 }
 
-// The capability-on acceptance criterion, executable — the mirror image of the
-// assertion #14 made while correlation was unimplemented: the Capability is
-// declared, the data behind it is served, and it reaches the renderer.
+// The PullRequests Capability contract is executable: the declared Capability,
+// served merge-request data, and renderer-visible output agree.
 func TestMergeRequestInformationIsServed(t *testing.T) {
 	responses := map[string][]response{
 		epicPath:       {{file: "epic.json"}},
@@ -647,9 +775,9 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	s := newReplayServer(t, responses)
 	p := newProvider(s)
 
-	snap, err := p.FetchEpic(context.Background(), epicRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if !snap.Capabilities.PullRequests {
 		t.Error("Capabilities.PullRequests = false; this driver correlates merge requests")
@@ -681,8 +809,8 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := plain.RenderEpic(&buf, snap); err != nil {
-		t.Fatalf("RenderEpic: %v", err)
+	if err := plain.RenderWatchlist(&buf, snap); err != nil {
+		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	// The renderer is #7's and spells a pull request "#3761" whichever Tracker
 	// served it; the driver's job is only to put the data where it looks.
@@ -690,6 +818,1428 @@ func TestMergeRequestInformationIsServed(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("the report does not mention %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+func TestResolveQuerySearchesMembershipThenReadsExactIssues(t *testing.T) {
+	const (
+		query         = "state=opened&labels=agent%20ready&scope=all&per_page=7"
+		globalIssues  = "/api/v4/issues"
+		cli101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+		platform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+		cli101MRs     = cli101Path + "/closed_by"
+		platform7MRs  = platform7Path + "/closed_by"
+	)
+	responses := map[string][]response{
+		globalIssues:  {{file: "query_membership.json"}},
+		cli101Path:    {{file: "query_issue_cli_101.json"}},
+		platform7Path: {{file: "query_issue_core_7.json"}},
+		cli101MRs:     {{file: "closed_by_empty.json"}},
+		platform7MRs:  {{file: "closed_by_empty.json"}},
+	}
+	s := newReplayServer(t, responses)
+	p := newProvider(s)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) || !snap.Parent.IsZero() {
+		t.Errorf("Query snapshot has an outer Epic/Parent: %+v / %+v", snap.Epic, snap.Parent)
+	}
+	if snap.Header != provider.QueryHeader(query) {
+		t.Errorf("Header = %+v, want exact Query", snap.Header)
+	}
+	if !snap.FetchedAt.IsZero() || snap.Capabilities != p.Capabilities() {
+		t.Errorf("FetchedAt/Capabilities = %v/%+v", snap.FetchedAt, snap.Capabilities)
+	}
+	wantKeys := []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"}
+	wantTitles := []string{"Ship the epic monitor", "Publish the release archives"}
+	if len(snap.Tickets) != len(wantKeys) {
+		t.Fatalf("Tickets = %d, want %d", len(snap.Tickets), len(wantKeys))
+	}
+	for i := range wantKeys {
+		if snap.Tickets[i].Key != wantKeys[i] || snap.Tickets[i].Title != wantTitles[i] {
+			t.Errorf("Tickets[%d] = {%q %q}, want {%q %q} from direct state",
+				i, snap.Tickets[i].Key, snap.Tickets[i].Title, wantKeys[i], wantTitles[i])
+		}
+	}
+
+	searches := s.requestsTo(globalIssues)
+	if len(searches) != 1 {
+		t.Fatalf("membership searches = %d, want one maximal first page", len(searches))
+	}
+	membership := searches[0]
+	if membership.method != http.MethodGet {
+		t.Errorf("membership method = %s, want GET", membership.method)
+	}
+	if got, want := membership.rawQuery, query+"&per_page=100&page=1"; got != want {
+		t.Errorf("raw membership query = %q, want opaque bytes plus bound %q", got, want)
+	}
+	if got := membership.query["per_page"]; !reflect.DeepEqual(got, []string{"7", "100"}) {
+		t.Errorf("per_page values = %v, want original value plus appended first-page bound", got)
+	}
+	for _, path := range []string{cli101Path, platform7Path, cli101MRs, platform7MRs} {
+		if got := len(s.requestsTo(path)); got != 1 {
+			t.Errorf("requests to %s = %d, want 1", path, got)
+		}
+	}
+	if got := len(s.recorded()); got != 5 {
+		t.Errorf("all requests = %d, want membership, two roots and two correlation reads", got)
+	}
+	for _, request := range s.recorded() {
+		if strings.Contains(request.path, "/notes") || strings.Contains(request.path, "/links") {
+			t.Errorf("Query Resolve requested Detail path %s", request.path)
+		}
+	}
+}
+
+func TestResolveQueryPaginatesBeforeExactReads(t *testing.T) {
+	const query = "state=opened&per_page=7&page=44&search=ready%20%26%20waiting"
+	responses := queryResponses(
+		queryPage(queryIssueCLI101+","+queryIssueCLI101, "2"),
+		queryPage(queryIssueCore7, ""),
+	)
+	s := newReplayServer(t, responses)
+	p := newProvider(s, gitlab.WithMaxTickets(4))
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true below an exhausted budget")
+	}
+	wantKeys := []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"}
+	if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("Ticket keys = %v, want %v", got, wantKeys)
+	}
+
+	searches := s.requestsTo(queryGlobalIssues)
+	if len(searches) != 2 {
+		t.Fatalf("membership searches = %d, want two", len(searches))
+	}
+	all := s.recorded()
+	if len(all) < 2 || all[0].path != queryGlobalIssues || all[1].path != queryGlobalIssues {
+		t.Fatalf("first requests = %+v, want both membership pages before exact reads", all[:min(len(all), 2)])
+	}
+	for i, wantSuffix := range []string{"&per_page=4&page=1", "&per_page=4&page=2"} {
+		if got, want := searches[i].rawQuery, query+wantSuffix; got != want {
+			t.Errorf("page %d raw query = %q, want exact opaque prefix %q", i+1, got, want)
+		}
+	}
+	if got := searches[0].query["per_page"]; !reflect.DeepEqual(got, []string{"7", "4"}) {
+		t.Errorf("page one per_page values = %v, want user value followed by Provider value", got)
+	}
+	if got := searches[1].query["page"]; !reflect.DeepEqual(got, []string{"44", "2"}) {
+		t.Errorf("page two page values = %v, want user value followed by Provider value", got)
+	}
+	for _, path := range []string{queryCLI101Path, queryPlatform7Path} {
+		if got := len(s.requestsTo(path)); got != 1 {
+			t.Errorf("authoritative reads to %s = %d, want one after membership", path, got)
+		}
+	}
+}
+
+func TestResolveQueryKeepsOffsetPageSizeStable(t *testing.T) {
+	const total = 102
+	var mu sync.Mutex
+	var membershipQueries []url.Values
+
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		switch {
+		case path == queryGlobalIssues:
+			values := r.URL.Query()
+			perPageValues := values["per_page"]
+			pageValues := values["page"]
+			if len(perPageValues) == 0 || len(pageValues) == 0 {
+				t.Errorf("membership query omits Provider paging: %q", r.URL.RawQuery)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			perPage, err := strconv.Atoi(perPageValues[len(perPageValues)-1])
+			if err != nil {
+				t.Errorf("per_page = %q: %v", perPageValues[len(perPageValues)-1], err)
+			}
+			page, err := strconv.Atoi(pageValues[len(pageValues)-1])
+			if err != nil {
+				t.Errorf("page = %q: %v", pageValues[len(pageValues)-1], err)
+			}
+			start := (page - 1) * perPage
+			end := min(start+perPage, total)
+			issues := make([]map[string]any, 0, max(0, end-start))
+			for iid := start + 1; iid <= end; iid++ {
+				issues = append(issues, syntheticGitLabIssue(iid))
+			}
+			if end < total {
+				w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+			}
+			mu.Lock()
+			membershipQueries = append(membershipQueries, values)
+			mu.Unlock()
+			writeTestJSON(t, w, issues)
+
+		case strings.HasSuffix(path, "/closed_by"):
+			writeTestJSON(t, w, []any{})
+
+		default:
+			iid, ok := exactIssueIID(path)
+			if !ok {
+				t.Errorf("unexpected request path %s", path)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			writeTestJSON(t, w, syntheticGitLabIssue(iid))
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	p := providerAtGitLabServer(s.URL, gitlab.WithMaxTickets(101))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{
+		Query: "state=opened&per_page=7&page=44",
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !snap.LimitReached {
+		t.Error("LimitReached = false, want evidence for the clipped 102nd result")
+	}
+	if len(snap.Tickets) != 101 {
+		t.Fatalf("Tickets = %d, want 101", len(snap.Tickets))
+	}
+	for i, ticket := range snap.Tickets {
+		want := "acme/widgets#" + strconv.Itoa(i+1)
+		if ticket.Key != want {
+			t.Errorf("Tickets[%d].Key = %q, want %q", i, ticket.Key, want)
+			break
+		}
+	}
+
+	mu.Lock()
+	queries := append([]url.Values(nil), membershipQueries...)
+	mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("membership requests = %d, want 2", len(queries))
+	}
+	for i, values := range queries {
+		perPageValues := values["per_page"]
+		pageValues := values["page"]
+		if got := perPageValues[len(perPageValues)-1]; got != "100" {
+			t.Errorf("page %d Provider per_page = %q, want stable 100", i+1, got)
+		}
+		if got := pageValues[len(pageValues)-1]; got != strconv.Itoa(i+1) {
+			t.Errorf("request %d Provider page = %q, want %d", i+1, got, i+1)
+		}
+	}
+}
+
+func TestResolveQueryCutoffAccounting(t *testing.T) {
+	tests := []struct {
+		name       string
+		issues     string
+		next       string
+		maxTickets int
+		wantKeys   []string
+		wantLimit  bool
+	}{
+		{
+			name:       "exact boundary exhausted",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7,
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+		},
+		{
+			name:       "exact boundary with unused malformed continuation",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7,
+			next:       "not-a-page",
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "oversized response is clipped",
+			issues:     queryIssueCLI101 + "," + queryIssueCore7 + "," + queryIssueCLI101,
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101", "gitlab-org/platform/core#7"},
+			wantLimit:  true,
+		},
+		{
+			name:       "duplicate consumes native budget before de-duplication",
+			issues:     queryIssueCLI101 + "," + queryIssueCLI101,
+			next:       "2",
+			maxTickets: 2,
+			wantKeys:   []string{"gitlab-org/cli#101"},
+			wantLimit:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, queryResponses(queryPage(tt.issues, tt.next)))
+			snap, err := newProvider(s, gitlab.WithMaxTickets(tt.maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if snap.LimitReached != tt.wantLimit {
+				t.Errorf("LimitReached = %t, want %t", snap.LimitReached, tt.wantLimit)
+			}
+			if got := ticketKeys(snap.Tickets); !reflect.DeepEqual(got, tt.wantKeys) {
+				t.Errorf("Ticket keys = %v, want %v", got, tt.wantKeys)
+			}
+		})
+	}
+}
+
+func TestResolveQueryFollowsKeysetContinuation(t *testing.T) {
+	const query = "state=opened&search=ready&order_by=iid&sort=asc"
+	first := queryPage(queryIssueCLI101, "")
+	first.headers = map[string]string{
+		"X-Next-Cursor": "part,second",
+		"Link": "</api/v4/issues?per_page=4&cursor=before>; rel=\"prev\", " +
+			"</api/v4/issues?sort=asc&search=rea%64y&pagination=keyset&order_by=%69id&state=opened&per_page=4&cursor=part%2Csecond>; rel=\"next\"",
+	}
+	s := newReplayServer(t, queryResponses(first, queryPage(queryIssueCore7, "")))
+
+	snap, err := newProvider(s, gitlab.WithMaxTickets(4)).Resolve(
+		context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.LimitReached {
+		t.Error("LimitReached = true after the keyset continuation exhausted")
+	}
+	if got, want := ticketKeys(snap.Tickets), []string{
+		"gitlab-org/cli#101", "gitlab-org/platform/core#7",
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Ticket keys = %v, want %v", got, want)
+	}
+
+	searches := s.requestsTo(queryGlobalIssues)
+	if len(searches) != 2 {
+		t.Fatalf("membership requests = %d, want two", len(searches))
+	}
+	if got, want := searches[0].rawQuery, query+"&per_page=4&page=1"; got != want {
+		t.Errorf("first membership query = %q, want %q", got, want)
+	}
+	if got, want := searches[1].rawQuery,
+		"sort=asc&search=rea%64y&pagination=keyset&order_by=%69id&state=opened&per_page=4&cursor=part%2Csecond"; got != want {
+		t.Errorf("keyset continuation query = %q, want Tracker-supplied %q", got, want)
+	}
+	all := s.recorded()
+	if len(all) < 2 || all[0].path != queryGlobalIssues || all[1].path != queryGlobalIssues {
+		t.Errorf("request order = %+v, want all membership pages before exact roots", all)
+	}
+}
+
+func TestResolveQueryRejectsContinuationMembershipChanges(t *testing.T) {
+	const defaultQuery = "state=opened&search=SECRET_QUERY_47"
+	tests := []struct {
+		name      string
+		query     string
+		nextQuery string
+	}{
+		{name: "dropped filter", query: defaultQuery, nextQuery: "state=opened&per_page=4&cursor=next"},
+		{name: "changed value", query: defaultQuery, nextQuery: "state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "duplicate changed value", query: defaultQuery, nextQuery: "state=opened&state=closed&search=SECRET_QUERY_47&per_page=4&cursor=next"},
+		{name: "added filter", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&milestone=7&per_page=4&cursor=next"},
+		{name: "added order by", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=iid&per_page=4&cursor=next"},
+		{name: "added sort", query: defaultQuery, nextQuery: "state=opened&search=SECRET_QUERY_47&sort=asc&per_page=4&cursor=next"},
+		{
+			name: "changed original order by", query: defaultQuery + "&order_by=iid",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=created_at&per_page=4&cursor=next",
+		},
+		{
+			name: "changed original sort", query: defaultQuery + "&sort=asc",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&sort=desc&per_page=4&cursor=next",
+		},
+		{
+			name: "conflicting duplicate ordering control", query: defaultQuery + "&order_by=iid&sort=asc",
+			nextQuery: "state=opened&search=SECRET_QUERY_47&order_by=iid&sort=asc&sort=desc&per_page=4&cursor=next",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			first := queryPage(queryIssueCLI101, "")
+			first.headers = map[string]string{
+				"X-Next-Cursor": "next",
+				"Link":          "</api/v4/issues?" + tt.nextQuery + ">; rel=\"next\"",
+			}
+			s := newReplayServer(t, map[string][]response{queryGlobalIssues: {first}})
+
+			snap, err := newProvider(s, gitlab.WithMaxTickets(4)).Resolve(
+				context.Background(), provider.QuerySelector{Query: tt.query})
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"pagination", "Selector membership"},
+				Secret:   tt.query,
+			})
+			if strings.Contains(err.Error(), fixtureToken) || strings.Contains(err.Error(), "SECRET_QUERY_47") {
+				t.Errorf("error = %q, leaked credential or Query", err)
+			}
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != 1 {
+				t.Errorf("membership requests = %d, want 1", got)
+			}
+			if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+				t.Errorf("exact reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryReportsUnusedKeysetContinuationAtBudget(t *testing.T) {
+	first := queryPage(queryIssueCLI101, "")
+	first.headers = map[string]string{
+		"X-Next-Cursor": "unused",
+		"Link":          "<?search=SECRET_QUERY_47&per_page=1&cursor=unused>; rel=\"next\"",
+	}
+	s := newReplayServer(t, queryResponses(first))
+
+	snap, err := newProvider(s, gitlab.WithMaxTickets(1)).Resolve(
+		context.Background(), provider.QuerySelector{Query: "state=opened"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !snap.LimitReached {
+		t.Error("LimitReached = false, want unused keyset continuation evidence")
+	}
+	if got := len(s.requestsTo(queryGlobalIssues)); got != 1 {
+		t.Errorf("membership requests = %d, want no fetch of the unused continuation", got)
+	}
+}
+
+func TestResolveQueryRejectsMalformedOrCyclicKeysetContinuation(t *testing.T) {
+	const secretQuery = "search=SECRET_QUERY_47"
+	keysetPage := func(issue, cursor, link string) response {
+		return response{
+			body: "[" + issue + "]",
+			headers: map[string]string{
+				"X-Next-Cursor": cursor,
+				"Link":          link,
+			},
+		}
+	}
+	tests := []struct {
+		name  string
+		pages []response
+	}{
+		{
+			name:  "cursor without link",
+			pages: []response{keysetPage(queryIssueCLI101, "cursor", "")},
+		},
+		{
+			name:  "malformed link",
+			pages: []response{keysetPage(queryIssueCLI101, "cursor", "<not-closed; rel=\"next\"")},
+		},
+		{
+			name: "changed membership path",
+			pages: []response{keysetPage(queryIssueCLI101, "cursor",
+				"</api/v4/projects/other/issues?per_page=3&cursor=x>; rel=\"next\"")},
+		},
+		{
+			name: "changed Provider page size",
+			pages: []response{keysetPage(queryIssueCLI101, "cursor",
+				"<?search=SECRET_QUERY_47&per_page=1&cursor=x>; rel=\"next\"")},
+		},
+		{
+			name: "fragment",
+			pages: []response{keysetPage(queryIssueCLI101, "cursor",
+				"<?search=SECRET_QUERY_47&per_page=3&cursor=x#fragment>; rel=\"next\"")},
+		},
+		{
+			name: "repeated continuation",
+			pages: []response{
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=3&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCore7, "a", "<?search=SECRET_QUERY_47&per_page=3&cursor=a>; rel=\"next\""),
+			},
+		},
+		{
+			name: "non-adjacent cycle",
+			pages: []response{
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=4&cursor=a>; rel=\"next\""),
+				keysetPage(queryIssueCore7, "b", "<?search=SECRET_QUERY_47&per_page=4&cursor=b>; rel=\"next\""),
+				keysetPage(queryIssueCLI101, "a", "<?search=SECRET_QUERY_47&per_page=4&cursor=a>; rel=\"next\""),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maxTickets := len(tt.pages) + 1
+			s := newReplayServer(t, map[string][]response{queryGlobalIssues: tt.pages})
+			snap, err := newProvider(s, gitlab.WithMaxTickets(maxTickets)).Resolve(
+				context.Background(), provider.QuerySelector{Query: secretQuery})
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   secretQuery,
+			})
+			if strings.Contains(err.Error(), fixtureToken) {
+				t.Errorf("error = %q, leaked credential", err)
+			}
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial output", snap)
+			}
+			if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+				t.Errorf("non-membership requests = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryRejectsOffOriginKeysetContinuationWithoutCredentials(t *testing.T) {
+	var receiverMu sync.Mutex
+	receiverRequests := 0
+	receiverAuthorization := ""
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiverMu.Lock()
+		receiverRequests++
+		receiverAuthorization = r.Header.Get("Authorization")
+		receiverMu.Unlock()
+		writeTestJSON(t, w, []any{})
+	}))
+	t.Cleanup(receiver.Close)
+
+	first := queryPage(queryIssueCLI101, "")
+	first.headers = map[string]string{
+		"X-Next-Cursor": "outside",
+		"Link": receiver.URL +
+			"/api/v4/issues?per_page=3&cursor=outside>; rel=\"next\"",
+	}
+	first.headers["Link"] = "<" + first.headers["Link"]
+	s := newReplayServer(t, map[string][]response{queryGlobalIssues: {first}})
+
+	snap, err := newProvider(s, gitlab.WithMaxTickets(3)).Resolve(
+		context.Background(), provider.QuerySelector{Query: "search=SECRET_QUERY_47"})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"unsafe next link"},
+		Secret:   "SECRET_QUERY_47",
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	receiverMu.Lock()
+	gotRequests := receiverRequests
+	gotAuthorization := receiverAuthorization
+	receiverMu.Unlock()
+	if gotRequests != 0 || gotAuthorization != "" {
+		t.Errorf("off-origin receiver saw %d requests and Authorization %q, want neither",
+			gotRequests, gotAuthorization)
+	}
+}
+
+func TestResolveQueryRejectsNonProgressingPagination(t *testing.T) {
+	tests := []struct {
+		name  string
+		pages []response
+	}{
+		{
+			name:  "malformed next page",
+			pages: []response{queryPage(queryIssueCLI101, "oops")},
+		},
+		{
+			name:  "non-forward next page",
+			pages: []response{queryPage(queryIssueCLI101, "1")},
+		},
+		{
+			name: "repeated next page",
+			pages: []response{
+				queryPage(queryIssueCLI101, "2"),
+				queryPage(queryIssueCore7, "2"),
+			},
+		},
+		{
+			name: "empty continuation page",
+			pages: []response{
+				queryPage(queryIssueCLI101, "2"),
+				queryPage("", ""),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{queryGlobalIssues: tt.pages})
+			snap, err := newProvider(s, gitlab.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindUnavailable,
+				Contains: []string{"query"},
+				Secret:   fixtureToken,
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != len(tt.pages) {
+				t.Errorf("membership requests = %d, want %d", got, len(tt.pages))
+			}
+			if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+				t.Errorf("non-membership reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryPageTwoFailureReturnsNoPartialSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"slow down"}`},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit"}, Secret: fixtureToken},
+		},
+		{
+			name: "server failure",
+			resp: response{status: http.StatusInternalServerError, body: `{"message":"down"}`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"API error", "down"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `[{`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+		{
+			name: "malformed native query",
+			resp: response{status: http.StatusUnprocessableEntity, body: `{"message":{"state":["invalid"]}}`},
+			want: providertest.Want{Kind: provider.KindBadRef, Contains: []string{"query rejected"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{
+				queryGlobalIssues: {
+					queryPage(queryIssueCLI101, "2"),
+					tt.resp,
+				},
+			})
+			snap, err := newProvider(s, gitlab.WithMaxTickets(3)).Resolve(
+				context.Background(), provider.QuerySelector{Query: "state=opened"})
+			providertest.CheckError(t, "gitlab", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want no partial membership", snap)
+			}
+			if got := len(s.requestsTo(queryGlobalIssues)); got != 2 {
+				t.Errorf("membership requests = %d, want 2", got)
+			}
+			if got := len(s.recorded()) - 2; got != 0 {
+				t.Errorf("non-membership reads = %d, want none", got)
+			}
+		})
+	}
+}
+
+func TestResolveQueryUsesProjectScopedMembershipWhenPathIsConfigured(t *testing.T) {
+	const scoped = "/api/v4/projects/gitlab-org%2Fcli/issues"
+	s := newReplayServer(t, map[string][]response{
+		scoped: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithPath("gitlab-org/cli"))
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: ""})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if snap.Tickets == nil || len(snap.Tickets) != 0 {
+		t.Errorf("Tickets = %#v, want non-nil empty", snap.Tickets)
+	}
+	if snap.Header != provider.QueryHeader("") {
+		t.Errorf("Header = %+v, want explicit empty Query", snap.Header)
+	}
+	requests := s.recorded()
+	if len(requests) != 1 || requests[0].path != scoped || requests[0].rawQuery != "per_page=100&page=1" {
+		t.Errorf("requests = %+v, want one project-scoped maximal first page", requests)
+	}
+}
+
+func TestResolveQueryPreservesLiteralHashInRawQuery(t *testing.T) {
+	const (
+		query        = "search=#47&labels=agent%23ready"
+		globalIssues = "/api/v4/issues"
+	)
+	s := newReplayServer(t, map[string][]response{globalIssues: {{body: `[]`}}})
+
+	_, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requests := s.requestsTo(globalIssues)
+	if len(requests) != 1 {
+		t.Fatalf("membership requests = %d, want 1", len(requests))
+	}
+	if got, want := requests[0].rawQuery, query+"&per_page=100&page=1"; got != want {
+		t.Errorf("raw query = %q, want literal bytes %q", got, want)
+	}
+}
+
+func TestResolveQueryHugeLimitDoesNotPreallocateTheBudget(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		queryGlobalIssues: {{body: `[]`}},
+	})
+	p := newProvider(s, gitlab.WithMaxTickets(int(^uint(0)>>1)))
+	if _, err := p.Resolve(context.Background(), provider.QuerySelector{Query: "q=1"}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+}
+
+func TestResolveQueryRejectsMalformedNativeQuery(t *testing.T) {
+	const (
+		globalIssues = "/api/v4/issues"
+		query        = "state=wat"
+	)
+	s := newReplayServer(t, map[string][]response{
+		globalIssues: {{
+			status: http.StatusUnprocessableEntity,
+			body:   `{"message":{"labels":["is invalid"],"query":["state=wat is invalid"],"state":["does not have a valid value"]}}`,
+		}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind: provider.KindBadRef,
+		Contains: []string{
+			"query rejected",
+			`labels: ["is invalid"]`,
+			`query: ["[query] is invalid"]`,
+			`state: ["does not have a valid value"]`,
+		},
+		Secret: query,
+	})
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("error = %q, leaked credential", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if provider.KindOf(err).Retryable() {
+		t.Error("malformed native query must not be retryable")
+	}
+}
+
+func TestResolveQueryRedactsDecodedAndNormalizedNativeExplanation(t *testing.T) {
+	const query = "search=needs%20triage&labels=bug%2fui"
+	s := newReplayServer(t, map[string][]response{
+		queryGlobalIssues: {{
+			status: http.StatusUnprocessableEntity,
+			body: `{"message":{"query":["search=needs triage&labels=bug/ui is invalid",` +
+				`"labels=bug%2Fui&search=needs+triage was normalized"]}}`,
+		}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"query rejected", "is invalid", "was normalized", "[query]"},
+		Secret:   query,
+	})
+	for _, sensitive := range []string{
+		"search=needs triage&labels=bug/ui", "labels=bug%2Fui&search=needs+triage", fixtureToken,
+	} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Errorf("error = %q, leaked sensitive form %q", err, sensitive)
+		}
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if got := len(s.requestsTo(queryGlobalIssues)); got != 1 {
+		t.Errorf("membership requests = %d, want one", got)
+	}
+	if got := len(s.recorded()) - len(s.requestsTo(queryGlobalIssues)); got != 0 {
+		t.Errorf("exact reads = %d, want none", got)
+	}
+}
+
+func TestResolveQueryPreservesMembershipFailureClasses(t *testing.T) {
+	const globalIssues = "/api/v4/issues"
+	tests := []struct {
+		name string
+		resp response
+		want providertest.Want
+	}{
+		{
+			name: "auth",
+			resp: response{status: http.StatusUnauthorized, body: `{"message":"401 Unauthorized"}`},
+			want: providertest.Want{Kind: provider.KindAuth, Contains: []string{"authentication failed"}, Secret: fixtureToken},
+		},
+		{
+			name: "rate limit",
+			resp: response{status: http.StatusTooManyRequests, body: `{"message":"Too many requests"}`, headers: map[string]string{"Retry-After": "30"}},
+			want: providertest.Want{Kind: provider.KindRateLimit, Contains: []string{"rate limit", "30"}, Secret: fixtureToken},
+		},
+		{
+			name: "decode",
+			resp: response{body: `[{`},
+			want: providertest.Want{Kind: provider.KindUnavailable, Contains: []string{"decoding the response"}, Secret: fixtureToken},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{globalIssues: {tt.resp}})
+			snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+			providertest.CheckError(t, "gitlab", err, tt.want)
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want none", snap)
+			}
+			if len(s.recorded()) != 1 {
+				t.Errorf("requests = %d, want membership stage only", len(s.recorded()))
+			}
+		})
+	}
+}
+
+func TestResolveQueryTransportErrorDoesNotExposeQuery(t *testing.T) {
+	const query = "search=SECRET_QUERY_47"
+	transportErr := errors.New("dial failed")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	p := gitlab.New(fixtureHost,
+		gitlab.WithTokenSource(func(context.Context, string) (string, error) {
+			return fixtureToken, nil
+		}),
+		gitlab.WithHTTPClient(client),
+	)
+
+	snap, err := p.Resolve(context.Background(), provider.QuerySelector{Query: query})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"transport failure"},
+		Secret:   query,
+	})
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(%v, transportErr) = false, want true", err)
+	}
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveQueryRootFailureReturnsNoPartialSnapshot(t *testing.T) {
+	const (
+		globalIssues  = "/api/v4/issues"
+		cli101Path    = "/api/v4/projects/gitlab-org%2Fcli/issues/101"
+		platform7Path = "/api/v4/projects/gitlab-org%2Fplatform%2Fcore/issues/7"
+	)
+	s := newReplayServer(t, map[string][]response{
+		globalIssues:  {{file: "query_membership.json"}},
+		cli101Path:    {{file: "query_issue_cli_101.json"}},
+		platform7Path: {{status: http.StatusNotFound, body: `{"message":"404 Issue Not Found"}`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"gitlab-org/platform/core#7", "not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial membership", snap)
+	}
+	if len(s.recorded()) != 3 {
+		t.Errorf("requests = %d, want membership and roots only", len(s.recorded()))
+	}
+	for _, request := range s.recorded() {
+		if strings.Contains(request.path, "/closed_by") {
+			t.Errorf("correlation started after root failure: %s", request.path)
+		}
+	}
+}
+
+func TestResolveQueryRejectsInvalidSearchIdentity(t *testing.T) {
+	const globalIssues = "/api/v4/issues"
+	s := newReplayServer(t, map[string][]response{
+		globalIssues: {{body: `[{"iid":0,"project_id":34675721,"references":{"full":"gitlab-org/cli#0"}}]`}},
+	})
+	snap, err := newProvider(s).Resolve(context.Background(), provider.QuerySelector{Query: "q=1"})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindUnavailable,
+		Contains: []string{"invalid identity"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want none", snap)
+	}
+}
+
+func TestResolveExactRootsAreBoundedConcurrentAndOrdered(t *testing.T) {
+	const rootCount = 10
+	tests := []struct {
+		name         string
+		selector     func() provider.Selector
+		wantSearches int
+	}{
+		{
+			name: "Query",
+			selector: func() provider.Selector {
+				return provider.QuerySelector{Query: "state=opened"}
+			},
+			wantSearches: 1,
+		},
+		{
+			name: "Ref-list",
+			selector: func() provider.Selector {
+				refs := make([]ref.Ref, rootCount)
+				for i := range refs {
+					refs[i] = syntheticGitLabRef(i + 1)
+				}
+				return provider.RefListSelector{Refs: refs}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan int, rootCount)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+			var mu sync.Mutex
+			inFlight := 0
+			maxInFlight := 0
+			rootRequests := 0
+			correlationRequests := 0
+			membershipRequests := 0
+
+			issues := make([]map[string]any, rootCount)
+			for i := range issues {
+				issues[i] = syntheticGitLabIssue(i + 1)
+			}
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.EscapedPath()
+				switch {
+				case path == queryGlobalIssues:
+					mu.Lock()
+					membershipRequests++
+					mu.Unlock()
+					writeTestJSON(t, w, issues)
+				case strings.HasSuffix(path, "/closed_by"):
+					mu.Lock()
+					correlationRequests++
+					mu.Unlock()
+					writeTestJSON(t, w, []any{})
+				default:
+					iid, ok := exactIssueIID(path)
+					if !ok {
+						t.Errorf("unexpected request path %s", path)
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					mu.Lock()
+					rootRequests++
+					inFlight++
+					maxInFlight = max(maxInFlight, inFlight)
+					mu.Unlock()
+					started <- iid
+					<-release
+					mu.Lock()
+					inFlight--
+					mu.Unlock()
+					writeTestJSON(t, w, syntheticGitLabIssue(iid))
+				}
+			}))
+			t.Cleanup(s.Close)
+
+			type resolveResult struct {
+				snapshot model.WatchlistSnapshot
+				err      error
+			}
+			result := make(chan resolveResult, 1)
+			go func() {
+				snapshot, err := providerAtGitLabServer(s.URL, gitlab.WithMaxTickets(20)).Resolve(
+					context.Background(), tt.selector())
+				result <- resolveResult{snapshot: snapshot, err: err}
+			}()
+
+			seenStarts := make(map[int]struct{})
+			for range 8 {
+				seenStarts[receiveWithin(t, started, "one of the first eight exact roots")] = struct{}{}
+			}
+			if len(seenStarts) != 8 {
+				t.Errorf("distinct roots started = %d, want 8", len(seenStarts))
+			}
+			mu.Lock()
+			gotInFlight := inFlight
+			mu.Unlock()
+			if gotInFlight != 8 {
+				t.Errorf("roots in flight before release = %d, want worker bound 8", gotInFlight)
+			}
+			releaseOnce.Do(func() { close(release) })
+
+			got := receiveWithin(t, result, "bounded exact-root Resolve")
+			if got.err != nil {
+				t.Fatalf("Resolve: %v", got.err)
+			}
+			if len(got.snapshot.Tickets) != rootCount {
+				t.Fatalf("Tickets = %d, want %d", len(got.snapshot.Tickets), rootCount)
+			}
+			for i, ticket := range got.snapshot.Tickets {
+				want := "acme/widgets#" + strconv.Itoa(i+1)
+				if ticket.Key != want {
+					t.Errorf("Tickets[%d].Key = %q, want Selector order %q", i, ticket.Key, want)
+				}
+			}
+
+			mu.Lock()
+			gotMax := maxInFlight
+			gotRoots := rootRequests
+			gotCorrelations := correlationRequests
+			gotSearches := membershipRequests
+			mu.Unlock()
+			if gotMax != 8 {
+				t.Errorf("maximum exact roots in flight = %d, want 8", gotMax)
+			}
+			if gotRoots != rootCount || gotCorrelations != rootCount {
+				t.Errorf("root/correlation requests = %d/%d, want %d/%d",
+					gotRoots, gotCorrelations, rootCount, rootCount)
+			}
+			if gotSearches != tt.wantSearches {
+				t.Errorf("membership requests = %d, want %d", gotSearches, tt.wantSearches)
+			}
+		})
+	}
+}
+
+func TestResolveQueryExactRootsPreserveOrderAfterOutOfOrderCompletion(t *testing.T) {
+	const rootCount = 3
+	started := make(chan int, rootCount)
+	finished := make(chan int, rootCount)
+	releases := make([]chan struct{}, rootCount+1)
+	for iid := 1; iid <= rootCount; iid++ {
+		releases[iid] = make(chan struct{})
+	}
+	var releaseOnce [rootCount + 1]sync.Once
+	t.Cleanup(func() {
+		for iid := 1; iid <= rootCount; iid++ {
+			releaseOnce[iid].Do(func() { close(releases[iid]) })
+		}
+	})
+
+	issues := make([]map[string]any, rootCount)
+	for i := range issues {
+		issues[i] = syntheticGitLabIssue(i + 1)
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		switch {
+		case path == queryGlobalIssues:
+			writeTestJSON(t, w, issues)
+		case strings.HasSuffix(path, "/closed_by"):
+			writeTestJSON(t, w, []any{})
+		default:
+			iid, ok := exactIssueIID(path)
+			if !ok {
+				t.Errorf("unexpected request path %s", path)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			started <- iid
+			<-releases[iid]
+			writeTestJSON(t, w, syntheticGitLabIssue(iid))
+			finished <- iid
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	type resolveResult struct {
+		snapshot model.WatchlistSnapshot
+		err      error
+	}
+	result := make(chan resolveResult, 1)
+	go func() {
+		snapshot, err := providerAtGitLabServer(s.URL, gitlab.WithMaxTickets(rootCount)).Resolve(
+			context.Background(), provider.QuerySelector{Query: "state=opened"})
+		result <- resolveResult{snapshot: snapshot, err: err}
+	}()
+	for range rootCount {
+		receiveWithin(t, started, "all out-of-order exact roots")
+	}
+	for _, iid := range []int{3, 1, 2} {
+		releaseOnce[iid].Do(func() { close(releases[iid]) })
+		if got := receiveWithin(t, finished, "out-of-order exact-root completion"); got != iid {
+			t.Errorf("completed root = %d, want %d", got, iid)
+		}
+	}
+
+	got := receiveWithin(t, result, "out-of-order Resolve")
+	if got.err != nil {
+		t.Fatalf("Resolve: %v", got.err)
+	}
+	if keys := ticketKeys(got.snapshot.Tickets); !reflect.DeepEqual(keys, []string{
+		"acme/widgets#1", "acme/widgets#2", "acme/widgets#3",
+	}) {
+		t.Errorf("Ticket keys = %v, want membership order", keys)
+	}
+}
+
+func TestResolveQueryExactRootFailureIsDeterministic(t *testing.T) {
+	started := make(chan int, 2)
+	higherFinished := make(chan struct{}, 1)
+	releaseLower := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseLower) }) })
+
+	var mu sync.Mutex
+	correlationRequests := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		switch {
+		case path == queryGlobalIssues:
+			writeTestJSON(t, w, []map[string]any{
+				syntheticGitLabIssue(1), syntheticGitLabIssue(2),
+			})
+		case strings.HasSuffix(path, "/closed_by"):
+			mu.Lock()
+			correlationRequests++
+			mu.Unlock()
+			writeTestJSON(t, w, []any{})
+		default:
+			iid, ok := exactIssueIID(path)
+			if !ok {
+				t.Errorf("unexpected request path %s", path)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			started <- iid
+			w.Header().Set("Content-Type", "application/json")
+			if iid == 1 {
+				<-releaseLower
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"404 Issue Not Found"}`))
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+			higherFinished <- struct{}{}
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	type resolveResult struct {
+		snapshot model.WatchlistSnapshot
+		err      error
+	}
+	result := make(chan resolveResult, 1)
+	go func() {
+		snapshot, err := providerAtGitLabServer(s.URL, gitlab.WithMaxTickets(2)).Resolve(
+			context.Background(), provider.QuerySelector{Query: "state=opened"})
+		result <- resolveResult{snapshot: snapshot, err: err}
+	}()
+	for range 2 {
+		receiveWithin(t, started, "both failing exact roots")
+	}
+	receiveWithin(t, higherFinished, "higher-index root failure")
+	releaseOnce.Do(func() { close(releaseLower) })
+
+	got := receiveWithin(t, result, "deterministic failure Resolve")
+	providertest.CheckError(t, "gitlab", got.err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"acme/widgets#1", "not found"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(got.snapshot, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", got.snapshot)
+	}
+	mu.Lock()
+	gotCorrelations := correlationRequests
+	mu.Unlock()
+	if gotCorrelations != 0 {
+		t.Errorf("correlation requests = %d, want none after an exact-root failure", gotCorrelations)
+	}
+}
+
+func TestResolveQueryCancellationStopsQueuedExactRoots(t *testing.T) {
+	const rootCount = 12
+	started := make(chan int, rootCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	var mu sync.Mutex
+	rootRequests := 0
+	correlationRequests := 0
+	issues := make([]map[string]any, rootCount)
+	for i := range issues {
+		issues[i] = syntheticGitLabIssue(i + 1)
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		switch {
+		case path == queryGlobalIssues:
+			writeTestJSON(t, w, issues)
+		case strings.HasSuffix(path, "/closed_by"):
+			mu.Lock()
+			correlationRequests++
+			mu.Unlock()
+			writeTestJSON(t, w, []any{})
+		default:
+			iid, ok := exactIssueIID(path)
+			if !ok {
+				t.Errorf("unexpected request path %s", path)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			mu.Lock()
+			rootRequests++
+			mu.Unlock()
+			started <- iid
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			writeTestJSON(t, w, syntheticGitLabIssue(iid))
+		}
+	}))
+	t.Cleanup(s.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	type resolveResult struct {
+		snapshot model.WatchlistSnapshot
+		err      error
+	}
+	result := make(chan resolveResult, 1)
+	go func() {
+		snapshot, err := providerAtGitLabServer(s.URL, gitlab.WithMaxTickets(rootCount)).Resolve(
+			ctx, provider.QuerySelector{Query: "state=opened"})
+		result <- resolveResult{snapshot: snapshot, err: err}
+	}()
+	for range 8 {
+		receiveWithin(t, started, "the bounded exact-root fan-out before cancellation")
+	}
+	cancel()
+	got := receiveWithin(t, result, "cancelled exact-root Resolve")
+	releaseOnce.Do(func() { close(release) })
+	if got.err == nil {
+		t.Fatal("Resolve succeeded after cancellation")
+	}
+	if !reflect.DeepEqual(got.snapshot, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", got.snapshot)
+	}
+	mu.Lock()
+	gotRoots := rootRequests
+	gotCorrelations := correlationRequests
+	mu.Unlock()
+	if gotRoots != 8 {
+		t.Errorf("root requests = %d, want only the eight already in flight", gotRoots)
+	}
+	if gotCorrelations != 0 {
+		t.Errorf("correlation requests = %d, want none after cancellation", gotCorrelations)
+	}
+}
+
+func TestResolveRefListReadsExactHeterogeneousRootsInOrder(t *testing.T) {
+	responses := map[string][]response{
+		groupMilestonesPath:       {{file: "milestone_group.json"}},
+		issuePath:                 {{file: "issue_with_epic.json"}, {file: "issue_detail.json"}},
+		epicPath:                  {{file: "epic.json"}},
+		projectMilestonesPath:     {{file: "milestone_project.json"}},
+		issueMRsPath:              {{file: "closed_by.json"}},
+		mergeRequestApprovalsPath: {{file: "approvals_approved.json"}},
+		issueNotesPath:            {{file: "notes_empty.json"}},
+		issueLinksPath:            {{file: "links_empty.json"}},
+		epicNotesPath:             {{file: "notes_empty.json"}},
+	}
+	s := newReplayServer(t, responses)
+	p := newProvider(s)
+	selector := provider.RefListSelector{Refs: []ref.Ref{
+		groupMilestoneRef,
+		issueRef,
+		epicRef,
+		projectMilestoneRef,
+	}}
+
+	snap, err := p.Resolve(context.Background(), selector)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if snap.Tickets == nil {
+		t.Fatal("Tickets is nil; every successful Ref-list must return a non-nil slice")
+	}
+	if snap.Header != (model.WatchlistHeader{Title: "4 tickets"}) {
+		t.Errorf("Header = %+v, want the four-Ticket Ref-list identity", snap.Header)
+	}
+	if !reflect.DeepEqual(snap.Epic, model.Epic{}) {
+		t.Errorf("Epic = %+v, want the zero Epic for a Ref-list", snap.Epic)
+	}
+	if !snap.Parent.IsZero() {
+		t.Errorf("Parent = %+v, want the zero Parent for a Ref-list", snap.Parent)
+	}
+	if snap.Capabilities != p.Capabilities() {
+		t.Errorf("Capabilities = %+v, want the Provider's %+v", snap.Capabilities, p.Capabilities())
+	}
+	if !snap.FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %s, want the zero time", snap.FetchedAt)
+	}
+
+	wants := []struct {
+		id         model.TicketID
+		key        string
+		status     model.StatusCategory
+		native     string
+		repository string
+	}{
+		{"group-milestone:gitlab-org%3", "groups/gitlab-org%3", model.StatusDone, "closed", "gitlab-org"},
+		{issueTicketID, "gitlab-org/cli#8509", model.StatusInProgress, "open", "gitlab-org/cli"},
+		{epicTicketID, "gitlab-org&23356", model.StatusTodo, "open", "gitlab-org"},
+		{"project-milestone:gitlab-org/cli%3", "gitlab-org/cli%3", model.StatusTodo, "active", "gitlab-org/cli"},
+	}
+	if len(snap.Tickets) != len(wants) {
+		t.Fatalf("got %d Tickets, want %d", len(snap.Tickets), len(wants))
+	}
+	for i, want := range wants {
+		got := snap.Tickets[i]
+		if got.ID != want.id || got.Key != want.key || got.Status != want.status ||
+			got.NativeStatus != want.native || got.Repository != want.repository {
+			t.Errorf("Tickets[%d] = {%q %q %v %q %q}, want {%q %q %v %q %q}",
+				i, got.ID, got.Key, got.Status, got.NativeStatus, got.Repository,
+				want.id, want.key, want.status, want.native, want.repository)
+		}
+	}
+	if got := snap.Tickets[1].Assignees; len(got) != 1 || got[0].Login != "jay_mccure" {
+		t.Errorf("issue Assignees = %+v, want the recorded assignee", got)
+	}
+	if got := snap.Tickets[1].PullRequests; len(got) != 1 || got[0].Number != 3761 {
+		t.Errorf("issue PullRequests = %+v, want correlation on the ordered root slice", got)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if snap.Tickets[i].PullRequests != nil {
+			t.Errorf("Tickets[%d].PullRequests = %+v, want no correlation request for a non-issue ID",
+				i, snap.Tickets[i].PullRequests)
+		}
+	}
+
+	for _, path := range []string{groupMilestonesPath, issuePath, epicPath, projectMilestonesPath} {
+		if n := len(s.requestsTo(path)); n != 1 {
+			t.Errorf("%d root requests to %s, want 1", n, path)
+		}
+	}
+	for _, path := range []string{
+		issueMRsPath,
+		relatedMergeRequestsPath("gitlab-org/cli", 8509),
+		mergeRequestApprovalsPath,
+	} {
+		if n := len(s.requestsTo(path)); n != 1 {
+			t.Errorf("%d correlation requests to %s, want 1", n, path)
+		}
+	}
+	if n := len(s.recorded()); n != 7 {
+		t.Errorf("Resolve made %d HTTP requests, want four root reads and three issue-correlation reads", n)
+	}
+	for _, path := range []string{epicIssuesPath, projectMilestoneIssues, groupMilestoneIssuesPath} {
+		if n := len(s.requestsTo(path)); n != 0 {
+			t.Errorf("Resolve made %d requests to child endpoint %s, want none", n, path)
+		}
+	}
+	for _, r := range s.recorded() {
+		if strings.Contains(r.path, "/notes") || strings.Contains(r.path, "/links") {
+			t.Errorf("Resolve requested %s; Detail must stay lazy", r.path)
+		}
+	}
+
+	for _, ticket := range snap.Tickets {
+		detail, err := p.FetchDetail(context.Background(), ticket.ID)
+		if err != nil {
+			t.Fatalf("FetchDetail(%q): %v", ticket.ID, err)
+		}
+		if detail.TicketID != ticket.ID {
+			t.Errorf("FetchDetail(%q).TicketID = %q", ticket.ID, detail.TicketID)
+		}
+	}
+	for path, want := range map[string]int{
+		groupMilestonesPath:   2,
+		issuePath:             2,
+		issueNotesPath:        1,
+		issueLinksPath:        1,
+		epicPath:              2,
+		epicNotesPath:         1,
+		projectMilestonesPath: 2,
+	} {
+		if got := len(s.requestsTo(path)); got != want {
+			t.Errorf("after lazy drill-in, %s received %d requests, want %d", path, got, want)
+		}
+	}
+	for _, path := range []string{epicIssuesPath, projectMilestoneIssues, groupMilestoneIssuesPath} {
+		if n := len(s.requestsTo(path)); n != 0 {
+			t.Errorf("drill-in made %d requests to child endpoint %s, want none", n, path)
+		}
+	}
+}
+
+func TestResolveRefListRootFailureReturnsNoPartialSnapshot(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{
+		issuePath: {{file: "issue.json"}},
+		epicPath:  {{status: http.StatusNotFound, body: `{"message":"404 Epic Not Found"}`}},
+	})
+
+	snap, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{
+		issueRef,
+		epicRef,
+	}})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"gitlab-org&23356", "not found (or you lack access)"},
+		Secret:   fixtureToken,
+	})
+	if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+		t.Errorf("snapshot = %+v, want no partial output", snap)
+	}
+	if n := len(s.requestsTo(issueMRsPath)); n != 0 {
+		t.Errorf("%d correlation requests were made after a root failed, want none", n)
+	}
+}
+
+func TestResolveRefListRejectsEmptyAndUnknownSelectorsWithoutIO(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector provider.Selector
+		contains string
+	}{
+		{"empty Ref-list", provider.RefListSelector{}, "at least one Ref"},
+		{"unknown nil Selector", nil, "unsupported Watchlist selector"},
+		{"pointer Selector", &provider.EpicSelector{Ref: epicRef}, "unsupported Watchlist selector"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newReplayServer(t, map[string][]response{})
+			snap, err := newProvider(s).Resolve(context.Background(), tt.selector)
+			providertest.CheckError(t, "gitlab", err, providertest.Want{
+				Kind:     provider.KindBadRef,
+				Contains: []string{tt.contains},
+			})
+			if !reflect.DeepEqual(snap, model.WatchlistSnapshot{}) {
+				t.Errorf("snapshot = %+v, want zero", snap)
+			}
+			if n := len(s.recorded()); n != 0 {
+				t.Errorf("%d requests were sent; selector validation must be immediate", n)
+			}
+		})
+	}
+}
+
+func TestResolveRefListValidatesEveryTargetBeforeIO(t *testing.T) {
+	s := newReplayServer(t, map[string][]response{})
+	bad := ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"}
+
+	_, err := newProvider(s).Resolve(context.Background(), provider.RefListSelector{Refs: []ref.Ref{issueRef, bad}})
+	providertest.CheckError(t, "gitlab", err, providertest.Want{
+		Kind:     provider.KindBadRef,
+		Contains: []string{"not a GitLab Ref"},
+	})
+	if n := len(s.recorded()); n != 0 {
+		t.Errorf("%d requests were sent before all exact roots were validated", n)
 	}
 }
 
@@ -704,7 +2254,7 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 		{
 			name: "a GitHub Ref",
 			r:    ref.Ref{Tracker: ref.TrackerGitHub, Owner: "acme", Repo: "widgets", Number: 7, Raw: "acme/widgets#7"},
-			want: "is not a GitLab Epic Ref",
+			want: "is not a GitLab Ref",
 		},
 		{
 			name: "no path and no Profile project",
@@ -721,7 +2271,7 @@ func TestBadRefsFailBeforeAnyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
-			_, err := newProvider(s).FetchEpic(context.Background(), tt.r)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			providertest.CheckError(t, "gitlab", err, providertest.Want{
 				Kind:     provider.KindBadRef,
 				Contains: []string{tt.want},
@@ -741,7 +2291,7 @@ type epicFailure struct {
 }
 
 // epicFailures is the driver's failure table, hoisted out of the test that
-// iterates it so that TestFetchEpicFailuresCoverTheNamedClasses can assert what
+// iterates it so that TestResolveFailuresCoverTheNamedClasses can assert what
 // it covers rather than trusting a comment.
 func epicFailures() []epicFailure {
 	return []epicFailure{
@@ -845,12 +2395,12 @@ func epicFailures() []epicFailure {
 	}
 }
 
-func TestFetchEpicFailures(t *testing.T) {
+func TestResolveFailures(t *testing.T) {
 	for _, tt := range epicFailures() {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{epicPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 			providertest.CheckError(t, "gitlab", err, tt.want)
 		})
 	}
@@ -859,7 +2409,7 @@ func TestFetchEpicFailures(t *testing.T) {
 // The ticket's promise is per-driver: a bad ref, an auth failure and rate
 // limiting each explain themselves on this Tracker. This asserts the table
 // above actually exercises all three.
-func TestFetchEpicFailuresCoverTheNamedClasses(t *testing.T) {
+func TestResolveFailuresCoverTheNamedClasses(t *testing.T) {
 	kinds := []provider.Kind{}
 	for _, tt := range epicFailures() {
 		kinds = append(kinds, tt.want.Kind)
@@ -875,7 +2425,7 @@ func TestForbiddenOnANonEpicPath(t *testing.T) {
 		issuePath: {{status: http.StatusForbidden, body: `{"message":"403 Forbidden"}`}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindAuth,
 		Contains: []string{"access denied (403)", "read_api"},
@@ -896,9 +2446,9 @@ func TestPaginationRefusesToLoop(t *testing.T) {
 		},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	// A paging API contradicting itself is a server fault, which is what
 	// KindUnavailable means — and it stays retryable, on the same terms as a
@@ -925,9 +2475,9 @@ func TestPaginationSanitizesTheNextPageHeader(t *testing.T) {
 		}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	if strings.ContainsRune(err.Error(), '\x1b') {
 		t.Errorf("error %q carries a terminal escape", err)
@@ -959,9 +2509,9 @@ func TestPaginationIsBounded(t *testing.T) {
 		return out
 	}()
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindBadRef,
@@ -994,11 +2544,11 @@ func TestATransientTokenFailureIsNotCached(t *testing.T) {
 		return fixtureToken, nil
 	}))
 
-	if _, err := p.FetchEpic(context.Background(), epicRef); err == nil {
-		t.Fatal("the first FetchEpic succeeded, want the token failure")
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err == nil {
+		t.Fatal("the first Resolve succeeded, want the token failure")
 	}
-	if _, err := p.FetchEpic(context.Background(), epicRef); err != nil {
-		t.Fatalf("the second FetchEpic: %v; a transient token failure must not be cached", err)
+	if _, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef}); err != nil {
+		t.Fatalf("the second Resolve: %v; a transient token failure must not be cached", err)
 	}
 	if calls != 2 {
 		t.Errorf("the token source was called %d times, want 2: the failure must be retried", calls)
@@ -1026,13 +2576,13 @@ func TestPollingIsStableAndResolvesTheTokenOnce(t *testing.T) {
 		return fixtureToken, nil
 	}))
 
-	first, err := p.FetchEpic(context.Background(), epicRef)
+	first, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("first FetchEpic: %v", err)
+		t.Fatalf("first Resolve: %v", err)
 	}
-	second, err := p.FetchEpic(context.Background(), epicRef)
+	second, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err != nil {
-		t.Fatalf("second FetchEpic: %v", err)
+		t.Fatalf("second Resolve: %v", err)
 	}
 
 	if !reflect.DeepEqual(first, second) {
@@ -1056,7 +2606,7 @@ func TestNoTokenFailsWithoutARequest(t *testing.T) {
 			return "", fmt.Errorf(`no GitLab token found: run "glab auth login" or set GITLAB_TOKEN`)
 		}))
 
-	_, err := p.FetchEpic(context.Background(), epicRef)
+	_, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	providertest.CheckError(t, "gitlab", err, providertest.Want{
 		Kind:     provider.KindAuth,
 		Contains: []string{"glab auth login", "GITLAB_TOKEN"},
@@ -1070,7 +2620,7 @@ func TestNoTokenFailsWithoutARequest(t *testing.T) {
 // Milestone as Epic
 // ---------------------------------------------------------------------------
 
-// The Epic Refs the milestone fixtures were written for.
+// The Refs the milestone fixtures were written for.
 var (
 	projectMilestoneRef = ref.Ref{
 		Tracker: ref.TrackerGitLab,
@@ -1112,13 +2662,13 @@ func fullProjectMilestone(t *testing.T) *replayServer {
 
 // The headline of this ticket, executable: a milestone Ref renders a full Epic
 // view, exactly as a Premium epic does.
-func TestFetchEpicOnAProjectMilestone(t *testing.T) {
+func TestResolveOnAProjectMilestone(t *testing.T) {
 	s := fullProjectMilestone(t)
 	p := newProvider(s)
 
-	snap, err := p.FetchEpic(context.Background(), projectMilestoneRef)
+	snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -1132,6 +2682,9 @@ func TestFetchEpicOnAProjectMilestone(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
+	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the milestone display identity", snap.Header)
 	}
 	// A milestone belongs to nothing sitrep models: a project milestone's group
 	// is not its parent.
@@ -1190,8 +2743,8 @@ func TestFetchEpicOnAProjectMilestone(t *testing.T) {
 func TestMilestoneIsResolvedByIIDAndReadByID(t *testing.T) {
 	s := fullProjectMilestone(t)
 
-	if _, err := newProvider(s).FetchEpic(context.Background(), projectMilestoneRef); err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+	if _, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef}); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	lookups := s.requestsTo(projectMilestonesPath)
@@ -1227,7 +2780,7 @@ func TestMilestoneIsResolvedByIIDAndReadByID(t *testing.T) {
 
 // A group milestone: sitrep's own "groups/" spelling, GitLab's group scope, and
 // children from more than one project.
-func TestFetchEpicOnAGroupMilestone(t *testing.T) {
+func TestResolveOnAGroupMilestone(t *testing.T) {
 	responses := map[string][]response{
 		groupMilestonesPath:      {{file: "milestone_group.json"}},
 		groupMilestoneIssuesPath: {{file: "milestone_issues_page1.json"}},
@@ -1236,9 +2789,9 @@ func TestFetchEpicOnAGroupMilestone(t *testing.T) {
 	noMergeRequests(responses, "gitlab-org/platform/core", 7)
 	s := newReplayServer(t, responses)
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), groupMilestoneRef)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: groupMilestoneRef})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	want := model.Epic{
@@ -1252,6 +2805,9 @@ func TestFetchEpicOnAGroupMilestone(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snap.Epic, want) {
 		t.Errorf("Epic = %+v, want %+v", snap.Epic, want)
+	}
+	if snap.Header != provider.EpicHeader(want) {
+		t.Errorf("Header = %+v, want the group milestone display identity", snap.Header)
 	}
 	// Children of a group milestone span projects, and each says which.
 	repositories := map[string]bool{}
@@ -1273,9 +2829,9 @@ func TestMilestoneWithNoWebURLGetsABuiltOne(t *testing.T) {
 		projectMilestonesPath + "/6239397/issues": {{file: "milestone_issues_empty.json"}},
 	})
 
-	snap, err := newProvider(s).FetchEpic(context.Background(), ref4)
+	snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: ref4})
 	if err != nil {
-		t.Fatalf("FetchEpic: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if got := snap.Epic.URL; got != "https://gitlab.com/gitlab-org/cli/-/milestones/4" {
 		t.Errorf("Epic.URL = %q, want the built one", got)
@@ -1326,9 +2882,9 @@ func TestMilestoneLookupFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{projectMilestonesPath: {tt.resp}})
 
-			_, err := newProvider(s).FetchEpic(context.Background(), projectMilestoneRef)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: projectMilestoneRef})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
+				t.Fatal("Resolve succeeded, want an error")
 			}
 			providertest.CheckError(t, "gitlab", err, providertest.Want{
 				Kind:     tt.kind,
@@ -1349,9 +2905,9 @@ func TestPremiumForbiddenPointsAtMilestones(t *testing.T) {
 		epicPath: {{status: http.StatusForbidden, file: "error_forbidden.json"}},
 	})
 
-	_, err := newProvider(s).FetchEpic(context.Background(), epicRef)
+	_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: epicRef})
 	if err == nil {
-		t.Fatal("FetchEpic succeeded, want an error")
+		t.Fatal("Resolve succeeded, want an error")
 	}
 	for _, want := range []string{
 		"GitLab Premium or Ultimate (403)",
@@ -1387,9 +2943,9 @@ func TestBadMilestoneRefsFailBeforeAnyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newReplayServer(t, map[string][]response{})
-			_, err := newProvider(s).FetchEpic(context.Background(), tt.r)
+			_, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: tt.r})
 			if err == nil {
-				t.Fatal("FetchEpic succeeded, want an error")
+				t.Fatal("Resolve succeeded, want an error")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q, want it to mention %q", err, tt.want)
@@ -1495,9 +3051,9 @@ func TestChildIssueBreadcrumb(t *testing.T) {
 				issueMRsPath: {{file: "closed_by_empty.json"}},
 			})
 
-			snap, err := newProvider(s).FetchEpic(context.Background(), issueRef)
+			snap, err := newProvider(s).Resolve(context.Background(), provider.EpicSelector{Ref: issueRef})
 			if err != nil {
-				t.Fatalf("FetchEpic: %v", err)
+				t.Fatalf("Resolve: %v", err)
 			}
 			if snap.Parent != tt.want {
 				t.Errorf("Parent = %+v, want %+v", snap.Parent, tt.want)

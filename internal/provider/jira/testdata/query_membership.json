@@ -1,0 +1,15 @@
+{
+  "issues": [
+    {
+      "key": "def-4",
+      "fields": {
+        "summary": "stale search title that must not be rendered",
+        "status": { "name": "Wrong", "statusCategory": { "key": "new" } }
+      }
+    },
+    { "key": "ABC-7", "fields": {} },
+    { "key": "DEF-4", "fields": {} },
+    { "key": "ABC-1", "fields": {} }
+  ],
+  "isLast": true
+}

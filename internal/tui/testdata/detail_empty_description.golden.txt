@@ -1,4 +1,4 @@
-#111 · Widget sync v2: shards, retries & telemetry                                                         read just now
+#111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #119  Emit sync telemetry                                                  https://tracker.example.test/acme/widgets/119
 [Done]  @tobias
 
@@ -9,7 +9,7 @@ No description.
 COMMENTS (1)
 
 @tobias · 2026-01-14 11:45 UTC
-  Dashboards are live.
+    Dashboards are live.
 
 
 
@@ -37,4 +37,4 @@ COMMENTS (1)
 
 
 
-↑/k up • ↓/j down • esc back • u epic • r refresh • ? help • q quit
+m off · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh

@@ -95,8 +95,8 @@ func TestJSONJiraEpicDocument(t *testing.T) {
 
 	var doc struct {
 		Provider struct {
-			Name         string          `json:"name"`
-			Capabilities map[string]bool `json:"capabilities"`
+			Name         string                     `json:"name"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
 		} `json:"provider"`
 		Tickets []map[string]json.RawMessage `json:"tickets"`
 	}
@@ -106,7 +106,7 @@ func TestJSONJiraEpicDocument(t *testing.T) {
 	if doc.Provider.Name != "jira" {
 		t.Errorf("provider.name = %q, want jira", doc.Provider.Name)
 	}
-	if doc.Provider.Capabilities["pull_requests"] {
+	if string(doc.Provider.Capabilities["pull_requests"]) == "true" {
 		t.Error("provider.capabilities.pull_requests = true, want false")
 	}
 	if len(doc.Tickets) != 10 {
@@ -192,7 +192,7 @@ func TestProviderJiraRejectsAGitHubRef(t *testing.T) {
 	if got.code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
 	}
-	for _, want := range []string{"is not a Jira Epic Ref", "acme/widgets#111"} {
+	for _, want := range []string{"is not a Jira Ref", "acme/widgets#111"} {
 		if !strings.Contains(got.stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
 		}

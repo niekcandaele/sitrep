@@ -1,0 +1,16 @@
+#111 · Widget sync v2 current · never read
+#112  Draft the shard sync protocol
+[In Review]  @mara-vos  #501 open ci ok ch
+
+Could not read this Ticket's detail:
+permission denied while reading a private
+project that no longer exists
+
+Press r to try again, esc to go back.
+
+
+
+
+
+
+m off, shift-drag·esc back·q quit·? help

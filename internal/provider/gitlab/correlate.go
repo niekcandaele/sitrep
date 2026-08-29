@@ -25,7 +25,7 @@ import (
 const mergeRequestWorkers = 8
 
 // correlate attaches the merge requests moving each Ticket, and refines each
-// Ticket's Status Category with them. It is the only place FetchEpic makes more
+// Ticket's Status Category with them. It is the only place Resolve makes more
 // than one kind of request per node, and it is what Capabilities().PullRequests
 // declares.
 //
@@ -36,13 +36,13 @@ const mergeRequestWorkers = 8
 // merge requests and the snapshot carries on. Anything else — a 403, 401, 429,
 // 5xx, a transport failure, a decode failure — either hits every Ticket in the
 // same way or is a credential problem the user has to be told about, so it
-// fails the whole FetchEpic with the message checkStatus already wrote. Half a
+// fails the whole Resolve with the message checkStatus already wrote. Half a
 // situation report about a visibility gap is worth having; half a report about
 // an expired token is not. See isTicketScopedFailure for the per-endpoint
 // split.
 //
 // The fan-out is deterministic. Each worker writes only tickets[i], so
-// FetchEpic's Ticket order is untouched and two consecutive fetches return equal
+// Resolve's Ticket order is untouched and two consecutive fetches return equal
 // snapshots; errors are collected by index and scanned in index order, so the
 // error a caller sees never depends on scheduling.
 func (p *Provider) correlate(ctx context.Context, tickets []model.Ticket) error {
@@ -85,9 +85,8 @@ func (p *Provider) correlate(ctx context.Context, tickets []model.Ticket) error 
 }
 
 // correlateTicket attaches one Ticket's merge requests and refines its Status
-// Category. A Ticket whose id does not name an issue is skipped rather than
-// failed: there is no such Ticket today, and being total here is cheaper than
-// being surprised later.
+// Category. A Ref-list Epic or milestone root has no issue correlation endpoint,
+// so its non-issue Ticket ID is skipped.
 func (p *Provider) correlateTicket(ctx context.Context, ticket *model.Ticket) error {
 	t, err := parseTicketID(ticket.ID)
 	if err != nil || t.kind != kindIssue {
@@ -237,9 +236,8 @@ func (p *Provider) approvalsFor(ctx context.Context, m mergeRequestWire, pr mode
 //     Free tier, and normalizeReview falls through to a weaker but not wrong
 //     answer rather than to an absent one.
 //
-// A swallowed 404 is still indistinguishable from a Ticket that genuinely has
-// no merge requests. Closing that gap needs vocabulary for partial data that
-// neither model.Ticket nor model.EpicSnapshot has today, and is separate work.
+// A swallowed 404 and a genuine no-merge-request result are indistinguishable:
+// neither model.Ticket nor model.WatchlistSnapshot represents partial data.
 func isTicketScopedFailure(err error, swallow ...int) bool {
 	var status *statusError
 	if !errors.As(err, &status) {

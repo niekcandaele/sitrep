@@ -44,7 +44,7 @@ type Epic struct {
 	// package may branch on it.
 	NativeStatus string
 	// Assignees are the people the Epic is assigned to; may be empty. It exists
-	// for the Detail header a decoded Ticket is drawn with — an Epic Ref that
+	// for the Detail header a decoded Ticket is drawn with — a Ref that
 	// named a Ticket comes back as this Epic — and the epic renderers
 	// deliberately do not draw it.
 	Assignees []User
@@ -57,8 +57,8 @@ type Epic struct {
 	PullRequests []PullRequest
 }
 
-// Parent is the collection a Ticket belongs to: enough to draw a breadcrumb and
-// to re-enter sitrep on. Its Key and URL are both written in forms the Epic Ref
+// Parent is the parent Ticket a Ticket belongs to: enough to draw a breadcrumb
+// and to re-enter sitrep on. Its Key and URL are both written in forms the Ref
 // grammar accepts, so navigating up is a re-parse rather than a second lookup.
 // The zero value means "no parent", which is a normal state, never an error.
 type Parent struct {
@@ -109,9 +109,19 @@ type Ticket struct {
 	PullRequests []PullRequest
 }
 
-// Capabilities declares which optional Tracker features the serving Provider
-// supports. Renderers and the TUI show only what is declared; an undeclared
-// feature is silently absent, never an error.
+// SelectorCapabilities declares which Watchlist subjects a Provider can
+// resolve. Unlike an absent feature Capability, which remains silently absent
+// from rendering, an absent Selector Capability is a loud error: the requested
+// Selector is the command's entire subject.
+type SelectorCapabilities struct {
+	Epic    bool
+	RefList bool
+	Query   bool
+}
+
+// Capabilities declares what the serving Provider supports. Renderers and the
+// TUI silently omit undeclared feature data; Selector support is checked by the
+// Provider before it performs any work.
 type Capabilities struct {
 	// Hierarchy reports whether the Tracker exposes sub-tickets / parent links.
 	Hierarchy bool
@@ -123,4 +133,6 @@ type Capabilities struct {
 	// PullRequests reports whether the Provider correlates pull or merge
 	// requests to Tickets.
 	PullRequests bool
+	// Selectors declares the Watchlist subjects this Provider accepts.
+	Selectors SelectorCapabilities
 }

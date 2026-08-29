@@ -1,6 +1,6 @@
 // Package fake provides sitrep's built-in fake Provider: a deterministic,
-// dependency-free implementation of provider.Provider serving a hand-written
-// fixture epic.
+// dependency-free implementation of provider.Provider serving hand-written
+// fixture Watchlists.
 //
 // This is the standing test double for all renderer and TUI work in sitrep, not
 // scaffolding for one package's tests. It is production code precisely so every
@@ -14,6 +14,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,21 +30,25 @@ var allCapabilities = model.Capabilities{
 	BlockingLinks: true,
 	Comments:      true,
 	PullRequests:  true,
+	Selectors: model.SelectorCapabilities{
+		Epic: true, RefList: true, Query: true,
+	},
 }
 
-// Provider is a fake Provider serving a built-in fixture epic. The zero value
+// Provider is a fake Provider serving built-in Watchlist fixtures. The zero value
 // is not usable; call New.
 type Provider struct {
 	mu             sync.Mutex
-	snapshots      []model.EpicSnapshot
+	snapshots      []model.WatchlistSnapshot
 	details        map[model.TicketID]model.Detail
 	caps           model.Capabilities
-	epicErr        error
+	maxTickets     int
+	resolveErr     error
 	detailErr      error
 	delay          time.Duration
 	cursor         int
-	lastRef        ref.Ref
-	epicCalls      int
+	lastSelector   provider.Selector
+	resolveCalls   int
 	detailCalls    int
 	detailCallsFor map[model.TicketID]int
 }
@@ -56,9 +61,10 @@ type Option func(*Provider)
 // specific test scenarios.
 func New(opts ...Option) *Provider {
 	p := &Provider{
-		snapshots:      []model.EpicSnapshot{FixtureSnapshot()},
+		snapshots:      []model.WatchlistSnapshot{FixtureSnapshot()},
 		details:        FixtureDetails(),
 		caps:           allCapabilities,
+		maxTickets:     provider.DefaultMaxTickets,
 		detailCallsFor: make(map[model.TicketID]int),
 	}
 	for _, opt := range opts {
@@ -77,17 +83,27 @@ func WithCapabilities(c model.Capabilities) Option {
 	return func(p *Provider) { p.caps = c }
 }
 
-// WithSnapshot replaces the fixture epic with s for every FetchEpic call.
-func WithSnapshot(s model.EpicSnapshot) Option {
-	return func(p *Provider) { p.snapshots = []model.EpicSnapshot{s} }
+// WithMaxTickets sets the Query membership budget. Non-Query Selectors are
+// unaffected; non-positive values leave the default in place.
+func WithMaxTickets(maxTickets int) Option {
+	return func(p *Provider) {
+		if maxTickets > 0 {
+			p.maxTickets = maxTickets
+		}
+	}
 }
 
-// WithSnapshots serves s in order, one per FetchEpic call, repeating the last
+// WithSnapshot replaces the Watchlist fixture served by every Resolve call.
+func WithSnapshot(s model.WatchlistSnapshot) Option {
+	return func(p *Provider) { p.snapshots = []model.WatchlistSnapshot{s} }
+}
+
+// WithSnapshots serves s in order, one per Resolve call, repeating the last
 // one once they run out. This is how refresh behaviour is tested: give the
 // Provider the world before and after a Ticket moves.
-func WithSnapshots(s ...model.EpicSnapshot) Option {
+func WithSnapshots(s ...model.WatchlistSnapshot) Option {
 	return func(p *Provider) {
-		p.snapshots = make([]model.EpicSnapshot, len(s))
+		p.snapshots = make([]model.WatchlistSnapshot, len(s))
 		copy(p.snapshots, s)
 	}
 }
@@ -103,9 +119,9 @@ func WithDetails(d map[model.TicketID]model.Detail) Option {
 	}
 }
 
-// WithEpicError makes every FetchEpic call fail with err.
-func WithEpicError(err error) Option {
-	return func(p *Provider) { p.epicErr = err }
+// WithResolveError makes every Resolve call fail with err.
+func WithResolveError(err error) Option {
+	return func(p *Provider) { p.resolveErr = err }
 }
 
 // WithDetailError makes every FetchDetail call fail with err.
@@ -113,7 +129,7 @@ func WithDetailError(err error) Option {
 	return func(p *Provider) { p.detailErr = err }
 }
 
-// WithDelay makes both fetch methods take d before returning, so loading states
+// WithDelay makes both read methods take d before returning, so loading states
 // and spinners have something to spin for. The delay is cancellable through the
 // call's context.
 func WithDelay(d time.Duration) Option {
@@ -130,23 +146,31 @@ func (p *Provider) Capabilities() model.Capabilities {
 	return p.caps
 }
 
-// FetchEpic returns the current fixture snapshot, serving any Epic Ref. The
-// result is a deep copy filtered to the declared Capabilities, with FetchedAt
-// left zero for the caller to stamp. Successive calls advance through the
-// snapshots given to WithSnapshots. The Ref is recorded for LastRef and
-// otherwise ignored.
-func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot, error) {
+// Resolve returns the current fixture snapshot for selector. The result is a
+// deep copy filtered to the declared Capabilities, with FetchedAt left zero for
+// the caller to stamp. Successive calls advance through snapshots given to
+// WithSnapshots. Ref-list selectors keep only their exact members in Selector
+// order and never expose an outer Epic or Parent.
+func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	selector = cloneSelector(selector)
+	p.mu.Lock()
+	p.resolveCalls++
+	p.lastSelector = selector
+	caps := p.caps
+	p.mu.Unlock()
+
+	if err := provider.CheckSelectorSupport(p.Name(), caps, selector); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
 	if err := p.wait(ctx); err != nil {
-		return model.EpicSnapshot{}, err
+		return model.WatchlistSnapshot{}, err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.epicCalls++
-	p.lastRef = r
-	if p.epicErr != nil {
-		return model.EpicSnapshot{}, p.epicErr
+	if p.resolveErr != nil {
+		return model.WatchlistSnapshot{}, p.resolveErr
 	}
 
 	snap := cloneSnapshot(p.snapshots[p.cursor])
@@ -154,18 +178,96 @@ func (p *Provider) FetchEpic(ctx context.Context, r ref.Ref) (model.EpicSnapshot
 		p.cursor++
 	}
 
+	switch s := selector.(type) {
+	case provider.EpicSelector:
+		snap.Header = provider.EpicHeader(snap.Epic)
+		snap.LimitReached = false
+	case provider.RefListSelector:
+		if len(s.Refs) == 0 {
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"fake: Ref-list Selector is empty")
+		}
+		var err error
+		snap, err = selectRefListSnapshot(snap, s.Refs)
+		if err != nil {
+			return model.WatchlistSnapshot{}, err
+		}
+	case provider.QuerySelector:
+		snap.Header = provider.QueryHeader(s.Query)
+		snap.Epic = model.Epic{}
+		snap.Parent = model.Parent{}
+		snap.LimitReached = len(snap.Tickets) > p.maxTickets
+		if snap.LimitReached {
+			snap.Tickets = snap.Tickets[:p.maxTickets]
+		}
+	default:
+		panic("provider.CheckSelectorSupport accepted an unknown Selector")
+	}
+
+	if snap.Tickets == nil {
+		snap.Tickets = []model.Ticket{}
+	}
 	snap.Capabilities = p.caps
 	snap.FetchedAt = time.Time{}
 	applyEpicCapabilities(&snap.Epic, p.caps)
 	if !p.caps.Hierarchy {
-		// Without the Hierarchy Capability the Tracker exposes no parent links at
-		// all, so there is nothing to decode a breadcrumb from.
 		snap.Parent = model.Parent{}
 	}
 	for i := range snap.Tickets {
 		applyTicketCapabilities(&snap.Tickets[i], p.caps)
 	}
 	return snap, nil
+}
+
+func selectRefListSnapshot(snap model.WatchlistSnapshot, refs []ref.Ref) (model.WatchlistSnapshot, error) {
+	tickets := make([]model.Ticket, 0, len(refs))
+	for _, r := range refs {
+		index := -1
+		for i := range snap.Tickets {
+			if fakeTicketMatchesRef(snap.Tickets[i], r) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			name := strings.TrimSpace(r.Raw)
+			if name == "" {
+				name = r.String()
+			}
+			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindBadRef,
+				"fake: ticket %q was not found (or you lack access)", name)
+		}
+		tickets = append(tickets, snap.Tickets[index])
+	}
+	return model.WatchlistSnapshot{
+		Header:       provider.RefListHeader(len(tickets)),
+		Tickets:      tickets,
+		Capabilities: snap.Capabilities,
+	}, nil
+}
+
+func fakeTicketMatchesRef(ticket model.Ticket, r ref.Ref) bool {
+	if r.Owner != "" && r.Repo != "" && r.Number > 0 {
+		return string(ticket.ID) == fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number)
+	}
+	if r.Key != "" {
+		return strings.EqualFold(string(ticket.ID), r.Key) || strings.EqualFold(ticket.Key, r.Key)
+	}
+	name := strings.TrimSpace(r.Raw)
+	return name != "" && (string(ticket.ID) == name || ticket.Key == name)
+}
+
+func cloneSelector(selector provider.Selector) provider.Selector {
+	switch s := selector.(type) {
+	case provider.RefListSelector:
+		s.Refs = append([]ref.Ref(nil), s.Refs...)
+		return s
+	case provider.QuerySelector:
+		s.Query = strings.Clone(s.Query)
+		return s
+	default:
+		return selector
+	}
 }
 
 // FetchDetail returns the fixture Detail for id, filtered to the declared
@@ -194,20 +296,20 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return d, nil
 }
 
-// EpicCalls returns how many times FetchEpic has been called, including calls
+// ResolveCalls returns how many times Resolve has been called, including calls
 // that returned an injected error.
-func (p *Provider) EpicCalls() int {
+func (p *Provider) ResolveCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.epicCalls
+	return p.resolveCalls
 }
 
-// LastRef returns the Epic Ref passed to the most recent FetchEpic call, so a
-// caller's ref resolution can be asserted at the seam where it lands.
-func (p *Provider) LastRef() ref.Ref {
+// LastSelector returns the Selector passed to the most recent Resolve call, so
+// caller-side selector construction can be asserted at the seam where it lands.
+func (p *Provider) LastSelector() provider.Selector {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastRef
+	return cloneSelector(p.lastSelector)
 }
 
 // DetailCalls returns how many times FetchDetail has been called. A list
@@ -282,7 +384,7 @@ func applyDetailCapabilities(d *model.Detail, caps model.Capabilities) {
 
 // cloneSnapshot deep-copies a snapshot so a caller mutating what it got cannot
 // corrupt the fixture for the next call.
-func cloneSnapshot(s model.EpicSnapshot) model.EpicSnapshot {
+func cloneSnapshot(s model.WatchlistSnapshot) model.WatchlistSnapshot {
 	out := s
 	out.Epic = cloneEpic(s.Epic)
 	if s.Tickets != nil {

@@ -43,6 +43,10 @@ func checkLinks(t *testing.T, got []model.Link, want []wantLink) {
 			t.Errorf("Links[%d] = {%v %q %s}, want {%v %q %s}",
 				i, got[i].Kind, got[i].NativeLabel, got[i].Target.Key, w.kind, w.label, w.target)
 		}
+		if got[i].Target.ID == "" || string(got[i].Target.ID) != got[i].Target.Key {
+			t.Errorf("Links[%d].Target.ID = %q, want the non-empty Jira key %q FetchDetail accepts",
+				i, got[i].Target.ID, got[i].Target.Key)
+		}
 	}
 }
 

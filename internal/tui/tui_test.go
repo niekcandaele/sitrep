@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
@@ -154,9 +155,27 @@ func (s *session) finishWith(t *testing.T, quit tea.KeyPressMsg) (Model, []byte)
 	return m, frame(content)
 }
 
-// epicSource reads the fake Provider through the same seam production uses.
-func epicSource(p *fake.Provider, c *clock) Source {
-	return EpicSource(p, ref.Ref{Raw: "111"}, c.now)
+// selectorSource reads the fake Provider through the same seam production uses.
+func selectorSource(p *fake.Provider, c *clock) Source {
+	return SelectorSource(p, provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}, c.now)
+}
+
+func refListSelectorSource(p *fake.Provider, c *clock) Source {
+	refs := make([]ref.Ref, 0, 4)
+	for _, number := range []int{112, 115, 118, 121} {
+		refs = append(refs, ref.Ref{
+			Tracker: ref.TrackerGitHub,
+			Host:    "github.com",
+			Owner:   "acme",
+			Repo:    "widgets",
+			Number:  number,
+		})
+	}
+	return SelectorSource(p, provider.RefListSelector{Refs: refs}, c.now)
+}
+
+func querySelectorSource(p *fake.Provider, c *clock, query string) Source {
+	return SelectorSource(p, provider.QuerySelector{Query: query}, c.now)
 }
 
 // The headline frame: the header and its progress bar, every Status Category
@@ -165,7 +184,7 @@ func epicSource(p *fake.Provider, c *clock) Source {
 func TestInitialFrame(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	m, got := s.finish(t)
@@ -175,11 +194,240 @@ func TestInitialFrame(t *testing.T) {
 		t.Error("the first reading never landed")
 	}
 	// ADR-0003: a list refresh is one batched fetch and never touches Detail.
-	if n := p.EpicCalls(); n != 1 {
-		t.Errorf("EpicCalls() = %d, want exactly 1 batched fetch", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Errorf("ResolveCalls() = %d, want exactly 1 batched fetch", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: the monitor never fetches Detail", n)
+	}
+}
+
+func TestRefListInitialFrame(t *testing.T) {
+	p := fake.New()
+	c := newClock()
+	s := start(t, c, refListSelectorSource(p, c), time.Minute)
+	s.waitFor(t, "4 tickets")
+
+	m, got := s.finish(t)
+
+	checkGolden(t, "ref_list.golden.txt", got)
+	if m.input.Header != (Header{Title: "4 tickets"}) {
+		t.Errorf("Header = %+v, want 4 tickets", m.input.Header)
+	}
+	if len(m.input.Tickets) != 4 {
+		t.Errorf("Tickets = %d, want 4", len(m.input.Tickets))
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 0 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 0", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestLongQueryHeaderFitsANarrowFrameWithoutChangingTheQuery(t *testing.T) {
+	const (
+		width  = 42
+		height = 18
+	)
+	query := "  project = FOO AND statusCategory != Done ORDER BY updated DESC  "
+	p := fake.New()
+	c := newClock()
+	tm := teatest.NewTestModel(t, New(t.Context(), Options{
+		Source:   querySelectorSource(p, c, query),
+		Interval: time.Minute,
+		Now:      c.now,
+	}), teatest.WithInitialTermSize(width, height))
+	s := &session{tm: tm, clock: c}
+	s.waitFor(t, "project = FOO")
+
+	tm.Send(keyPress("q"))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+	m, ok := tm.FinalModel(t).(Model)
+	if !ok {
+		t.Fatalf("final model is %T, want tui.Model", tm.FinalModel(t))
+	}
+	content := m.View().Content
+	got := frame(content)
+	checkGolden(t, "query_narrow.golden.txt", got)
+
+	if h := lipgloss.Height(content); h != height {
+		t.Errorf("frame height = %d, want %d", h, height)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Errorf("line width = %d, want at most %d: %q", got, width, line)
+		}
+	}
+	if first := strings.SplitN(string(got), "\n", 2)[0]; !strings.HasSuffix(strings.TrimRight(first, " "), "…") {
+		t.Errorf("narrow Query Header = %q, want ellipsis", first)
+	}
+	if m.input.Header.Title != query {
+		t.Errorf("stored Header Title = %q, want full Query %q", m.input.Header.Title, query)
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != query {
+		t.Errorf("last selector = %#v, want exact Query %q", p.LastSelector(), query)
+	}
+}
+
+func TestQueryDetailUsesTheQueryBreadcrumb(t *testing.T) {
+	query := "label:bug assignee:@me"
+	p := fake.New()
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, query)
+
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	m, got := s.finish(t)
+
+	if m.mode != modeDetail {
+		t.Error("enter did not open Detail from the Query Watchlist")
+	}
+	if m.detail.input.Parent != (Header{Title: query}) {
+		t.Errorf("Detail Parent = %+v, want Query Header", m.detail.input.Parent)
+	}
+	if !strings.Contains(string(got), query) {
+		t.Errorf("Detail frame omitted Query breadcrumb:\n%s", got)
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 1", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestQueryLimitNoticeSurvivesFilterAndDetailRoundTrip(t *testing.T) {
+	query := "state=opened"
+	p := fake.New(fake.WithMaxTickets(4))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Limit reached — showing 4 tickets.")
+
+	s.tm.Send(keyPress("/"))
+	s.typeText("shard")
+	s.tm.Send(enterKey)
+	s.waitFor(t, "2 of 4 Tickets")
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	s.tm.Send(escKey)
+
+	m, got := s.finish(t)
+	if m.mode != modeList || m.filter.Query != "shard" || !m.input.LimitReached {
+		t.Errorf("returned list state = mode %v filter %q LimitReached=%t", m.mode, m.filter.Query, m.input.LimitReached)
+	}
+	for _, want := range []string{"Limit reached — showing 4 tickets.", "2 of 4 Tickets"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("returned list omitted %q:\n%s", want, got)
+		}
+	}
+	if p.ResolveCalls() != 1 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 1 and 1", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestQueryEscapeAndRefreshReplaceMembershipWithTheSameSelector(t *testing.T) {
+	query := "label:changing-membership"
+	before := fake.FixtureSnapshot()
+	before.Tickets = append([]model.Ticket(nil), before.Tickets[0])
+	after := fake.FixtureSnapshot()
+	after.Tickets = append([]model.Ticket(nil), after.Tickets[1])
+	p := fake.New(fake.WithSnapshots(before, after))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       querySelectorSource(p, c, query),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Draft the shard sync protocol")
+
+	s.tm.Send(enterKey)
+	s.waitFor(t, "DESCRIPTION")
+	s.tm.Send(escKey)
+	s.tm.Send(keyPress("r"))
+	waitUntil(t, "the Query refresh", func() bool { return p.ResolveCalls() == 2 })
+	s.waitFor(t, "Retry & backoff for the sync worker")
+
+	m, got := s.finish(t)
+	if m.mode != modeList {
+		t.Error("esc did not return to the Query Watchlist")
+	}
+	if m.input.Header != (Header{Title: query}) {
+		t.Errorf("Header after refresh = %+v, want Query Header", m.input.Header)
+	}
+	if len(m.input.Tickets) != 1 || m.input.Tickets[0].ID != "acme/widgets#113" {
+		t.Errorf("membership after refresh = %+v, want only #113", m.input.Tickets)
+	}
+	if strings.Contains(string(got), "Draft the shard sync protocol") {
+		t.Errorf("former Query member remained in refreshed frame:\n%s", got)
+	}
+	selector, ok := p.LastSelector().(provider.QuerySelector)
+	if !ok || selector.Query != query {
+		t.Errorf("last selector = %#v, want exact Query %q", p.LastSelector(), query)
+	}
+	if p.ResolveCalls() != 2 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 2 and 1", p.ResolveCalls(), p.DetailCalls())
+	}
+}
+
+func TestRefListFilteringDrillInAndRefreshUseTheCommonListPath(t *testing.T) {
+	before := fake.FixtureSnapshot()
+	after := fake.FixtureSnapshot()
+	after.Tickets[0].Status = model.StatusDone
+	after.Tickets[0].NativeStatus = "closed"
+	after.Tickets = append(after.Tickets, model.Ticket{ID: "acme/widgets#999", Key: "#999", Title: "unrequested"})
+	p := fake.New(fake.WithSnapshots(before, after))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       refListSelectorSource(p, c),
+		DetailSource: TicketDetailSource(p),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "4 tickets")
+
+	// Hide-finished operates on the same rows while whole-Watchlist progress stays
+	// based on all four members.
+	s.tm.Send(keyPress("d"))
+	s.waitFor(t, "2 of 4 Tickets")
+	s.tm.Send(keyPress("d"))
+
+	// Fuzzy find selects #112, and opening it is the only Detail read.
+	s.tm.Send(keyPress("/"))
+	s.typeText("Draft shard")
+	s.tm.Send(enterKey)
+	s.tm.Send(enterKey)
+	waitUntil(t, "the selected Ref-list Ticket detail", func() bool { return p.DetailCallsFor("acme/widgets#112") == 1 })
+	s.waitFor(t, "The shard sync protocol")
+	s.tm.Send(escKey)
+	s.waitFor(t, "4 tickets")
+
+	// Clear the query before refreshing so the changed status is visible.
+	s.tm.Send(escKey)
+	s.tm.Send(keyPress("r"))
+	waitUntil(t, "the Ref-list refresh", func() bool { return p.ResolveCalls() == 2 })
+
+	m, _ := s.finish(t)
+	if m.input.Header != (Header{Title: "4 tickets"}) {
+		t.Errorf("Header after refresh = %+v", m.input.Header)
+	}
+	if len(m.input.Tickets) != 4 {
+		t.Fatalf("membership after refresh = %d, want 4", len(m.input.Tickets))
+	}
+	for _, ticket := range m.input.Tickets {
+		if ticket.ID == "acme/widgets#999" {
+			t.Error("refresh added an unrequested Ticket")
+		}
+	}
+	if p.ResolveCalls() != 2 || p.DetailCalls() != 1 {
+		t.Errorf("calls = Resolve %d Detail %d, want 2 and 1", p.ResolveCalls(), p.DetailCalls())
 	}
 }
 
@@ -196,15 +444,15 @@ func TestFrameAfterAutoRefresh(t *testing.T) {
 
 	p := fake.New(fake.WithSnapshots(before, after))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	// A beat before the interval has elapsed must not fetch.
 	s.clock.advance(30 * time.Second)
 	s.beat()
 	s.waitFor(t, "updated 30s ago")
-	if n := p.EpicCalls(); n != 1 {
-		t.Fatalf("EpicCalls() = %d after 30s of a 60s interval, want 1", n)
+	if n := p.ResolveCalls(); n != 1 {
+		t.Fatalf("ResolveCalls() = %d after 30s of a 60s interval, want 1", n)
 	}
 
 	s.clock.advance(31 * time.Second)
@@ -216,8 +464,8 @@ func TestFrameAfterAutoRefresh(t *testing.T) {
 	m, got := s.finish(t)
 
 	checkGolden(t, "after_refresh.golden.txt", got)
-	if n := p.EpicCalls(); n != 2 {
-		t.Errorf("EpicCalls() = %d, want 2: one refresh is one FetchEpic", n)
+	if n := p.ResolveCalls(); n != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2: one refresh is one Resolve", n)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0", n)
@@ -238,7 +486,7 @@ func TestFrameAfterFailedRefresh(t *testing.T) {
 		if calls.Add(1) > 1 {
 			return ListInput{}, errors.New("dial tcp: lookup tracker.example.test: no such host")
 		}
-		return epicSource(p, c)(ctx)
+		return selectorSource(p, c)(ctx)
 	}
 
 	s := start(t, c, src, time.Minute)
@@ -262,9 +510,12 @@ func TestFrameAfterFailedRefresh(t *testing.T) {
 // An undeclared Capability is silently absent: no pull request text anywhere,
 // no error, no placeholder.
 func TestFrameWithoutThePullRequestCapability(t *testing.T) {
-	p := fake.New(fake.WithCapabilities(model.Capabilities{Hierarchy: true}))
+	p := fake.New(fake.WithCapabilities(model.Capabilities{
+		Hierarchy: true,
+		Selectors: model.SelectorCapabilities{Epic: true},
+	}))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	_, got := s.finish(t)
@@ -277,10 +528,15 @@ func TestFrameWithoutThePullRequestCapability(t *testing.T) {
 	}
 }
 
-// A collection with no Tickets renders its header without dividing by zero and
+// A Watchlist with no Tickets renders its header without dividing by zero and
 // says so rather than trailing off into an empty void.
 func TestFrameWithNoTickets(t *testing.T) {
-	empty := model.EpicSnapshot{
+	empty := model.WatchlistSnapshot{
+		Header: model.WatchlistHeader{
+			Key:   "#900",
+			Title: "Widget sync v3: nothing planned yet",
+			URL:   "https://tracker.example.test/acme/widgets/900",
+		},
 		Epic: model.Epic{
 			ID:     "acme/widgets#900",
 			Key:    "#900",
@@ -291,7 +547,7 @@ func TestFrameWithNoTickets(t *testing.T) {
 	}
 	p := fake.New(fake.WithSnapshot(empty))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v3")
 
 	_, got := s.finish(t)
@@ -317,9 +573,9 @@ func TestFrameWhenTheFirstFetchFails(t *testing.T) {
 	}
 }
 
-// The list screen consumes a collection of Tickets plus a header, not an Epic.
+// The list screen consumes a Watchlist of Tickets plus a header, not an Epic.
 // This is the executable form of that contract: a hand-built ListInput that
-// was never an EpicSnapshot renders.
+// was never a WatchlistSnapshot renders.
 func TestFrameFromAHandBuiltListInput(t *testing.T) {
 	in := ListInput{
 		Header:  Header{Key: "query", Title: "Everything assigned to @tobias"},
@@ -343,18 +599,18 @@ func TestFrameFromAHandBuiltListInput(t *testing.T) {
 func TestRefreshDoesNotOverlap(t *testing.T) {
 	p := fake.New(fake.WithDelay(50 * time.Millisecond))
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("r"))
 	s.tm.Send(keyPress("r"))
 	s.waitFor(t, "refreshing…")
-	waitUntil(t, "the forced refresh to finish", func() bool { return p.EpicCalls() >= 2 })
+	waitUntil(t, "the forced refresh to finish", func() bool { return p.ResolveCalls() >= 2 })
 
 	m, _ := s.finish(t)
 
-	if n := p.EpicCalls(); n != 2 {
-		t.Errorf("EpicCalls() = %d, want 2: two rapid refreshes are one fetch", n)
+	if n := p.ResolveCalls(); n != 2 {
+		t.Errorf("ResolveCalls() = %d, want 2: two rapid refreshes are one fetch", n)
 	}
 	if !m.quitting {
 		t.Error("the final model does not report quitting")
@@ -366,7 +622,7 @@ func TestRefreshDoesNotOverlap(t *testing.T) {
 func TestFullHelpKeepsTheFrameOnScreen(t *testing.T) {
 	p := fake.New()
 	c := newClock()
-	s := start(t, c, epicSource(p, c), time.Minute)
+	s := start(t, c, selectorSource(p, c), time.Minute)
 	s.waitFor(t, "Widget sync v2")
 
 	s.tm.Send(keyPress("?"))
@@ -402,7 +658,7 @@ func TestQuitKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := fake.New()
 			c := newClock()
-			s := start(t, c, epicSource(p, c), time.Minute)
+			s := start(t, c, selectorSource(p, c), time.Minute)
 			s.waitFor(t, "Widget sync v2")
 
 			s.tm.Send(tt.key)
