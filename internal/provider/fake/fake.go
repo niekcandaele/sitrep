@@ -356,6 +356,7 @@ func (p *Provider) wait(ctx context.Context) error {
 func applyTicketCapabilities(t *model.Ticket, caps model.Capabilities) {
 	if !caps.PullRequests {
 		t.PullRequests = nil
+		t.PullRequestTotal = 0
 	}
 	if !caps.Hierarchy {
 		t.ParentID = ""
@@ -369,6 +370,7 @@ func applyTicketCapabilities(t *model.Ticket, caps model.Capabilities) {
 func applyEpicCapabilities(e *model.Epic, caps model.Capabilities) {
 	if !caps.PullRequests {
 		e.PullRequests = nil
+		e.PullRequestTotal = 0
 	}
 }
 

@@ -31,15 +31,16 @@ func decodesToTicket(snap model.WatchlistSnapshot) bool { return len(snap.Ticket
 // reports are built from.
 func decodedTicket(snap model.WatchlistSnapshot) model.Ticket {
 	return model.Ticket{
-		ID:           snap.Epic.ID,
-		Key:          snap.Epic.Key,
-		Title:        snap.Epic.Title,
-		URL:          snap.Epic.URL,
-		Status:       snap.Epic.Status,
-		NativeStatus: snap.Epic.NativeStatus,
-		Assignees:    snap.Epic.Assignees,
-		Repository:   snap.Epic.Repository,
-		PullRequests: snap.Epic.PullRequests,
+		ID:               snap.Epic.ID,
+		Key:              snap.Epic.Key,
+		Title:            snap.Epic.Title,
+		URL:              snap.Epic.URL,
+		Status:           snap.Epic.Status,
+		NativeStatus:     snap.Epic.NativeStatus,
+		Assignees:        snap.Epic.Assignees,
+		Repository:       snap.Epic.Repository,
+		PullRequests:     snap.Epic.PullRequests,
+		PullRequestTotal: snap.Epic.PullRequestTotal,
 	}
 }
 

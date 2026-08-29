@@ -194,3 +194,30 @@ func TestHasMetaAgreesWithTicketMeta(t *testing.T) {
 		}
 	}
 }
+
+// A Ticket whose Provider capped what it fetched counts every pull request the
+// Tracker reported, not the handful that came back. The field decides what the
+// meta line says and never whether there is one, so the row keeps its height.
+func TestMetaLineCountsTheTrackersPullRequestTotal(t *testing.T) {
+	caps := model.Capabilities{PullRequests: true}
+	base := ticket("#1", model.StatusInProgress)
+	base.PullRequests = []model.PullRequest{{
+		Number: 501, State: model.PROpen,
+		Checks: model.ChecksPassing, Review: model.ReviewApproved,
+	}}
+
+	if got := ticketMeta(base, caps, Styles{}); strings.Contains(got, "more") {
+		t.Errorf("meta line %q counts an overflow the Provider never reported", got)
+	}
+
+	truncated := base
+	truncated.PullRequestTotal = 34
+	got := ticketMeta(truncated, caps, Styles{})
+	if !strings.Contains(got, "+33 more") {
+		t.Errorf("meta line = %q, want the 33 pull requests the row does not show", got)
+	}
+
+	if hasMeta(truncated, caps) != hasMeta(base, caps) {
+		t.Error("the total changed a row's height; it may only change what the meta line says")
+	}
+}

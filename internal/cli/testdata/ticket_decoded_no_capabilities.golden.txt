@@ -1,6 +1,6 @@
 
 Ticket #112  Draft the shard sync protocol
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 https://tracker.example.test/acme/widgets/112
 Epic #111  Widget sync v2: shards, retries & telemetry
 

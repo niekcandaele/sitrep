@@ -317,6 +317,9 @@ func newEpic(n issueNode) model.Epic {
 		Assignees:    newAssignees(n.Assignees.Nodes),
 		Repository:   n.Repository.NameWithOwner,
 		PullRequests: prs,
+		// The closing connection is capped and never paginated, so the count
+		// GitHub reports is what makes the cap visible downstream.
+		PullRequestTotal: pullRequestTotal(n.ClosedByPullRequestsReferences, prs),
 	}
 }
 
@@ -364,6 +367,9 @@ func newTicket(n issueNode, epicRepo string) model.Ticket {
 		Assignees:    newAssignees(n.Assignees.Nodes),
 		Repository:   n.Repository.NameWithOwner,
 		PullRequests: prs,
+		// The closing connection is capped and never paginated, so the count
+		// GitHub reports is what makes the cap visible downstream.
+		PullRequestTotal: pullRequestTotal(n.ClosedByPullRequestsReferences, prs),
 		// ParentID stays empty: one level of the sub-issue graph is fetched, so
 		// every Ticket hangs directly off the Epic.
 	}
