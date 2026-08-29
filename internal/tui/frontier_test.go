@@ -1133,3 +1133,24 @@ func TestFrontierRefreshDropsAnInFlightAnswer(t *testing.T) {
 		t.Error("the answers were dropped from the session cache too, so the reads were wasted")
 	}
 }
+
+// An exact Ref list may name one Ticket twice. The canvas draws one card for
+// it, so a header counting the graph's positional member rows would claim more
+// Actionable Tickets than there are cards to point at.
+func TestFrontierHeaderCountsCardsNotMemberRows(t *testing.T) {
+	snap := fake.FixtureBlockingSnapshot()
+	snap.Tickets = append(snap.Tickets, snap.Tickets[0])
+	p := fake.New(fake.WithSnapshot(snap), fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	m, got := s.finish(t)
+
+	want := "16 nodes" + separator + "3 ghosts" + separator + "3 actionable"
+	if !strings.Contains(string(got), want) {
+		t.Errorf("the header does not read %q:\n%s", want, string(got))
+	}
+	if n := len(m.frontier.layout.order); n != 16 {
+		t.Errorf("the canvas drew %d nodes, so the count above is asserting the wrong thing", n)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
 
 // The layout is pure, so these tests build a model.BlockingGraph from plain
@@ -323,4 +324,36 @@ func TestFrontierBadgeCountsAnonymousBlockers(t *testing.T) {
 	if got := frontierBadgeLine(nodes[0], g); got != "UNVERIFIED +2 unnamed blockers" {
 		t.Errorf("badge line = %q, want an unverified card carrying the unnamed blocker count", got)
 	}
+}
+
+// A Ghost reached as a dependent — a member's Blocks Link pointing out of the
+// Watchlist — is drawn connected to the member that blocks it. The Ref-list
+// fixture is the real shape: #112 blocks #116, which is not one of its members.
+func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
+	tickets := fake.FixtureRefListSnapshot().Tickets
+	links := make(map[model.TicketID][]model.Link, len(tickets))
+	for _, ticket := range tickets {
+		links[ticket.ID] = fake.FixtureDetails()[ticket.ID].Links
+	}
+	g, l := layoutOf(tickets, links)
+
+	const ghost = model.TicketID("acme/widgets#116")
+	if _, drawn := l.nodeAt[ghost]; !drawn {
+		t.Fatalf("%s is not on the canvas, so this test proves nothing", ghost)
+	}
+	if got := l.columnOf[ghost]; got != l.columnOf["acme/widgets#112"]+1 {
+		t.Errorf("the Ghost sits in column %d, want the column right of the member that blocks it",
+			got)
+	}
+
+	index := make(map[model.TicketID]int, len(l.order))
+	for i, id := range l.order {
+		index[id] = i
+	}
+	for _, e := range frontierEdges(g, index) {
+		if l.order[e.from] == ghost && l.order[e.to] == "acme/widgets#112" {
+			return
+		}
+	}
+	t.Errorf("no edge joins %s to the member that blocks it: it is drawn floating", ghost)
 }

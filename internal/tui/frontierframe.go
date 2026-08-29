@@ -292,16 +292,21 @@ type frontierEdge struct {
 }
 
 // frontierEdges collects the drawable edges in canonical order — members in
-// Watchlist order, each member's Blockers in order — which is the only
-// tie-break the layout below uses.
+// Watchlist order then Ghosts in theirs, each node's Blockers in order — which
+// is the only tie-break the layout below uses.
+//
+// Ghosts are walked because a Ghost reached as a dependent — a member's Blocks
+// Link pointing out of the Watchlist — carries its edge on the Ghost's own
+// Blockers, and a Ghost card drawn connected to nothing says the opposite of
+// what the Watchlist read.
 func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []frontierEdge {
 	var edges []frontierEdge
-	for _, a := range g.Members() {
-		from, ok := index[a.TicketID]
+	collect := func(id model.TicketID, blockers []model.Blocker) {
+		from, ok := index[id]
 		if !ok {
-			continue
+			return
 		}
-		for _, b := range a.Blockers {
+		for _, b := range blockers {
 			// An anonymous blocker has no node, so it has no edge. It is already
 			// unsatisfied, so its member is already not Actionable; the card's
 			// badge is where it is accounted for.
@@ -316,6 +321,12 @@ func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []fronti
 			}
 			edges = append(edges, frontierEdge{from: from, to: to})
 		}
+	}
+	for _, a := range g.Members() {
+		collect(a.TicketID, a.Blockers)
+	}
+	for _, ghost := range g.Ghosts() {
+		collect(ghost.Target.ID, ghost.Blockers)
 	}
 	return edges
 }

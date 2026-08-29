@@ -79,6 +79,11 @@ type GhostTicket struct {
 	// Target is the Ghost's identity, taken from the first Link that named it,
 	// with the first non-Unknown Status any Link gave it.
 	Target LinkTarget
+	// Blockers are the Watchlist members that block this Ghost, discovered
+	// through their own Blocks Links. A Ghost is still a leaf — sitrep never
+	// reads a Ghost's own Links — so this holds only what the Watchlist itself
+	// said, never blockers the Ghost knows about and the Watchlist does not.
+	Blockers []Blocker
 }
 
 // BlockingGraph is the derived blocking structure of one Watchlist: its members
@@ -122,7 +127,13 @@ func (g BlockingGraph) For(id TicketID) (Actionability, bool) {
 // first-appearance order over the canonical walk.
 func (g BlockingGraph) Ghosts() []GhostTicket {
 	out := make([]GhostTicket, len(g.ghosts))
-	copy(out, g.ghosts)
+	for i, ghost := range g.ghosts {
+		out[i] = ghost
+		if ghost.Blockers != nil {
+			out[i].Blockers = make([]Blocker, len(ghost.Blockers))
+			copy(out[i].Blockers, ghost.Blockers)
+		}
+	}
 	return out
 }
 
@@ -186,7 +197,11 @@ func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabi
 		index:   make(map[TicketID]int, len(tickets)),
 	}
 	for _, t := range tickets {
-		if _, dup := g.index[t.ID]; !dup {
+		// An empty ID is not an identity, so it is never indexed: indexing it
+		// would make one unidentified member the node every anonymous blocker
+		// Link resolves to, which fails open on exactly the unverified blocker
+		// Actionable exists to fail closed on.
+		if _, dup := g.index[t.ID]; !dup && t.ID != "" {
 			g.index[t.ID] = len(g.members)
 		}
 		g.members = append(g.members, Actionability{TicketID: t.ID, Status: t.Status})
@@ -209,11 +224,11 @@ func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabi
 	// Ghost when the target is not a member. Ghosts follow the members, in
 	// first-appearance order.
 	node := func(target LinkTarget) int {
-		if i, ok := g.index[target.ID]; ok {
-			return i
-		}
 		if target.ID == "" {
 			return anonymousNode
+		}
+		if i, ok := g.index[target.ID]; ok {
+			return i
 		}
 		if i, ok := ghostIndex[target.ID]; ok {
 			if g.ghosts[i].Target.Status == StatusUnknown {
@@ -268,6 +283,9 @@ func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabi
 		if e.blocked < len(g.members) {
 			g.members[e.blocked].Blockers = append(g.members[e.blocked].Blockers,
 				g.blocker(e, tickets))
+		} else {
+			ghost := &g.ghosts[e.blocked-len(g.members)]
+			ghost.Blockers = append(ghost.Blockers, g.blocker(e, tickets))
 		}
 	}
 
@@ -289,6 +307,21 @@ func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabi
 				g.members[i].InCycle = true
 			}
 		}
+	}
+
+	// A Watchlist may name one Ticket twice; the Ticket has one blocking state.
+	// The member list stays positional because it is the --json contract, but
+	// only the first occurrence of an ID is a node, so every later row is made
+	// to agree with it rather than reporting an unblocked Ticket a second time.
+	for i := range g.members {
+		canonical, indexed := g.index[g.members[i].TicketID]
+		if !indexed || canonical == i {
+			continue
+		}
+		row := cloneActionability(g.members[canonical])
+		row.TicketID = g.members[i].TicketID
+		row.Status = g.members[i].Status
+		g.members[i] = row
 	}
 	return g
 }

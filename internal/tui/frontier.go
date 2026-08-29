@@ -471,9 +471,12 @@ func (m Model) frontierHeader() string {
 	case !f.input.Capabilities.BlockingLinks:
 		counts = "frontier" + separator + "this Provider reports no blocking links"
 	case f.resolved:
+		// Counted over the layout's order rather than the graph's members: a
+		// Watchlist may name one Ticket twice, and a header claiming more
+		// Actionable Tickets than there are cards is not a count of anything.
 		actionable := 0
-		for _, a := range f.graph.Members() {
-			if a.Actionable {
+		for _, id := range f.layout.order {
+			if a, member := f.graph.For(id); member && a.Actionable {
 				actionable++
 			}
 		}
