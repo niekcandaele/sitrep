@@ -69,6 +69,24 @@ opened — never during list rendering.
 The ordered, session-local path of Tickets followed through explicit Links in Detail.
 Following a Link pushes the current Ticket; Esc returns to the preceding Ticket.
 
+**Frontier**:
+The screen that renders a Watchlist as nodes and BlockedBy/Blocks edges to answer one
+question: which Tickets can be picked up right now. It is a second rendering of the same
+Watchlist, not another Selector kind.
+_Avoid_: graph view, DAG, dependency tree, node view
+
+**Actionable**:
+A derived property of a Ticket: its Status Category is Todo and every Ticket it is BlockedBy
+has Status Category Done or Cancelled. A blocker whose status could not be read leaves the
+Ticket not Actionable — the property fails closed, because telling an agent to start work on
+a Ticket whose blockers were never verified is the one wrong answer that costs something.
+_Avoid_: ready, unblocked, available
+
+**Ghost Ticket**:
+A Ticket that appears on the Frontier only as the target of a Link from a Watchlist member,
+without being a member itself. It is drawn so that a Ticket blocked from outside the
+Watchlist never looks Actionable. Its Links are not followed to discover further Tickets.
+
 ## Relationships
 
 - A **Selector** resolves one **Watchlist**; every refresh resolves the same Selector again.
@@ -84,6 +102,13 @@ Following a Link pushes the current Ticket; Esc returns to the preceding Ticket.
 - Following an explicit **Link** appends to the **Trail**; Esc removes one Trail step and
   restores the preceding Ticket.
 - A **Profile** selects a **Provider** and supplies what it needs to connect.
+- The **Frontier** renders one **Watchlist**; membership is the Watchlist's, plus **Ghost
+  Tickets** pulled in as Link targets. It never changes which Tickets the Watchlist contains.
+- **Actionable** is computed from a Ticket's Status Category and its BlockedBy **Links**;
+  because Links live in **Detail**, the Frontier fetches Detail per Ticket and the list
+  refresh never does.
+- A cycle of BlockedBy Links makes every Ticket in it permanently not Actionable; the
+  Frontier reports the cycle rather than hiding it.
 
 ## Example dialogue
 
@@ -114,5 +139,11 @@ Following a Link pushes the current Ticket; Esc returns to the preceding Ticket.
   Capability boundaries.
 - An OSC 8 terminal hyperlink may open a URL through the terminal, while following an
   explicit Link inside sitrep extends the Trail. These are separate actions.
+- **Actionable** is sitrep's own computation, not a Tracker field. It is orthogonal to Status
+  Category: an InProgress Ticket can be blocked, and that combination is a signal to show,
+  not a contradiction to resolve. Colour on the Frontier carries Status Category; Actionable
+  and blocked are carried by a separate visual channel.
+- Filtering hides rows in a list but would delete edges on the **Frontier**, which can make a
+  blocked Ticket look Actionable. The Frontier therefore renders the complete Watchlist.
 - sitrep is **read-only by design** — it never writes to a Tracker. Agents write; sitrep
   watches.
