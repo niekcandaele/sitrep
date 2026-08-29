@@ -1435,3 +1435,31 @@ func TestFrontierMovementKeysReachTheirDirections(t *testing.T) {
 		})
 	}
 }
+
+// A read that failed is still failed after the Watchlist is read again. The
+// re-seat issues nothing, so dropping the failure record would leave cards
+// marked UNVERIFIED with nothing on screen saying why or what to press.
+func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
+	after := blockingSnapshotSwapping(t, "acme/widgets#212", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, separator+"2 actionable")
+	m, got := s.finish(t)
+
+	// #211 is the fixture's unreadable member and is still on the Watchlist.
+	if _, still := m.frontier.failed["acme/widgets#211"]; !still {
+		t.Errorf("failed = %v after a refresh, want the Ticket whose read failed", m.frontier.failed)
+	}
+	frame := string(got)
+	if !strings.Contains(frame, "1 Ticket's Links could not be read") {
+		t.Errorf("the failure notice went away across a refresh:\n%s", frame)
+	}
+	if !strings.Contains(frame, "press r to retry") {
+		t.Errorf("the remedy went away across a refresh:\n%s", frame)
+	}
+}

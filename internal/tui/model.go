@@ -489,16 +489,45 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 func (m Model) reseatFrontier() (Model, tea.Cmd) {
 	m.frontierGeneration++
 	m.mouseEpoch++
-	focus := m.frontier.focusID
-	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
+	previous := m.frontier
 	m.frontier = frontierState{
 		input:    FrontierFromList(m.input, m.linksFromCache()),
-		focusID:  focus,
-		offsetX:  offsetX,
-		offsetY:  offsetY,
+		focusID:  previous.focusID,
+		offsetX:  previous.offsetX,
+		offsetY:  previous.offsetY,
 		resolved: true,
 	}
+	// A read that failed is still failed, so the footer keeps saying so and
+	// keeps pointing at r. Dropping the record because the Watchlist was read
+	// again would leave cards marked UNVERIFIED with nothing on screen saying
+	// why or what to press. Members the refresh removed leave the set with them.
+	for id := range previous.failed {
+		if _, seated := m.frontier.input.Links[id]; seated {
+			continue
+		}
+		if !m.hasMember(id) {
+			continue
+		}
+		if m.frontier.failed == nil {
+			m.frontier.failed = make(map[model.TicketID]struct{}, len(previous.failed))
+		}
+		m.frontier.failed[id] = struct{}{}
+	}
+	if len(m.frontier.failed) > 0 {
+		m.frontier.lastErr = previous.lastErr
+	}
 	return m.rebuildFrontier(), repaint
+}
+
+// hasMember reports whether id names a Ticket in the seated Frontier's
+// Watchlist.
+func (m Model) hasMember(id model.TicketID) bool {
+	for _, t := range m.frontier.input.Tickets {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // onRefreshed folds one reading in. A failed refresh keeps the last good data
