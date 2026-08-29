@@ -180,8 +180,21 @@ func TestListMarkersSurviveARefreshAndCostNoDetailCall(t *testing.T) {
 	after := fake.FixtureBlockingSnapshot()
 	// #211 is Actionable in the first reading and finished in the second, so
 	// its marker has to go without anything being re-fetched.
-	after.Tickets[10].Status = model.StatusDone
-	after.Tickets[10].NativeStatus = "closed"
+	// Selected by ID: a fixture reorder must fail loudly rather than quietly
+	// test a different Ticket.
+	const finished = model.TicketID("acme/widgets#211")
+	moved := false
+	for i, member := range after.Tickets {
+		if member.ID != finished {
+			continue
+		}
+		after.Tickets[i].Status = model.StatusDone
+		after.Tickets[i].NativeStatus = "closed"
+		moved = true
+	}
+	if !moved {
+		t.Fatalf("%s is not in the fixture, so this test proves nothing", finished)
+	}
 
 	p := completeBlockingProvider(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after))
 	c := newClock()

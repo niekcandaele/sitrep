@@ -239,8 +239,11 @@ func TestFrontierWithoutTheBlockingLinksCapability(t *testing.T) {
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls = %d, want 0: a screen that cannot draw a graph must not pay for one", n)
 	}
-	if m.frontier.graph.BlockingLinksSupported() {
-		t.Error("the graph claims blocking links the Provider does not report")
+	for _, a := range m.frontier.graph.Members() {
+		if a.Actionable || a.LinksKnown {
+			t.Errorf("%s = %+v: the graph claims blocking links the Provider does not report",
+				a.TicketID, a)
+		}
 	}
 	if strings.Contains(string(got), "ACTIONABLE") {
 		t.Errorf("the Frontier claimed something with no blocking links to read:\n%s", got)

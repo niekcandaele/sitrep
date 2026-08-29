@@ -177,6 +177,60 @@ func TestRenderRowsFillsTheWindowExactly(t *testing.T) {
 	}
 }
 
+// "0 actionable" is the case that has to be drawn: without it, a warm reading
+// where nothing can be picked up renders exactly like a cold one that is not
+// claiming anything. assertNoMarkers asserts absence and cannot reach this.
+func TestHeaderDrawsAZeroActionableCount(t *testing.T) {
+	p := model.Progress{Done: 1, Denominator: 2, PercentDone: 50}
+	warm := listMarkers{active: true, actionable: map[model.TicketID]bool{}}
+
+	got := headerProgress(p, "just now", 120, warm, Styles{})
+
+	if !strings.Contains(got, separator+"0 actionable") {
+		t.Errorf("a warm header with nothing Actionable says nothing about it:\n%s", got)
+	}
+	if cold := headerProgress(p, "just now", 120, listMarkers{}, Styles{}); cold == got {
+		t.Errorf("warm-and-none renders identically to cold:\n%s", got)
+	}
+}
+
+// The marker column takes two cells from the title's budget, and the budget is
+// what keeps a line inside the terminal. A cold listMarkers reserves nothing,
+// so the discipline has to be asserted warm, at a width where the titles
+// actually reach the edge.
+func TestRenderRowsFitsTheWindowWithMarkersActive(t *testing.T) {
+	long := func(key string) model.Ticket {
+		t := ticket(key, model.StatusTodo)
+		t.Title = strings.Repeat("rebalance the shard placement heuristic ", 3)
+		t.NativeStatus = "Selected for Development"
+		return t
+	}
+	rows := BuildRows([]model.Ticket{long("#1"), long("#2")})
+	markers := listMarkers{
+		active:     true,
+		actionable: map[model.TicketID]bool{"#1": true},
+		count:      1,
+	}
+
+	// rowLines rather than renderRows: renderRows clips every line to the width
+	// as a last resort, which would hide a row that overran its budget instead
+	// of failing. What is asserted is the budget itself.
+	for _, width := range []int{40, 60, 80} {
+		drew := false
+		for i := range rows {
+			for _, line := range rowLines(rows, i, 4, width, i == 1, model.Capabilities{}, markers, Styles{}) {
+				drew = drew || strings.Contains(line, strings.TrimSpace(actionableMarker))
+				if w := lipgloss.Width(line); w > width {
+					t.Errorf("width %d: line %q is %d cells wide", width, line, w)
+				}
+			}
+		}
+		if !drew {
+			t.Fatalf("width %d: no marker was drawn, so this proves nothing", width)
+		}
+	}
+}
+
 // hasMeta feeds rowHeights, which feeds ensureVisible, rowAt and the scroll
 // offset, while ticketMeta decides what is actually drawn. A Native Status
 // suppressed by one and counted by the other makes the scroll window drift and
