@@ -81,12 +81,17 @@ const (
 )
 
 // frontierCell is one canvas cell: what to draw, which style-table entry to
-// draw it with, and which of the layout's URLs it hyperlinks to. A zero rune is
-// the second half of a double-width rune and draws nothing of its own.
+// draw it with, and which of the layout's URLs it hyperlinks to.
 type frontierCell struct {
 	r     rune
 	style int
 	link  int
+	// continuation marks a cell covered by the double-width rune to its left.
+	// It draws nothing of its own and is not blank: writing over it defaces the
+	// glyph and leaves the assembled row one column too wide. It is a field
+	// rather than an r == 0 test so that the renderer and the overflow-glyph
+	// placer read one spelling of the same fact.
+	continuation bool
 	// trailing holds the zero-width runes that belong to r — combining marks,
 	// variation selectors, ZWJ joiners. They occupy no column of their own, so
 	// they ride along with the cell they modify rather than claiming one or
@@ -686,19 +691,22 @@ func (l *frontierLayout) drawCard(n frontierNode, g model.BlockingGraph, rect fr
 	}
 
 	l.write(rect.X+1, rect.Y+2, balancedTruncate(n.title, inner, "…"), title, link, rect.X+rect.W-1)
-	l.write(rect.X+1, rect.Y+3, balancedTruncate(frontierBadgeLine(n, g), inner, "…"), badge, 0, rect.X+rect.W-1)
+	l.write(rect.X+1, rect.Y+3, frontierBadgeLine(n, g, inner), badge, 0, rect.X+rect.W-1)
 }
 
-// frontierBadgeLine is a card's fourth line: the Native Status where it says
-// something the Status Category does not, then the emphasis badge, then a count
-// of blocking Links that named no Ticket.
-func frontierBadgeLine(n frontierNode, g model.BlockingGraph) string {
-	var parts []string
-	if n.native != "" {
-		parts = append(parts, n.native)
-	}
+// frontierBadgeLine is a card's fourth line, fitted to width: the Native Status
+// where it says something the Status Category does not, then the emphasis badge,
+// then a count of blocking Links that named no Ticket.
+//
+// The badge and the unnamed-blocker count answer the question this screen exists
+// to answer, so they are assembled first and keep their columns. The Native
+// Status is display-only and takes what is left; where nothing useful is left it
+// is dropped outright. Truncating the joined line instead lets a long Native
+// Status eat "blocked by 3".
+func frontierBadgeLine(n frontierNode, g model.BlockingGraph, width int) string {
+	var carried []string
 	if n.emphasis.badge != "" {
-		parts = append(parts, n.emphasis.badge)
+		carried = append(carried, n.emphasis.badge)
 	}
 	if a, ok := g.For(n.id); ok {
 		if anonymous := anonymousBlockers(a); anonymous > 0 {
@@ -706,10 +714,24 @@ func frontierBadgeLine(n frontierNode, g model.BlockingGraph) string {
 			if anonymous > 1 {
 				noun = "blockers"
 			}
-			parts = append(parts, fmt.Sprintf("+%d unnamed %s", anonymous, noun))
+			carried = append(carried, fmt.Sprintf("+%d unnamed %s", anonymous, noun))
 		}
 	}
-	return strings.Join(parts, " ")
+	load := strings.Join(carried, " ")
+	switch {
+	case n.native == "":
+		return balancedTruncate(load, width, "…")
+	case load == "":
+		return balancedTruncate(n.native, width, "…")
+	}
+	// One column for the separating space, and at least two for the Native
+	// Status itself: a lone ellipsis where a status used to be says less than
+	// the blank it replaces.
+	budget := width - lipgloss.Width(load) - 1
+	if budget < 2 {
+		return balancedTruncate(load, width, "…")
+	}
+	return balancedTruncate(n.native, budget, "…") + " " + load
 }
 
 // write blits a string onto the canvas from x, stopping at limit. Card text
@@ -738,7 +760,7 @@ func (l *frontierLayout) write(x, y int, s string, style, link, limit int) {
 		if x >= 0 {
 			l.cells[y][x] = frontierCell{r: r, style: style, link: link}
 			for i := 1; i < w; i++ {
-				l.cells[y][x+i] = frontierCell{style: style, link: link}
+				l.cells[y][x+i] = frontierCell{style: style, link: link, continuation: true}
 			}
 			last = x
 		}
@@ -841,7 +863,7 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 				flush()
 				runStyle, runLink = cell.style, cell.link
 			}
-			if cell.r != 0 {
+			if !cell.continuation {
 				run.WriteRune(cell.r)
 				run.WriteString(cell.trailing)
 			}
@@ -881,8 +903,8 @@ func frontierOverflowGlyphs(l frontierLayout, overlay map[[2]int]frontierCell,
 		if y < 0 || y >= l.height || x < 0 || x >= l.width {
 			return true
 		}
-		r := l.cells[y][x].r
-		return r == 0 || r == ' '
+		cell := l.cells[y][x]
+		return !cell.continuation && cell.r == ' '
 	}
 	// place searches one edge for a free cell, nearest the middle first. across
 	// is the coordinate that varies; fixed is the edge itself.

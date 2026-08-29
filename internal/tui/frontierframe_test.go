@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
@@ -321,7 +324,7 @@ func TestFrontierBadgeCountsAnonymousBlockers(t *testing.T) {
 	})
 	nodes := frontierNodes(g, tickets, true)
 
-	if got := frontierBadgeLine(nodes[0], g); got != "UNVERIFIED +2 unnamed blockers" {
+	if got := frontierBadgeLine(nodes[0], g, 60); got != "UNVERIFIED +2 unnamed blockers" {
 		t.Errorf("badge line = %q, want an unverified card carrying the unnamed blocker count", got)
 	}
 }
@@ -356,4 +359,125 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 		}
 	}
 	t.Errorf("no edge joins %s to the member that blocks it: it is drawn floating", ghost)
+}
+
+// An overflow arrow must never land on the continuation cell of a double-width
+// rune. The cell holds no rune of its own, so it reads as blank, but writing
+// there defaces the glyph beside it and makes the assembled row one column too
+// wide — which the line's own truncation then pays for by dropping a column of
+// content off the right. No fixture Ticket has a double-width rune, so this
+// layout brings its own.
+func TestFrontierOverflowGlyphsNeverLandOnADoubleWidthRune(t *testing.T) {
+	wide := func(id, title string) model.Ticket {
+		return model.Ticket{
+			ID:     model.TicketID(id),
+			Key:    id,
+			Title:  title,
+			Status: model.StatusTodo,
+		}
+	}
+	tickets := []model.Ticket{
+		wide("#1", "分散シャード再調整の計画"),
+		wide("#2", "重み付けテーブルの移行"),
+		wide("#3", "配置ヒューリスティクス"),
+		wide("#4", "シャードの安全な退避"),
+		wide("#5", "ロールアウト手順書の公開"),
+	}
+	g, l := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"),
+		"#2": blockedBy("#3"),
+		"#3": nil,
+		"#4": blockedBy("#3"),
+		"#5": blockedBy("#3"),
+	})
+	if len(g.Members()) != len(tickets) {
+		t.Fatalf("Members() = %d, want the %d the layout was built from",
+			len(g.Members()), len(tickets))
+	}
+
+	// A window smaller than the canvas in both axes, walked over every offset
+	// that has somewhere to overflow to, so every edge places an arrow on every
+	// row and column the cards occupy.
+	const width, height = 40, 9
+	if l.width <= width || l.height <= height {
+		t.Fatalf("canvas is %dx%d, which fits in the %dx%d window: no arrow is drawn",
+			l.width, l.height, width, height)
+	}
+	placed := 0
+	for offsetY := 0; offsetY <= l.height-height; offsetY++ {
+		for offsetX := 0; offsetX <= l.width-width; offsetX++ {
+			glyphs := frontierOverflowGlyphs(l, map[[2]int]frontierCell{},
+				offsetX, offsetY, width, height)
+			for at := range glyphs {
+				placed++
+				y, x := at[1]+offsetY, at[0]+offsetX
+				if y < 0 || y >= l.height || x < 0 || x >= l.width {
+					continue
+				}
+				if cell := l.cells[y][x]; cell.r != ' ' {
+					t.Fatalf("at offset %d,%d an arrow was placed on canvas cell %d,%d, "+
+						"which holds %q (continuation %v), not a blank",
+						offsetX, offsetY, x, y, cell.r, cell.continuation)
+				}
+			}
+			for i, line := range renderFrontierCanvas(l, "", false,
+				offsetX, offsetY, width, height, DefaultStyles(true)) {
+				if got := lipgloss.Width(line); got > width {
+					t.Fatalf("at offset %d,%d line %d is %d columns wide, want at most %d: %q",
+						offsetX, offsetY, i, got, width, line)
+				}
+			}
+		}
+	}
+	if placed == 0 {
+		t.Fatal("no arrow was placed anywhere, so this test asserts nothing")
+	}
+}
+
+// On a card too narrow to hold both, the badge keeps its columns and the
+// display-only Native Status gives way. A screen whose whole purpose is "what
+// can be picked up" must not lose "blocked by 3" to a verbose Tracker label.
+func TestFrontierBadgeLineGivesTheNativeStatusWhatIsLeft(t *testing.T) {
+	blocked := model.Ticket{
+		ID:           "#1",
+		Key:          "#1",
+		Title:        "title #1",
+		Status:       model.StatusTodo,
+		NativeStatus: "Selected for Development",
+	}
+	tickets := []model.Ticket{blocked,
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+		blockingTicket("#4", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3", "#4"),
+		"#2": nil,
+		"#3": nil,
+		"#4": nil,
+	})
+	node := frontierNodes(g, tickets, true)[0]
+	const badge = "blocked by 3"
+	if node.emphasis.badge != badge {
+		t.Fatalf("badge = %q, want %q: this test asserts the wrong thing otherwise",
+			node.emphasis.badge, badge)
+	}
+
+	// Wide enough for both: the Native Status leads, in full.
+	if got := frontierBadgeLine(node, g, 60); got != "[Selected for Development] "+badge {
+		t.Errorf("badge line at 60 columns = %q, want both fields", got)
+	}
+	// A default card's inner width holds only one of them whole.
+	got := frontierBadgeLine(node, g, frontierCardWidth-2)
+	if !strings.HasSuffix(got, badge) {
+		t.Errorf("badge line on a default card = %q, want it to end in %q", got, badge)
+	}
+	if w := lipgloss.Width(got); w > frontierCardWidth-2 {
+		t.Errorf("badge line is %d columns wide, want at most %d: %q", w, frontierCardWidth-2, got)
+	}
+	// Narrower still and the Native Status is dropped rather than reduced to an
+	// ellipsis standing in for nothing.
+	if got := frontierBadgeLine(node, g, len(badge)+2); got != badge {
+		t.Errorf("badge line with no room to spare = %q, want just %q", got, badge)
+	}
 }
