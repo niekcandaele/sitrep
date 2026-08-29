@@ -1,0 +1,63 @@
+package tui
+
+import (
+	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/termtext"
+)
+
+// This file is the terminal-visible-text boundary for every screen in this
+// package (ADR-0006):
+//
+//	A model value becomes safe to draw at the moment it enters a screen's
+//	state, not at the moment it is rendered, and not because of who produced
+//	it.
+//
+// The monitor takes model data through four funnels — Options.Initial,
+// Options.Open, Options.Source and Options.DetailSource — and none of them has
+// to come from a Provider: a Source is any closure at all, and a caller that
+// never went near provider.Sanitized can seat whatever it likes. So the package
+// makes its own inputs safe here, at intake, and the renderers below stop being
+// where safety is decided. A new screen consuming a ListInput or a DetailInput
+// inherits that without doing anything.
+//
+// The functions here are the only sanitizing calls in this package, with one
+// stated exception: renderHyperlink cleans its text and URI for scope
+// integrity, which is about the OSC 8 sequence it writes rather than about the
+// model. See its comment.
+//
+// The policy itself lives in internal/termtext. A new rule about what text may
+// reach a terminal belongs there, not here.
+
+// safeHeader cleans a breadcrumb or Watchlist header.
+func safeHeader(h Header) Header {
+	cleaned := termtext.Header(model.WatchlistHeader{Key: h.Key, Title: h.Title, URL: h.URL})
+	return Header{Key: cleaned.Key, Title: cleaned.Title, URL: cleaned.URL}
+}
+
+// safeListInput cleans one reading of the Watchlist on its way into Model
+// state, whether it was seated by the caller or produced by a refresh.
+func safeListInput(in ListInput) ListInput {
+	in.Header = safeHeader(in.Header)
+	in.Tickets = termtext.Tickets(in.Tickets)
+	return in
+}
+
+// safeOpen cleans the decoder's entry Ticket and its breadcrumb.
+func safeOpen(open OpenTicket) OpenTicket {
+	open.Ticket = termtext.Ticket(open.Ticket)
+	open.Parent = safeHeader(open.Parent)
+	return open
+}
+
+// safeDetail cleans one Detail reading. Capabilities are bools and carry no
+// text.
+func safeDetail(d model.Detail) model.Detail {
+	return termtext.Detail(d)
+}
+
+// safeErr cleans the text of a Source or DetailSource failure, which the footer
+// and the error document draw. provider.Errorf already cleans a classified
+// Provider error; a directly constructed source can return any error at all.
+func safeErr(err error) error {
+	return termtext.Err(err)
+}

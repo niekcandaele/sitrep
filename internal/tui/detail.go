@@ -12,6 +12,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // mode is which screen owns the terminal.
@@ -74,8 +75,15 @@ type DetailInput struct {
 // DetailFromTicket adapts a Ticket and its Detail to the Detail-view contract.
 // Rich list Tickets and deliberately thin Link targets both enter through this
 // boundary, so the Detail screen never enriches a seat from list state.
+//
+// It is also where a Detail seat crosses the terminal-visible-text boundary
+// (see intake.go): everything the Detail screen draws is cleaned here, once, on
+// its way into the seat rather than at each render site.
 func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	parent Header, fetchedAt time.Time) DetailInput {
+	t = termtext.Ticket(t)
+	d = safeDetail(d)
+	parent = safeHeader(parent)
 	return DetailInput{
 		Ticket: DetailHeader{
 			Key:              t.Key,
@@ -260,14 +268,18 @@ func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities
 // ticketFromLinkTarget is deliberately thin. A Link target never borrows rich
 // fields from a visible or hidden list row, even when the same ID is present.
 func ticketFromLinkTarget(target model.LinkTarget) model.Ticket {
-	return model.Ticket{
+	// A Link target becomes a seated Ticket here, which is a state-entry funnel
+	// of its own, so it crosses the boundary as a whole value rather than field
+	// by field. termtext.Ticket is idempotent, so a target that was already
+	// cleaned at intake pays nothing for crossing again.
+	return termtext.Ticket(model.Ticket{
 		ID:           target.ID,
 		Key:          target.Key,
-		Title:        sanitizeTerminalText(target.Title),
+		Title:        target.Title,
 		URL:          target.URL,
 		Status:       target.Status,
-		NativeStatus: sanitizeTerminalText(target.NativeStatus),
-	}
+		NativeStatus: target.NativeStatus,
+	})
 }
 
 var errEmptyLinkTargetID = errors.New("this Link target has no Ticket identity")

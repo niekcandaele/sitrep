@@ -132,7 +132,8 @@ func New(ctx context.Context, opts Options) Model {
 		if detailSrc == nil {
 			return model.Detail{}, model.Capabilities{}, errNoDetailSource
 		}
-		return detailSrc(ctx, id)
+		d, caps, err := detailSrc(ctx, id)
+		return safeDetail(d), caps, safeErr(err)
 	}
 
 	// The box draws no cursor of its own: the real terminal cursor is placed
@@ -148,7 +149,8 @@ func New(ctx context.Context, opts Options) Model {
 			if src == nil {
 				return ListInput{}, errNoSource
 			}
-			return src(ctx)
+			in, err := src(ctx)
+			return safeListInput(in), safeErr(err)
 		},
 		now:      now,
 		interval: opts.Interval,
@@ -177,7 +179,7 @@ func New(ctx context.Context, opts Options) Model {
 		// successful refresh is folded in, and nothing is in flight: the refresh
 		// clock runs from when the reading was *taken*, so the first auto-refresh
 		// lands one interval after that rather than one interval after startup.
-		m.input = *opts.Initial
+		m.input = safeListInput(*opts.Initial)
 		m.hasData = true
 		m.refreshing = false
 		m.generation = 0
@@ -193,7 +195,8 @@ func New(ctx context.Context, opts Options) Model {
 			m.generation = 0
 			m.listArmed = false
 		}
-		next, _ := m.seatDetail(opts.Open.Ticket, opts.Open.Parent, opts.Open.Capabilities)
+		entry := safeOpen(*opts.Open)
+		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities)
 		m = next.(Model)
 	}
 	return m

@@ -13,6 +13,20 @@
 // TUI holds as a plain function so it knows nothing about Refs, auth or
 // GraphQL.
 //
+// # The terminal-text boundary
+//
+// Model data enters this package through exactly four funnels — Options.Initial,
+// Options.Open, Options.Source and Options.DetailSource — and none of them has
+// to come from a Provider: a Source is any closure the caller wrote. So the
+// screens do not trust their caller. Everything entering Model state crosses
+// intake.go, which applies internal/termtext to whole model values, and the
+// renderers below are therefore free of sanitizing calls (ADR-0006).
+//
+// A new screen inherits that by consuming a ListInput or a DetailInput: both
+// can only be seated through those funnels or through DetailFromTicket, which
+// crosses the same boundary. A screen shows a Key, never a model.TicketID —
+// identity is deliberately outside the boundary because it is never drawn.
+//
 // # Progress is computed from every Ticket
 //
 // The header's progress bar is derived from the whole reading, never from the

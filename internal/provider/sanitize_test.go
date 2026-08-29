@@ -8,175 +8,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
-
-func TestSanitizeLine(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "ordinary text is untouched", in: "Add the widget", want: "Add the widget"},
-		{name: "an erase-display sequence", in: "hi\x1b[2Jthere", want: "hi[2Jthere"},
-		{name: "a window-title sequence", in: "hi\x1b]0;pwned\athere", want: "hi]0;pwnedthere"},
-		{
-			name: "OSC 52, which writes the clipboard",
-			in:   "\x1b]52;c;cHduZWQ=\x07ok",
-			want: "]52;c;cHduZWQ=ok",
-		},
-		{name: "a bare carriage return", in: "real\rfake", want: "realfake"},
-		{name: "CRLF", in: "one\r\ntwo", want: "one two"},
-		{name: "a newline becomes a space", in: "one\ntwo", want: "one two"},
-		{name: "a tab becomes a space", in: "one\ttwo", want: "one two"},
-		{name: "DEL", in: "a\x7fb", want: "ab"},
-		{name: "a C1 control", in: "a\u009bb", want: "ab"},
-		{name: "a NUL", in: "a\x00b", want: "ab"},
-		{name: "multi-byte UTF-8 survives", in: "héllo — 世界 ✓", want: "héllo — 世界 ✓"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := provider.SanitizeLine(tt.in); got != tt.want {
-				t.Errorf("SanitizeLine(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSanitizeTextKeepsMarkdownLayoutAndPrintableUnicode(t *testing.T) {
-	input := "# Café 東京 👩🏽‍💻\r\n\n\t- [x] **done** é"
-	want := "# Café 東京 👩🏽‍💻\n\n\t- [x] **done** é"
-	if got := provider.SanitizeText(input); got != want {
-		t.Errorf("SanitizeText(%q) = %q, want %q", input, got, want)
-	}
-}
-
-func TestSanitizeTextRemovesAllControlsExceptLayout(t *testing.T) {
-	for control := byte(0); control < 0x20; control++ {
-		t.Run(fmt.Sprintf("C0_%02x", control), func(t *testing.T) {
-			input := "body" + string([]byte{control})
-			want := "body"
-			switch control {
-			case '\n':
-				want += "\n"
-			case '\t':
-				want += "\t"
-			}
-			if got := provider.SanitizeText(input); got != want {
-				t.Errorf("SanitizeText(%q) = %q, want %q", input, got, want)
-			}
-		})
-	}
-	for control := rune(0x7f); control <= 0x9f; control++ {
-		t.Run(fmt.Sprintf("control_%04x", control), func(t *testing.T) {
-			input := "body" + string(control)
-			if got := provider.SanitizeText(input); got != "body" {
-				t.Errorf("SanitizeText(%q) = %q, want %q", input, got, "body")
-			}
-		})
-	}
-	for control := byte(0x80); control <= 0x9f; control++ {
-		t.Run(fmt.Sprintf("raw_C1_%02x", control), func(t *testing.T) {
-			input := "body" + string([]byte{control})
-			if got := provider.SanitizeText(input); got != "body" {
-				t.Errorf("SanitizeText(% x) = %q, want %q", []byte(input), got, "body")
-			}
-		})
-	}
-	if got := provider.SanitizeText("one\rtwo\r\nthree"); got != "onetwo\nthree" {
-		t.Errorf("bare CR and CRLF = %q, want %q", got, "onetwo\nthree")
-	}
-}
-
-func TestSanitizeTextStripsCompleteTerminalSequencesAndPayloads(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "ESC OSC 8 with BEL and ST",
-			input: "before\x1b]8;;https://evil.example.test/a\aLABEL\x1b]8;;\x1b\\after",
-			want:  "beforeLABELafter",
-		},
-		{
-			name:  "ESC OSC 52 clipboard payload",
-			input: "before\x1b]52;c;cHduZWQ=\aafter",
-			want:  "beforeafter",
-		},
-		{
-			name:  "raw C1 OSC 8 and ST",
-			input: "before\x9d8;;https://evil.example.test/raw\x9cLABEL\x9d8;;\x9cafter",
-			want:  "beforeLABELafter",
-		},
-		{
-			name:  "UTF-8 C1 OSC 52 and ST",
-			input: "before" + string(rune(0x9d)) + "52;c;cHduZWQ=" + string(rune(0x9c)) + "after",
-			want:  "beforeafter",
-		},
-		{
-			name:  "CSI styling keeps visible text",
-			input: "before\x1b[31mred\x1b[0mafter",
-			want:  "beforeredafter",
-		},
-		{
-			name:  "DCS payload",
-			input: "before\x1bP1;2|https://evil.example.test\x1b\\after",
-			want:  "beforeafter",
-		},
-		{
-			name:  "unterminated OSC payload",
-			input: "before\x1b]52;c;cHduZWQ=https://evil.example.test",
-			want:  "before",
-		},
-		{
-			name:  "truncated CSI",
-			input: "before\x1b[38;2",
-			want:  "before",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := provider.SanitizeText(tt.input)
-			if got != tt.want {
-				t.Errorf("SanitizeText(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-			if again := provider.SanitizeText(got); again != got {
-				t.Errorf("SanitizeText is not idempotent: first %q, second %q", got, again)
-			}
-		})
-	}
-}
-
-func TestSanitizeTextDropsMalformedUTF8(t *testing.T) {
-	tests := [][]byte{
-		{'a', 0x80, 'b'},
-		{'a', 0xc0, 0xaf, 'b'},
-		{'a', 0xc2, 'b'},
-		{'a', 0xe2, 0x82, 'b'},
-		{'a', 0xf0, 0x9f, 0x92, 'b'},
-		{'a', 0xf5, 0x80, 0x80, 0x80, 'b'},
-	}
-	for _, input := range tests {
-		got := provider.SanitizeText(string(input))
-		if !utf8.ValidString(got) || got != "ab" {
-			t.Errorf("SanitizeText(% x) = %q (valid=%v), want %q", input, got, utf8.ValidString(got), "ab")
-		}
-	}
-}
-
-func TestSanitizeLineMalformedUTF8PolicyRemainsUnchanged(t *testing.T) {
-	input := string([]byte{'a', 0xff, 'b'})
-	if got := provider.SanitizeLine(input); got != input {
-		t.Errorf("SanitizeLine changed discovery-6-scoped malformed input: % x became % x", input, got)
-	}
-}
 
 // The decorator's field-by-field test asserts what the multi-line helper does
 // through the two fields that use it.
@@ -365,7 +201,7 @@ func checkClean(t *testing.T, path string, v reflect.Value, multiline bool) {
 // every classified error passes through cleans it.
 //
 // The verb is %s, not %q: %q escapes a control character into printable text
-// before SanitizeLine ever sees it, which leaves the sanitization branch
+// before the sanitizer ever sees it, which leaves the sanitization branch
 // unexercised and the test green with the sanitization deleted.
 func TestErrorfSanitizesTheMessage(t *testing.T) {
 	const dirty = "boom\x1b[2J\nnext"
