@@ -85,6 +85,25 @@ JSON remains schema v1:
   jq -e '.schema_version == 1 and has("ticket") and has("ticket_id")'
 ```
 
+## Upgrade notes to carry into the release notes
+
+The generated changelog lists commits; a config change a user has to make by hand needs its
+own sentence in the GitHub Release body.
+
+**v0.3 — GitLab Profile paths declare their scope.** A Profile's `project:` is a project
+path unless it is written `groups/<path>`. A Profile that names a group must be rewritten,
+or hostless `&N` Refs against it fail:
+
+```yaml
+# before
+project: acme/platform
+# after
+project: groups/acme/platform
+```
+
+sitrep cannot detect this when the config is loaded — `acme/platform` is a valid project
+path — so the failure surfaces at the first `&N` Ref, with a message naming the fix.
+
 ## Versioning
 
 Tags are `vMAJOR.MINOR.PATCH`. The JSON `schema_version` is independent of the tag and of

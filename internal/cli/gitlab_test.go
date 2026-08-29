@@ -686,6 +686,30 @@ profiles:
 	}
 }
 
+// An unprefixed Profile path is a project path, so it cannot complete a group
+// epic Ref. The run fails before any network call, and the message names the
+// rewrite: this is the whole user-facing remedy, because "acme/platform" is a
+// valid project path and config-time detection is impossible.
+func TestGitLabProjectProfileRejectsAGroupEpicRef(t *testing.T) {
+	got := runWith([]string{"&12", "--json"}, cli.Deps{
+		Config:            parseConfig(t, gitlabConfig),
+		Env:               gitlabEnv,
+		GitLabTokenSource: noGitLabToken,
+	})
+
+	if got.code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %q)", got.code, got.stderr)
+	}
+	if got.stdout != "" {
+		t.Errorf("stdout = %q, want no document at all", got.stdout)
+	}
+	for _, want := range []string{"names a group epic", "is a project", "groups/gitlab-org"} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", got.stderr, want)
+		}
+	}
+}
+
 // The mirror: an unset token_env is *not* fatal on GitLab, because glab may
 // still be logged in. The run reaches the driver, which is what fails.
 func TestGitLabProfileWithAnUnsetTokenEnvFallsThrough(t *testing.T) {

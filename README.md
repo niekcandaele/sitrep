@@ -416,7 +416,10 @@ needs `$GITLAB_HOST`, a host-specific `glab` login, or a Profile. A Profile can 
 the group/project needed to complete hostless `&N` and `%N` Refs. A Profile naming a group
 must write it `groups/<path>`; anything unprefixed is a project path. `&N` therefore needs a
 group Profile, a bare `N` or `#N` needs a project Profile, and `%N` reads the milestones of
-whichever scope the Profile declared.
+whichever scope the Profile declared. If a Profile's `project:` names a group, rewrite it
+with the prefix — `project: acme/platform` becomes `project: groups/acme/platform` — or
+hostless `&N` Refs will fail with a message telling you the same thing. sitrep cannot detect
+this at config time: `acme/platform` is a perfectly valid project path.
 
 Native epics require Premium or Ultimate. On GitLab Free, a project or group milestone is the
 Epic fallback, with the same Watchlist renderers and Ticket drill-in. sitrep does not guess
