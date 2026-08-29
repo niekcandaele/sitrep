@@ -4,7 +4,7 @@ Watchlist  state=opened&labels=agent
 
 IN PROGRESS (3)
   #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req
+           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
   #113     Retry & backoff for the sync worker
            @mara-vos @tobias  #502 open ci FAIL review pending
   #7       Teach the gadget agent to speak sync v2

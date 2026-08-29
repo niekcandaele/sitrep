@@ -14,9 +14,11 @@
 //     Detail and decoded-Ticket documents remain schema v1.
 //   - Times are RFC 3339 in UTC.
 //   - tickets is always present and always an array, never null.
-//   - Optional strings and capability-gated arrays are omitted when empty. An
-//     undeclared Capability means the key is absent everywhere — absence is the
-//     normal, silent way to say "this Tracker does not do that".
+//   - Optional strings, counts and capability-gated arrays are omitted when
+//     empty. An undeclared Capability means the key is absent everywhere —
+//     absence is the normal, silent way to say "this Tracker does not do that",
+//     and it is also how an absent pull_request_total says "this Provider
+//     cannot tell you how many there are".
 //
 // Tickets are emitted flat, in Provider order, with a status field on each and
 // a computed progress block alongside. Grouping is presentation: it belongs to
@@ -108,6 +110,9 @@ type ticketDoc struct {
 	ParentID     model.TicketID       `json:"parent_id,omitempty"`
 	Assignees    []userDoc            `json:"assignees,omitempty"`
 	PullRequests []pullRequestDoc     `json:"pull_requests,omitempty"`
+	// PullRequestTotal is how many pull requests the Tracker says the Ticket
+	// has, present only when the serving Provider can supply a total.
+	PullRequestTotal int `json:"pull_request_total,omitempty"`
 }
 
 type selectorDoc struct {
@@ -390,6 +395,7 @@ func newTicketDoc(t model.Ticket, caps model.Capabilities) ticketDoc {
 		doc.Assignees = append(doc.Assignees, newUserDoc(a))
 	}
 	if caps.PullRequests {
+		doc.PullRequestTotal = t.PullRequestTotal
 		for _, pr := range t.PullRequests {
 			doc.PullRequests = append(doc.PullRequests, pullRequestDoc{
 				Number:     pr.Number,

@@ -47,6 +47,9 @@ type DetailHeader struct {
 	Assignees []model.User
 	// PullRequests are the pull requests moving the Ticket.
 	PullRequests []model.PullRequest
+	// PullRequestTotal is how many the Tracker says there are; zero when the
+	// serving Provider cannot supply a total.
+	PullRequestTotal int
 	// Repository is where the Ticket lives, e.g. "acme/widgets".
 	Repository string
 }
@@ -75,14 +78,15 @@ func DetailFromTicket(t model.Ticket, d model.Detail, caps model.Capabilities,
 	parent Header, fetchedAt time.Time) DetailInput {
 	return DetailInput{
 		Ticket: DetailHeader{
-			Key:          t.Key,
-			Title:        t.Title,
-			URL:          t.URL,
-			Status:       t.Status,
-			NativeStatus: t.NativeStatus,
-			Assignees:    t.Assignees,
-			PullRequests: t.PullRequests,
-			Repository:   t.Repository,
+			Key:              t.Key,
+			Title:            t.Title,
+			URL:              t.URL,
+			Status:           t.Status,
+			NativeStatus:     t.NativeStatus,
+			Assignees:        t.Assignees,
+			PullRequests:     t.PullRequests,
+			PullRequestTotal: t.PullRequestTotal,
+			Repository:       t.Repository,
 		},
 		Parent:       parent,
 		Detail:       d,

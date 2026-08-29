@@ -55,6 +55,12 @@ type Epic struct {
 	// PullRequests Capability; nil otherwise. Lead pull request first. Like
 	// Assignees it exists for the decoded Detail header only.
 	PullRequests []PullRequest
+	// PullRequestTotal is how many pull requests the Tracker says this node
+	// has, which can exceed len(PullRequests) when the Provider capped what it
+	// fetched. Zero means the serving Provider cannot supply a total, which is
+	// a normal state and never an error. Like PullRequests it is meaningful
+	// only when the Provider declares the PullRequests Capability.
+	PullRequestTotal int
 }
 
 // Parent is the parent Ticket a Ticket belongs to: enough to draw a breadcrumb
@@ -107,6 +113,12 @@ type Ticket struct {
 	// first, so a renderer showing a single pull request per row can take the
 	// first element.
 	PullRequests []PullRequest
+	// PullRequestTotal is how many pull requests the Tracker says this Ticket
+	// has, which can exceed len(PullRequests) when the Provider capped what it
+	// fetched. Zero means the serving Provider cannot supply a total, which is
+	// a normal state and never an error. Like PullRequests it is meaningful
+	// only when the Provider declares the PullRequests Capability.
+	PullRequestTotal int
 }
 
 // SelectorCapabilities declares which Watchlist subjects a Provider can

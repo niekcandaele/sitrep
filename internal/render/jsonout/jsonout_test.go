@@ -301,3 +301,66 @@ func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 		}
 	}
 }
+
+// pull_request_total is optional and Capability-gated, exactly like the
+// pull_requests array it annotates: present when the Provider can say how many
+// pull requests a Ticket has, absent when it cannot, and absent everywhere when
+// the Provider does not correlate pull requests at all. Neither schema_version
+// moves for it — a consumer that ignores the key is unaffected.
+func TestRenderWatchlistPullRequestTotalIsOptionalAndCapabilityGated(t *testing.T) {
+	ticketTotals := func(t *testing.T, raw []byte) map[string]*int {
+		t.Helper()
+
+		var doc struct {
+			Tickets []struct {
+				Key              string `json:"key"`
+				PullRequestTotal *int   `json:"pull_request_total"`
+			} `json:"tickets"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		totals := make(map[string]*int, len(doc.Tickets))
+		for _, ticket := range doc.Tickets {
+			totals[ticket.Key] = ticket.PullRequestTotal
+		}
+		return totals
+	}
+
+	render := func(t *testing.T, p *fake.Provider) []byte {
+		t.Helper()
+
+		snap, err := p.Resolve(context.Background(), provider.EpicSelector{Ref: ref.Ref{Raw: "111"}})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		snap.FetchedAt = generatedAt
+
+		var buf bytes.Buffer
+		if err := jsonout.RenderWatchlist(&buf, snap, provider.EpicSelector{Ref: ref.Ref{Raw: "111"}}, p.Name()); err != nil {
+			t.Fatalf("RenderWatchlist: %v", err)
+		}
+		return buf.Bytes()
+	}
+
+	withPullRequests := ticketTotals(t, render(t, fake.New()))
+
+	// #112 is the fixture's truncated Ticket: one pull request fetched, four
+	// reported by the Tracker.
+	if got := withPullRequests["#112"]; got == nil || *got != 4 {
+		t.Errorf("#112 pull_request_total = %v, want 4", got)
+	}
+	// #115 carries no pull requests at all, so there is no total to state.
+	if got := withPullRequests["#115"]; got != nil {
+		t.Errorf("#115 pull_request_total = %v, want the key to be absent", *got)
+	}
+
+	caps := model.Capabilities{Hierarchy: true, Comments: true, BlockingLinks: true}
+	caps.Selectors.Epic = true
+	withoutPullRequests := ticketTotals(t, render(t, fake.New(fake.WithCapabilities(caps))))
+	for key, total := range withoutPullRequests {
+		if total != nil {
+			t.Errorf("%s pull_request_total = %d without the PullRequests Capability, want the key to be absent", key, *total)
+		}
+	}
+}

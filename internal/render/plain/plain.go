@@ -298,9 +298,10 @@ func assigneeList(users []model.User) string {
 }
 
 // pullRequests renders the Ticket's lead pull request, with a count of the
-// rest so nothing is silently hidden. The Capability is the authority: when
-// the snapshot does not declare PullRequests nothing is emitted, even if the
-// Ticket somehow carries pull requests.
+// rest so nothing is silently hidden — including the ones the Provider never
+// fetched, when it can say how many there are. The Capability is the authority:
+// when the snapshot does not declare PullRequests nothing is emitted, even if
+// the Ticket somehow carries pull requests.
 func pullRequests(t model.Ticket, caps model.Capabilities) string {
 	if !caps.PullRequests || len(t.PullRequests) == 0 {
 		return ""
@@ -308,8 +309,8 @@ func pullRequests(t model.Ticket, caps model.Capabilities) string {
 	// Providers list the lead pull request first: the one that best represents
 	// the Ticket's current state.
 	summary := PullRequestSummary(t.PullRequests[0], t.Repository)
-	if rest := len(t.PullRequests) - 1; rest > 0 {
-		summary += fmt.Sprintf(" +%d more", rest)
+	if overflow := PullRequestOverflow(len(t.PullRequests), t.PullRequestTotal); overflow != "" {
+		summary += " " + overflow
 	}
 	return summary
 }

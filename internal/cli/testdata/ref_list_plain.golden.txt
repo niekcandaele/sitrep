@@ -4,7 +4,7 @@ Watchlist  4 tickets
 
 IN PROGRESS (1)
   #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req
+           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 TODO (1)
   #115     Reconcile widget IDs across shards

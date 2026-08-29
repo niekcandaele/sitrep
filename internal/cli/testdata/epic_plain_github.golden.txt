@@ -9,7 +9,7 @@ IN PROGRESS (8)
   #6               GitHub PR correlation
                    [open]  #20 draft ci ...
   #90              Ship the résumé & CV importer
-                   [open]  @alice @bob @carol  #103 open ci ok approved +2 more
+                   [open]  @alice @bob @carol  #103 open ci ok approved +33 more
   #95              Back off when GitHub says slow down
                    [open]  #104 open ci FAIL changes req
   #96              Approved but the pipeline exploded

@@ -1,6 +1,6 @@
 #111 · Widget sync v2                   current · never read
 #112  Draft the shard sync protocol
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 
 @mara-vos · 2026-01-13 08:30 UTC

@@ -1,6 +1,6 @@
                                                                                                  current · read just now
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 DESCRIPTION
 

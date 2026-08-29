@@ -1,6 +1,6 @@
 #111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #112  Draft the shard sync protocol                                        https://tracker.example.test/acme/widgets/112
-[In Review]  @mara-vos  #501 open ci ok changes req
+[In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
   length. Step 13 of the handshake, spelled out at length. Step 14 of the handshake, spelled out at length. Step 15 of
   the handshake, spelled out at length. Step 16 of the handshake, spelled out at length. Step 17 of the handshake,

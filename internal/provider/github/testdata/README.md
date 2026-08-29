@@ -38,6 +38,10 @@ request numbers and titles on the real children (#3 to #6) are the epic's real o
 rest are invented, because one healthy epic cannot contain every situation the driver has
 to survive at once.
 
+Only #90 carries a `totalCount`. Every other block omits it deliberately, so the recorded
+payload covers both paths: a truncated connection that knows its own size, and a Tracker
+answer with no total at all, which falls back to counting what was fetched.
+
 The shapes and what each one proves:
 
 | Ticket | pull requests | proves |
@@ -46,7 +50,7 @@ The shapes and what each one proves:
 | #5 | one `OPEN`, `REVIEW_REQUIRED`, `SUCCESS` | waiting on review; Ticket becomes InProgress |
 | #6 | one `OPEN` `isDraft: true`, `reviewDecision: null`, `PENDING` | the agent is coding |
 | #7, #92, #94 | `nodes: []` | nil `PullRequests`; #7 stays Todo |
-| #90 | `CLOSED`, then `MERGED`, then a newer `OPEN` | lead selection prefers merged |
+| #90 | `CLOSED`, then `MERGED`, then a newer `OPEN`, under `totalCount: 34` | lead selection prefers merged; a truncated connection reports the Tracker's own total, so the row counts thirty-three it does not show |
 | #91 | one `CLOSED` on a `NOT_PLANNED` Ticket | stays Cancelled, stays out of the denominator |
 | #93 | `closedByPullRequestsReferences: null` | the whole connection can be absent |
 | #95 | one `OPEN`, `CHANGES_REQUESTED`, `FAILURE` | changes requested and red checks |
@@ -133,7 +137,7 @@ gh api graphql -f query='{ __type(name:"Issue") { fields { name } } }' | grep -i
 
 | Fixture | proves |
 |---|---|
-| `ticket_with_parent.json` | no Tickets, a same-repo parent keyed `#2`, and the root issue's own assignees and open pull request landing on the Epic |
+| `ticket_with_parent.json` | no Tickets, a same-repo parent keyed `#2`, and the root issue's own assignees and open pull request landing on the Epic, whose `totalCount: 12` proves the total rides onto the Epic too |
 | `ticket_cross_repo_parent.json` | a parent in another repository keyed `owner/repo#N`, with a null `closedByPullRequestsReferences` and no assignees |
 | `ticket_no_parent.json` | `parent: null` — a Ticket that hangs off nothing, which is an ordinary state and not an error |
 

@@ -19,10 +19,11 @@ import (
 type pullRequestConnection struct {
 	// TotalCount is how many closing pull requests the Ticket has, which can be
 	// more than Nodes holds: the query caps the connection at twenty and does
-	// not paginate it (see query.go), so a Ticket with more than twenty shows
-	// twenty of them and loses the rest silently. TotalCount is decoded so that
-	// a renderer could say "showing 20 of 34" — and **nothing renders it
-	// today**. Reporting the truncation to the user is separate work.
+	// not paginate it (ADR-0003 keeps one Resolve to a bounded set of requests;
+	// see query.go), so a Ticket with more than twenty is served twenty of
+	// them. pullRequestTotal turns TotalCount into model.Ticket's
+	// PullRequestTotal, which is what the "+N more" fragment counts from, so
+	// the truncation is stated rather than implied away.
 	TotalCount int               `json:"totalCount"`
 	Nodes      []pullRequestNode `json:"nodes"`
 }
@@ -142,6 +143,31 @@ func newPullRequests(
 		created = append(created, candidate.CreatedAt)
 	}
 	return leadFirst(prs, created)
+}
+
+// pullRequestTotal reports how many pull requests the Ticket has, for the
+// renderers that count the ones a row does not show. prs is the union
+// newPullRequests returned, and a nil closing connection contributes nothing.
+//
+// The two connections cannot simply be added: the timeline one counts Issue
+// sources the mapper ignores and double-counts pull requests the closing one
+// already carried. So the answer is the larger of GitHub's own closing count
+// and what the union actually holds:
+//
+//   - nothing truncated: closing.TotalCount == len(closing.Nodes) <= len(prs),
+//     so the total is len(prs) and every row reads exactly as it did before;
+//   - the closing connection truncated at twenty of thirty-four: the total is
+//     thirty-four, which is the fact worth reporting;
+//   - truncated and the cross-reference path contributed extra pull requests:
+//     the total is an honest lower bound — never above GitHub's own count and
+//     never below what is held — rather than a guess at the union's true size;
+//   - no pull requests at all: zero, the model's documented "no total".
+func pullRequestTotal(closing *pullRequestConnection, prs []model.PullRequest) int {
+	total := 0
+	if closing != nil {
+		total = closing.TotalCount
+	}
+	return max(total, len(prs))
 }
 
 func stablePullRequestIdentity(n pullRequestNode) (string, bool) {

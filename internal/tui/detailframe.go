@@ -243,14 +243,15 @@ func renderBreadcrumb(parent Header, width int, s Styles) string {
 // not describe itself differently one keystroke apart.
 func detailMetaTicket(h DetailHeader) model.Ticket {
 	return model.Ticket{
-		Key:          h.Key,
-		Title:        h.Title,
-		URL:          h.URL,
-		Status:       h.Status,
-		NativeStatus: h.NativeStatus,
-		Assignees:    h.Assignees,
-		PullRequests: h.PullRequests,
-		Repository:   h.Repository,
+		Key:              h.Key,
+		Title:            h.Title,
+		URL:              h.URL,
+		Status:           h.Status,
+		NativeStatus:     h.NativeStatus,
+		Assignees:        h.Assignees,
+		PullRequests:     h.PullRequests,
+		PullRequestTotal: h.PullRequestTotal,
+		Repository:       h.Repository,
 	}
 }
 

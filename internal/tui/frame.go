@@ -221,8 +221,9 @@ func assignees(users []model.User) string {
 }
 
 // pullRequest renders the Ticket's lead pull request, with a count of the rest
-// so nothing is silently hidden. The Capability is the authority: without it
-// nothing is emitted at all — no error, no placeholder.
+// so nothing is silently hidden — including the ones the Provider never
+// fetched, when it can say how many there are. The Capability is the authority:
+// without it nothing is emitted at all — no error, no placeholder.
 func pullRequest(t model.Ticket, caps model.Capabilities, s Styles) string {
 	if !caps.PullRequests || len(t.PullRequests) == 0 {
 		return ""
@@ -230,8 +231,8 @@ func pullRequest(t model.Ticket, caps model.Capabilities, s Styles) string {
 	lead := t.PullRequests[0]
 	style := s.pullRequest(lead)
 	summary := renderHyperlink(style, plain.PullRequestSummary(lead, t.Repository), lead.URL)
-	if rest := len(t.PullRequests) - 1; rest > 0 {
-		summary += style.Render(fmt.Sprintf(" +%d more", rest))
+	if overflow := plain.PullRequestOverflow(len(t.PullRequests), t.PullRequestTotal); overflow != "" {
+		summary += style.Render(" " + overflow)
 	}
 	return summary
 }
