@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -405,6 +406,16 @@ func truncateBlock(block string, width int) string {
 // dangling escape sequence that bleeds colour down the screen. Nothing this
 // package emits may be wider than the terminal — a line that wraps would
 // silently break the window arithmetic above it.
+// plural picks the wording for a count. "1 nodes" and "1 Tickets' Links" are
+// the common cases on a small Watchlist, which is where a screen most needs to
+// read as if someone wrote it.
+func plural(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return strconv.Itoa(n) + " " + plural
+}
+
 func truncateLine(line string, width int) string {
 	if width <= 0 {
 		return ""

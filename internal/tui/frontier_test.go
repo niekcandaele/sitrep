@@ -281,6 +281,63 @@ func TestFrontierIgnoresListFilters(t *testing.T) {
 	}
 }
 
+// An overflow indicator says "there is more that way". Punched into a card's
+// border it says that and also unmakes the card, so it takes the nearest blank
+// cell on its edge instead — and where the edge is full it is dropped, because
+// the footer's scroll position reports the same fact.
+func TestFrontierOverflowGlyphsNeverOverwriteContent(t *testing.T) {
+	// A canvas whose top row is entirely card border and whose bottom row has
+	// exactly one blank cell, off the midpoint.
+	full := make([]frontierCell, 8)
+	for i := range full {
+		full[i] = frontierCell{r: '─'}
+	}
+	bottom := append([]frontierCell(nil), full...)
+	bottom[1] = frontierCell{r: ' '}
+	l := frontierLayout{cells: [][]frontierCell{full, bottom, full}, width: 8, height: 3}
+
+	got := frontierOverflowGlyphs(l, nil, 0, 1, 8, 2)
+
+	if len(got) != 1 {
+		t.Fatalf("placed %v, want only the ▲ the free cell can carry", got)
+	}
+	if glyph, ok := got[[2]int{1, 0}]; !ok || glyph != '▲' {
+		t.Errorf("placed %v, want ▲ on the one blank cell at x=1", got)
+	}
+}
+
+// A zero-width rune modifies the cell before it rather than claiming a column
+// of its own. Dropping it silently rewrites the Tracker's text: "café" on a
+// card must be the bytes the list row draws.
+func TestFrontierCardsKeepCombiningMarks(t *testing.T) {
+	// "cafe" plus a combining acute: the mark is zero-width and claims no
+	// column of its own, which is exactly what the canvas used to drop.
+	const title = "café latency"
+	tickets := []model.Ticket{{ID: "T-1", Key: "#1", Title: title, Status: model.StatusTodo}}
+	m := frontierMouseModel(t, tickets, nil, 120, 30)
+
+	if !strings.Contains(m.View().Content, title) {
+		t.Errorf("the card dropped the combining mark:\n%s", m.View().Content)
+	}
+}
+
+// jsonout walks members positionally because a Ref-list Watchlist may name the
+// same Ticket twice. The Frontier is a graph, where one Ticket is one node: a
+// second card would give nodeAt and columnOf two answers and one winner, so
+// clicks and focus would reach a card the eye is not on.
+func TestFrontierDrawsOneNodePerTicket(t *testing.T) {
+	ticket := model.Ticket{ID: "T-1", Key: "#1", Title: "twice", Status: model.StatusTodo}
+	m := frontierMouseModel(t, []model.Ticket{ticket, ticket}, nil, 120, 30)
+
+	if n := len(m.frontier.layout.order); n != 1 {
+		t.Errorf("the canvas carries %d nodes for one Ticket named twice: %v",
+			n, m.frontier.layout.order)
+	}
+	if strings.Count(m.View().Content, "#1") != 1 {
+		t.Errorf("the Ticket was drawn twice:\n%s", m.View().Content)
+	}
+}
+
 // A canvas bigger than the terminal scrolls rather than reflowing: the card
 // width is fixed, and the edges say where there is more.
 func TestFrontierNarrowTerminalScrolls(t *testing.T) {
@@ -317,7 +374,7 @@ func TestFrontierNarrowTerminalScrolls(t *testing.T) {
 			t.Errorf("line width = %d, want at most %d: %q", w, width, line)
 		}
 	}
-	if !strings.Contains(string(got), "col ") {
+	if !strings.Contains(string(got), "x ") {
 		t.Errorf("no scroll position is reported on a canvas larger than the body:\n%s", got)
 	}
 }

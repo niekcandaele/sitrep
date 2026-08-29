@@ -2,39 +2,39 @@
 frontier · 16 nodes · 3 ghosts · 3 actionable                                                                   just now
 
 ┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌─────────────────────────
-│  #205                Done│┼────▶┃▸ #201                Todo┃─▶│  #202                Todo│─▶│  #207         In Progres
-│Compute shard weights     ││     ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu
-│                          ││     ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1
-└──────────────────────────┘│     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └─────────────────────────
-                            │
-┌──────────────────────────┐│     ┌──────────────────────────┐
-│  #206           Cancelled│┘┌───▶│  #203                Todo│
-│Legacy weight table       │ │    │Backfill shard weights    │
-│                          │ │    │blocked by 1              │
-└──────────────────────────┘ │    └──────────────────────────┘
+│  #205                Done│─┼───▶┃▸ #201                Todo┃─▶│  #202                Todo│─▶│  #207         In Progres
+│Compute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu
+│                          │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1
+└──────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └─────────────────────────
                              │
-╔══════════════════════════╗ │    ┌──────────────────────────┐
-║  #208                Todo║ │┌──▶│  #204                Todo│
-║Split the rebalancer queue║ ││   │Drain a shard safely      │
-║CYCLE                     ║ ││   │UNVERIFIED                │
-╚══════════════════════════╝ ││   └──────────────────────────┘                                                         ›
-                             ││
-╔══════════════════════════╗ ││   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-║  #209                Todo║ ││┌─▶┃  #213                Todo┃
-║Merge the rebalancer queue║ │││  ┃Rotate rebalancer credent…┃
-║CYCLE                     ║ │││  ┃ACTIONABLE                ┃
-╚══════════════════════════╝ │││  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-                             │││
-╔══════════════════════════╗ │││
-║  #210                Todo║ │││
-║Deduplicate shard moves   ║ │││
-║CYCLE                     ║ │││
-╚══════════════════════════╝ │││
-                             │││
-┌──────────────────────────┐ │││
-│  #211                Todo│ │││                            ▼
-                                                                                                      col 0/2 · row 0/28
+┌──────────────────────────┐ │    ┌──────────────────────────┐
+│  #206           Cancelled│─┘┌──▶│  #203                Todo│
+│Legacy weight table       │  │   │Backfill shard weights    │
+│                          │  │   │blocked by 1              │
+└──────────────────────────┘  │   └──────────────────────────┘
+                              │
+╔══════════════════════════╗  │   ┌──────────────────────────┐
+║  #208                Todo║  │┌─▶│  #204                Todo│
+║Split the rebalancer queue║  ││  │Drain a shard safely      │
+║CYCLE                     ║  ││  │UNVERIFIED                │
+╚══════════════════════════╝  ││  └──────────────────────────┘                                                         ›
+                              ││
+╔══════════════════════════╗  ││  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+║  #209                Todo║  ││┌▶┃  #213                Todo┃
+║Merge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
+║CYCLE                     ║  │││ ┃ACTIONABLE                ┃
+╚══════════════════════════╝  │││ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                              │││
+╔══════════════════════════╗  │││
+║  #210                Todo║  │││
+║Deduplicate shard moves   ║  │││
+║CYCLE                     ║  │││
+╚══════════════════════════╝  │││
+                              │││
+┌──────────────────────────┐  │││
+│  #211                Todo│  │││                           ▼
+                                                                                                          x 0/2 · y 0/28
 filters do not apply here: the Frontier renders the whole Watchlist
-1 Tickets' Links could not be read; anything they block is not Actionable
-fake: no detail for ticket "acme/widgets#211"
-m off · shift-drag to select text • enter open Ticket • v list • ↑/k up • ↓/j down • ←/h blockers • →/l dependents …
+1 Ticket's Links could not be read; anything they block is not Actionable
+read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
+m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down
