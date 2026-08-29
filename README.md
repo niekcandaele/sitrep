@@ -184,11 +184,12 @@ navigation.
 
 Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
 renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
-Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — the only
-bulk per-Ticket read sitrep does, which is why it shows a progress count and why `esc`
-interrupts it — and Details already read this session are reused. Colour carries the Status
-Category, exactly as it does on the list, while border weight and a badge word carry whether
-a Ticket is Actionable or blocked, so an in-progress Ticket that is also blocked shows both.
+Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — a bulk
+per-Ticket read, which is why it shows a progress count and why `esc` interrupts it
+(`--json --links` is the other one) — and Details already read this session are reused.
+Colour carries the Status Category, exactly as it does on the list, while border weight and
+a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
+is also blocked shows both.
 A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
 never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
 whose Links could not be read is marked unverified, which leaves anything it blocks not
@@ -613,9 +614,9 @@ schema-v3 Selector Capability object), plus:
 | `links[].kind` | `relates`, `blocked_by`, `blocks` |
 
 Compatibility is per document schema. Additive optional fields do not require a bump. A
-breaking Watchlist change increments schema v3; an unchanged decoded Ticket/Detail document
-remains schema v1. Consumers should pin the schema version for the document family they read
-and ignore unknown keys.
+breaking Watchlist change increments the Watchlist schema version; an unchanged decoded
+Ticket/Detail document remains schema v1. Consumers should pin the schema version for the
+document family they read and ignore unknown keys.
 
 Watchlist v3 is a deliberate exception to that additive rule. The `--links` fields are
 additive, but they make the Watchlist field set *invocation-dependent*, so the version is

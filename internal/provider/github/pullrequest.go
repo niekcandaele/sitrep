@@ -155,7 +155,7 @@ func newPullRequests(
 // and what the union actually holds:
 //
 //   - nothing truncated: closing.TotalCount == len(closing.Nodes) <= len(prs),
-//     so the total is len(prs) and every row reads exactly as it did before;
+//     so the total is len(prs), the number of pull requests actually held;
 //   - the closing connection truncated at twenty of thirty-four: the total is
 //     thirty-four, which is the fact worth reporting;
 //   - truncated and the cross-reference path contributed extra pull requests:

@@ -11,9 +11,10 @@ import (
 
 // completeBlockingProvider serves the blocking Watchlist with a Detail for
 // every member, including #211, whose Detail the shared fixture deliberately
-// omits so that its read fails. That failure is #68/#69's case and
-// TestOneUnreadableDetailKeepsTheListCold still depends on it, so the complete
-// fixture is composed here rather than in internal/provider/fake.
+// omits so that its read fails. That failure is what keeps the list cold when
+// one Detail is unreadable, and TestOneUnreadableDetailKeepsTheListCold depends
+// on it, so the complete fixture is composed here rather than in
+// internal/provider/fake.
 //
 // #211's Detail is read and carries no Links, which is the tri-state's other
 // side: known, and genuinely unblocked.

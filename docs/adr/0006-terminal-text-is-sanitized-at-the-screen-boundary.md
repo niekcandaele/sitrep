@@ -44,8 +44,7 @@ have no intake of their own and rely on their only production caller sanitizing
 at the Provider seam. Giving them one is a follow-up, not a defect of this
 decision.
 
-The rule this decision anticipated has since landed where it said it would:
-`Line` and `Body` now balance bidirectional scopes, so a control opened in a
+`Line` and `Body` also balance bidirectional scopes, so a control opened in a
 field is terminated in it and a terminator that closes nothing is dropped.
 Balanced text — legitimate Hebrew and Arabic — crosses the boundary
 byte-identical, because the scopes are contained rather than removed. One

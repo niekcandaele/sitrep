@@ -33,8 +33,8 @@
 // Here, in Line and Body, and nowhere else. A rule that has to hold for every
 // terminal-visible field lives in these two functions, because every such
 // field crosses one of them exactly once — balancing unterminated
-// bidirectional overrides, which Balance implements, is the rule this
-// paragraph once anticipated. The one obligation that falls outside them is on
+// bidirectional overrides, which Balance implements, is one such rule. The one
+// obligation that falls outside them is on
 // a renderer that cuts text: cutting can drop an appended terminator, so it
 // re-balances what it cut with Balance rather than owning a policy of its own.
 package termtext
