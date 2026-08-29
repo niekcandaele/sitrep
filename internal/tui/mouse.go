@@ -9,9 +9,14 @@ import (
 )
 
 const (
-	doubleClickInterval        = 500 * time.Millisecond
-	mouseEnabledHelp           = "off · shift-drag to select text"
-	mouseEnabledCompactHelp    = "off, shift-drag"
+	doubleClickInterval = 500 * time.Millisecond
+	// Every footer item names what its key does, and so do these: "m off" with
+	// capture on parses as "the mouse is off", which is the opposite of both
+	// the state and the effect of pressing m.
+	mouseEnabledHelp           = "release · shift-drag to select text"
+	mouseEnabledCompactHelp    = "release, shift-drag"
+	mouseEnabledTerseHelp      = "release/⇧drag"
+	mouseDisabledHelp          = "capture"
 	searchMouseHintHelp        = "to select text"
 	searchMouseHintCompactHelp = "select text"
 )
@@ -336,14 +341,14 @@ func (m Model) syncMouseKeys() Model {
 		m.searchKeys.MouseHint.SetEnabled(true)
 		return m
 	}
-	m.keys.ToggleMouse.SetHelp("m", "on")
+	m.keys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
 	m.keys.MouseSelect.SetEnabled(false)
 	m.keys.MouseOpen.SetEnabled(false)
 	m.keys.MouseWheel.SetEnabled(false)
-	m.detailKeys.ToggleMouse.SetHelp("m", "on")
+	m.detailKeys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
 	m.detailKeys.MouseWheel.SetEnabled(false)
 	m.detailKeys.MouseFollow.SetEnabled(false)
-	m.frontierKeys.ToggleMouse.SetHelp("m", "on")
+	m.frontierKeys.ToggleMouse.SetHelp("m", mouseDisabledHelp)
 	m.frontierKeys.MouseSelect.SetEnabled(false)
 	m.frontierKeys.MouseOpen.SetEnabled(false)
 	m.frontierKeys.MouseWheel.SetEnabled(false)

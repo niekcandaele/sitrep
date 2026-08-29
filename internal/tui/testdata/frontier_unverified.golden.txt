@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 13 nodes · 0 ghosts · 0 actionable                                                                   just now
+frontier · 13 nodes · actionable unknown                                                                        just now
 
 ┌──────────────────────────┐
 │▸ #201                Todo│
@@ -34,7 +34,7 @@ frontier · 13 nodes · 0 ghosts · 0 actionable                                
 ┌──────────────────────────┐
 │  #206           Cancelled│
 │Legacy weight table       │                                ▼
-                                                                                                                  y 0/45
+
 13 Tickets' Links could not be read; anything they block is not Actionable
 read failed: tracker said no — press r to retry the Tickets that failed
-m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 0/45

@@ -37,4 +37,4 @@ Press r to try again, esc to go back.
 
 
 
-m off · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh
+m release · shift-drag to select text • esc back • q quit • u watchlist • ? help • ↑/k up • ↓/j down • r refresh

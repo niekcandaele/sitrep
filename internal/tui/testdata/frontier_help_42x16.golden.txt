@@ -1,0 +1,22 @@
+#200  Shard rebalancer rollout
+frontier · 16 nodes · 3 ghosts ·… just now
+
+───────────┐ ▼┌──────────────────────────┐
+                          x 80/80 · y 0/59
+1 Ticket's Links could not be read; anyth…
+read failed: fake: no detail for ticket "…
+m            release, shift-drag
+click        select node
+double-click open Ticket
+wheel        scroll
+enter        open Ticket
+v/esc        list
+r            re-read Details
+?            help
+q            quit
+↑/k          previous node
+↓/j          next node
+←/h          blocker side
+→/l          dependent side
+g            first node
+G            last node

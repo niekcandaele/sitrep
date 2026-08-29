@@ -100,10 +100,11 @@ func suppressedStatusDetails() map[model.TicketID]model.Detail {
 	return details
 }
 
-// The Detail header meta line obeys the same suppression rule as the list row
-// it was opened from — a Ticket must not describe itself differently one
-// keystroke apart — while the LINKS table below it keeps every tag, because no
-// Status Category heading supplies that context there.
+// The Detail header meta line draws plain.StatusField: no Status Category
+// heading stands above it, so a status the list row suppresses as redundant is
+// still the only status signal here, and a [Todo] on this line is the rule
+// working rather than the suppression failing. The LINKS table keeps every tag
+// for the same reason.
 func TestDetailFrameSuppressedNativeStatus(t *testing.T) {
 	p := fake.New(fake.WithDetails(suppressedStatusDetails()))
 	s := startBoth(t, p, newClock(), time.Minute)

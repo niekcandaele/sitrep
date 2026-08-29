@@ -61,12 +61,5 @@ func actionableMarkers(tickets []model.Ticket, links map[model.TicketID][]model.
 // hiding a row deletes an edge, and a deleted edge can make a blocked Ticket
 // look Actionable (CONTEXT.md).
 func (m Model) listMarkers() listMarkers {
-	// The same guard actionableMarkers opens with, repeated here because Go
-	// evaluates arguments first: linksFromCache builds two maps sized to the
-	// whole Detail cache, on every rendered frame, before the callee can
-	// early-return on a Provider that reports no blocking links at all.
-	if !m.input.Capabilities.BlockingLinks || len(m.input.Tickets) == 0 {
-		return listMarkers{}
-	}
 	return actionableMarkers(m.input.Tickets, m.linksFromCache(), m.input.Capabilities)
 }

@@ -382,7 +382,7 @@ func TestRenderBreadcrumb(t *testing.T) {
 		parent Header
 		want   string
 	}{
-		{"a collection", Header{Key: "#111", Title: "Widget sync v2"}, "#111 · Widget sync v2"},
+		{"a Watchlist", Header{Key: "#111", Title: "Widget sync v2"}, "#111 · Widget sync v2"},
 		{"no parent at all", Header{}, ""},
 		{"a title with no key", Header{Title: "Everything assigned to @tobias"}, "Everything assigned to @tobias"},
 		{"a key with no title", Header{Key: "#111"}, "#111"},

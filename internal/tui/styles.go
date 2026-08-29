@@ -139,7 +139,7 @@ func DefaultStyles(isDark bool) Styles {
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
 		FrontierBold:    base.Foreground(text).Bold(true),
-		FrontierFaint:   base.Foreground(dim).Faint(true),
+		FrontierFaint:   base.Foreground(dim),
 		Actionable:      base.Foreground(text).Bold(true),
 	}
 }

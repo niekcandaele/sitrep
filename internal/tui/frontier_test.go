@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,11 @@ func TestFrontierFrame(t *testing.T) {
 		t.Errorf("mode = %v, want the Frontier", m.mode)
 	}
 	frame := string(got)
+	// The other spelling of the same header field: a Watchlist where some
+	// member's Links were readable gets a number, and it counts only those.
+	if !strings.Contains(frame, separator+"3 actionable") {
+		t.Errorf("the header does not carry a computed Actionable count:\n%s", frame)
+	}
 	for _, want := range []string{"ACTIONABLE", "blocked by 1", "CYCLE", "UNVERIFIED"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("the frame is missing %q:\n%s", want, frame)
@@ -175,6 +181,12 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 	if !strings.Contains(frame, "13 Tickets' Links could not be read") {
 		t.Errorf("the footer does not name the failure count:\n%s", frame)
 	}
+	// "0 actionable" is a computed answer. A Frontier where nothing could be
+	// computed must not render byte-identically to one where every Ticket is
+	// genuinely blocked.
+	if !strings.Contains(frame, "actionable unknown") {
+		t.Errorf("the header claims an Actionable count it could not compute:\n%s", frame)
+	}
 	if strings.Contains(frame, "ACTIONABLE") {
 		t.Errorf("something looked Actionable with no Links verified:\n%s", frame)
 	}
@@ -215,8 +227,8 @@ func TestFrontierFetchIsInterruptible(t *testing.T) {
 	if m.mode != modeList {
 		t.Errorf("mode = %v, want the list", m.mode)
 	}
-	if m.frontier.done != 0 || m.frontier.failed != 0 {
-		t.Errorf("a stale answer landed: done %d failed %d", m.frontier.done, m.frontier.failed)
+	if m.frontier.done != 0 || len(m.frontier.failed) != 0 {
+		t.Errorf("a stale answer landed: done %d failed %v", m.frontier.done, m.frontier.failed)
 	}
 }
 
@@ -314,7 +326,7 @@ func TestFrontierOverflowGlyphsNeverOverwriteContent(t *testing.T) {
 // card must be the bytes the list row draws.
 func TestFrontierCardsKeepCombiningMarks(t *testing.T) {
 	// "cafe" plus a combining acute: the mark is zero-width and claims no
-	// column of its own, which is exactly what the canvas used to drop.
+	// column of its own, so a width-counting canvas can silently discard it.
 	const title = "café latency"
 	tickets := []model.Ticket{{ID: "T-1", Key: "#1", Title: title, Status: model.StatusTodo}}
 	m := frontierMouseModel(t, tickets, nil, 120, 30)
@@ -379,6 +391,18 @@ func TestFrontierNarrowTerminalScrolls(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "x ") {
 		t.Errorf("no scroll position is reported on a canvas larger than the body:\n%s", got)
+	}
+	// The one-line footer is cut from the right, so the order it is written in
+	// is the order it survives in. These three are what a reader needs when the
+	// screen is not doing what they expected — and r is the only remedy for the
+	// failure banner this frame draws directly above the footer. Asserted here
+	// so a -update run cannot accept their loss silently.
+	footer := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
+	last := footer[len(footer)-1]
+	for _, want := range []string{"q quit", "r re-read Details", "? help"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("the %d-column footer dropped %q: %q", width, want, last)
+		}
 	}
 }
 
@@ -862,9 +886,10 @@ func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
 	}
 }
 
-// The other half of the same defect: an answer the screen no longer wants was
-// discarded entirely, so a re-entered Frontier paid the Tracker again for a read
-// that had already been made. The abandoned seat's bookkeeping still stays out.
+// An answer for an abandoned fan-out generation is still a real Detail: the
+// read was paid for, so it warms the session cache and a re-entered Frontier
+// plans around it instead of asking the Tracker again. The abandoned seat's own
+// bookkeeping stays out, because that seat is gone.
 func TestAnAbandonedFanOutAnswerStillWarmsTheCache(t *testing.T) {
 	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
 	in := ListInput{
@@ -989,5 +1014,452 @@ func TestFrontierWheelScrollsTheCanvas(t *testing.T) {
 	}
 	if m.frontier.focusID != focus {
 		t.Errorf("the wheel moved focus to %q", m.frontier.focusID)
+	}
+}
+
+// blockingSnapshotSwapping returns the blocking fixture with one member dropped
+// and one appended, which is the shape a refresh has to survive: a node
+// arrives, a node leaves.
+func blockingSnapshotSwapping(t *testing.T, drop model.TicketID, add model.Ticket) model.WatchlistSnapshot {
+	t.Helper()
+	s := fake.FixtureBlockingSnapshot()
+	kept := make([]model.Ticket, 0, len(s.Tickets))
+	for _, member := range s.Tickets {
+		if member.ID != drop {
+			kept = append(kept, member)
+		}
+	}
+	if len(kept) == len(s.Tickets) {
+		t.Fatalf("%s is not in the fixture, so this test proves nothing", drop)
+	}
+	s.Tickets = append(kept, add)
+	return s
+}
+
+// addedMember is deliberately absent from FixtureBlockingDetails: a member a
+// refresh introduces has no Links until somebody reads them.
+var addedMember = model.Ticket{
+	ID:           "acme/widgets#214",
+	Key:          "#214",
+	Title:        "Audit the rebalancer rollout",
+	URL:          "https://tracker.example.test/acme/widgets/214",
+	Status:       model.StatusTodo,
+	NativeStatus: "open",
+	Repository:   "acme/widgets",
+}
+
+// ADR-0003 Amendment 4: a whole-Watchlist Detail fan-out is permitted only in
+// response to an explicit user action. The --interval heartbeat is not one, so
+// a refresh landing with the Frontier open re-seats the screen and issues
+// nothing — a member the refresh introduced stays UNVERIFIED until r.
+func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
+	after := blockingSnapshotSwapping(t, "acme/widgets#213", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+
+	fetched := p.DetailCalls()
+	if fetched == 0 {
+		t.Fatal("the fan-out fetched nothing, so a fan-out on refresh would be invisible here")
+	}
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, "15 nodes"+separator+"2 ghosts")
+	m, got := s.finish(t)
+
+	if n := p.DetailCalls(); n != fetched {
+		t.Errorf("DetailCalls = %d, want the fan-out's %d: a refresh must fan out no Detail", n, fetched)
+	}
+	if _, drawn := m.frontier.layout.nodeAt[addedMember.ID]; !drawn {
+		t.Error("the member the refresh added is not on the canvas")
+	}
+	if _, drawn := m.frontier.layout.nodeAt["acme/widgets#213"]; drawn {
+		t.Error("the member the refresh removed is still on the canvas")
+	}
+	if _, seated := m.frontier.input.Links[addedMember.ID]; seated {
+		t.Error("the added member has Links, so something fetched them off a timer")
+	}
+	if !strings.Contains(string(got), "UNVERIFIED") {
+		t.Error("the frame claims every member is verified after a refresh introduced one that is not")
+	}
+}
+
+// The re-seat preserves where the reader was. A Watchlist that changed shape
+// under them must not also move the window and the focus.
+func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
+	// #212 leaves rather than #213, so the node G lands on survives the refresh
+	// and preserving focus is what the assertion below can see.
+	after := blockingSnapshotSwapping(t, "acme/widgets#212", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	s.tm.Send(keyPress("G"))
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, separator+"2 actionable")
+	m, _ := s.finish(t)
+
+	if m.frontier.focusID != "acme/widgets#403" {
+		t.Errorf("focus = %q after the refresh, want the node G left it on", m.frontier.focusID)
+	}
+	if m.frontier.offsetX == 0 && m.frontier.offsetY == 0 {
+		t.Fatal("the window sat at the canvas origin, so preserving the offsets proves nothing")
+	}
+	if _, drawn := m.frontier.layout.nodeAt[m.frontier.focusID]; !drawn {
+		t.Errorf("focus = %q after the refresh, which is not a node on the canvas", m.frontier.focusID)
+	}
+}
+
+// The re-seat advances the generation, so an answer in flight for the previous
+// reading is dropped rather than seated onto a Watchlist that has moved under
+// it. The read is still real, so it warms the session cache.
+func TestFrontierRefreshDropsAnInFlightAnswer(t *testing.T) {
+	release := make(chan struct{})
+	// Nothing leaves here: with every read still held there are no Links and so
+	// no Ghosts, and one added node is the only thing that moves the counts.
+	after := fake.FixtureBlockingSnapshot()
+	after.Tickets = append(after.Tickets, addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: blockedDetailSource(release, TicketDetailSource(p)),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "reading Detail")
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, "14 nodes")
+	close(release)
+	waitUntil(t, "every held read to answer", func() bool {
+		return p.DetailCalls() == detailfanout.Parallelism
+	})
+	m, _ := s.finish(t)
+
+	if m.frontier.done != 0 {
+		t.Errorf("the re-seated Frontier counted %d answers from the reading it replaced", m.frontier.done)
+	}
+	if len(m.frontier.input.Links) != 0 {
+		t.Errorf("the re-seated Frontier seated %d Links from the reading it replaced",
+			len(m.frontier.input.Links))
+	}
+	if len(m.details) == 0 {
+		t.Error("the answers were dropped from the session cache too, so the reads were wasted")
+	}
+}
+
+// An exact Ref list may name one Ticket twice. The canvas draws one card for
+// it, so a header counting the graph's positional member rows would claim more
+// Actionable Tickets than there are cards to point at.
+func TestFrontierHeaderCountsCardsNotMemberRows(t *testing.T) {
+	snap := fake.FixtureBlockingSnapshot()
+	snap.Tickets = append(snap.Tickets, snap.Tickets[0])
+	p := fake.New(fake.WithSnapshot(snap), fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	m, got := s.finish(t)
+
+	want := "16 nodes" + separator + "3 ghosts" + separator + "3 actionable"
+	if !strings.Contains(string(got), want) {
+		t.Errorf("the header does not read %q:\n%s", want, string(got))
+	}
+	if n := len(m.frontier.layout.order); n != 16 {
+		t.Errorf("the canvas drew %d nodes, so the count above is asserting the wrong thing", n)
+	}
+}
+
+// Adoption credits the Ticket it seated and nothing else. With more members
+// than detailfanout.Parallelism a Ticket can still be queued when its Detail is
+// read by hand, and a bare failure count cannot tell which Ticket it is
+// clearing: it would absolve one that really did fail, dropping the footer's
+// count and its "press r to retry" line while that card still says UNVERIFIED.
+//
+// The keyboard cannot reach this interleaving deterministically, so it is
+// driven through the state the two paths share.
+func TestAdoptCachedLinksCreditsOnlyTheTicketItSeats(t *testing.T) {
+	const failed = model.TicketID("acme/widgets#211")
+	const queued = model.TicketID("acme/widgets#212")
+	m := Model{
+		details: map[model.TicketID]detailEntry{
+			queued: {detail: model.Detail{TicketID: queued}},
+		},
+		frontier: frontierState{
+			input: FrontierInput{
+				Tickets:      []model.Ticket{{ID: failed}, {ID: queued}},
+				Capabilities: model.Capabilities{BlockingLinks: true},
+			},
+			failed:  map[model.TicketID]struct{}{failed: {}},
+			lastErr: errors.New("tracker said no"),
+		},
+	}
+
+	m = m.adoptCachedLinks()
+
+	if _, seated := m.frontier.input.Links[queued]; !seated {
+		t.Error("the hand-read Ticket's Links were not adopted")
+	}
+	if _, still := m.frontier.failed[failed]; !still {
+		t.Errorf("adopting %s cleared the failure for %s, which never succeeded", queued, failed)
+	}
+	if m.frontier.lastErr == nil {
+		t.Error("the retry line went away while a Ticket's Links are still unread")
+	}
+
+	// Seating the Ticket that actually failed is what clears it, and emptying
+	// the set is what clears the error.
+	m.details[failed] = detailEntry{detail: model.Detail{TicketID: failed}}
+	m = m.adoptCachedLinks()
+	if len(m.frontier.failed) != 0 {
+		t.Errorf("failed = %v after every Ticket was seated, want empty", m.frontier.failed)
+	}
+	if m.frontier.lastErr != nil {
+		t.Error("the retry line survived every Ticket being read")
+	}
+}
+
+// The Frontier's expanded help is the only place its graph vocabulary is
+// written down, and nothing rendered it. Two sizes: a normal terminal, and one
+// small enough that model.go's keys.(KeyMap) type assertion fails and a
+// FrontierKeyMap goes down the generic stacking branch instead of the list's
+// compact one.
+func TestFrontierExpandedHelp(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		width, height int
+		golden        string
+		// wants is the graph vocabulary the panel has room for. A terminal too
+		// short for the whole listing still has to name the keys it does show
+		// in the Frontier's own words.
+		wants []string
+	}{
+		{"normal", 120, 40, "frontier_help_120x40.golden.txt", []string{
+			"previous node", "next node", "blocker side", "dependent side",
+			"first node", "last node", "v/esc", "open Ticket", "re-read Details",
+		}},
+		{"narrow", 42, 28, "frontier_help_42x28.golden.txt", []string{
+			"v/esc", "open Ticket", "re-read Details", "select node",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New(fake.WithBlockingFixture())
+			c := newClock()
+			tm := teatest.NewTestModel(t, New(t.Context(), Options{
+				Source:       selectorSource(p, c),
+				DetailSource: TicketDetailSource(p),
+				Interval:     time.Minute,
+				Now:          c.now,
+			}), teatest.WithInitialTermSize(tt.width, tt.height))
+			s := &session{tm: tm, clock: c}
+			s.waitFor(t, "Shard rebalancer rollout")
+			tm.Send(keyPress("v"))
+			// The counts line, not the word "actionable": at 42 columns the
+			// header is clipped before it reaches that far.
+			s.waitFor(t, "16 nodes")
+			tm.Send(keyPress("?"))
+			s.waitFor(t, "re-read Details")
+
+			tm.Send(keyPress("q"))
+			tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+			m, ok := tm.FinalModel(t).(Model)
+			if !ok {
+				t.Fatalf("final model is %T, want tui.Model", tm.FinalModel(t))
+			}
+			content := m.View().Content
+			got := frame(content)
+
+			checkGolden(t, tt.golden, got)
+			if h := lipgloss.Height(content); h != tt.height {
+				t.Errorf("frame height = %d, want %d", h, tt.height)
+			}
+			for _, line := range strings.Split(content, "\n") {
+				if w := lipgloss.Width(line); w > tt.width {
+					t.Errorf("line width = %d, want at most %d: %q", w, tt.width, line)
+				}
+			}
+			// The graph vocabulary, which is what this panel is for: the four
+			// movement axes say what they move over, and esc is named beside v.
+			for _, want := range tt.wants {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("the expanded help omits %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// r on a fully warm Frontier issues nothing. Re-reading a cache that already
+// covers the Watchlist would turn a recovery key into a whole-Watchlist
+// fan-out, which is the ADR-0003 Amendment 4 protection this guard exists for.
+func TestFrontierRefreshOnAWarmFrontierIssuesNothing(t *testing.T) {
+	// Every member has a Detail, so one fan-out leaves nothing outstanding --
+	// the fixture deliberately omits #211's.
+	details := fake.FixtureBlockingDetails()
+	details["acme/widgets#211"] = model.Detail{TicketID: "acme/widgets#211"}
+	p := fake.New(fake.WithSnapshot(fake.FixtureBlockingSnapshot()), fake.WithDetails(details))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	warm := p.DetailCalls()
+	if warm != len(fake.FixtureBlockingSnapshot().Tickets) {
+		t.Fatalf("DetailCalls = %d, want one per member: the cache is not warm", warm)
+	}
+
+	s.tm.Send(keyPress("r"))
+	s.tm.Send(keyPress("G"))
+	s.waitFor(t, "GHOST")
+	m, _ := s.finish(t)
+
+	if n := p.DetailCalls(); n != warm {
+		t.Errorf("r issued %d reads on a warm Frontier, want none", n-warm)
+	}
+	if !m.frontier.resolved {
+		t.Error("r left a warm Frontier unresolved")
+	}
+}
+
+// r while a fan-out is in flight issues nothing either: the reads it would
+// re-issue are the reads already running, and a second batch behind the first
+// is the fan-out paid for twice.
+func TestFrontierRefreshDuringAFanOutIssuesNothing(t *testing.T) {
+	release := make(chan struct{})
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	// The reads are held before they reach the Provider, so the Provider's own
+	// counter never moves: this counts what the screen issued.
+	var issued atomic.Int64
+	held := blockedDetailSource(release, TicketDetailSource(p))
+	counting := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+		issued.Add(1)
+		return held(ctx, id)
+	}
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: counting,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "reading Detail")
+	waitUntil(t, "the first batch to be issued", func() bool {
+		return issued.Load() == detailfanout.Parallelism
+	})
+
+	// Key presses are delivered in order and handled synchronously, so r has
+	// been through Update by the time q ends the session.
+	s.tm.Send(keyPress("r"))
+	m, _ := s.finish(t)
+	close(release)
+
+	if n := issued.Load(); n != detailfanout.Parallelism {
+		t.Errorf("issued %d reads, want the %d already in flight: r started a second batch",
+			n, detailfanout.Parallelism)
+	}
+	// The queue is the fan-out's own remainder. Re-planning over a fan-out in
+	// flight would put every member back on it, and the reads already running
+	// would then be issued a second time as slots freed.
+	if got, want := len(m.frontier.queued), len(m.frontier.input.Tickets)-detailfanout.Parallelism; got != want {
+		t.Errorf("queued = %d, want the fan-out's own remaining %d: r re-planned over it", got, want)
+	}
+}
+
+// Every movement binding is dispatched through a real key press, so swapping
+// two cases in onFrontierKey's switch fails here. moveFocus itself is unit
+// tested; the wiring from binding to direction was not.
+func TestFrontierMovementKeysReachTheirDirections(t *testing.T) {
+	// Three nodes: #3 blocks both #1 and #2, so #3 is alone on the blocker side
+	// and #1 sits above #2 on the dependent side.
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"#1": blockedBy("#3"), "#2": blockedBy("#3"), "#3": nil,
+	}
+
+	seat := func(t *testing.T, focus model.TicketID) Model {
+		t.Helper()
+		m := frontierMouseModel(t, tickets, links, 120, 40)
+		m.frontier.focusID = focus
+		m.frontier.hasFocus = true
+		return m
+	}
+	press := func(t *testing.T, m Model, key tea.KeyPressMsg) model.TicketID {
+		t.Helper()
+		next, _ := m.onFrontierKey(key)
+		return next.(Model).frontier.focusID
+	}
+
+	// The layout the assertions below read: #3 alone on the blocker side, #1
+	// above #2 on the dependent side.
+	l := seat(t, "#1").frontier.layout
+	if l.columnOf["#3"] != 0 || l.columnOf["#1"] != 1 || l.columnOf["#2"] != 1 {
+		t.Fatalf("columns = %v, want #3 left of #1 and #2", l.columnOf)
+	}
+	if l.nodeAt["#1"].Y >= l.nodeAt["#2"].Y {
+		t.Fatalf("#1 is not above #2, so up and down assert nothing")
+	}
+
+	for _, tt := range []struct {
+		name string
+		from model.TicketID
+		key  tea.KeyPressMsg
+		want model.TicketID
+		axis string
+	}{
+		{"down", "#1", keyPress("j"), "#2", "next node"},
+		{"up", "#2", keyPress("k"), "#1", "previous node"},
+		{"left", "#1", keyPress("h"), "#3", "blocker side"},
+		{"right", "#3", keyPress("l"), "#1", "dependent side"},
+		{"home", "#2", keyPress("g"), "#1", "first node"},
+		{"end", "#1", keyPress("G"), "#3", "last node"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := press(t, seat(t, tt.from), tt.key); got != tt.want {
+				t.Errorf("%s from %s focused %s, want %s (%s)",
+					tt.name, tt.from, got, tt.want, tt.axis)
+			}
+		})
+	}
+}
+
+// A read that failed is still failed after the Watchlist is read again. The
+// re-seat issues nothing, so dropping the failure record would leave cards
+// marked UNVERIFIED with nothing on screen saying why or what to press.
+func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
+	after := blockingSnapshotSwapping(t, "acme/widgets#212", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, separator+"2 actionable")
+	m, got := s.finish(t)
+
+	// #211 is the fixture's unreadable member and is still on the Watchlist.
+	if _, still := m.frontier.failed["acme/widgets#211"]; !still {
+		t.Errorf("failed = %v after a refresh, want the Ticket whose read failed", m.frontier.failed)
+	}
+	frame := string(got)
+	if !strings.Contains(frame, "1 Ticket's Links could not be read") {
+		t.Errorf("the failure notice went away across a refresh:\n%s", frame)
+	}
+	if !strings.Contains(frame, "press r to retry") {
+		t.Errorf("the remedy went away across a refresh:\n%s", frame)
 	}
 }

@@ -40,8 +40,8 @@ func FromProvider(p provider.Provider) Fetch {
 
 // Plan returns the Ticket IDs a caller still has to fetch, in canonical order:
 // the Watchlist's own order, skipping empty IDs, skipping duplicates, and
-// skipping anything that have already reports holding. Determinism matters — it is
-// what makes a progress count and a golden frame reproducible.
+// skipping anything the have predicate already reports holding. Determinism
+// matters — it is what makes a progress count and a golden frame reproducible.
 //
 // A nil have is a caller holding nothing.
 func Plan(tickets []model.Ticket, have func(model.TicketID) bool) []model.TicketID {

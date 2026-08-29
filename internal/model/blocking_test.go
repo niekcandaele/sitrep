@@ -641,3 +641,97 @@ func TestBuildBlockingGraphIsPure(t *testing.T) {
 		t.Error("Members() must return a copy, not the graph's storage")
 	}
 }
+
+// A Watchlist may name one Ticket twice — an exact Ref list is free to repeat a
+// Ref — and the Ticket still has one blocking state. The member list stays
+// positional because that is the --json contract, so the rows must agree.
+func TestDuplicateMembersShareOneBlockingAnswer(t *testing.T) {
+	a := ticket("a", model.StatusTodo, "open")
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{a, ticket("b", model.StatusTodo, "open"), a},
+		map[model.TicketID][]model.Link{
+			"a": {blockedBy(target("b", model.StatusTodo))},
+			"b": nil,
+		}, allCaps)
+
+	members := g.Members()
+	if len(members) != 3 {
+		t.Fatalf("Members() = %d rows, want one per input Ticket", len(members))
+	}
+	first, second := members[0], members[2]
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("the two rows for a disagree:\nrow 0: %+v\nrow 2: %+v", first, second)
+	}
+	if second.Actionable {
+		t.Error("the duplicate row is Actionable while the Ticket it names is blocked")
+	}
+	if got := blockerKeys(second.Blockers); len(got) != 1 || got[0] != "b" {
+		t.Errorf("the duplicate row's Blockers = %v, want b", got)
+	}
+	// Cloned, not shared: mutating one row must not reach the other.
+	second.Blockers[0].Member = false
+	if !g.Members()[2].Blockers[0].Member {
+		t.Error("Members() handed out the graph's own Blocker storage")
+	}
+}
+
+// A member with no ID is not an identity. Before, it was indexed like any other
+// member, so every anonymous blocker Link in the Watchlist resolved to it and it
+// came back Actionable: fail-open on an unidentified blocker, which is the exact
+// inverse of the rule Actionable exists to enforce.
+func TestAnEmptyIDMemberAbsorbsNoAnonymousBlockers(t *testing.T) {
+	anonymous := model.Link{
+		Kind:        model.LinkBlockedBy,
+		NativeLabel: "is blocked by",
+		Target:      model.LinkTarget{Key: "an unresolvable blocker"},
+	}
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{ticket("", model.StatusTodo, "open"), ticket("b", model.StatusTodo, "open")},
+		// No key for the empty ID: detailfanout.Plan skips it, so nothing ever
+		// reads a nameless member's Links and it is unverified by construction.
+		map[model.TicketID][]model.Link{"b": {anonymous}}, allCaps)
+
+	members := g.Members()
+	if len(members) != 2 {
+		t.Fatalf("Members() = %d rows, want one per input Ticket", len(members))
+	}
+	if got := len(members[0].Blockers); got != 0 {
+		t.Errorf("the empty-ID member carries %d blockers, want the anonymous Link to have gone to b", got)
+	}
+	if members[0].Actionable {
+		t.Error("the empty-ID member is Actionable; a Ticket with no identity is never verified")
+	}
+	if got := len(members[1].Blockers); got != 1 {
+		t.Fatalf("b carries %d blockers, want its own anonymous one", got)
+	}
+	if members[1].Actionable {
+		t.Error("b is Actionable behind an anonymous blocker")
+	}
+}
+
+// A Ghost reached as a dependent — a member's Blocks Link pointing out of the
+// Watchlist — carries the edge on the Ghost's own Blockers. Without it the
+// canvas draws a card connected to nothing while the header counts it.
+func TestAGhostReachedAsADependentCarriesItsBlockers(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{ticket("a", model.StatusTodo, "open")},
+		map[model.TicketID][]model.Link{
+			"a": {blocks(target("ghost", model.StatusTodo))},
+		}, allCaps)
+
+	ghosts := g.Ghosts()
+	if len(ghosts) != 1 {
+		t.Fatalf("Ghosts() = %d, want the one a blocks", len(ghosts))
+	}
+	if got := blockerKeys(ghosts[0].Blockers); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("the Ghost's Blockers = %v, want a", got)
+	}
+	if !ghosts[0].Blockers[0].Member {
+		t.Error("the Ghost's blocker is not marked a Watchlist member")
+	}
+	// Cloned, not shared, the same way Members() clones Actionability.
+	ghosts[0].Blockers[0].Member = false
+	if !g.Ghosts()[0].Blockers[0].Member {
+		t.Error("Ghosts() handed out the graph's own Blocker storage")
+	}
+}

@@ -578,7 +578,7 @@ func TestFrameWhenTheFirstFetchFails(t *testing.T) {
 		return ListInput{}, errors.New("dial tcp: lookup tracker.example.test: no such host")
 	}
 	s := start(t, newClock(), src, time.Minute)
-	s.waitFor(t, "Could not read the collection")
+	s.waitFor(t, "Could not read the Watchlist")
 
 	m, got := s.finish(t)
 

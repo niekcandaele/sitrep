@@ -15,6 +15,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/niekcandaele/sitrep/internal/provider"
+	// A deliberate one-driver dependency. Two Profile keys — project and
+	// wont_do_labels — mean whatever the gitlab driver says they mean, and a
+	// config package that re-derives either rule is a second owner of it that
+	// nothing keeps in step. Calling the driver's own predicates is the cheaper
+	// of the two wrong-looking options. Moving all driver-specific Profile
+	// validation into internal/cli is the refactor that would remove it.
 	"github.com/niekcandaele/sitrep/internal/provider/gitlab"
 	"github.com/niekcandaele/sitrep/internal/ref"
 )
@@ -305,11 +311,10 @@ func (c Config) validateProject(p Profile) error {
 			"project is not used by a github profile (a GitHub Ref carries its own owner/repo)")
 	}
 	if p.Provider == providerGitLab {
-		// "groups/" is how a GitLab path declares it names a group; with nothing
-		// after it, it names nothing at all. Every other spelling is a path
-		// sitrep cannot check offline and does not try to.
-		group, prefixed := strings.CutPrefix(strings.TrimLeft(strings.TrimSpace(p.Project), "/"), "groups/")
-		if prefixed && strings.Trim(group, "/") == "" {
+		// The gitlab driver owns what a Profile path means, prefix rule
+		// included; re-deriving it here is how the two drift. Every other
+		// spelling is a path sitrep cannot check offline and does not try to.
+		if gitlab.ProfilePathNamesNoGroup(p.Project) {
 			return c.profileErrorf(p.Name, "project %q names no group — write groups/<group path>", p.Project)
 		}
 		return nil

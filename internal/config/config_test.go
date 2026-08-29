@@ -541,6 +541,18 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 			},
 		},
 		{
+			// A site whose labels are not written in the Latin alphabet has to
+			// be able to configure this at all: an ASCII-only usability rule
+			// rejected the whole Profile.
+			name: "a gitlab profile whose won't-do labels are not Latin",
+			doc: "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n" +
+				"    wont_do_labels: [\"見送り\", \"не будет\"]\n",
+			want: config.Profile{
+				Name: "x", Provider: "gitlab", Host: "gitlab.acme.test", MaxTickets: 100,
+				WontDoLabels: []string{"見送り", "не будет"},
+			},
+		},
+		{
 			// After credential scoping a Profile is the only way a self-hosted
 			// host on a custom port can get a token, so it has to be nameable.
 			name: "a host with an explicit port",

@@ -3,6 +3,8 @@ package detailfanout_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -102,8 +104,24 @@ func TestRunEmitsOneOutcomePerIDAndSurfacesPerIDErrors(t *testing.T) {
 	}
 }
 
+// The bound is exact in both directions: Run holds Parallelism reads in flight,
+// never more and -- given enough work -- never fewer.
+//
+// Every worker is held at a gate until Parallelism of them have arrived, so
+// peak measures the semaphore rather than how quickly goroutines happened to be
+// scheduled; releasing the gate straight after launch measured the scheduler,
+// and the capacity could be raised to a million with the package still green.
+// Waiting for those arrivals is also the only assertion that Run is concurrent
+// at all: a sequential implementation never reaches the count and fails here by
+// timeout rather than by assertion.
+//
+// Workers are then released one at a time, and each release may admit exactly
+// one more. A capacity larger than Parallelism admits the whole backlog at once
+// and breaks that bound on the first release.
 func TestRunNeverExceedsParallelism(t *testing.T) {
-	var inflight, peak atomic.Int64
+	var inflight, peak, arrivals atomic.Int64
+	var admitted sync.WaitGroup
+	admitted.Add(detailfanout.Parallelism)
 	release := make(chan struct{})
 	f := func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
 		n := inflight.Add(1)
@@ -113,26 +131,42 @@ func TestRunNeverExceedsParallelism(t *testing.T) {
 				break
 			}
 		}
+		if arrivals.Add(1) <= detailfanout.Parallelism {
+			admitted.Done()
+		}
 		<-release
 		inflight.Add(-1)
 		return model.Detail{TicketID: id}, model.Capabilities{}, nil
 	}
 
-	ids := make([]model.TicketID, 0, 32)
-	for i := range 32 {
-		ids = append(ids, model.TicketID(string(rune('a'+i%26)))+model.TicketID(rune('0'+i/26)))
+	const ids = 4 * detailfanout.Parallelism
+	work := make([]model.TicketID, 0, ids)
+	for i := range ids {
+		work = append(work, model.TicketID(fmt.Sprintf("t-%d", i)))
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- detailfanout.Run(t.Context(), f, ids, func(detailfanout.Outcome) {})
+		done <- detailfanout.Run(t.Context(), f, work, func(detailfanout.Outcome) {})
 	}()
-	close(release)
+
+	admitted.Wait()
+	if got := peak.Load(); got != detailfanout.Parallelism {
+		t.Fatalf("peak in flight = %d with %d ids queued, want exactly %d",
+			got, ids, detailfanout.Parallelism)
+	}
+	for released := 1; released <= ids; released++ {
+		release <- struct{}{}
+		if got, limit := arrivals.Load(), int64(detailfanout.Parallelism+released); got > limit {
+			t.Fatalf("%d reads had started after %d releases, want at most %d: "+
+				"the semaphore admitted more than it holds", got, released, limit)
+		}
+	}
 	if err := <-done; err != nil {
 		t.Fatalf("Run = %v, want nil", err)
 	}
 
-	if peak.Load() > detailfanout.Parallelism {
-		t.Errorf("peak in flight = %d, want at most %d", peak.Load(), detailfanout.Parallelism)
+	if got := peak.Load(); got != detailfanout.Parallelism {
+		t.Errorf("peak in flight = %d, want exactly %d", got, detailfanout.Parallelism)
 	}
 }
 

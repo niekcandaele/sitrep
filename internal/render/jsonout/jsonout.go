@@ -18,9 +18,10 @@
 //     empty. An undeclared Capability means the key is absent everywhere —
 //     absence is the normal, silent way to say "this Tracker does not do that".
 //     pull_request_total is omitted at zero too, so an absent key does not
-//     distinguish "this Provider cannot tell you how many there are" from a
-//     capable Provider reporting none; an absent pull_requests array is the
-//     consumer's signal for the second.
+//     distinguish "this Provider does not report pull requests" from a capable
+//     Provider that found none. Nothing on the wire distinguishes them: both
+//     keys are absent in both cases. A consumer that needs to tell them apart
+//     has to read capabilities.pull_requests.
 //   - The blocking fields — the top-level blocking object and each Ticket's
 //     actionable, links_known, in_cycle and unmet_blockers — appear only when
 //     the caller computed a BlockingGraph, which takes both the --links flag and
@@ -126,10 +127,10 @@ type ticketDoc struct {
 	Assignees    []userDoc            `json:"assignees,omitempty"`
 	PullRequests []pullRequestDoc     `json:"pull_requests,omitempty"`
 	// PullRequestTotal is how many pull requests the Tracker says the Ticket
-	// has. Zero is omitted along with an unsupplied total: a genuine zero from
-	// a capable Provider is indistinguishable on the wire, and pull_requests
-	// being absent is what tells the consumer there are none. It stays an int
-	// rather than becoming a *int because that would be a wire change.
+	// has. Zero is omitted along with an unsupplied total, and the two are
+	// indistinguishable on the wire; capabilities.pull_requests is what tells
+	// a consumer which it is looking at. It stays an int rather than becoming
+	// a *int because that would be a wire change.
 	PullRequestTotal int `json:"pull_request_total,omitempty"`
 	// Actionable, LinksKnown and InCycle are pointers so that a computed false
 	// still encodes as false while an uncomputed field is omitted entirely. A

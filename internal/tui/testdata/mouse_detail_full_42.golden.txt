@@ -27,7 +27,7 @@ DESCRIPTION
 
 COMMENTS (3)
                                         0%
-m off · shift-drag to select text
+m release · shift-drag to select text
 
 wheel      scroll body      ↑/k  up
 click Link follow           ↓/j  down

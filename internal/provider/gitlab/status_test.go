@@ -169,6 +169,8 @@ func TestAnAcceptedWontDoListNeverFallsBackToTheDefaults(t *testing.T) {
 		{"workflow::abgebrochen"},
 		{"Niet Doen"},
 		{"a", "b"},
+		{"見送り"},
+		{"не будет", "workflow::見送り"},
 	}
 
 	for _, names := range lists {
@@ -187,15 +189,37 @@ func TestAnAcceptedWontDoListNeverFallsBackToTheDefaults(t *testing.T) {
 	}
 }
 
+// A label written outside the Latin alphabet round-trips: the configured name
+// matches the Tracker's label, and does not match a built-in one.
+func TestWontDoSetMatchesANonLatinLabel(t *testing.T) {
+	set := newWontDoSet([]string{"見送り", "не будет"})
+	for _, label := range []string{"見送り", "workflow::見送り", "Не Будет"} {
+		if !set.matches(label) {
+			t.Errorf("newWontDoSet did not match %q, so the configured list matches nothing", label)
+		}
+	}
+	if set.matches("wontfix") {
+		t.Error("the configured list fell back to the built-in defaults")
+	}
+}
+
 // The rule config validation reads, stated as a table so the two layers cannot
 // drift apart quietly.
 func TestUsableWontDoLabel(t *testing.T) {
 	tests := map[string]bool{
-		"wontfix":            true,
-		"Won't Fix":          true,
-		"workflow::wontfix":  true,
-		"ausgemustert":       true,
-		"404":                true,
+		"wontfix":           true,
+		"Won't Fix":         true,
+		"workflow::wontfix": true,
+		"ausgemustert":      true,
+		"404":               true,
+		// A label is usable in whatever writing system the site uses it in.
+		// An ASCII-only rule rejected the Profile outright, so a Japanese,
+		// Cyrillic, Arabic or Chinese site could not configure this at all.
+		"見送り":                true,
+		"не будет":           true,
+		"لن يتم":             true,
+		"不做":                 true,
+		"workflow::見送り":      true,
 		"::":                 false,
 		"---":                false,
 		"workflow::":         false,

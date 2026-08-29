@@ -21,7 +21,7 @@ DONE (3)
   #119     Emit sync telemetry
            @tobias
 
-m            off, shift-drag
+m            release, shift-drag
 click        select Ticket
 double-click open Ticket
 wheel        move selection

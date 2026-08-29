@@ -352,3 +352,24 @@ func TestMilestoneWebURL(t *testing.T) {
 		t.Errorf("milestoneWebURL with no host = %q, want empty", got)
 	}
 }
+
+// The predicate config validation calls, so that the "groups/" prefix rule has
+// one owner and the comment on parseDefaultPath saying so is true.
+func TestProfilePathNamesNoGroup(t *testing.T) {
+	tests := map[string]bool{
+		"groups/":              true,
+		"groups//":             true,
+		"  /groups/ ":          true,
+		"":                     false,
+		"acme/widgets":         false,
+		"groups":               false,
+		"groups/acme":          false,
+		"groups/acme/platform": false,
+	}
+
+	for raw, want := range tests {
+		if got := ProfilePathNamesNoGroup(raw); got != want {
+			t.Errorf("ProfilePathNamesNoGroup(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
