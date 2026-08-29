@@ -325,7 +325,7 @@ func TestFrontierOverflowGlyphsNeverOverwriteContent(t *testing.T) {
 // card must be the bytes the list row draws.
 func TestFrontierCardsKeepCombiningMarks(t *testing.T) {
 	// "cafe" plus a combining acute: the mark is zero-width and claims no
-	// column of its own, which is exactly what the canvas used to drop.
+	// column of its own, so a width-counting canvas can silently discard it.
 	const title = "café latency"
 	tickets := []model.Ticket{{ID: "T-1", Key: "#1", Title: title, Status: model.StatusTodo}}
 	m := frontierMouseModel(t, tickets, nil, 120, 30)
@@ -885,9 +885,10 @@ func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
 	}
 }
 
-// The other half of the same defect: an answer the screen no longer wants was
-// discarded entirely, so a re-entered Frontier paid the Tracker again for a read
-// that had already been made. The abandoned seat's bookkeeping still stays out.
+// An answer for an abandoned fan-out generation is still a real Detail: the
+// read was paid for, so it warms the session cache and a re-entered Frontier
+// plans around it instead of asking the Tracker again. The abandoned seat's own
+// bookkeeping stays out, because that seat is gone.
 func TestAnAbandonedFanOutAnswerStillWarmsTheCache(t *testing.T) {
 	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
 	in := ListInput{

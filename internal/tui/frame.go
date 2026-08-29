@@ -421,11 +421,12 @@ func plural(n int, singular, plural string) string {
 // package emits may be wider than the terminal — a line that wraps would
 // silently break the window arithmetic above it.
 //
-// It re-balances what it cuts, so this is the catch-all it reads as: every
-// screen's last pass over a line goes through here, and a cut that dropped the
-// bidirectional terminator termtext appended would re-create the defect
-// ADR-0006 removed. A line composed of already-balanced fields comes back
-// byte-identical.
+// A line this function cuts comes back re-balanced: dropping the bidirectional
+// terminator termtext appended is exactly the defect ADR-0006 removes. A line
+// that fits passes straight through, balanced or not, because the intake
+// boundary already owns that — which is why renderFrontierCanvas wraps its own
+// result in termtext.Balance rather than relying on this: the canvas cuts by
+// column, on cells this function never sees.
 func truncateLine(line string, width int) string {
 	if width <= 0 {
 		return ""
