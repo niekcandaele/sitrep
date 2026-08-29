@@ -391,7 +391,8 @@ relationships from branch names.
 sitrep reads a bounded window of a Ticket's pull requests and never paginates it, so a Ticket
 with more than the window holds shows one of them and counts the rest. The `+N more` figure
 uses GitHub's own count of all of a Ticket's pull requests, so it stays honest about what was
-left out; on a Tracker that reports no total it degrades to counting what was fetched.
+left out; on a Tracker that reports no total it degrades to counting what was fetched. Under
+`--json` the same figure is `pull_request_total`.
 
 For github.com, an ambient `$GH_TOKEN` or `$GITHUB_TOKEN` is scoped to github.com and sitrep
 falls back to `gh auth token`. An Enterprise host needs its own `gh auth login --hostname`
@@ -528,8 +529,14 @@ non-Epic shape:
 `progress` counts `todo`, `in_progress`, `done`, `cancelled`, and `unknown`, plus `total`,
 `denominator` (`total - cancelled`), and rounded `percent_done`. A Ticket carries `id`, `key`,
 `title`, `url`, `status`, and optional `native_status`, `repository`, hierarchy `parent_id`,
-`assignees`, and `pull_requests`. Each pull request has `number`, `title`, `url`, optional
-`repository`, and the fixed `state`, `review`, and `checks` tokens listed below.
+`assignees`, `pull_requests`, and `pull_request_total`. Each pull request has `number`,
+`title`, `url`, optional `repository`, and the fixed `state`, `review`, and `checks` tokens
+listed below.
+
+`pull_request_total` is a lower bound on how many pull requests the Ticket has: never below
+the length of `pull_requests`, never above the Tracker's own count. It is omitted at zero,
+and so is `pull_requests`, so an absent pair does not distinguish a Provider that does not
+report pull requests from one that found none — read `capabilities.pull_requests` for that.
 
 Two useful Watchlist queries:
 

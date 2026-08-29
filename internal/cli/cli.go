@@ -71,7 +71,8 @@ Usage:
 
 Selectors:
   One Ref selects an Epic Watchlist. If it resolves to a plain Ticket instead,
-  sitrep opens that Ticket's Detail.
+  sitrep opens that Ticket's Detail; --links needs a Watchlist and is refused
+  there.
 
   Two or more positional Refs select exact Tickets in order. They need no common
   Epic, but must use one Tracker and connection.
@@ -87,13 +88,17 @@ Ref forms:
   111                                        bare issue number
   #111                                       bare issue number
   acme/widgets#111                           owner, repository, number
-  https://github.com/acme/widgets/issues/111  GitHub issue URL
   ABC-123                                    Jira key; its prefix matches a Profile
-  https://acme.atlassian.net/browse/ABC-123   Jira browse URL
-  https://gitlab.com/acme/widgets/-/issues/7  GitLab issue/work-item URL
   acme&12                                    GitLab native epic Ref
-  https://gitlab.com/groups/acme/-/epics/12  GitLab native epic URL
   acme/widgets%3                             GitLab milestone Ref
+  https://github.com/acme/widgets/issues/111
+                                             GitHub issue URL
+  https://acme.atlassian.net/browse/ABC-123
+                                             Jira browse URL
+  https://gitlab.com/acme/widgets/-/issues/7
+                                             GitLab issue/work-item URL
+  https://gitlab.com/groups/acme/-/epics/12
+                                             GitLab native epic URL
   https://gitlab.com/acme/widgets/-/milestones/3
                                              GitLab milestone URL
 
@@ -101,13 +106,21 @@ Ref forms:
   forms work anywhere. GitLab's &N names a native Epic; %N is the milestone-as-
   Epic fallback available on GitLab Free.
 
+Monitor:
+  The monitor opens on the Watchlist. Press v for the Frontier, which draws the
+  same Watchlist as nodes and blocking edges to answer one question: which
+  Tickets can be picked up right now.
+
 Flags:
   -h, --help              show this help and exit
-      --interval <dur>    how often the monitor refreshes (default 60s)
+      --interval <dur>    how often the monitor refreshes (default 60s,
+                          minimum 5s)
       --no-mouse          start the monitor without mouse capture
       --json              print a one-shot JSON report and exit
-      --links             with --json, add Actionable and each Ticket's unmet
-                          blockers; costs one Detail fetch per Ticket
+      --links             with --json, add each Ticket's unmet blockers and
+                          whether it is Actionable - Todo with every blocker
+                          finished or cancelled. Needs a Watchlist, and costs
+                          one Detail fetch per Ticket
       --plain             print a one-shot Watchlist or Ticket report and exit
       --profile <name>    Profile from ~/.config/sitrep/config.yml (default:
                           matched from the route or Refs)
@@ -394,10 +407,12 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	if _, epic := selector.(provider.EpicSelector); epic && decodesToTicket(snap) {
 		// Blocking data is produced for a Watchlist, and this Ref resolved to
-		// one Ticket. Same reason --links without --json fails: ignoring it
-		// would silently drop the data the caller asked for.
+		// one Ticket. It is the same misuse as --links without --json, so it is
+		// the same answer: ignoring the flag would silently drop the data the
+		// caller asked for. The Ref itself resolved perfectly well, so this is
+		// not a bad Ref.
 		if *withLinks {
-			return runtimeError(stderr, provider.Errorf(provider.KindBadRef,
+			return usageError(stderr, fmt.Sprintf(
 				"--links needs a Watchlist: %s names a single Ticket", snap.Epic.Key))
 		}
 		if *asJSON || *asPlain {

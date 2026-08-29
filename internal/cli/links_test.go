@@ -304,14 +304,16 @@ func TestLinksRequiresJSON(t *testing.T) {
 func TestLinksFailsOnADecodedTicket(t *testing.T) {
 	got := run([]string{"112", "--json", "--links"}, decoder())
 
-	if got.code == 0 {
-		t.Fatalf("exit code = 0, want a failure (stdout: %q)", got.stdout)
+	// Exit 2, the same as --links without --json: it is the same misuse of the
+	// same flag, and the Ref itself resolved perfectly well, so it is not a bad
+	// Ref either.
+	if got.code != 2 {
+		t.Errorf("exit code = %d, want 2 (stdout: %q)", got.code, got.stdout)
 	}
 	if got.stdout != "" {
 		t.Errorf("stdout = %q, want no document at all", got.stdout)
 	}
-	if !strings.Contains(got.stderr, "--links needs a Watchlist") ||
-		!strings.Contains(got.stderr, "#112") {
+	if !strings.HasPrefix(got.stderr, "sitrep: --links needs a Watchlist: #112 names a single Ticket\n") {
 		t.Errorf("stderr = %q, want it to name --links and the Ticket", got.stderr)
 	}
 }
