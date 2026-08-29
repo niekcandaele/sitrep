@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/provider"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // detailHeaderHeight is what renderDetailHeader always draws: the breadcrumb,
@@ -310,7 +310,7 @@ func truncateDocumentLines(lines []string, width int) []string {
 // drill-in with nothing at all reads as a bug.
 func describeDetail(in DetailInput, width int, s Styles, renderer markdownRenderer) []string {
 	lines := []string{s.SectionHeader.Render("DESCRIPTION"), ""}
-	body := provider.SanitizeText(in.Detail.Description)
+	body := in.Detail.Description
 	if strings.TrimSpace(body) == "" {
 		return append(lines, s.Muted.Render("No description."))
 	}
@@ -323,7 +323,9 @@ func renderMarkdownBody(body, ticketURL string, width int, s Styles, renderer ma
 		return lines
 	}
 
-	message := "Could not render Markdown: " + sanitizeTerminalText(err.Error())
+	// The renderer's own prose is not model data — it is a message from a
+	// dependency — so it does not arrive through intake and is cleaned here.
+	message := "Could not render Markdown: " + termtext.Line(err.Error())
 	fallback := []string{s.Error.Render(truncateLine(message, width))}
 	for _, line := range wrapText(body, width) {
 		fallback = append(fallback, s.Body.Render(line))
@@ -352,8 +354,7 @@ func commentLines(in DetailInput, width int, s Styles, renderer markdownRenderer
 			lines = append(lines, "")
 		}
 		lines = append(lines, truncateLine(s.CommentAuthor.Render(commentByline(c)), width))
-		body := provider.SanitizeText(c.Body)
-		for _, line := range renderMarkdownBody(body, in.Ticket.URL,
+		for _, line := range renderMarkdownBody(c.Body, in.Ticket.URL,
 			width-lipgloss.Width(commentIndent), s, renderer) {
 			lines = append(lines, commentIndent+line)
 		}
@@ -385,8 +386,8 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 	seen := make(map[detailLinkIdentity]int, len(links))
 	labelWidth, keyWidth, titleWidth, statusWidth := 0, 0, 0, 0
 	for i, l := range links {
-		labels[i] = sanitizeTerminalText(linkLabel(l))
-		statuses[i] = sanitizeTerminalText(nativeStatusTag(l.Target.NativeStatus))
+		labels[i] = linkLabel(l)
+		statuses[i] = nativeStatusTag(l.Target.NativeStatus)
 		labelWidth = max(labelWidth, lipgloss.Width(labels[i]))
 		keyWidth = max(keyWidth, lipgloss.Width(l.Target.Key))
 		titleWidth = max(titleWidth, lipgloss.Width(l.Target.Title))

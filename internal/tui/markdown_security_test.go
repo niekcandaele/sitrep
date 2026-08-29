@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -65,7 +66,11 @@ func TestDirectDetailSourceBodiesCannotInjectTerminalOutput(t *testing.T) {
 
 func TestControlOnlyDirectDescriptionIsEmptyAfterSanitizing(t *testing.T) {
 	t.Setenv("GLAMOUR_STYLE", "dark")
-	in := DetailInput{Detail: model.Detail{Description: "\x1b]52;c;cHduZWQ=\a\x00\r"}}
+	// Seated the way every Detail is seated, so the description crosses the
+	// terminal-visible-text boundary exactly once, at intake.
+	in := DetailFromTicket(model.Ticket{ID: "T-1", Key: "#1"},
+		model.Detail{Description: "\x1b]52;c;cHduZWQ=\a\x00\r"},
+		model.Capabilities{}, Header{}, time.Time{})
 	visible := ansi.Strip(strings.Join(detailLines(in, 80, Styles{}), "\n"))
 	if !strings.Contains(visible, "No description.") {
 		t.Errorf("control-only description did not render empty state:\n%s", visible)

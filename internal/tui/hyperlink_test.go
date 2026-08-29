@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 func hyperlinkOpen(url string) string { return ansi.SetHyperlink(url) }
@@ -50,7 +50,7 @@ func TestHyperlinkSeamsStripTerminalControlInjection(t *testing.T) {
 	hostileURL := "https://safe.example/path\a\x1b]8;;https://evil.example/\a" +
 		"\x1b]52;c;YXR0YWNr\x1b\\" + string(rune(0x9d)) + "52;c;YXR0YWNr" +
 		string(rune(0x9c)) + "\r\nend"
-	cleanURL := provider.SanitizeLine(hostileURL)
+	cleanURL := termtext.Line(hostileURL)
 	if cleanURL == hostileURL {
 		t.Fatal("hostile URL fixture did not require sanitizing")
 	}
@@ -136,7 +136,7 @@ func TestRenderHyperlinkSanitizesVisibleTextAndDropsControlOnlyURL(t *testing.T)
 		strings.Contains(raw, "\r") || strings.Contains(raw, string(rune(0x9c))) {
 		t.Errorf("control-only URL or hostile visible text emitted terminal controls: %q", raw)
 	}
-	if got, want := raw, provider.SanitizeLine(text); got != want {
+	if got, want := raw, termtext.Line(text); got != want {
 		t.Errorf("sanitized plain fragment = %q, want %q", got, want)
 	}
 }
@@ -163,8 +163,8 @@ func TestRenderHyperlinkNormalizesMalformedUTF8BeforeControlSanitizing(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			text := "界text-" + string(tt.bytes) + "-safe"
 			url := "https://example.test/界/" + string(tt.bytes) + "/safe"
-			wantText := provider.SanitizeLine(strings.ToValidUTF8(text, ""))
-			wantURL := provider.SanitizeLine(strings.ToValidUTF8(url, ""))
+			wantText := termtext.Line(text)
+			wantURL := termtext.Line(url)
 
 			raw := renderHyperlink(lipgloss.NewStyle(), text, url)
 			if !utf8.ValidString(raw) {
@@ -186,7 +186,7 @@ func TestDirectOptionsAndDetailSourceCannotInjectRawC1OSC(t *testing.T) {
 	rawST := string([]byte{0x9c})
 	hostileURL := "https://safe.example/界/" + rawOSC52 + rawST +
 		"\x1b]8;;https://evil.example/\aend"
-	cleanURL := provider.SanitizeLine(strings.ToValidUTF8(hostileURL, ""))
+	cleanURL := termtext.Line(hostileURL)
 
 	tests := []struct {
 		name          string
@@ -275,8 +275,10 @@ func TestLinkPlainTextFieldsCannotInjectTerminalControls(t *testing.T) {
 	label := hostile("label")
 	status := hostile("status")
 	url := "https://tracker.example/TARGET"
-	lines, _ := linkDocument(DetailInput{
-		Detail: model.Detail{Links: []model.Link{{
+	// Seated the way every Detail is seated, so the Links cross the
+	// terminal-visible-text boundary at intake rather than at this render site.
+	in := DetailFromTicket(model.Ticket{ID: "T-1", Key: "#1"},
+		model.Detail{Links: []model.Link{{
 			Kind:        model.LinkRelates,
 			NativeLabel: label,
 			Target: model.LinkTarget{
@@ -284,8 +286,8 @@ func TestLinkPlainTextFieldsCannotInjectTerminalControls(t *testing.T) {
 				URL: url, NativeStatus: status,
 			},
 		}}},
-		Capabilities: model.Capabilities{BlockingLinks: true},
-	}, 600, Styles{}, detailLinkIdentity{}, false)
+		model.Capabilities{BlockingLinks: true}, Header{}, time.Time{})
+	lines, _ := linkDocument(in, 600, Styles{}, detailLinkIdentity{}, false)
 	raw := strings.Join(lines, "\n")
 
 	if !utf8.ValidString(raw) {
@@ -314,11 +316,11 @@ func TestLinkPlainTextFieldsCannotInjectTerminalControls(t *testing.T) {
 		}
 	}
 	visible := ansi.Strip(raw)
-	safeLabel := sanitizeTerminalText(label)
+	safeLabel := termtext.Line(label)
 	if !strings.Contains(visible, safeLabel) {
 		t.Errorf("sanitized NativeLabel missing from %q", visible)
 	}
-	safeStatus := sanitizeTerminalText(status)
+	safeStatus := termtext.Line(status)
 	if !strings.Contains(visible, "["+safeStatus+"]") {
 		t.Errorf("sanitized Native Status missing from %q", visible)
 	}
@@ -351,8 +353,8 @@ func TestFollowingHostileLinkSanitizesThinDetailSeat(t *testing.T) {
 		t.Fatal("hostile Link follow issued no Detail fetch")
 	}
 
-	safeTitle := sanitizeTerminalText(title)
-	safeStatus := sanitizeTerminalText(status)
+	safeTitle := termtext.Line(title)
+	safeStatus := termtext.Line(status)
 	if child.detail.ticket.Title != safeTitle || child.detail.ticket.NativeStatus != safeStatus {
 		t.Errorf("thin seat retained unsafe display fields: title=%q status=%q", child.detail.ticket.Title, child.detail.ticket.NativeStatus)
 	}

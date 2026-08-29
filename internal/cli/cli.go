@@ -31,6 +31,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/ref"
 	"github.com/niekcandaele/sitrep/internal/render/jsonout"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 	"github.com/niekcandaele/sitrep/internal/tui"
 )
 
@@ -1073,7 +1074,7 @@ func usageError(stderr io.Writer, msg string) int {
 // driver builds, and this covers anything constructed outside it that still
 // quotes tracker text.
 func runtimeError(stderr io.Writer, err error) int {
-	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, provider.SanitizeLine(err.Error()))
+	fmt.Fprintf(stderr, "%s: %s\n", buildinfo.Name, termtext.Line(err.Error()))
 	return exitFailure
 }
 
