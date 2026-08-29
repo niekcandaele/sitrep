@@ -63,9 +63,10 @@ func writeTicketHeader(b *strings.Builder, in TicketSnapshot) {
 	t := in.Ticket
 	fmt.Fprintf(b, "Ticket %s  %s\n", t.Key, Truncate(t.Title, maxTitleWidth))
 
-	if meta := ticketMeta(t, in.Capabilities); meta != "" {
-		fmt.Fprintf(b, "%s\n", meta)
-	}
+	// No Status Category heading stands above a single-Ticket report, so the
+	// status is drawn with StatusField and the line is never empty.
+	meta := append([]string{StatusField(t)}, ticketMetaTail(t, in.Capabilities)...)
+	fmt.Fprintf(b, "%s\n", strings.Join(meta, "  "))
 	if t.URL != "" {
 		fmt.Fprintf(b, "%s\n", t.URL)
 	}

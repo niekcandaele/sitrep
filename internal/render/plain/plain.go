@@ -270,8 +270,10 @@ func writeTicket(b *strings.Builder, t model.Ticket, keyColumn int, caps model.C
 	fmt.Fprintf(b, "%s%s%s\n", ticketIndent, strings.Repeat(" ", keyColumn), meta)
 }
 
-// ticketMeta joins the non-empty parts of a Ticket's second line with two
-// spaces: its Native Status, its assignees, and its lead pull request.
+// ticketMeta joins the non-empty parts of a grouped row's second line with two
+// spaces: its Native Status, its assignees, and its lead pull request. The row
+// sits under a Status Category heading, so a Native Status that only restates
+// that heading is dropped.
 func ticketMeta(t model.Ticket, caps model.Capabilities) string {
 	var parts []string
 
@@ -281,13 +283,21 @@ func ticketMeta(t model.Ticket, caps model.Capabilities) string {
 	if ShowsNativeStatus(t) {
 		parts = append(parts, "["+t.NativeStatus+"]")
 	}
+	return strings.Join(append(parts, ticketMetaTail(t, caps)...), "  ")
+}
+
+// ticketMetaTail is the part of a meta line that does not depend on whether a
+// Status Category heading stands above the Ticket: assignees, then the lead
+// pull request.
+func ticketMetaTail(t model.Ticket, caps model.Capabilities) []string {
+	var parts []string
 	if s := assigneeList(t.Assignees); s != "" {
 		parts = append(parts, s)
 	}
 	if s := pullRequests(t, caps); s != "" {
 		parts = append(parts, s)
 	}
-	return strings.Join(parts, "  ")
+	return parts
 }
 
 // assigneeList renders the assignees as @-prefixed logins in Provider order.

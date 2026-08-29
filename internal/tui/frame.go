@@ -237,13 +237,30 @@ func ticketMeta(t model.Ticket, caps model.Capabilities, s Styles) string {
 	if plain.ShowsNativeStatus(t) {
 		parts = append(parts, s.NativeStatus.Render("["+t.NativeStatus+"]"))
 	}
+	return strings.Join(append(parts, ticketMetaTail(t, caps, s)...), "  ")
+}
+
+// detailMetaLine builds the Detail header's meta line. No Status Category
+// heading stands above it, so the status comes from plain.StatusField, which
+// falls back to the Category rather than rendering nothing. Everything after
+// the status is the same line the list rows draw.
+func detailMetaLine(t model.Ticket, caps model.Capabilities, s Styles) string {
+	parts := []string{s.NativeStatus.Render(plain.StatusField(t))}
+	return strings.Join(append(parts, ticketMetaTail(t, caps, s)...), "  ")
+}
+
+// ticketMetaTail is the part of a meta line that does not depend on whether a
+// Status Category heading stands above the Ticket: assignees, then the lead
+// pull request.
+func ticketMetaTail(t model.Ticket, caps model.Capabilities, s Styles) []string {
+	var parts []string
 	if handles := assignees(t.Assignees); handles != "" {
 		parts = append(parts, s.Assignees.Render(handles))
 	}
 	if pr := pullRequest(t, caps, s); pr != "" {
 		parts = append(parts, pr)
 	}
-	return strings.Join(parts, "  ")
+	return parts
 }
 
 // assignees renders the @-prefixed logins in Provider order. No assignees

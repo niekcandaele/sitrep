@@ -37,6 +37,9 @@ var degenerateNativeStatus = map[model.StatusCategory][]string{
 // model.LinkTarget, which carries both fields, cannot be passed: the LINKS
 // table has no Category heading supplying the context and is deliberately
 // exempt from this rule.
+//
+// This is only half the rule. A renderer that draws a Ticket with no Category
+// heading above it must call StatusField instead, which never renders nothing.
 func ShowsNativeStatus(t model.Ticket) bool {
 	if t.NativeStatus == "" {
 		return false
@@ -55,4 +58,19 @@ func ShowsNativeStatus(t model.Ticket) bool {
 // are separate table entries precisely because the rule does not equate them.
 func normalizeNativeStatus(native string) string {
 	return strings.ToLower(strings.Join(strings.Fields(native), " "))
+}
+
+// StatusField is the bracketed status a renderer draws when no Status Category
+// heading stands above the Ticket — the Detail header and the single-Ticket
+// report. It is the Tracker's own word when that word adds something, and the
+// Status Category when it does not, so the reader is never told nothing at all
+// about a Ticket's status.
+//
+// A renderer whose rows already sit under a Category heading wants
+// ShowsNativeStatus instead: there, suppression is the whole point.
+func StatusField(t model.Ticket) string {
+	if ShowsNativeStatus(t) {
+		return "[" + t.NativeStatus + "]"
+	}
+	return "[" + CategoryLabel(t.Status) + "]"
 }

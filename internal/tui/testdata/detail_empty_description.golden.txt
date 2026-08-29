@@ -1,6 +1,6 @@
 #111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #119  Emit sync telemetry                                                  https://tracker.example.test/acme/widgets/119
-@tobias
+[Done]  @tobias
 
 DESCRIPTION
 
