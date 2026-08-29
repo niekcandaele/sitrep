@@ -21,7 +21,8 @@ sitrep --profile work-github \
   --query 'repo:acme/widgets is:issue label:agent'  # tracker-native Query Watchlist
 
 sitrep 38 39 40 41 --plain                 # one-shot text
-sitrep 38 39 40 41 --json                  # schema-v2 Watchlist JSON
+sitrep 38 39 40 41 --json                  # schema-v3 Watchlist JSON
+sitrep 38 39 40 41 --json --links          # ...plus Actionable and unmet blockers
 ```
 
 A **Ref** points to one Ticket or Epic. Accepted forms are:
@@ -77,7 +78,7 @@ For Watchlist-producing Selectors, all three modes read the same resolved Watchl
 
 The single-Ref decoder exception applies in every mode: a plain Ticket opens Detail in the
 TUI, prints one Ticket report with `--plain`, and emits a schema-v1 Ticket/Detail document
-with `--json`. Watchlist JSON uses the schema-v2 contract.
+with `--json`. Watchlist JSON uses the schema-v3 contract.
 
 Progress, grouping, and filters cover the complete fetched Watchlist. Hiding rows does not
 change the progress denominator. When a Query reaches its configured membership cutoff,
@@ -353,7 +354,7 @@ its configured values; profileless routes use the defaults below:
 - it caps only Tracker-discovered Query membership — never Epic children, positional Refs,
   or stdin Refs;
 - hitting the cutoff is successful truncation, not a known total. Plain/TUI output says
-  `Limit reached — showing N ticket(s).`; schema-v2 JSON adds
+  `Limit reached — showing N ticket(s).`; schema-v3 JSON adds
   `watchlist.limit_reached: true`;
 - exhausting results exactly at the boundary is not labeled as truncated;
 - `refresh_interval` controls monitor cadence independently. It defaults to 60 seconds,
@@ -429,16 +430,16 @@ omitted, never `null`.
 
 There are two independently versioned document families:
 
-- **Watchlist documents use schema version 2** for Epic, Ref-list/stdin, and Query
+- **Watchlist documents use schema version 3** for Epic, Ref-list/stdin, and Query
   Watchlists.
 - **Decoded Ticket/Detail documents remain schema version 1** when one positional Ref opens a
   plain Ticket.
 
-### Watchlist document: schema v2
+### Watchlist document: schema v3
 
 | Key | Meaning |
 |---|---|
-| `schema_version` | `2` |
+| `schema_version` | `3` |
 | `generated_at` | when this Watchlist was resolved |
 | `provider.name` | `github`, `gitlab`, `jira`, or `fake` |
 | `provider.capabilities` | optional data Capabilities plus `selectors.epic`, `ref_list`, and `query` |
@@ -446,6 +447,7 @@ There are two independently versioned document families:
 | `watchlist.epic` | Epic identity, present only for an Epic Selector |
 | `watchlist.limit_reached` | optional `true`, present only for a truncated Query |
 | `progress` | Status Category arithmetic over the fetched Tickets |
+| `blocking` | `--links` only: `cycles`, always an array |
 | `tickets` | current thin Tickets, flat and in Provider order |
 
 The three Selector variants are:
@@ -461,7 +463,7 @@ non-Epic shape:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-01-15T12:00:00Z",
   "provider": {
     "name": "fake",
@@ -521,10 +523,64 @@ sitrep --profile work-github --query 'repo:acme/widgets is:issue' --json |
   jq -r '.tickets[] | select(.status != "done" and .status != "cancelled") | .key'
 ```
 
+### `--links`: Actionable and unmet blockers
+
+An agent asking "what can I start?" should not have to open a TUI. `--links` answers that
+in the same document:
+
+```sh
+sitrep 38 39 40 41 --json --links | jq -r '.tickets[] | select(.actionable) | .key'
+```
+
+`--links` requires `--json`; with `--plain`, or on its own, it is a usage error. It costs
+one Detail fetch per Ticket, because Links live in Detail — that price is why it is opt-in
+and why a plain `--json` run still makes exactly one batched request
+([ADR-0003](docs/adr/0003-provider-interface-split-by-view.md)).
+
+With `--links`, each Ticket gains:
+
+| Key | Meaning |
+|---|---|
+| `actionable` | Status Category is Todo, this Ticket's Links were readable, and every blocker is finished |
+| `links_known` | `false` when this Ticket's own Detail could not be read, so its blockers are unknown |
+| `in_cycle` | `true` when the Ticket sits on a BlockedBy cycle; it never changes `actionable` |
+| `unmet_blockers` | the blockers holding this Ticket, present only when there are any |
+
+A Ticket with `links_known: false` may still list a blocker, when that blocker was
+discovered through another Ticket's `blocks` Link. `links_known: false` says the list may
+be incomplete; it never means a listed blocker was guessed at.
+
+and the document gains `blocking.cycles`: each cycle's Ticket IDs, always an array.
+
+Each unmet blocker is a Ticket object — `id`, `key`, `title`, `url`, `status`, optional
+`native_status` — plus `member` (`false` for a **Ghost Ticket**, a Link target that is not
+a Watchlist member) and `status_known`. Satisfied blockers are not listed; the question is
+what is holding the Ticket. A blocker with no identity at all is still emitted, with empty
+identity fields, because dropping it would make a blocked Ticket look actionable.
+
+`actionable` **fails closed**: anything sitrep could not read leaves it `false`. A blocker
+with `status: "todo", status_known: true` is honestly blocked; one with
+`status: "unknown", status_known: false` is a blocker sitrep could not verify. Both leave
+the Ticket not actionable, and a consumer can tell which is which.
+
+These keys are **absent, not null**, when they were not computed — without `--links`, or
+when the Provider does not declare the `blocking_links` Capability (which is silent, like
+every other optional Capability, and issues no fetch). Absence means "not computed"; a
+`false` under `--links` is a computed answer, and the two must never look alike.
+
+A failed Detail fetch is not fatal: the run still exits `0` and the affected Ticket carries
+`links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
+passing a half-fetched Watchlist off as complete.
+
+A single Ref that resolves to a plain Ticket ignores `--links` and exits `0`: that document
+already carries the Ticket's complete `links` array, and Actionable is a Watchlist-level
+property that needs the other members' statuses. A script can therefore pass `--links`
+uniformly over a mixed list of Refs.
+
 ### Decoded Ticket/Detail document: schema v1
 
 A plain Ticket document has `schema_version`, `generated_at`, and `provider` (without the
-schema-v2 Selector Capability object), plus:
+schema-v3 Selector Capability object), plus:
 
 | Key | Meaning |
 |---|---|
@@ -546,9 +602,17 @@ schema-v2 Selector Capability object), plus:
 | `links[].kind` | `relates`, `blocked_by`, `blocks` |
 
 Compatibility is per document schema. Additive optional fields do not require a bump. A
-breaking Watchlist change increments schema v2; an unchanged decoded Ticket/Detail document
+breaking Watchlist change increments schema v3; an unchanged decoded Ticket/Detail document
 remains schema v1. Consumers should pin the schema version for the document family they read
 and ignore unknown keys.
+
+Watchlist v3 is a deliberate exception to that additive rule. The `--links` fields are
+additive, but they make the Watchlist field set *invocation-dependent*, so the version is
+what tells a consumer which fields this binary is capable of emitting at all: left at `2`,
+a consumer could not distinguish an old binary that rejects `--links` from a new one that
+was simply not asked for blockers. The version identifies the contract the binary
+implements, not the invocation used, so it is `3` on every Watchlist document whether or
+not `--links` was given.
 
 ## When something fails
 

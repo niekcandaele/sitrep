@@ -51,7 +51,7 @@ func TestDocumentationContract(t *testing.T) {
 		"**Filters do not apply on the Frontier**",
 		"**Ghost Ticket**",
 		"OSC 8 terminal hyperlinks",
-		"Watchlist documents use schema version 2",
+		"Watchlist documents use schema version 3",
 		"Decoded Ticket/Detail documents remain schema version 1",
 	} {
 		if !strings.Contains(readme, marker) {
@@ -133,7 +133,11 @@ func TestREADMEStructuredExamplesUseRealContracts(t *testing.T) {
 		Raw:     "acme/widgets#115",
 	}}}
 	var rendered bytes.Buffer
-	if err := jsonout.RenderWatchlist(&rendered, snapshot, selector, "fake"); err != nil {
+	if err := jsonout.RenderWatchlist(&rendered, jsonout.WatchlistDocument{
+		Snapshot:     snapshot,
+		Selector:     selector,
+		ProviderName: "fake",
+	}); err != nil {
 		t.Fatalf("render deterministic README Watchlist: %v", err)
 	}
 	var authoritative any

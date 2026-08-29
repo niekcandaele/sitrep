@@ -26,7 +26,11 @@ func TestJSONTitleArrivesBalanced(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := jsonout.RenderWatchlist(&buf, snap, provider.EpicSelector{Ref: ref.Ref{}}, p.Name()); err != nil {
+	if err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+		Snapshot:     snap,
+		Selector:     provider.EpicSelector{Ref: ref.Ref{}},
+		ProviderName: p.Name(),
+	}); err != nil {
 		t.Fatalf("RenderWatchlist: %v", err)
 	}
 	document := buf.String()
