@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 )
@@ -139,13 +140,18 @@ func UsableWontDoLabel(name string) bool { return normalizeLabel(name) != "" }
 // after the last "::" of a scoped label, lower-cased, with everything that is
 // not a letter or a digit stripped. "workflow::Won't Fix" and "wontfix" are one
 // entry.
+//
+// Letter and digit are Unicode's, not ASCII's. A site whose labels are written
+// in Japanese, Cyrillic, Arabic or Chinese normalizes to something rather than
+// to nothing, so its list can match and UsableWontDoLabel can accept it. The
+// built-in defaults are ASCII and read the same either way.
 func normalizeLabel(label string) string {
 	if at := strings.LastIndex(label, "::"); at >= 0 {
 		label = label[at+2:]
 	}
 	var b strings.Builder
 	for _, c := range strings.ToLower(label) {
-		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
 			b.WriteRune(c)
 		}
 	}

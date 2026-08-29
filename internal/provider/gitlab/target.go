@@ -133,6 +133,20 @@ type defaultPath struct {
 	scope pathScope
 }
 
+// ProfilePathNamesNoGroup reports whether a Profile's project path declares a
+// group and then names none: "groups/", "groups//", " /groups/ ". Config
+// validation calls it rather than re-deriving the prefix rule, so parseDefaultPath
+// below really is the only place that rule lives.
+func ProfilePathNamesNoGroup(raw string) bool {
+	parsed := parseDefaultPath(raw)
+	if parsed.scope == scopeGroup || parsed.path != "" {
+		return false
+	}
+	trimmed := strings.TrimLeft(strings.TrimSpace(raw), "/")
+	_, prefixed := strings.CutPrefix(trimmed, groupScopePrefix)
+	return prefixed
+}
+
 // parseDefaultPath is the only place a Profile path's "groups/" prefix is
 // interpreted. An unprefixed path is a project path; a "groups/"-prefixed one is
 // a group path with the prefix stripped; a path with nothing left after that,
