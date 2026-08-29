@@ -9,6 +9,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // Layout constants. The bar is width-adaptive within these bounds so the
@@ -123,7 +124,7 @@ func pairLineReserved(left, right string, width int) string {
 	if lipgloss.Width(right) >= width {
 		return rightAlign(ansi.Truncate(right, width, ""), width)
 	}
-	left = ansi.Truncate(left, width-lipgloss.Width(right)-1, "")
+	left = balancedTruncate(left, width-lipgloss.Width(right)-1, "")
 	return pairLine(left, right, width)
 }
 
@@ -167,10 +168,10 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 	if meta := ticketMeta(r.Ticket, caps, s); meta != "" {
 		// The meta line is clipped here, with an ellipsis, rather than left to
 		// truncateLine's last-resort empty tail: a "ci FAIL" cut to "ci FA"
-		// reads as a complete verdict about the wrong thing. ansi.Truncate is
+		// reads as a complete verdict about the wrong thing. The clip is
 		// escape-aware, which this line needs — it carries styling. The budget
 		// is the title's, so the two lines end in the same column.
-		meta = ansi.Truncate(meta, titleWidth, "…")
+		meta = balancedTruncate(meta, titleWidth, "…")
 		lines = append(lines, unselectedMarker+strings.Repeat(" ", keyColumn)+meta)
 	}
 	return lines
@@ -353,4 +354,19 @@ func truncateLine(line string, width int) string {
 		return ""
 	}
 	return ansi.Truncate(line, width, "")
+}
+
+// balancedTruncate clips a fragment of Tracker-controlled text and re-balances
+// what it cut. termtext closed every bidirectional scope the field opened, and
+// a cut can drop the terminator it appended: this exists so narrowing a line
+// does not re-create the defect the boundary removed. It is not a second
+// boundary and holds no policy of its own — a fragment that fits is returned
+// untouched, and Balance only drops strays and appends at the very end, so the
+// ANSI styling these fragments carry is unaffected.
+func balancedTruncate(s string, width int, tail string) string {
+	cut := ansi.Truncate(s, width, tail)
+	if cut == s {
+		return s
+	}
+	return termtext.Balance(cut)
 }

@@ -76,6 +76,16 @@ func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 		}
 	}
 
+	// Every fragment sitrep writes is balanced on its own, and a concatenation
+	// of balanced sequences is balanced, so a single unmatched opener anywhere
+	// in the session fails here. This is the truncation-proof form of "an
+	// unterminated override cannot affect a subsequent line": cursor motion and
+	// repaints add no bidi code points, so a partial repaint cannot fake it.
+	if unterminated, stray := termtexttest.Unbalanced(visible); unterminated != 0 || stray != 0 {
+		t.Errorf("the PTY stream is not bidi-balanced (unterminated %U, stray %U):\n%+q",
+			unterminated, stray, visible)
+	}
+
 	assertPTYHyperlinksClosed(t, output)
 	assertTerminalModePair(t, output, ansi.SetModeAltScreenSaveCursor, ansi.ResetModeAltScreenSaveCursor)
 	assertTerminalModePair(t, output, ansi.SetModeMouseButtonEvent, ansi.ResetModeMouseButtonEvent)
@@ -93,7 +103,10 @@ func TestBoundaryPTYHelper(t *testing.T) {
 }
 
 // hostilePTYLine is a single-line field: a marker so the screen can be waited
-// on, and every terminal control the fixture knows.
+// on, and every terminal control the fixture knows. termtexttest.Hostile also
+// carries the bidi payload — an unterminated U+202E, an unterminated U+2067
+// and a stray U+2069 — so the balance assertion above needs no field of its
+// own.
 func hostilePTYLine(marker string) string {
 	return marker + " " + termtexttest.Hostile
 }

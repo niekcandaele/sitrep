@@ -12,6 +12,7 @@ import (
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
 )
 
 // The decorator's field-by-field test asserts what the multi-line helper does
@@ -34,8 +35,9 @@ func TestSanitizedKeepsTheStructureOfMultiLineText(t *testing.T) {
 }
 
 // hostile is the string every tracker-controlled field of the fake below
-// carries: an escape sequence, a bare CR, a C1 byte and a DEL.
-const hostile = "x\x1b[2J\x1b]0;pwned\ay\rz\u009b\x7f"
+// carries: an escape sequence, a bare CR, a C1 byte, a DEL, an unterminated
+// right-to-left override and a pop directional isolate that closes nothing.
+const hostile = "x\x1b[2J\x1b]0;pwned\ay\rz\u009b\x7f\u202eoverride\u2069"
 
 // hostileProvider answers with hostile text in every field of a WatchlistSnapshot
 // and a Detail. Asserting field by field is the point: a field added later and
@@ -105,6 +107,15 @@ func TestSanitizedCleansEveryField(t *testing.T) {
 	}
 	checkClean(t, "snapshot", reflect.ValueOf(snap), false)
 	checkClean(t, "detail", reflect.ValueOf(detail), true)
+
+	// The walk above would pass on a title that lost its override entirely, so
+	// the headline shape is asserted once outright: the code point is still
+	// there and it is closed. --plain, --json and the decoded one-shot path all
+	// read what this one call returns.
+	title := snap.Tickets[0].Title
+	if !strings.ContainsRune(title, 0x202E) || !strings.HasSuffix(title, "\u202c") {
+		t.Errorf("Ticket title = %+q, want the U+202E kept and terminated by U+202C", title)
+	}
 }
 
 func TestStampSnapshotPreservesLimitReached(t *testing.T) {
@@ -171,8 +182,9 @@ func TestSanitizedForwardsQuerySelectorUnchangedAndCleansItsHeader(t *testing.T)
 }
 
 // checkClean walks every string in a value and asserts it carries no control
-// character. multiline says whether "\n" and "\t" are allowed, which is true of
-// a Detail and false of a snapshot.
+// character and leaves no bidirectional scope unbalanced. multiline says
+// whether "\n" and "\t" are allowed, which is true of a Detail and false of a
+// snapshot.
 func checkClean(t *testing.T, path string, v reflect.Value, multiline bool) {
 	t.Helper()
 	switch v.Kind() {
@@ -183,6 +195,13 @@ func checkClean(t *testing.T, path string, v reflect.Value, multiline bool) {
 			}
 			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 				t.Errorf("%s = %q, which carries the control character %U", path, v.String(), r)
+				return
+			}
+		}
+		for _, segment := range strings.Split(v.String(), "\n") {
+			if unterminated, stray := termtexttest.Unbalanced(segment); unterminated != 0 || stray != 0 {
+				t.Errorf("%s = %+q, which is not bidi-balanced (unterminated %U, stray %U)",
+					path, v.String(), unterminated, stray)
 				return
 			}
 		}

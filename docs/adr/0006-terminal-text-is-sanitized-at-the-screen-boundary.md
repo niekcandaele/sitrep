@@ -44,6 +44,14 @@ have no intake of their own and rely on their only production caller sanitizing
 at the Provider seam. Giving them one is a follow-up, not a defect of this
 decision.
 
-A future rule about what text may reach a terminal — balancing unterminated
-bidirectional overrides, say — lands in `termtext.Line` and `termtext.Body`, and
-nowhere else.
+The rule this decision anticipated has since landed where it said it would:
+`Line` and `Body` now balance bidirectional scopes, so a control opened in a
+field is terminated in it and a terminator that closes nothing is dropped.
+Balanced text — legitimate Hebrew and Arabic — crosses the boundary
+byte-identical, because the scopes are contained rather than removed. One
+obligation falls outside the two functions: a renderer that *cuts* text can
+drop the terminator the boundary appended, so `plain.Truncate` and the TUI's
+own clipping re-balance what they cut with `termtext.Balance`. That is not a
+second policy; it is a renderer declining to undo the first. The next rule
+about what text may reach a terminal lands in `termtext.Line` and
+`termtext.Body`, and nowhere else.

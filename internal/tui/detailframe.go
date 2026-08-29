@@ -155,7 +155,7 @@ func renderDetailTopLine(parent Header, trail []detailTrailEntry, staleness stri
 	}
 	right := s.Staleness.Render(staleness)
 	if lipgloss.Width(right) >= width {
-		right = ansi.Truncate(right, width, "")
+		right = balancedTruncate(right, width, "")
 		return strings.Repeat(" ", max(width-lipgloss.Width(right), 0)) + right
 	}
 
@@ -209,7 +209,7 @@ func renderBreadcrumbCrumbs(crumbs []detailBreadcrumbCrumb, width int, s Styles)
 	newest := rendered[len(rendered)-1]
 	used := lipgloss.Width(newest)
 	if used > width {
-		return ansi.Truncate(newest, width, "")
+		return balancedTruncate(newest, width, "")
 	}
 
 	first := len(rendered) - 1
@@ -411,11 +411,11 @@ func linkDocument(in DetailInput, width int, s Styles, focused detailLinkIdentit
 	lines := []string{s.SectionHeader.Render(fmt.Sprintf("LINKS (%d)", len(links))), ""}
 	rows := make([]detailLinkRow, 0, len(links))
 	for i, l := range links {
-		label := ansi.Truncate(labels[i], labelWidth, "…")
+		label := balancedTruncate(labels[i], labelWidth, "…")
 		line := column(s.LinkLabel.Render(label), label, labelWidth) +
 			column(renderHyperlink(s.TicketKey, l.Target.Key, l.Target.URL), l.Target.Key, keyWidth)
 
-		title := ansi.Truncate(l.Target.Title, titleWidth, "…")
+		title := balancedTruncate(l.Target.Title, titleWidth, "…")
 		styledTitle := renderHyperlink(s.TicketTitle, title, l.Target.URL)
 		if tag := statuses[i]; tag != "" {
 			line += column(styledTitle, title, titleWidth) + s.NativeStatus.Render(tag)

@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // Layout widths are fixed constants, not terminal-derived: a one-shot report
@@ -182,12 +183,18 @@ func PadKey(key string, width int) string {
 // Truncate shortens s to at most width runes, ending in an ellipsis when it
 // had to cut. It counts runes rather than bytes: a byte-slice truncation
 // corrupts a multi-byte title such as "Renseigner la métrique « éclair »".
+//
+// A cut is re-balanced for the same reason: the terminator that closes a
+// bidirectional scope can be among the runes dropped, and a renderer may not
+// re-create at the cut a defect the boundary already removed. This is not a
+// second policy about Tracker text — the policy is termtext.Balance's, and
+// this only declines to undo it.
 func Truncate(s string, width int) string {
 	runes := []rune(s)
 	if len(runes) <= width || width <= 0 {
 		return s
 	}
-	return string(runes[:width-1]) + ellipsis
+	return termtext.Balance(string(runes[:width-1]) + ellipsis)
 }
 
 // PullRequestSummary renders one pull request as a single line fragment:
