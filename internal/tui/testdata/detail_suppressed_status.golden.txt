@@ -1,6 +1,6 @@
 #111 · Widget sync v2: shards, retries & telemetry                                               current · read just now
 #115  Reconcile widget IDs across shards                                   https://tracker.example.test/acme/widgets/115
-
+[Todo]
 
 DESCRIPTION
 

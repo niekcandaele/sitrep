@@ -23,14 +23,17 @@ type blockingWire struct {
 		Actionable    *bool  `json:"actionable"`
 		LinksKnown    *bool  `json:"links_known"`
 		InCycle       *bool  `json:"in_cycle"`
+		Status        string `json:"status"`
+		NativeStatus  string `json:"native_status"`
 		UnmetBlockers []struct {
-			ID          string `json:"id"`
-			Key         string `json:"key"`
-			Title       string `json:"title"`
-			URL         string `json:"url"`
-			Status      string `json:"status"`
-			Member      bool   `json:"member"`
-			StatusKnown bool   `json:"status_known"`
+			ID           string `json:"id"`
+			Key          string `json:"key"`
+			Title        string `json:"title"`
+			URL          string `json:"url"`
+			Status       string `json:"status"`
+			NativeStatus string `json:"native_status"`
+			Member       bool   `json:"member"`
+			StatusKnown  bool   `json:"status_known"`
 		} `json:"unmet_blockers"`
 	} `json:"tickets"`
 }
@@ -201,6 +204,98 @@ func TestRenderWatchlistRejectsAGraphOverDifferentTickets(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "2 members for 1 Tickets") {
 		t.Errorf("error = %q, want it to name the mismatch", err)
+	}
+}
+
+// The length check alone would pass a graph built over the same Tickets in a
+// different order, and every row would carry another Ticket's blocking state.
+func TestRenderWatchlistRejectsAReorderedGraph(t *testing.T) {
+	graph := model.BuildBlockingGraph([]model.Ticket{{ID: "b"}, {ID: "a"}}, nil, blockingLinks())
+	snap := model.WatchlistSnapshot{
+		Tickets:      []model.Ticket{{ID: "a", Key: "#a"}, {ID: "b", Key: "#b"}},
+		Capabilities: blockingLinks(),
+	}
+
+	var buf bytes.Buffer
+	err := jsonout.RenderWatchlist(&buf, jsonout.WatchlistDocument{
+		Snapshot:     snap,
+		Selector:     provider.RefListSelector{Refs: []ref.Ref{{Raw: "a"}}},
+		ProviderName: "fake",
+		Blocking:     &graph,
+	})
+	if err == nil {
+		t.Fatalf("RenderWatchlist accepted a graph in the wrong order:\n%s", buf.String())
+	}
+	if !strings.Contains(err.Error(), "member 0 is b, want a") {
+		t.Errorf("error = %q, want it to name the mispaired member", err)
+	}
+}
+
+// One Ticket, one status. A blocker's status is the authoritative one the graph
+// resolved, not the copy the Link that named it carried — the same Ticket
+// appearing twice in one document with two statuses is a document that lies.
+func TestBlockerStatusAgreesWithTheBlockersOwnTicket(t *testing.T) {
+	blocker := model.Ticket{
+		ID: "a", Key: "#a", Status: model.StatusTodo, NativeStatus: "Selected for Development",
+	}
+	dependent := model.Ticket{ID: "b", Key: "#b", Status: model.StatusTodo}
+	// The Link is stale: it names #a as done, which it is not.
+	links := map[model.TicketID][]model.Link{
+		"a": nil,
+		"b": {{Kind: model.LinkBlockedBy, Target: model.LinkTarget{
+			ID: "a", Key: "#a", Status: model.StatusDone, NativeStatus: "closed",
+		}}},
+	}
+	tickets := []model.Ticket{blocker, dependent}
+	graph := model.BuildBlockingGraph(tickets, links, blockingLinks())
+	snap := model.WatchlistSnapshot{Tickets: tickets, Capabilities: blockingLinks()}
+
+	doc := decodeBlocking(t, renderWatchlist(t, snap, &graph))
+	if len(doc.Tickets[1].UnmetBlockers) != 1 {
+		t.Fatalf("#b has %d unmet blockers, want the one that is not done",
+			len(doc.Tickets[1].UnmetBlockers))
+	}
+	got := doc.Tickets[1].UnmetBlockers[0]
+	if got.Status != doc.Tickets[0].Status {
+		t.Errorf("unmet_blockers[0].status = %q but tickets[0].status = %q — the same Ticket",
+			got.Status, doc.Tickets[0].Status)
+	}
+	if got.NativeStatus != doc.Tickets[0].NativeStatus {
+		t.Errorf("unmet_blockers[0].native_status = %q but tickets[0].native_status = %q",
+			got.NativeStatus, doc.Tickets[0].NativeStatus)
+	}
+}
+
+// An anonymous blocker has no Ticket and no Ghost to read, so its status is
+// unknown however confidently the Link that named it wrote one. The Tracker's
+// own word goes with the Category it belonged to rather than standing beside a
+// contradicting one.
+func TestAnonymousBlockerDropsANativeStatusThatContradictsItsCategory(t *testing.T) {
+	dependent := model.Ticket{ID: "b", Key: "#b", Status: model.StatusTodo}
+	links := map[model.TicketID][]model.Link{
+		"b": {{Kind: model.LinkBlockedBy, Target: model.LinkTarget{
+			Key: "#g", Status: model.StatusDone, NativeStatus: "closed",
+		}}},
+	}
+	tickets := []model.Ticket{dependent}
+	graph := model.BuildBlockingGraph(tickets, links, blockingLinks())
+	snap := model.WatchlistSnapshot{Tickets: tickets, Capabilities: blockingLinks()}
+
+	doc := decodeBlocking(t, renderWatchlist(t, snap, &graph))
+	if len(doc.Tickets[0].UnmetBlockers) != 1 {
+		t.Fatalf("#b has %d unmet blockers, want the anonymous one",
+			len(doc.Tickets[0].UnmetBlockers))
+	}
+	got := doc.Tickets[0].UnmetBlockers[0]
+	if got.StatusKnown {
+		t.Fatalf("an anonymous blocker reported status_known: this test needs an unread one")
+	}
+	if got.Status != model.StatusUnknown.String() {
+		t.Errorf("status = %q beside status_known: false", got.Status)
+	}
+	if got.NativeStatus != "" {
+		t.Errorf("native_status = %q beside status %q — a contradiction on the wire",
+			got.NativeStatus, got.Status)
 	}
 }
 

@@ -184,11 +184,12 @@ navigation.
 
 Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
 renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
-Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — the only
-bulk per-Ticket read sitrep does, which is why it shows a progress count and why `esc`
-interrupts it — and Details already read this session are reused. Colour carries the Status
-Category, exactly as it does on the list, while border weight and a badge word carry whether
-a Ticket is Actionable or blocked, so an in-progress Ticket that is also blocked shows both.
+Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — a bulk
+per-Ticket read, which is why it shows a progress count and why `esc` interrupts it
+(`--json --links` is the other one) — and Details already read this session are reused.
+Colour carries the Status Category, exactly as it does on the list, while border weight and
+a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
+is also blocked shows both.
 A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
 never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
 whose Links could not be read is marked unverified, which leaves anything it blocks not
@@ -339,7 +340,8 @@ or `invalid` from the list is how you stop sitrep reading them as cancellation. 
 matched case-, punctuation- and scope-insensitively, so `Won't Fix`, `wontfix` and
 `workflow::wontfix` are one entry. The key is GitLab-only — GitHub and Jira report
 cancellation natively, and a `github` or `jira` Profile that sets it is an error — and writing
-it empty is an error too: omit the key entirely to keep sitrep's built-in list
+it empty is an error too, as is an entry with no letters or digits to match by (`::`,
+`workflow::`): omit the key entirely to keep sitrep's built-in list
 (`wontfix`, `wontdo`, `willnotfix`, `willnotdo`, `duplicate`, `invalid`, `declined`,
 `rejected`, `obsolete`, `notplanned`, `notreproducible`, `cannotreproduce`, `abandoned`).
 
@@ -415,7 +417,10 @@ needs `$GITLAB_HOST`, a host-specific `glab` login, or a Profile. A Profile can 
 the group/project needed to complete hostless `&N` and `%N` Refs. A Profile naming a group
 must write it `groups/<path>`; anything unprefixed is a project path. `&N` therefore needs a
 group Profile, a bare `N` or `#N` needs a project Profile, and `%N` reads the milestones of
-whichever scope the Profile declared.
+whichever scope the Profile declared. If a Profile's `project:` names a group, rewrite it
+with the prefix — `project: acme/platform` becomes `project: groups/acme/platform` — or
+hostless `&N` Refs will fail with a message telling you the same thing. sitrep cannot detect
+this at config time: `acme/platform` is a perfectly valid project path.
 
 Native epics require Premium or Ultimate. On GitLab Free, a project or group milestone is the
 Epic fallback, with the same Watchlist renderers and Ticket drill-in. sitrep does not guess
@@ -583,10 +588,11 @@ A failed Detail fetch is not fatal: the run still exits `0` and the affected Tic
 `links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
 passing a half-fetched Watchlist off as complete.
 
-A single Ref that resolves to a plain Ticket ignores `--links` and exits `0`: that document
-already carries the Ticket's complete `links` array, and Actionable is a Watchlist-level
-property that needs the other members' statuses. A script can therefore pass `--links`
-uniformly over a mixed list of Refs.
+A single Ref that resolves to a plain Ticket fails with `--links` rather than exiting `0`
+with a document missing every key that was asked for: Actionable is a Watchlist-level
+property that needs the other members' statuses, so there is nothing to compute. That
+document already carries the Ticket's complete `links` array, which is what a script wanting
+one Ticket's Links should read.
 
 ### Decoded Ticket/Detail document: schema v1
 
@@ -613,9 +619,9 @@ schema-v3 Selector Capability object), plus:
 | `links[].kind` | `relates`, `blocked_by`, `blocks` |
 
 Compatibility is per document schema. Additive optional fields do not require a bump. A
-breaking Watchlist change increments schema v3; an unchanged decoded Ticket/Detail document
-remains schema v1. Consumers should pin the schema version for the document family they read
-and ignore unknown keys.
+breaking Watchlist change increments the Watchlist schema version; an unchanged decoded
+Ticket/Detail document remains schema v1. Consumers should pin the schema version for the
+document family they read and ignore unknown keys.
 
 Watchlist v3 is a deliberate exception to that additive rule. The `--links` fields are
 additive, but they make the Watchlist field set *invocation-dependent*, so the version is

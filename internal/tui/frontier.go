@@ -65,10 +65,11 @@ type frontierState struct {
 	focusID          model.TicketID
 	hasFocus         bool
 	offsetX, offsetY int
-	// queued are the Ticket IDs not yet issued; inflight is how many fetch
-	// commands are out.
-	queued   []model.TicketID
-	inflight int
+	// queued are the Ticket IDs not yet issued. The in-flight count lives on
+	// Model, not here: re-seating frontierState on every entry would reset it
+	// to zero while the previous entry's fetches are still running, and N
+	// toggles would then run N concurrent Parallelism-sized batches.
+	queued []model.TicketID
 	// resolved is true once every planned fetch has answered. Actionable and
 	// blocked emphasis is drawn only then: fail-closed plus a progressive fetch
 	// means a half-loaded Frontier gives wrong answers to anyone glancing at it.
@@ -148,13 +149,50 @@ func (m Model) issueFrontierFetches() (tea.Model, tea.Cmd) {
 	if m.mode == modeFrontier {
 		cmds = append(cmds, repaint)
 	}
-	for len(m.frontier.queued) > 0 && m.frontier.inflight < detailfanout.Parallelism {
+	adopted := false
+	for len(m.frontier.queued) > 0 && m.detailFanoutInflight < detailfanout.Parallelism {
 		id := m.frontier.queued[0]
 		m.frontier.queued = m.frontier.queued[1:]
-		m.frontier.inflight++
+		// The plan was made before these answers landed. A Ticket read since —
+		// by a fan-out this seat replaced, or by hand — is already paid for,
+		// and paying twice is exactly what this screen's cost discipline is
+		// about.
+		if entry, cached := m.details[id]; cached {
+			m = m.seatFanoutLinks(id, entry.detail.Links)
+			m.frontier.done++
+			adopted = true
+			continue
+		}
+		m.detailFanoutInflight++
 		cmds = append(cmds, m.frontierFetchCmd(m.frontierGeneration, id))
 	}
+	if adopted {
+		m = m.settleFrontier().rebuildFrontier()
+	}
 	return m, tea.Batch(cmds...)
+}
+
+// seatFanoutLinks writes one Ticket's Links into the seated input. Key presence
+// is the tri-state that makes fail-closed Actionable real, so this is the only
+// way a Ticket becomes verified.
+func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
+	if m.frontier.input.Links == nil {
+		m.frontier.input.Links = make(map[model.TicketID][]model.Link)
+	}
+	m.frontier.input.Links[id] = links
+	return m
+}
+
+// settleFrontier marks the fan-out resolved once this seat's own plan has been
+// answered in full, from the Tracker or from the session cache. It counts this
+// seat's bookkeeping rather than the shared in-flight counter: a fetch left
+// running by a seat the user walked away from holds a slot but says nothing
+// about this one.
+func (m Model) settleFrontier() Model {
+	if m.frontier.done == m.frontier.planned && len(m.frontier.queued) == 0 {
+		m.frontier.resolved = true
+	}
+	return m
 }
 
 // frontierFetchCmd reads one Ticket's Detail on Bubble Tea's goroutine pool,
@@ -172,30 +210,59 @@ func (m Model) frontierFetchCmd(generation int, id model.TicketID) tea.Cmd {
 // tri-state that makes fail-closed Actionable real, so a Ticket whose Links
 // could not be read stays unknown rather than looking unblocked.
 func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
-	if msg.generation != m.frontierGeneration {
-		return m, nil
+	// The read was paid for whether or not this screen still wants it, so the
+	// counter and the session cache are settled before the generation guard.
+	// A re-entered Frontier then plans around what the abandoned one fetched
+	// instead of asking the Tracker again.
+	m.detailFanoutInflight--
+	if msg.err == nil {
+		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
 	}
-	m.frontier.inflight--
+	if msg.generation != m.frontierGeneration {
+		// The answer belongs to an abandoned seat, but the slot it held is free
+		// now, so whatever the current seat has queued can start.
+		return m.issueFrontierFetches()
+	}
 	m.frontier.done++
 
 	if msg.err != nil {
 		m.frontier.failed++
 		m.frontier.lastErr = msg.err
 	} else {
-		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
-		if m.frontier.input.Links == nil {
-			m.frontier.input.Links = make(map[model.TicketID][]model.Link)
-		}
-		m.frontier.input.Links[msg.id] = msg.detail.Links
+		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
 	}
-	if m.frontier.inflight == 0 && len(m.frontier.queued) == 0 {
-		m.frontier.resolved = true
-	}
+	m = m.settleFrontier()
 	// The badges, and therefore the geometry a queued mouse callback captured,
 	// may have changed.
 	m.mouseEpoch++
 	m = m.rebuildFrontier()
 	return m.issueFrontierFetches()
+}
+
+// adoptCachedLinks folds Details read since the fan-out into the seated input.
+// One Ticket, one answer: a member whose fan-out read failed and was then
+// opened by hand has Links in the session cache, and leaving the Frontier's own
+// map without the key would keep the card UNVERIFIED and the footer claiming a
+// read that has since succeeded could not be made — while the list, which reads
+// the cache directly, draws the Ticket as Actionable.
+func (m Model) adoptCachedLinks() Model {
+	for _, t := range m.frontier.input.Tickets {
+		if _, seated := m.frontier.input.Links[t.ID]; seated {
+			continue
+		}
+		entry, cached := m.details[t.ID]
+		if !cached {
+			continue
+		}
+		m = m.seatFanoutLinks(t.ID, entry.detail.Links)
+		if m.frontier.failed > 0 {
+			m.frontier.failed--
+		}
+	}
+	if m.frontier.failed == 0 {
+		m.frontier.lastErr = nil
+	}
+	return m
 }
 
 // rebuildFrontier recomputes everything derived from the seated input: the
@@ -311,7 +378,7 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	outstanding := detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
-	if len(outstanding) == 0 || m.frontier.inflight > 0 || len(m.frontier.queued) > 0 {
+	if len(outstanding) == 0 || m.detailFanoutInflight > 0 || len(m.frontier.queued) > 0 {
 		return m, nil
 	}
 	m.frontier.queued = outstanding
@@ -410,16 +477,22 @@ func (m Model) frontierHeader() string {
 				actionable++
 			}
 		}
-		counts = fmt.Sprintf("frontier%s%d nodes%s%d ghosts%s%d actionable",
-			separator, nodes, separator, ghosts, separator, actionable)
+		counts = fmt.Sprintf("frontier%s%s%s%s%s%d actionable",
+			separator, plural(nodes, "node", "nodes"),
+			separator, plural(ghosts, "ghost", "ghosts"),
+			separator, actionable)
 	default:
-		counts = fmt.Sprintf("frontier%s%d nodes%sreading Detail %d/%d",
-			separator, nodes, separator, f.done, f.planned)
+		counts = fmt.Sprintf("frontier%s%s%sreading Detail %d/%d",
+			separator, plural(nodes, "node", "nodes"), separator, f.done, f.planned)
 	}
 
 	return strings.Join([]string{
 		headerIdentity(f.input.Header, m.width, m.styles),
-		pairLine(m.styles.Counts.Render(truncateLine(counts, m.width)),
+		// The staleness clock is reserved rather than truncated away: how old
+		// this reading is answers "why does it say that", and a counts line
+		// clipped mid-word answers nothing. The list header makes the same
+		// trade.
+		pairLineReserved(m.styles.Counts.Render(counts),
 			m.styles.Staleness.Render(m.staleness()), m.width),
 		"",
 	}, "\n")
@@ -436,7 +509,7 @@ func (m Model) frontierBody(height int) []string {
 				"Tickets are blocked or which can be picked up. The Watchlist itself is "+
 				"unaffected — press v or esc to go back to it."), height)
 	case len(m.frontier.input.Tickets) == 0:
-		return padLines([]string{m.styles.Muted.Render("This collection has no Tickets.")}, height)
+		return padLines([]string{m.styles.Muted.Render("This Watchlist has no Tickets.")}, height)
 	}
 	// A graph with nodes but no edges is not an error state: every Todo node
 	// whose Links were readable is then Actionable, which is the truth.
@@ -461,36 +534,52 @@ func padLines(lines []string, height int) []string {
 	return lines[:max(height, 1)]
 }
 
-// frontierFooterLines is the Frontier's bottom block. The filter notice is
-// mandatory whenever a filter is on: hidden work that looks like missing work
-// is this feature's failure mode, and here it would also delete edges.
+// frontierFooterLines is the Frontier's bottom block with the scroll position
+// written onto it. The position is an overlay rather than a line of its own,
+// which is what lets frontierFooterHeight measure the block instead of
+// hand-counting it.
 func (m Model) frontierFooterLines() []string {
+	lines := m.frontierFooterBlock()
+	if pos := m.frontierScrollPosition(); pos != "" {
+		last := len(lines) - 1
+		position := m.styles.Staleness.Render(pos)
+		if lipgloss.Width(lines[last])+1+lipgloss.Width(position) <= m.width {
+			lines[last] = pairLineReserved(lines[last], position, m.width)
+		} else {
+			lines[0] = pairLineReserved(lines[0], position, m.width)
+		}
+	}
+	return lines
+}
+
+// frontierFooterBlock is every footer line the screen's own state produces: the
+// spacer, the notices, and the help listing. It never consults the canvas, so
+// frontierBodyHeight can measure it without asking the canvas how tall it is.
+//
+// The filter notice is mandatory whenever a filter is on: hidden work that looks
+// like missing work is this feature's failure mode, and here it would also
+// delete edges.
+func (m Model) frontierFooterBlock() []string {
 	lines := []string{""}
 	if m.filter.Active() {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			"filters do not apply here: the Frontier renders the whole Watchlist", m.width)))
 	}
 	if m.frontier.resolved && m.frontier.failed > 0 {
-		lines = append(lines, m.styles.Error.Render(truncateLine(fmt.Sprintf(
-			"%d Tickets' Links could not be read; anything they block is not Actionable",
-			m.frontier.failed), m.width)))
+		lines = append(lines, m.styles.Error.Render(balancedTruncate(fmt.Sprintf(
+			"%s Links could not be read; anything they block is not Actionable",
+			plural(m.frontier.failed, "Ticket's", "Tickets'")), m.width, "…")))
 	}
 	if m.frontier.lastErr != nil {
-		lines = append(lines, m.styles.Error.Render(truncateLine(
-			m.frontier.lastErr.Error(), m.width)))
+		// Whichever parallel read failed last, labelled as one failure and
+		// pointed at its remedy: bare, it reads as the cause of everything on
+		// screen. The text is the Tracker's, so the cut is re-balanced.
+		lines = append(lines, m.styles.Error.Render(balancedTruncate(fmt.Sprintf(
+			"read failed: %s — press r to retry the Tickets that failed",
+			m.frontier.lastErr.Error()), m.width, "…")))
 	}
 
-	help := strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")
-	if pos := m.frontierScrollPosition(); pos != "" {
-		last := len(help) - 1
-		position := m.styles.Staleness.Render(pos)
-		if lipgloss.Width(help[last])+1+lipgloss.Width(position) <= m.width {
-			help[last] = pairLineReserved(help[last], position, m.width)
-		} else {
-			lines[0] = pairLineReserved(lines[0], position, m.width)
-		}
-	}
-	return append(lines, help...)
+	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")...)
 }
 
 // frontierShowsCanvas reports whether the body is the graph rather than one of
@@ -502,6 +591,10 @@ func (m Model) frontierShowsCanvas() bool {
 // frontierScrollPosition reports where the window sits on a canvas bigger than
 // it, one axis per direction that actually has somewhere to go. A canvas that
 // fits, or a body that is not a canvas at all, reports nothing.
+//
+// The axes are labelled x and y, in character cells. "col" would collide with
+// the graph columns the blocker-side and dependent-side keys move between,
+// which are counted in nodes and are not what this reports.
 func (m Model) frontierScrollPosition() string {
 	if !m.frontierShowsCanvas() {
 		return ""
@@ -510,30 +603,21 @@ func (m Model) frontierScrollPosition() string {
 	width, height := m.width, m.frontierBodyHeight()
 	var parts []string
 	if l.width > width {
-		parts = append(parts, fmt.Sprintf("col %d/%d", m.frontier.offsetX, l.width-width))
+		parts = append(parts, fmt.Sprintf("x %d/%d", m.frontier.offsetX, l.width-width))
 	}
 	if l.height > height {
-		parts = append(parts, fmt.Sprintf("row %d/%d", m.frontier.offsetY, l.height-height))
+		parts = append(parts, fmt.Sprintf("y %d/%d", m.frontier.offsetY, l.height-height))
 	}
 	return strings.Join(parts, separator)
 }
 
-// frontierFooterHeight is how many lines the footer occupies. It is counted
-// here rather than measured from frontierFooterLines to keep the two out of a
-// loop: the scroll position reuses either the spacer or a help line and never
-// adds one, so the footer's height does not depend on it.
+// frontierFooterHeight is how many lines the footer occupies. Measuring the
+// block would recurse — the canvas needs the height to know its own size, and
+// the scroll position needs the canvas — so the block is built without the
+// scroll-position overlay, which is what needs the canvas and which never adds
+// a line: it is written onto a line the footer already has.
 func (m Model) frontierFooterHeight() int {
-	lines := 1
-	if m.filter.Active() {
-		lines++
-	}
-	if m.frontier.resolved && m.frontier.failed > 0 {
-		lines++
-	}
-	if m.frontier.lastErr != nil {
-		lines++
-	}
-	return lines + len(strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n"))
+	return len(m.frontierFooterBlock())
 }
 
 // frontierBodyHeight is the room left for the canvas once the header and footer

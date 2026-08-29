@@ -2393,7 +2393,7 @@ func TestResolveReportsTheTruncatedPullRequestTotal(t *testing.T) {
 	}
 
 	// No totalCount in the payload: the total floors at what is actually held,
-	// so the row reads exactly as it did before this field existed.
+	// so the row counts the pull requests it has.
 	degraded := byKey["#98"]
 	if got, want := degraded.PullRequestTotal, len(degraded.PullRequests); got != want {
 		t.Errorf("#98 PullRequestTotal = %d, want %d — a payload with no total counts what it holds", got, want)

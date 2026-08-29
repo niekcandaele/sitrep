@@ -393,6 +393,13 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	}
 
 	if _, epic := selector.(provider.EpicSelector); epic && decodesToTicket(snap) {
+		// Blocking data is produced for a Watchlist, and this Ref resolved to
+		// one Ticket. Same reason --links without --json fails: ignoring it
+		// would silently drop the data the caller asked for.
+		if *withLinks {
+			return runtimeError(stderr, provider.Errorf(provider.KindBadRef,
+				"--links needs a Watchlist: %s names a single Ticket", snap.Epic.Key))
+		}
 		if *asJSON || *asPlain {
 			return runDecodedOneShot(ctx, stdout, stderr, p, snap, *asJSON)
 		}

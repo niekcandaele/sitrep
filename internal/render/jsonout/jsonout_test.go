@@ -325,8 +325,9 @@ func TestDocumentsCarryTheSchemaVersion(t *testing.T) {
 // pull_request_total is optional and Capability-gated, exactly like the
 // pull_requests array it annotates: present when the Provider can say how many
 // pull requests a Ticket has, absent when it cannot, and absent everywhere when
-// the Provider does not correlate pull requests at all. Neither schema_version
-// moves for it — a consumer that ignores the key is unaffected.
+// the Provider does not correlate pull requests at all. It is an additive
+// optional field, which no schema_version bump is owed for — a consumer that
+// ignores the key is unaffected.
 func TestRenderWatchlistPullRequestTotalIsOptionalAndCapabilityGated(t *testing.T) {
 	ticketTotals := func(t *testing.T, raw []byte) map[string]*int {
 		t.Helper()

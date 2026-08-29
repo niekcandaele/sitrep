@@ -2,19 +2,19 @@
 frontier · 16 nodes · 3 ghosts · 3 actionable       just now
 
 ┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━
-│▸ #205                Done│┼────▶┃  #201                Tod
-│Compute shard weights     ││     ┃Ship the rebalancer CLI
-│                          ││     ┃ACTIONABLE
-└──────────────────────────┘│     ┗━━━━━━━━━━━━━━━━━━━━━━━━━
-                            │
-┌──────────────────────────┐│     ┌────────────────────────›
-│  #206           Cancelled│┘┌───▶│  #203                Tod
-│Legacy weight table       │ │    │Backfill shard weights
-│                          │ │    │blocked by 1
-└──────────────────────────┘ │    └─────────────────────────
-                             │
-╔══════════════════════════╗ │▼   ┌─────────────────────────
-                                         col 0/62 · row 0/47
-1 Tickets' Links could not be read; anything they block is n
-fake: no detail for ticket "acme/widgets#211"
-m off, shift-drag • enter open Ticket • v list • ↑/k up …
+│▸ #205                Done│─┼───▶┃  #201                Tod
+│Compute shard weights     │ │    ┃Ship the rebalancer CLI
+│                          │ │    ┃ACTIONABLE
+└──────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━
+                             │                             ›
+┌──────────────────────────┐ │    ┌─────────────────────────
+│  #206           Cancelled│─┘┌──▶│  #203                Tod
+│Legacy weight table       │  │   │Backfill shard weights
+│                          │  │   │blocked by 1
+└──────────────────────────┘  │   └─────────────────────────
+                              │
+╔══════════════════════════╗ ▼│   ┌─────────────────────────
+                                             x 0/62 · y 0/47
+1 Ticket's Links could not be read; anything they block is …
+read failed: fake: no detail for ticket "acme/widgets#211" …
+m off, shift-drag • enter open Ticket • v list • q quit …

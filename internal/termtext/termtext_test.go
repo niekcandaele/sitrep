@@ -44,9 +44,9 @@ func TestLine(t *testing.T) {
 	}
 }
 
-// Line normalizes malformed UTF-8 (#66). The earlier policy left it alone,
-// which is exactly what let a raw single-byte C1 reach a terminal as CSI: the
-// rune scan classified it as utf8.RuneError and wrote the byte back out.
+// Line normalizes malformed UTF-8. Leaving it alone is what lets a raw
+// single-byte C1 reach a terminal as CSI: a rune scan classifies it as
+// utf8.RuneError and writes the byte back out.
 func TestLineNormalizesMalformedUTF8(t *testing.T) {
 	tests := [][]byte{
 		{'a', 0x80, 'b'},

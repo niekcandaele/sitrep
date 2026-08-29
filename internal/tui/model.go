@@ -82,6 +82,12 @@ type Model struct {
 	// Watchlist, advances it and every outstanding answer is dropped. That is
 	// what makes the fan-out interruptible.
 	frontierGeneration int
+	// detailFanoutInflight is how many bulk fan-out fetches are out, counted on
+	// the Model rather than on frontierState so that re-seating the Frontier
+	// does not reset it. It is what bounds concurrency across toggles: the
+	// generation drops an old fetch's answer, but the fetch itself is still
+	// running and still costing the Tracker a request.
+	detailFanoutInflight int
 	// detailReturn is the mode a root Detail seat returns to on esc. The
 	// Frontier is a second rendering of the list, not a Trail entry, so a Ticket
 	// opened from it goes back to it.

@@ -50,3 +50,55 @@ func TestShowsNativeStatus(t *testing.T) {
 		}
 	}
 }
+
+// StatusField never renders nothing: whatever the Category and whatever the
+// Tracker's word, a renderer with no Category heading above it gets something
+// to draw. This is the invariant, asserted rather than the strings.
+func TestStatusFieldIsNeverEmpty(t *testing.T) {
+	categories := []model.StatusCategory{
+		model.StatusUnknown, model.StatusTodo, model.StatusInProgress,
+		model.StatusDone, model.StatusCancelled,
+	}
+	natives := []string{"", "open", "closed", "Done", "not planned", "In Review", "  "}
+
+	for _, c := range categories {
+		for _, native := range natives {
+			got := StatusField(model.Ticket{Status: c, NativeStatus: native})
+			if len(got) <= len("[]") {
+				t.Errorf("StatusField(%q under %v) = %q, want a status", native, c, got)
+			}
+		}
+	}
+}
+
+// The two halves of the rule at once: a degenerate word is suppressed on a row
+// under a Category heading, and replaced by its Status Category where no
+// heading supplies it.
+func TestDegenerateStatusIsSuppressedOnRowsAndNamedWithoutAHeading(t *testing.T) {
+	tests := []struct {
+		native string
+		status model.StatusCategory
+		onRow  bool
+		field  string
+	}{
+		{"open", model.StatusTodo, false, "[Todo]"},
+		{"closed", model.StatusDone, false, "[Done]"},
+		{"Done", model.StatusDone, false, "[Done]"},
+		{"not planned", model.StatusCancelled, false, "[Cancelled]"},
+		{"in progress", model.StatusInProgress, false, "[In Progress]"},
+		{"", model.StatusTodo, false, "[Todo]"},
+		// Not degenerate: the Tracker's own word survives both ways.
+		{"In Review", model.StatusInProgress, true, "[In Review]"},
+	}
+
+	for _, tc := range tests {
+		ticket := model.Ticket{Status: tc.status, NativeStatus: tc.native}
+		if got := StatusField(ticket); got != tc.field {
+			t.Errorf("StatusField(%q under %v) = %q, want %q", tc.native, tc.status, got, tc.field)
+		}
+		if got := ShowsNativeStatus(ticket); got != tc.onRow {
+			t.Errorf("ShowsNativeStatus(%q under %v) = %v, want %v",
+				tc.native, tc.status, got, tc.onRow)
+		}
+	}
+}

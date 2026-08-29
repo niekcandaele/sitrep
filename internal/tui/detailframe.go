@@ -123,7 +123,8 @@ const commentTimeLayout = "2006-01-02 15:04"
 
 // renderDetailHeader draws the block above the Detail body: the root Watchlist
 // and prior Trail Tickets as a breadcrumb, the current Ticket's identity, and a
-// meta line using the same field renderer as list rows.
+// meta line whose status names the Status Category when the Tracker's own word
+// would only restate it — nothing supplies that context here.
 //
 // It is drawn in every state — loading, failed, loaded — because a screen that
 // cannot say which Ticket it is reading is worse than the list it replaced.
@@ -131,7 +132,7 @@ func renderDetailHeader(in DetailInput, staleness string, width int, s Styles, t
 	return strings.Join([]string{
 		renderDetailTopLine(in.Parent, trail, staleness, width, s),
 		headerIdentity(Header{Key: in.Ticket.Key, Title: in.Ticket.Title, URL: in.Ticket.URL}, width, s, true),
-		truncateLine(ticketMeta(detailMetaTicket(in.Ticket), in.Capabilities, s), width),
+		truncateLine(detailMetaLine(detailMetaTicket(in.Ticket), in.Capabilities, s), width),
 		"",
 	}, "\n")
 }

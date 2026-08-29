@@ -542,9 +542,6 @@ func TestWithoutBlockingLinksCapabilityTheGraphClaimsNothing(t *testing.T) {
 		"b": {blockedBy(target("a", model.StatusTodo))},
 	}
 	g := model.BuildBlockingGraph(tickets, links, model.Capabilities{})
-	if g.BlockingLinksSupported() {
-		t.Error("BlockingLinksSupported() must report the absent Capability")
-	}
 	for _, m := range g.Members() {
 		if m.Actionable || m.LinksKnown || m.InCycle || len(m.Blockers) != 0 {
 			t.Errorf("%s = %+v, want a graph that claims nothing", m.TicketID, m)
@@ -585,8 +582,7 @@ func TestEmptyInputs(t *testing.T) {
 	}
 
 	var zero model.BlockingGraph
-	if zero.BlockingLinksSupported() || len(zero.Members()) != 0 ||
-		len(zero.Ghosts()) != 0 || len(zero.Cycles()) != 0 {
+	if len(zero.Members()) != 0 || len(zero.Ghosts()) != 0 || len(zero.Cycles()) != 0 {
 		t.Error("the zero BlockingGraph must be a graph over no Tickets")
 	}
 	if _, ok := zero.For("a"); ok {

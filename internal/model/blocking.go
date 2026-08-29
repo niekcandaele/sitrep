@@ -92,18 +92,11 @@ type GhostTicket struct {
 //
 // The zero value is a graph over no Tickets with no blocking information.
 type BlockingGraph struct {
-	supported bool
-	members   []Actionability
-	index     map[TicketID]int
-	ghosts    []GhostTicket
-	cycles    [][]TicketID
+	members []Actionability
+	index   map[TicketID]int
+	ghosts  []GhostTicket
+	cycles  [][]TicketID
 }
-
-// BlockingLinksSupported reports whether the serving Provider declared the
-// BlockingLinks Capability. When it is false the graph claims nothing: no
-// blockers, no Ghosts, no cycles and nothing Actionable, because a Provider
-// that cannot express "blocks" has nothing to say about direction.
-func (g BlockingGraph) BlockingLinksSupported() bool { return g.supported }
 
 // Members returns every Watchlist member's Actionability in canonical order:
 // the order Tickets were given to BuildBlockingGraph.
@@ -189,9 +182,8 @@ type blockEdge struct {
 // caps are the serving Provider's Capabilities; only BlockingLinks is read.
 func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabilities) BlockingGraph {
 	g := BlockingGraph{
-		supported: caps.BlockingLinks,
-		members:   make([]Actionability, 0, len(tickets)),
-		index:     make(map[TicketID]int, len(tickets)),
+		members: make([]Actionability, 0, len(tickets)),
+		index:   make(map[TicketID]int, len(tickets)),
 	}
 	for _, t := range tickets {
 		if _, dup := g.index[t.ID]; !dup {

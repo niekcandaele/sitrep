@@ -8,6 +8,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // This file is the Frontier's layout: nodes and BlockedBy edges in, a canvas of
@@ -28,8 +29,11 @@ const (
 	// fits at all and the card shrinks to what there is.
 	frontierNarrowTerminal = 30
 	frontierMinCardWidth   = 12
-	// frontierMinGutter is the two columns every gutter needs: one for the
-	// horizontal run and one for the arrowhead.
+	// frontierMinGutter is the two columns every gutter reserves beside the
+	// cards: one blank beside the blocker's right border, so a vertical channel
+	// never runs flush against a card it has nothing to do with, and one for the
+	// arrowhead beside the dependent's left border. The channels sit between
+	// them.
 	frontierMinGutter = 2
 	// maxGutterChannels caps how many vertical runs one gutter draws. Beyond it
 	// channels are reused round-robin: junctions are drawn, so an overlapping
@@ -83,6 +87,12 @@ type frontierCell struct {
 	r     rune
 	style int
 	link  int
+	// trailing holds the zero-width runes that belong to r — combining marks,
+	// variation selectors, ZWJ joiners. They occupy no column of their own, so
+	// they ride along with the cell they modify rather than claiming one or
+	// being dropped: "café" on a card must be the same bytes as "café" on a
+	// list row.
+	trailing string
 }
 
 // frontierRect is one node's card on the canvas.
@@ -168,7 +178,17 @@ func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool)
 	members := g.Members()
 	ghosts := g.Ghosts()
 	nodes := make([]frontierNode, 0, len(members)+len(ghosts))
+	// A Ref-list Watchlist may legitimately name the same Ticket twice, and
+	// jsonout walks its members positionally for exactly that reason. The
+	// Frontier is a graph, where one Ticket is one node: a second card for the
+	// same ID would give nodeAt, columnOf and hit-testing two answers and one
+	// winner, so focus and clicks would reach a card the eye is not on.
+	drawn := make(map[model.TicketID]bool, len(members))
 	for _, a := range members {
+		if drawn[a.TicketID] {
+			continue
+		}
+		drawn[a.TicketID] = true
 		t := byID[a.TicketID]
 		nodes = append(nodes, frontierNode{
 			id:       a.TicketID,
@@ -544,7 +564,10 @@ func (l *frontierLayout) routeGutter(segments []frontierSegment, bx, dx, style i
 
 		// Channels are assigned in segment order and reused round-robin past the
 		// cap; overlapping runs are acceptable because junctions are drawn.
-		cx := bx + 1 + next%channels
+		// Channel 0 starts one column clear of the blocker's border: a trunk
+		// drawn in the column touching the cards reads as part of every card in
+		// that column, related or not.
+		cx := bx + 2 + next%channels
 		next++
 		for x := bx + 1; x <= cx-1; x++ {
 			l.merge(x, by, '─', style)
@@ -687,9 +710,15 @@ func (l *frontierLayout) write(x, y int, s string, style, link, limit int) {
 		return
 	}
 	limit = min(limit, l.width)
+	last := -1
 	for _, r := range s {
 		w := lipgloss.Width(string(r))
 		if w <= 0 {
+			// A zero-width rune modifies the cell before it. A leading one
+			// modifies nothing, so it is dropped.
+			if last >= 0 {
+				l.cells[y][last].trailing += string(r)
+			}
 			continue
 		}
 		if x+w > limit {
@@ -700,6 +729,7 @@ func (l *frontierLayout) write(x, y int, s string, style, link, limit int) {
 			for i := 1; i < w; i++ {
 				l.cells[y][x+i] = frontierCell{style: style, link: link}
 			}
+			last = x
 		}
 		x += w
 	}
@@ -762,19 +792,7 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 		overlay[[2]int{rect.X + 1 - offsetX, rect.Y + 1 - offsetY}] =
 			frontierCell{r: '▸', style: frontierMarkerStyle}
 	}
-	overflow := make(map[[2]int]rune, 4)
-	if offsetY > 0 {
-		overflow[[2]int{width / 2, 0}] = '▲'
-	}
-	if offsetY+height < l.height {
-		overflow[[2]int{width / 2, height - 1}] = '▼'
-	}
-	if offsetX > 0 {
-		overflow[[2]int{0, height / 2}] = '‹'
-	}
-	if offsetX+width < l.width {
-		overflow[[2]int{width - 1, height / 2}] = '›'
-	}
+	overflow := frontierOverflowGlyphs(l, overlay, offsetX, offsetY, width, height)
 
 	lines := make([]string, 0, height)
 	for wy := range height {
@@ -814,12 +832,81 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 			}
 			if cell.r != 0 {
 				run.WriteRune(cell.r)
+				run.WriteString(cell.trailing)
 			}
 		}
 		flush()
-		lines = append(lines, truncateLine(strings.TrimRight(line.String(), " "), width))
+		// The canvas cuts by column, not by line: a horizontal scroll slices
+		// every card in the leftmost and rightmost columns mid-field, which can
+		// leave a bidirectional opener or its terminator on the far side of the
+		// window. Balancing the assembled line is the same obligation
+		// balancedTruncate carries for a field it clips (ADR-0006).
+		lines = append(lines, termtext.Balance(
+			truncateLine(strings.TrimRight(line.String(), " "), width)))
 	}
 	return lines
+}
+
+// frontierOverflowGlyphs places one edge indicator per direction that has
+// content off-screen, on a cell that is blank in the visible window. It walks
+// outwards from the middle of the edge, because the middle is where the eye
+// looks first; where the whole edge is occupied it draws nothing rather than
+// punching a hole in a card's border, and the footer's scroll position still
+// reports the same fact.
+//
+// It is a pure function of the window: the same offsets and the same canvas
+// always place the same glyphs.
+func frontierOverflowGlyphs(l frontierLayout, overlay map[[2]int]frontierCell,
+	offsetX, offsetY, width, height int) map[[2]int]rune {
+	out := make(map[[2]int]rune, 4)
+	free := func(wx, wy int) bool {
+		if _, taken := overlay[[2]int{wx, wy}]; taken {
+			return false
+		}
+		if _, taken := out[[2]int{wx, wy}]; taken {
+			return false
+		}
+		y, x := wy+offsetY, wx+offsetX
+		if y < 0 || y >= l.height || x < 0 || x >= l.width {
+			return true
+		}
+		r := l.cells[y][x].r
+		return r == 0 || r == ' '
+	}
+	// place searches one edge for a free cell, nearest the middle first. across
+	// is the coordinate that varies; fixed is the edge itself.
+	place := func(glyph rune, alongRow bool, fixed, span int) {
+		mid := span / 2
+		for d := range span {
+			for _, across := range [2]int{mid - d, mid + d} {
+				if across < 0 || across >= span {
+					continue
+				}
+				wx, wy := across, fixed
+				if !alongRow {
+					wx, wy = fixed, across
+				}
+				if free(wx, wy) {
+					out[[2]int{wx, wy}] = glyph
+					return
+				}
+			}
+		}
+	}
+
+	if offsetY > 0 {
+		place('▲', true, 0, width)
+	}
+	if offsetY+height < l.height {
+		place('▼', true, height-1, width)
+	}
+	if offsetX > 0 {
+		place('‹', false, 0, height)
+	}
+	if offsetX+width < l.width {
+		place('›', false, width-1, height)
+	}
+	return out
 }
 
 // nodeAtPoint reports which node's card covers a canvas coordinate.

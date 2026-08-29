@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
@@ -184,8 +186,9 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 }
 
 // esc mid-fetch returns to a readable list, and a late answer from the
-// abandoned generation changes nothing: that is what makes the fan-out
-// interruptible.
+// abandoned generation moves nothing on screen: that is what makes the fan-out
+// interruptible. The read itself still warms the session cache — see
+// TestAnAbandonedFanOutAnswerStillWarmsTheCache.
 func TestFrontierFetchIsInterruptible(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
@@ -236,8 +239,11 @@ func TestFrontierWithoutTheBlockingLinksCapability(t *testing.T) {
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls = %d, want 0: a screen that cannot draw a graph must not pay for one", n)
 	}
-	if m.frontier.graph.BlockingLinksSupported() {
-		t.Error("the graph claims blocking links the Provider does not report")
+	for _, a := range m.frontier.graph.Members() {
+		if a.Actionable || a.LinksKnown {
+			t.Errorf("%s = %+v: the graph claims blocking links the Provider does not report",
+				a.TicketID, a)
+		}
 	}
 	if strings.Contains(string(got), "ACTIONABLE") {
 		t.Errorf("the Frontier claimed something with no blocking links to read:\n%s", got)
@@ -278,6 +284,63 @@ func TestFrontierIgnoresListFilters(t *testing.T) {
 	}
 }
 
+// An overflow indicator says "there is more that way". Punched into a card's
+// border it says that and also unmakes the card, so it takes the nearest blank
+// cell on its edge instead — and where the edge is full it is dropped, because
+// the footer's scroll position reports the same fact.
+func TestFrontierOverflowGlyphsNeverOverwriteContent(t *testing.T) {
+	// A canvas whose top row is entirely card border and whose bottom row has
+	// exactly one blank cell, off the midpoint.
+	full := make([]frontierCell, 8)
+	for i := range full {
+		full[i] = frontierCell{r: '─'}
+	}
+	bottom := append([]frontierCell(nil), full...)
+	bottom[1] = frontierCell{r: ' '}
+	l := frontierLayout{cells: [][]frontierCell{full, bottom, full}, width: 8, height: 3}
+
+	got := frontierOverflowGlyphs(l, nil, 0, 1, 8, 2)
+
+	if len(got) != 1 {
+		t.Fatalf("placed %v, want only the ▲ the free cell can carry", got)
+	}
+	if glyph, ok := got[[2]int{1, 0}]; !ok || glyph != '▲' {
+		t.Errorf("placed %v, want ▲ on the one blank cell at x=1", got)
+	}
+}
+
+// A zero-width rune modifies the cell before it rather than claiming a column
+// of its own. Dropping it silently rewrites the Tracker's text: "café" on a
+// card must be the bytes the list row draws.
+func TestFrontierCardsKeepCombiningMarks(t *testing.T) {
+	// "cafe" plus a combining acute: the mark is zero-width and claims no
+	// column of its own, which is exactly what the canvas used to drop.
+	const title = "café latency"
+	tickets := []model.Ticket{{ID: "T-1", Key: "#1", Title: title, Status: model.StatusTodo}}
+	m := frontierMouseModel(t, tickets, nil, 120, 30)
+
+	if !strings.Contains(m.View().Content, title) {
+		t.Errorf("the card dropped the combining mark:\n%s", m.View().Content)
+	}
+}
+
+// jsonout walks members positionally because a Ref-list Watchlist may name the
+// same Ticket twice. The Frontier is a graph, where one Ticket is one node: a
+// second card would give nodeAt and columnOf two answers and one winner, so
+// clicks and focus would reach a card the eye is not on.
+func TestFrontierDrawsOneNodePerTicket(t *testing.T) {
+	ticket := model.Ticket{ID: "T-1", Key: "#1", Title: "twice", Status: model.StatusTodo}
+	m := frontierMouseModel(t, []model.Ticket{ticket, ticket}, nil, 120, 30)
+
+	if n := len(m.frontier.layout.order); n != 1 {
+		t.Errorf("the canvas carries %d nodes for one Ticket named twice: %v",
+			n, m.frontier.layout.order)
+	}
+	if strings.Count(m.View().Content, "#1") != 1 {
+		t.Errorf("the Ticket was drawn twice:\n%s", m.View().Content)
+	}
+}
+
 // A canvas bigger than the terminal scrolls rather than reflowing: the card
 // width is fixed, and the edges say where there is more.
 func TestFrontierNarrowTerminalScrolls(t *testing.T) {
@@ -314,7 +377,7 @@ func TestFrontierNarrowTerminalScrolls(t *testing.T) {
 			t.Errorf("line width = %d, want at most %d: %q", w, width, line)
 		}
 	}
-	if !strings.Contains(string(got), "col ") {
+	if !strings.Contains(string(got), "x ") {
 		t.Errorf("no scroll position is reported on a canvas larger than the body:\n%s", got)
 	}
 }
@@ -504,7 +567,9 @@ func TestFrontierRefreshOnlyRetriesWhatFailed(t *testing.T) {
 	before := p.DetailCalls()
 
 	s.tm.Send(keyPress("r"))
-	s.waitFor(t, "actionable")
+	waitUntil(t, "the retry of #211", func() bool {
+		return p.DetailCallsFor("acme/widgets#211") == 2
+	})
 	m, _ := s.finish(t)
 
 	// #211 has no fixture Detail, so it is the only read left to retry.
@@ -572,11 +637,58 @@ func TestFrontierSeatIsSanitized(t *testing.T) {
 		t.Fatalf("mode = %v, want the Frontier", m.mode)
 	}
 	termtexttest.AssertClean(t, "m.frontier.input.Header", m.frontier.input.Header)
-	for i, ticket := range m.frontier.input.Tickets {
+	for _, ticket := range m.frontier.input.Tickets {
 		termtexttest.AssertClean(t, "m.frontier.input.Tickets", ticket,
 			termtexttest.Exempt("ID", "ParentID"))
-		if i > 2 {
-			break
+	}
+	assertNoInjectedControls(t, "frontier frame", m.View().Content)
+}
+
+// Links arriving through the fan-out never crossed a seat funnel: they are
+// written straight into frontier.input.Links from a DetailSource answer. The
+// boundary has to hold on that path too, or the one screen that fetches in bulk
+// is the one screen that does not sanitize.
+func TestFrontierFanOutLinksAreSanitized(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := hostileListInput(now)
+	detail := hostileDetail("T-1")
+	if termtexttest.IsClean(detail, detailValueOptions...) {
+		t.Fatal("the hostile Detail fixture carries nothing hostile")
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return hostileDetail(id), in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+	m = updated.(Model)
+	updated, cmd := m.Update(keyPress("v"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("the Frontier issued no fan-out, so this test proves nothing")
+	}
+	// Entering batches a repaint with the fan-out's fetch commands.
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("entering the Frontier produced %T, want a batch of fetches", cmd())
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		updated, _ = m.Update(sub())
+		m = updated.(Model)
+	}
+
+	if len(m.frontier.input.Links) == 0 {
+		t.Fatal("no fan-out answer reached the seat, so this test proves nothing")
+	}
+	for id, links := range m.frontier.input.Links {
+		for _, link := range links {
+			termtexttest.AssertClean(t, "m.frontier.input.Links["+string(id)+"]", link,
+				termtexttest.Exempt("Target.ID"))
 		}
 	}
 	assertNoInjectedControls(t, "frontier frame", m.View().Content)
@@ -620,6 +732,175 @@ func frontierMouseModel(t *testing.T, tickets []model.Ticket,
 		t.Fatal("the fan-out never resolved")
 	}
 	return m
+}
+
+// One cache, one answer. A fan-out read that failed leaves no Links key, so the
+// card is UNVERIFIED and the footer counts it; opening that Ticket by hand fills
+// the session cache, and coming back must adopt it. Otherwise the Frontier keeps
+// claiming a read failed that has since succeeded, while the list — which reads
+// the same cache directly — draws the Ticket as Actionable, and r is a silent
+// no-op because there is genuinely nothing left to plan.
+func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second", Status: model.StatusTodo},
+	}
+	in := ListInput{
+		Header:       Header{Key: "#0", Title: "adopt"},
+		Tickets:      tickets,
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return model.Detail{TicketID: id}, in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+
+	// The fan-out answers: #2 lands, #1 fails. The Frontier opens focused on
+	// the list's selection, which is #1.
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-2",
+		detail: model.Detail{TicketID: "T-2"}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-1", err: errors.New("context deadline exceeded"),
+	})
+	m = updated.(Model)
+
+	if !strings.Contains(m.View().Content, "UNVERIFIED") {
+		t.Fatalf("the failed read left no UNVERIFIED card:\n%s", m.View().Content)
+	}
+	if m.frontier.focusID != "T-1" {
+		t.Fatalf("focus = %q, want the Ticket whose read failed", m.frontier.focusID)
+	}
+
+	// Open it by hand, let the read land, and come back.
+	updated, cmd := m.Update(keyPress("enter"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("opening the unread Ticket issued no fetch")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	updated, _ = m.Update(escKey)
+	m = updated.(Model)
+
+	if m.mode != modeFrontier {
+		t.Fatalf("esc landed in %v, want the Frontier", m.mode)
+	}
+	frame := m.View().Content
+	if strings.Contains(frame, "UNVERIFIED") {
+		t.Errorf("the card is still unverified after its Detail was read by hand:\n%s", frame)
+	}
+	if strings.Contains(frame, "could not be read") {
+		t.Errorf("the footer still reports a failed read:\n%s", frame)
+	}
+	if strings.Contains(frame, "context deadline exceeded") {
+		t.Errorf("the footer still shows the stale error:\n%s", frame)
+	}
+	if _, seated := m.frontier.input.Links["T-1"]; !seated {
+		t.Error("the Frontier's Links map still lacks the key the session cache holds")
+	}
+}
+
+// Leaving the Frontier drops the answer but not the fetch behind it, so the
+// in-flight count lives on the Model: re-seating frontierState must not reset
+// it to zero and let a second toggle start a second full-width batch.
+func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	release := make(chan struct{})
+	source := blockedDetailSource(release, TicketDetailSource(p))
+	var peak, live int
+	var mu sync.Mutex
+	counting := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+		mu.Lock()
+		live++
+		peak = max(peak, live)
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			live--
+			mu.Unlock()
+		}()
+		return source(ctx, id)
+	}
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: counting,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+
+	for range 3 {
+		s.tm.Send(keyPress("v"))
+		s.waitFor(t, "reading Detail")
+		s.tm.Send(keyPress("v"))
+		s.waitFor(t, "TODO")
+	}
+	close(release)
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "actionable")
+
+	s.finish(t)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > detailfanout.Parallelism {
+		t.Errorf("peak concurrent reads = %d, want at most %d: a toggle started a second batch",
+			peak, detailfanout.Parallelism)
+	}
+}
+
+// The other half of the same defect: an answer the screen no longer wants was
+// discarded entirely, so a re-entered Frontier paid the Tracker again for a read
+// that had already been made. The abandoned seat's bookkeeping still stays out.
+func TestAnAbandonedFanOutAnswerStillWarmsTheCache(t *testing.T) {
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := ListInput{
+		Header:       Header{Key: "#0", Title: "abandoned"},
+		Tickets:      []model.Ticket{{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			return model.Detail{TicketID: id}, in.Capabilities, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	abandoned := m.frontierGeneration
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: abandoned, id: "T-1",
+		detail: model.Detail{TicketID: "T-1"}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+
+	if !m.haveDetail("T-1") {
+		t.Error("the answer was discarded, so re-entering the Frontier would pay for it again")
+	}
+	if m.frontier.done != 0 {
+		t.Errorf("frontier.done = %d, want 0: an abandoned seat's answer is not this seat's progress",
+			m.frontier.done)
+	}
 }
 
 func frontierMouse(t *testing.T, m Model, msg tea.MouseMsg) tea.Msg {

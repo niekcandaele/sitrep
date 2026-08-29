@@ -34,7 +34,7 @@ frontier · 13 nodes · 0 ghosts · 0 actionable                                
 ┌──────────────────────────┐
 │  #206           Cancelled│
 │Legacy weight table       │                                ▼
-                                                                                                                row 0/45
+                                                                                                                  y 0/45
 13 Tickets' Links could not be read; anything they block is not Actionable
-tracker said no
-m off · shift-drag to select text • enter open Ticket • v list • ↑/k up • ↓/j down • ←/h blockers • →/l dependents …
+read failed: tracker said no — press r to retry the Tickets that failed
+m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down

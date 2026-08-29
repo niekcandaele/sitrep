@@ -572,6 +572,7 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// A Ticket opened from the Frontier goes back to the Frontier: it is
 			// a second rendering of the list, not a Trail entry.
 			m.mode = modeFrontier
+			m = m.adoptCachedLinks().rebuildFrontier()
 			return m.reconcileFrontier(true), repaint
 		}
 		m.mode = modeList

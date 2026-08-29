@@ -325,11 +325,11 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 		Down: list.Down,
 		Left: key.NewBinding(
 			key.WithKeys("left", "h"),
-			key.WithHelp("←/h", "blockers"),
+			key.WithHelp("←/h", "blocker side"),
 		),
 		Right: key.NewBinding(
 			key.WithKeys("right", "l"),
-			key.WithHelp("→/l", "dependents"),
+			key.WithHelp("→/l", "dependent side"),
 		),
 		Home: key.NewBinding(
 			key.WithKeys("home", "g"),
@@ -366,8 +366,16 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 }
 
 // ShortHelp returns the bindings the Frontier's one-line footer shows.
+//
+// The escape hatches come before movement: q, ? and r are what a reader needs
+// when the screen is not doing what they expected, and r is the only remedy for
+// the failure banner drawn directly above this line. Movement is discoverable
+// by trying the arrow keys; "? help" is not discoverable by anything. This is
+// the same trade KeyMap.ShortHelp names, made the same way, so the two footers
+// are visibly one decision.
 func (k FrontierKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.ToggleMouse, k.Open, k.Toggle, k.Up, k.Down, k.Left, k.Right, k.Help, k.Quit}
+	return []key.Binding{k.ToggleMouse, k.Open, k.Toggle, k.Quit, k.Refresh, k.Help,
+		k.Up, k.Down, k.Left, k.Right}
 }
 
 // FullHelp returns every binding in two dense columns; the model stacks them

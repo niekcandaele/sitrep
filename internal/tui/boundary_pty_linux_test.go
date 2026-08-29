@@ -31,8 +31,17 @@ const (
 	boundaryPTYChildMarker  = "LINKTARGET"
 	boundaryPTYDrillMarker  = "DRILLDETAIL"
 	boundaryPTYListMarker   = "WATCHLISTSCREEN"
-	// The Frontier's own header word, which no other screen draws.
+	// The Frontier's own header word, which no other screen draws. It is drawn
+	// at seat time, before any card, so it says the screen opened and nothing
+	// more.
 	boundaryPTYFrontierMarker = "frontier"
+	// The dashed top border of a Ghost Ticket's card, which only the canvas's
+	// card renderer draws. Waiting on it is what makes this leg an assertion
+	// about that renderer: quitting on the header word alone, which is drawn at
+	// seat time, leaves whether a card ever drew a race, and the leg passes with
+	// node drawing entirely broken. The card's own fields are the hostile Link
+	// target's, so the assertions above cover the bytes it wrote.
+	boundaryPTYFrontierCardMarker = "╭╌╌╌"
 )
 
 // boundaryPTYBodyPayload is carried only by body fields, where the Body policy
@@ -71,7 +80,8 @@ func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 	visible := ansi.Strip(output)
 	for _, want := range []string{
 		boundaryPTYDetailMarker, boundaryPTYChildMarker, boundaryPTYDrillMarker,
-		boundaryPTYListMarker, boundaryPTYFrontierMarker, "café", "東京",
+		boundaryPTYListMarker, boundaryPTYFrontierMarker, boundaryPTYFrontierCardMarker,
+		"café", "東京",
 	} {
 		if !strings.Contains(visible, want) {
 			t.Errorf("PTY output lost %q:\n%s", want, visible)
@@ -248,7 +258,8 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 		{waitFor: boundaryPTYChildMarker, send: "u"},
 		{waitFor: boundaryPTYListMarker, send: "\r"},
 		{waitFor: boundaryPTYDrillMarker, send: "uv"},
-		{waitFor: boundaryPTYFrontierMarker, send: "q"},
+		{waitFor: boundaryPTYFrontierMarker, send: ""},
+		{waitFor: boundaryPTYFrontierCardMarker, send: "q"},
 	}
 	for _, step := range script {
 		output = waitForPTYMarker(t, chunks, output, step.waitFor)

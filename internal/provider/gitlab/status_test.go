@@ -156,3 +156,57 @@ func TestNormalizeStatusNeverReportsInProgress(t *testing.T) {
 		}
 	}
 }
+
+// The two layers agree: every list config validation accepts replaces the
+// built-in labels rather than silently falling back to them. UsableWontDoLabel
+// is the rule both sides read, so a list that passes it can never normalize
+// away to nothing.
+func TestAnAcceptedWontDoListNeverFallsBackToTheDefaults(t *testing.T) {
+	// None of these normalizes to a built-in label, so a set that still
+	// matches "wontfix" can only be defaultWontDoLabels handed back.
+	lists := [][]string{
+		{"ausgemustert"},
+		{"workflow::abgebrochen"},
+		{"Niet Doen"},
+		{"a", "b"},
+	}
+
+	for _, names := range lists {
+		for _, name := range names {
+			if !UsableWontDoLabel(name) {
+				t.Fatalf("UsableWontDoLabel(%q) = false; this list would be rejected by config", name)
+			}
+		}
+		set := newWontDoSet(names)
+		if len(set) != len(names) {
+			t.Errorf("newWontDoSet(%v) has %d entries, want %d", names, len(set), len(names))
+		}
+		if set.matches("wontfix") {
+			t.Errorf("newWontDoSet(%v) still matches a built-in label: the override was ignored", names)
+		}
+	}
+}
+
+// The rule config validation reads, stated as a table so the two layers cannot
+// drift apart quietly.
+func TestUsableWontDoLabel(t *testing.T) {
+	tests := map[string]bool{
+		"wontfix":            true,
+		"Won't Fix":          true,
+		"workflow::wontfix":  true,
+		"ausgemustert":       true,
+		"404":                true,
+		"::":                 false,
+		"---":                false,
+		"workflow::":         false,
+		"":                   false,
+		"   ":                false,
+		"workflow:: - - -  ": false,
+	}
+
+	for name, want := range tests {
+		if got := UsableWontDoLabel(name); got != want {
+			t.Errorf("UsableWontDoLabel(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
