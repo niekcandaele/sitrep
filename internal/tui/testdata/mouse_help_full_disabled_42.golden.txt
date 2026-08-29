@@ -30,11 +30,11 @@ CANCELLED (1)
 
 
 
-m     on         ↑/k  up
-enter open       ↓/j  down
-r     refresh    pgup page up
-?     help       pgdn page down
-q     quit       g    first
-                 G    last
-                 d    hide finished
-                 /    find
+m     on          ↑/k  up
+enter open        ↓/j  down
+v     frontier    pgup page up
+r     refresh     pgdn page down
+?     help        g    first
+q     quit        G    last
+                  d    hide finished
+                  /    find

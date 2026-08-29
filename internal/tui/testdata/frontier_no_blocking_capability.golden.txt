@@ -1,0 +1,40 @@
+#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
+frontier · this Provider reports no blocking links                                                              just now
+
+This Provider does not report blocking links, so sitrep cannot tell which Tickets are blocked or which can be picked up.
+The Watchlist itself is unaffected — press v or esc to go back to it.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+m off · shift-drag to select text • enter open Ticket • v list • ↑/k up • ↓/j down • ←/h blockers • →/l dependents …

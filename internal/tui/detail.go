@@ -27,6 +27,12 @@ const (
 	// rendering. That is why the breadcrumb is carried on DetailInput rather than
 	// read from list state.
 	modeDetail
+	// modeFrontier is the same Watchlist drawn as blocking-graph nodes.
+	//
+	// It is a second rendering of the list rather than a navigation frame: the
+	// membership is the list's, the selection survives the toggle both ways, and
+	// a Ticket opened from it returns to it.
+	modeFrontier
 )
 
 // DetailHeader identifies the Ticket a Detail belongs to: everything the Detail
@@ -236,6 +242,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 
 	m = m.clearPendingClick()
 	m.trail = nil
+	m.detailReturn = modeList
 	return m.seatDetail(t, m.input.Header, m.input.Capabilities)
 }
 
@@ -457,6 +464,9 @@ func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	m.mouseEpoch++
 	m.trail = nil
 	m.mode = modeList
+	// The Watchlist is genuinely up from both screens, so the walk-up leaves the
+	// Frontier behind as well.
+	m.detailReturn = modeList
 	m.detail = detailState{}
 	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 
@@ -557,8 +567,14 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.quit(msg), tea.Quit
 		}
 		m = m.clearPendingClick()
-		m.mode = modeList
 		m.detail = detailState{}
+		if m.detailReturn == modeFrontier {
+			// A Ticket opened from the Frontier goes back to the Frontier: it is
+			// a second rendering of the list, not a Trail entry.
+			m.mode = modeFrontier
+			return m.reconcileFrontier(true), repaint
+		}
+		m.mode = modeList
 		// The list's own state was never touched, but the help listing may have
 		// been expanded while Detail was open, which changes how much room the
 		// list has. Re-measuring is idempotent when nothing moved.

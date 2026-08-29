@@ -31,6 +31,8 @@ const (
 	boundaryPTYChildMarker  = "LINKTARGET"
 	boundaryPTYDrillMarker  = "DRILLDETAIL"
 	boundaryPTYListMarker   = "WATCHLISTSCREEN"
+	// The Frontier's own header word, which no other screen draws.
+	boundaryPTYFrontierMarker = "frontier"
 )
 
 // boundaryPTYBodyPayload is carried only by body fields, where the Body policy
@@ -69,7 +71,7 @@ func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 	visible := ansi.Strip(output)
 	for _, want := range []string{
 		boundaryPTYDetailMarker, boundaryPTYChildMarker, boundaryPTYDrillMarker,
-		boundaryPTYListMarker, "café", "東京",
+		boundaryPTYListMarker, boundaryPTYFrontierMarker, "café", "東京",
 	} {
 		if !strings.Contains(visible, want) {
 			t.Errorf("PTY output lost %q:\n%s", want, visible)
@@ -235,7 +237,9 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 
 	output := make([]byte, 0, 16*1024)
 	// tab focuses the Link and enter follows it into a second Detail seat; u
-	// walks up into the list, and enter drills back in from a row.
+	// walks up into the list, and enter drills back in from a row. The last
+	// step walks up again and opens the Frontier, whose canvas draws the same
+	// hostile fields through a third render path.
 	script := []struct {
 		waitFor string
 		send    string
@@ -243,7 +247,8 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 		{waitFor: boundaryPTYDetailMarker, send: "\t\r"},
 		{waitFor: boundaryPTYChildMarker, send: "u"},
 		{waitFor: boundaryPTYListMarker, send: "\r"},
-		{waitFor: boundaryPTYDrillMarker, send: "q"},
+		{waitFor: boundaryPTYDrillMarker, send: "uv"},
+		{waitFor: boundaryPTYFrontierMarker, send: "q"},
 	}
 	for _, step := range script {
 		output = waitForPTYMarker(t, chunks, output, step.waitFor)

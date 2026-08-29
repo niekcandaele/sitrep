@@ -72,6 +72,13 @@ type Styles struct {
 	Error lipgloss.Style
 	// Muted styles secondary prose, such as the empty Watchlist notice.
 	Muted lipgloss.Style
+	// FrontierBold is the loud half of the Frontier's emphasis channel: an
+	// Actionable node, a node on a cycle, and the focus marker. Emphasis is
+	// weight rather than a second hue, because colour there carries Status
+	// Category and nothing else.
+	FrontierBold lipgloss.Style
+	// FrontierFaint is the quiet half of that channel: a node that is blocked.
+	FrontierFaint lipgloss.Style
 }
 
 // DefaultStyles returns the monitor's palette for a dark or light terminal.
@@ -127,6 +134,8 @@ func DefaultStyles(isDark bool) Styles {
 		Body:            base.Foreground(text),
 		Error:           base.Foreground(bad).Bold(true),
 		Muted:           base.Foreground(dim),
+		FrontierBold:    base.Foreground(text).Bold(true),
+		FrontierFaint:   base.Foreground(dim).Faint(true),
 	}
 }
 
