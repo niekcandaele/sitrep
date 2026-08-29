@@ -55,7 +55,7 @@ func linkKind(linkType string) (model.LinkKind, string) {
 // is given. (The GitHub driver's blocked-by-then-blocks ordering is a
 // consequence of its two separate GraphQL connections, not a rule the model
 // imposes.)
-func newLinks(entries []issueLinkWire) []model.Link {
+func newLinks(entries []issueLinkWire, wontDo wontDoSet) []model.Link {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -65,7 +65,7 @@ func newLinks(entries []issueLinkWire) []model.Link {
 		links = append(links, model.Link{
 			Kind:        kind,
 			NativeLabel: label,
-			Target:      newLinkTarget(entry.issueWire),
+			Target:      newLinkTarget(entry.issueWire, wontDo),
 		})
 	}
 	return links
@@ -74,8 +74,8 @@ func newLinks(entries []issueLinkWire) []model.Link {
 // newLinkTarget maps the linked issue onto a Link's far end. It runs through
 // the same normalizeStatus every Ticket does, so a linked Ticket's Native Status
 // reads in the links table exactly as it does in the list.
-func newLinkTarget(issue issueWire) model.LinkTarget {
-	status, native := normalizeStatus(issue.State, issue.Labels, issue.closedAsDuplicate())
+func newLinkTarget(issue issueWire, wontDo wontDoSet) model.LinkTarget {
+	status, native := normalizeStatus(issue.State, issue.Labels, issue.closedAsDuplicate(), wontDo)
 	return model.LinkTarget{
 		ID:           issue.ticketID(),
 		Key:          issue.key(),

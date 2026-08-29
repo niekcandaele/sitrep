@@ -51,6 +51,16 @@
 // complete — "&12" needs a group, "7" needs a project, "%3" follows whichever
 // the Profile declared. A mismatch is refused before any request, by targetFor.
 //
+// # The won't-do labels
+//
+// A closed GitLab issue or epic carrying a won't-do label is Cancelled rather
+// than Done, because REST exposes no resolution field and a label is the only
+// signal there is. sitrep ships a built-in list of such labels
+// (defaultWontDoLabels); a Profile's wont_do_labels replaces it wholesale with
+// the site's own wording, and a Profile that writes none keeps the built-in
+// list. A matched label becomes the Native Status verbatim, as GitLab spells it
+// on the issue — never as the Profile spells it.
+//
 // # Milestone as Epic
 //
 // Native epics are a Premium/Ultimate feature. On GitLab Free the collection a
@@ -154,6 +164,7 @@ type Provider struct {
 	tokenSource TokenSource
 	userAgent   string
 	maxTickets  int
+	wontDo      wontDoSet
 
 	tokenMu sync.Mutex
 	token   string
@@ -175,6 +186,7 @@ func New(host string, opts ...Option) *Provider {
 		tokenSource: DefaultTokenSource,
 		userAgent:   buildinfo.Name + "/" + buildinfo.Version,
 		maxTickets:  provider.DefaultMaxTickets,
+		wontDo:      newWontDoSet(nil),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -239,6 +251,17 @@ func WithMaxTickets(maxTickets int) Option {
 	return func(p *Provider) {
 		if maxTickets > 0 {
 			p.maxTickets = maxTickets
+		}
+	}
+}
+
+// WithWontDoLabels replaces the built-in won't-do label list with the Profile's
+// own — the label names that mean cancelled on this site. An empty list leaves
+// the built-in list in place, mirroring WithMaxTickets' non-positive values.
+func WithWontDoLabels(names []string) Option {
+	return func(p *Provider) {
+		if len(names) > 0 {
+			p.wontDo = newWontDoSet(names)
 		}
 	}
 }
@@ -881,7 +904,7 @@ func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket,
 		if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 			return model.Ticket{}, err
 		}
-		return newTicketFromIssue(issue), nil
+		return newTicketFromIssue(issue, p.wontDo), nil
 
 	case t.isMilestone():
 		milestone, err := p.fetchMilestone(ctx, t)
@@ -895,7 +918,7 @@ func (p *Provider) fetchRootTicket(ctx context.Context, t target) (model.Ticket,
 		if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 			return model.Ticket{}, err
 		}
-		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path)), nil
+		return newTicketFromEpic(newEpicFromEpic(epic, p.host, t.path, p.wontDo)), nil
 	}
 }
 
@@ -909,7 +932,7 @@ func (p *Provider) fetchIssueSnapshot(ctx context.Context, t target, snap *model
 	if _, err := p.do(ctx, t.issuePath(), nil, t.String(), &issue); err != nil {
 		return err
 	}
-	snap.Epic = newEpicFromIssue(issue)
+	snap.Epic = newEpicFromIssue(issue, p.wontDo)
 	snap.Parent = newParentFromIssue(issue, p.host)
 
 	prs, err := p.mergeRequestsFor(ctx, t)
@@ -927,7 +950,7 @@ func (p *Provider) fetchEpicSnapshot(ctx context.Context, t target, snap *model.
 	if _, err := p.do(ctx, t.epicPath(), nil, t.String(), &epic); err != nil {
 		return err
 	}
-	snap.Epic = newEpicFromEpic(epic, p.host, t.path)
+	snap.Epic = newEpicFromEpic(epic, p.host, t.path, p.wontDo)
 	snap.Parent = newParentFromEpic(epic, p.host, t.path)
 
 	tickets, err := p.fetchChildren(ctx, t, t.epicIssuesPath())
@@ -975,7 +998,7 @@ func (p *Provider) fetchChildren(ctx context.Context, t target, path string) ([]
 	}
 	var tickets []model.Ticket
 	for _, issue := range issues {
-		tickets = append(tickets, newTicketFromIssue(issue))
+		tickets = append(tickets, newTicketFromIssue(issue, p.wontDo))
 	}
 	return tickets, nil
 }
@@ -1073,7 +1096,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 		TicketID:    id,
 		Description: issue.Description,
 		Comments:    newComments(notes, issue.WebURL),
-		Links:       newLinks(links),
+		Links:       newLinks(links, p.wontDo),
 	}, nil
 }
 

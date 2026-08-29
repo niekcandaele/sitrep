@@ -269,6 +269,7 @@ profiles:
     provider: gitlab
     host: git.acme.test
     project: groups/acme/platform
+    wont_do_labels: [ausgemustert, "workflow::no-fix"]
     auth:
       token_env: GITLAB_TOKEN
 ```
@@ -284,6 +285,17 @@ issues endpoint a `--query` reads and which hostless Refs the Profile can comple
 needs a group, `N` or `#N` needs a project, and `%N` works under either and follows the
 Profile's scope. A Ref the Profile's scope cannot complete is rejected before any request,
 with the spelling to use instead.
+
+`wont_do_labels` names the labels that mean "nobody did this" on that GitLab site, so a closed
+issue carrying one is Cancelled instead of Done. It **replaces** sitrep's built-in list rather
+than adding to it: a site that has an opinion has the whole opinion, and dropping `duplicate`
+or `invalid` from the list is how you stop sitrep reading them as cancellation. Names are
+matched case-, punctuation- and scope-insensitively, so `Won't Fix`, `wontfix` and
+`workflow::wontfix` are one entry. The key is GitLab-only — GitHub and Jira report
+cancellation natively, and a `github` or `jira` Profile that sets it is an error — and writing
+it empty is an error too: omit the key entirely to keep sitrep's built-in list
+(`wontfix`, `wontdo`, `willnotfix`, `willnotdo`, `duplicate`, `invalid`, `declined`,
+`rejected`, `obsolete`, `notplanned`, `notreproducible`, `cannotreproduce`, `abandoned`).
 
 **A Profile names a token; it never holds one.** `auth.token_env` is the environment-variable
 name. Literal tokens in config are rejected. A credential is sent only to the Profile host
@@ -363,6 +375,12 @@ Native epics require Premium or Ultimate. On GitLab Free, a project or group mil
 Epic fallback, with the same Watchlist renderers and Ticket drill-in. sitrep does not guess
 between them: an `&N` Ref reads a native Epic and a `%N` Ref reads a milestone. A child
 issue's native Epic, or its milestone when no Epic exists, becomes its parent breadcrumb.
+
+GitLab's REST API exposes no resolution or closed-reason field, so a label is the only signal
+that closed work was abandoned rather than finished: a closed issue or epic carrying a
+won't-do label is Cancelled and leaves the progress denominator. The label list is
+configurable per Profile with `wont_do_labels`, and the Native Status shown is GitLab's own
+spelling of the label on the issue.
 
 Merge requests show per Ticket with state, review/approval posture, and pipeline status. An
 open Ticket with an open or draft merge request is categorized InProgress. Correlation costs
