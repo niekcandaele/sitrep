@@ -185,7 +185,7 @@ func compactDetailShortHelp(renderer help.Model, roles detailHelpRoles, width in
 	roles.links.SetHelp("tab/⇧tab", "links")
 
 	if roles.mouse.Help().Desc == mouseEnabledHelp {
-		roles.mouse.SetHelp("m", "off/⇧drag")
+		roles.mouse.SetHelp("m", mouseEnabledTerseHelp)
 	}
 	priority = roles.priorityShortBindings()
 	if fits(priority) {
@@ -220,9 +220,9 @@ func fittingDetailShortHelp(
 }
 
 func descriptiveDetailShortBinding(roles detailHelpRoles, budget int) (key.Binding, bool) {
-	mouse := "m on"
-	if roles.mouse.Help().Desc != "on" {
-		mouse = "m off · shift-drag to select text"
+	mouse := "m " + mouseDisabledHelp
+	if roles.mouse.Help().Desc != mouseDisabledHelp {
+		mouse = "m " + mouseEnabledHelp
 	}
 	tokens := detailCompactHelpTokens{
 		mouse: mouse,
@@ -317,13 +317,13 @@ func syntheticDetailHelpBinding(text string) key.Binding {
 func compactDetailShortBinding(roles detailHelpRoles, width int) key.Binding {
 	budget := max(width, 1)
 	showHelp := budget >= detailHelpDiscoveryWidth
-	captureEnabled := roles.mouse.Help().Desc != "on"
+	captureEnabled := roles.mouse.Help().Desc != mouseDisabledHelp
 	parentEnabled := roles.parent.Enabled()
 
 	if roles.links.Enabled() && !roles.follow.Enabled() {
-		mouse := "m on"
+		mouse := "m " + mouseDisabledHelp
 		if captureEnabled {
-			mouse = "m off, shift-drag"
+			mouse = "m " + mouseEnabledCompactHelp
 		}
 		tokens := detailCompactHelpTokens{
 			mouse: mouse,
@@ -352,13 +352,16 @@ func compactDetailShortBinding(roles detailHelpRoles, width int) key.Binding {
 		if lipgloss.Width(joinDetailHelpParts(tokens.parts(), budget)) > budget {
 			tokens.quit = "q"
 		}
+		if lipgloss.Width(joinDetailHelpParts(tokens.parts(), budget)) > budget && !captureEnabled {
+			tokens.mouse = "m"
+		}
 		return syntheticDetailHelpBinding(tokens.fitWhole(budget))
 	}
 
 	if !roles.links.Enabled() {
-		mouse := "m on"
+		mouse := "m " + mouseDisabledHelp
 		if captureEnabled {
-			mouse = "m off, shift-drag"
+			mouse = "m " + mouseEnabledCompactHelp
 		}
 		tokens := detailCompactHelpTokens{
 			mouse: mouse,
@@ -389,7 +392,7 @@ func compactDetailShortBinding(roles detailHelpRoles, width int) key.Binding {
 		return syntheticDetailHelpBinding(tokens.fitWhole(budget))
 	}
 
-	mouse := "m on"
+	mouse := "m " + mouseDisabledHelp
 	if captureEnabled {
 		mouse = "m/⇧drag"
 	}
@@ -459,7 +462,16 @@ func (m Model) detailHelpView() string {
 		return m.help.View(keys)
 	}
 
-	mouseLines := truncateLine(unbounded.ShortHelpView([]key.Binding{roles.mouse}), m.width)
+	// The mouse item gets its own row, so it is the compact spelling that fits
+	// rather than the full one cut mid-word: "shift-drag" is the recovery this
+	// row exists to advertise, and half of it advertises nothing.
+	mouseItem := roles.mouse
+	if lipgloss.Width(unbounded.ShortHelpView([]key.Binding{mouseItem})) > m.width {
+		if compact, ok := compactMouseHelp(mouseItem); ok {
+			mouseItem.SetHelp("m", compact)
+		}
+	}
+	mouseLines := truncateLine(unbounded.ShortHelpView([]key.Binding{mouseItem}), m.width)
 	if roles.mouse.Help().Desc == mouseEnabledHelp {
 		// Separate the capture-recovery affordance from the action grid. The extra
 		// row also keeps enabled and disabled mouse-help geometry distinct, so a

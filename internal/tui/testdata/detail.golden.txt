@@ -37,4 +37,4 @@ LINKS (3)
   blocks            #116  Protocol conformance tests               [Selected for Development]
   is duplicated by  #7    Teach the gadget agent to speak sync v2  [In Progress]
 
-m off · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down
+m release · shift-drag to select text • esc back • q quit • tab/⇧tab links • u watchlist • ? help • ↑/k up • ↓/j down

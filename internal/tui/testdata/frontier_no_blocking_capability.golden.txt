@@ -37,4 +37,4 @@ The Watchlist itself is unaffected — press v or esc to go back to it.
 
 
 
-m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down
+v/esc list • ? help • q quit • m release · shift-drag to select text

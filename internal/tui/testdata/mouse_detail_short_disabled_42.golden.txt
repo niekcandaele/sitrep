@@ -36,5 +36,5 @@ COMMENTS (3)
     Agreed on an explicit version byte.
     Costs nothing now, saves a migration
     later.
-
-m on·esc back·q quit·tab/⇧·? help·u↑    0%
+                                        0%
+m capture·esc back·q quit·tab/⇧·? help·u↑

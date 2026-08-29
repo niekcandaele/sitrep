@@ -30,7 +30,7 @@ CANCELLED (1)
 
 
 
-m     on          ↑/k  up
+m     capture     ↑/k  up
 enter open        ↓/j  down
 v     frontier    pgup page up
 r     refresh     pgdn page down

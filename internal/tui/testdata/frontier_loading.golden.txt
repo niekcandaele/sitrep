@@ -36,5 +36,5 @@ frontier · 13 nodes · reading Detail 0/13                                     
 │Rewrite the placement heu…│
 │[In Review]               │
 └──────────────────────────┘                                ▼
-                                                                                                                  y 6/43
-m off · shift-drag to select text • enter open Ticket • v list • q quit • r re-read Details • ? help • ↑/k up • ↓/j down
+
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 6/43

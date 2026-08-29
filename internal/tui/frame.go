@@ -137,6 +137,10 @@ func pairLine(left, right string, width int) string {
 // pairLineReserved keeps the right fragment visible by clipping the left one
 // before delegating to pairLine. It is used where the right-hand fact is
 // load-bearing, such as a scroll position.
+//
+// The clip is marked with an ellipsis. A left half cut without one reads as a
+// complete sentence that happens to end oddly — "1 actionabl" — and the reader
+// has no way to tell the difference from a word the screen really printed.
 func pairLineReserved(left, right string, width int) string {
 	if width <= 0 {
 		return ""
@@ -144,7 +148,7 @@ func pairLineReserved(left, right string, width int) string {
 	if lipgloss.Width(right) >= width {
 		return rightAlign(truncateLine(right, width), width)
 	}
-	left = balancedTruncate(left, width-lipgloss.Width(right)-1, "")
+	left = balancedTruncate(left, width-lipgloss.Width(right)-1, "…")
 	return pairLine(left, right, width)
 }
 

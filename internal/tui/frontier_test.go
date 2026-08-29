@@ -391,6 +391,18 @@ func TestFrontierNarrowTerminalScrolls(t *testing.T) {
 	if !strings.Contains(string(got), "x ") {
 		t.Errorf("no scroll position is reported on a canvas larger than the body:\n%s", got)
 	}
+	// The one-line footer is cut from the right, so the order it is written in
+	// is the order it survives in. These three are what a reader needs when the
+	// screen is not doing what they expected — and r is the only remedy for the
+	// failure banner this frame draws directly above the footer. Asserted here
+	// so a -update run cannot accept their loss silently.
+	footer := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
+	last := footer[len(footer)-1]
+	for _, want := range []string{"q quit", "r re-read Details", "? help"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("the %d-column footer dropped %q: %q", width, want, last)
+		}
+	}
 }
 
 // Selection survives the toggle in both directions: it is a mode toggle over
@@ -1212,5 +1224,75 @@ func TestAdoptCachedLinksCreditsOnlyTheTicketItSeats(t *testing.T) {
 	}
 	if m.frontier.lastErr != nil {
 		t.Error("the retry line survived every Ticket being read")
+	}
+}
+
+// The Frontier's expanded help is the only place its graph vocabulary is
+// written down, and nothing rendered it. Two sizes: a normal terminal, and one
+// small enough that model.go's keys.(KeyMap) type assertion fails and a
+// FrontierKeyMap goes down the generic stacking branch instead of the list's
+// compact one.
+func TestFrontierExpandedHelp(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		width, height int
+		golden        string
+		// wants is the graph vocabulary the panel has room for. A terminal too
+		// short for the whole listing still has to name the keys it does show
+		// in the Frontier's own words.
+		wants []string
+	}{
+		{"normal", 120, 40, "frontier_help_120x40.golden.txt", []string{
+			"previous node", "next node", "blocker side", "dependent side",
+			"first node", "last node", "v/esc", "open Ticket", "re-read Details",
+		}},
+		{"narrow", 42, 28, "frontier_help_42x28.golden.txt", []string{
+			"v/esc", "open Ticket", "re-read Details", "select node",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := fake.New(fake.WithBlockingFixture())
+			c := newClock()
+			tm := teatest.NewTestModel(t, New(t.Context(), Options{
+				Source:       selectorSource(p, c),
+				DetailSource: TicketDetailSource(p),
+				Interval:     time.Minute,
+				Now:          c.now,
+			}), teatest.WithInitialTermSize(tt.width, tt.height))
+			s := &session{tm: tm, clock: c}
+			s.waitFor(t, "Shard rebalancer rollout")
+			tm.Send(keyPress("v"))
+			// The counts line, not the word "actionable": at 42 columns the
+			// header is clipped before it reaches that far.
+			s.waitFor(t, "16 nodes")
+			tm.Send(keyPress("?"))
+			s.waitFor(t, "re-read Details")
+
+			tm.Send(keyPress("q"))
+			tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+			m, ok := tm.FinalModel(t).(Model)
+			if !ok {
+				t.Fatalf("final model is %T, want tui.Model", tm.FinalModel(t))
+			}
+			content := m.View().Content
+			got := frame(content)
+
+			checkGolden(t, tt.golden, got)
+			if h := lipgloss.Height(content); h != tt.height {
+				t.Errorf("frame height = %d, want %d", h, tt.height)
+			}
+			for _, line := range strings.Split(content, "\n") {
+				if w := lipgloss.Width(line); w > tt.width {
+					t.Errorf("line width = %d, want at most %d: %q", w, tt.width, line)
+				}
+			}
+			// The graph vocabulary, which is what this panel is for: the four
+			// movement axes say what they move over, and esc is named beside v.
+			for _, want := range tt.wants {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("the expanded help omits %q:\n%s", want, got)
+				}
+			}
+		})
 	}
 }

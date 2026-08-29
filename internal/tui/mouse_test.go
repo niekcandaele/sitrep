@@ -106,8 +106,8 @@ func TestMouseViewLifecycleAndToggle(t *testing.T) {
 		if view := m.View(); view.MouseMode != tea.MouseModeNone || view.OnMouse != nil {
 			t.Errorf("disabled view = mode %v handler nil=%t", view.MouseMode, view.OnMouse == nil)
 		}
-		if got := m.keys.ToggleMouse.Help().Desc; got != "on" {
-			t.Errorf("disabled help = %q, want on", got)
+		if got := m.keys.ToggleMouse.Help().Desc; got != mouseDisabledHelp {
+			t.Errorf("disabled help = %q, want %q", got, mouseDisabledHelp)
 		}
 
 		m.lastClickID = "#1"
@@ -141,7 +141,7 @@ func requireHelpText(t *testing.T, view string, wants ...string) {
 
 func TestMouseHelpLayoutContracts(t *testing.T) {
 	const (
-		enabledMouseHelp    = "m off · shift-drag to select text"
+		enabledMouseHelp    = "m release · shift-drag to select text"
 		searchMouseHelp     = "shift-drag select text"
 		fullSearchMouseHelp = "shift-drag to select text"
 	)
@@ -162,7 +162,7 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		next, _ := m.Update(keyPress("m"))
 		m = next.(Model)
 		disabledHelp := append([]string(nil), listHelp[4:]...)
-		disabledHelp = append([]string{"m on"}, disabledHelp...)
+		disabledHelp = append([]string{"m capture"}, disabledHelp...)
 		requireHelpText(t, m.help.View(m.helpKeys()), disabledHelp...)
 	})
 
@@ -170,11 +170,11 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m := mouseListModel(t, Options{}, []model.Ticket{ticket("#1", model.StatusTodo)}, 40, 40)
 		m.help.SetWidth(40)
 		m.keys.ClearFilter.SetEnabled(true)
-		requireHelpText(t, m.help.View(m.helpKeys()), "m off, shift-drag", "enter open", "q quit")
+		requireHelpText(t, m.help.View(m.helpKeys()), "m release/⇧drag", "enter open", "q quit")
 
 		m.help.ShowAll = true
 		narrowListHelp := append([]string(nil), listHelp...)
-		narrowListHelp[0] = "m off, shift-drag"
+		narrowListHelp[0] = "m release, shift-drag"
 		requireHelpText(t, m.help.View(m.helpKeys()), narrowListHelp...)
 
 		next, _ := m.Update(keyPress("m"))
@@ -183,7 +183,7 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m.help.SetWidth(12)
 		m.help.ShowAll = false
 		disabled := m.help.View(m.helpKeys())
-		requireHelpText(t, disabled, "m on")
+		requireHelpText(t, disabled, "m capture")
 		if strings.Contains(disabled, "shift-drag") {
 			t.Errorf("disabled narrow help advertises capture mitigation:\n%s", disabled)
 		}
@@ -202,7 +202,7 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 		m.width = 40
 		m.help.SetWidth(40)
 		m.help.ShowAll = false
-		requireHelpText(t, m.detailHelpView(), "m off, shift-drag", "esc back", "q quit")
+		requireHelpText(t, m.detailHelpView(), "m release, shift-drag", "esc back", "q quit")
 		m.help.ShowAll = true
 		requireHelpText(t, m.detailHelpView(),
 			enabledMouseHelp, "wheel scroll body", "esc back", "u watchlist", "r refresh", "? help", "q quit",
@@ -247,16 +247,16 @@ func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 						"enter/r open/refresh", "d / hide finished/find", "?/q help/quit")
 				}
 				if noMouse {
-					requireHelpText(t, content, "m on")
+					requireHelpText(t, content, "m capture")
 					for _, forbidden := range []string{"shift-drag", "click select Ticket", "double-click open Ticket", "wheel move selection"} {
 						if strings.Contains(content, forbidden) {
 							t.Errorf("disabled list help advertises %q:\n%s", forbidden, content)
 						}
 					}
 				} else {
-					mouseRecovery := "m off · shift-drag to select text"
+					mouseRecovery := "m release · shift-drag to select text"
 					if size.width == 42 {
-						mouseRecovery = "m off, shift-drag"
+						mouseRecovery = "m release, shift-drag"
 					}
 					requireHelpText(t, content,
 						mouseRecovery, "click select Ticket",
@@ -290,16 +290,16 @@ func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 						"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
 				}
 				if noMouse {
-					requireHelpText(t, content, "m on")
+					requireHelpText(t, content, "m capture")
 					for _, forbidden := range []string{"shift-drag", "wheel scroll body", "click Link follow"} {
 						if strings.Contains(content, forbidden) {
 							t.Errorf("disabled Detail help advertises %q:\n%s", forbidden, content)
 						}
 					}
 				} else {
-					mouseRecovery := "m off · shift-drag to select text"
+					mouseRecovery := "m release · shift-drag to select text"
 					if size.width == 42 {
-						mouseRecovery = "m off, shift-drag"
+						mouseRecovery = "m release, shift-drag"
 					}
 					requireHelpText(t, content,
 						mouseRecovery, "wheel scroll body", "click Link follow")
@@ -403,12 +403,12 @@ func TestDetailResponsiveShortHelpKeepsAtomicActionsAcrossSeats(t *testing.T) {
 		hasLinks      bool
 		focused       bool
 	}{
-		{name: "no-links/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: noLinks},
-		{name: "no-links/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: noLinks},
-		{name: "unfocused/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: unfocusedLinks, hasLinks: true},
-		{name: "unfocused/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: unfocusedLinks, hasLinks: true},
-		{name: "focused/mouse-enabled", mouseSegments: []string{"m off", "m off, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: focusedLink, hasLinks: true, focused: true},
-		{name: "focused/no-mouse", mouseSegments: []string{"m on", "m"}, noMouse: true, kind: focusedLink, hasLinks: true, focused: true},
+		{name: "no-links/mouse-enabled", mouseSegments: []string{"m release", "m release, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: noLinks},
+		{name: "no-links/no-mouse", mouseSegments: []string{"m capture", "m"}, noMouse: true, kind: noLinks},
+		{name: "unfocused/mouse-enabled", mouseSegments: []string{"m release", "m release, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: unfocusedLinks, hasLinks: true},
+		{name: "unfocused/no-mouse", mouseSegments: []string{"m capture", "m"}, noMouse: true, kind: unfocusedLinks, hasLinks: true},
+		{name: "focused/mouse-enabled", mouseSegments: []string{"m release", "m release, shift-drag", "m/⇧drag", "m/⇧", "m"}, kind: focusedLink, hasLinks: true, focused: true},
+		{name: "focused/no-mouse", mouseSegments: []string{"m capture", "m"}, noMouse: true, kind: focusedLink, hasLinks: true, focused: true},
 	}
 	widths := make([]int, 0, 48)
 	for width := 21; width <= 66; width++ {
@@ -561,7 +561,7 @@ func TestDetailResponsiveShortHelpAtDecoderRoot(t *testing.T) {
 
 	t.Run("unfocused root", func(t *testing.T) {
 		text := helpText(m)
-		for _, want := range []string{"m off, shift-drag", "q quit", "tab/⇧", "? help"} {
+		for _, want := range []string{"m/⇧drag", "q quit", "tab/⇧", "? help"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("decoder-root help omitted %q: %q", want, text)
 			}
@@ -711,7 +711,7 @@ func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
 			t.Errorf("frame height = %d, want terminal height %d", got, m.height)
 		}
 		requireHelpText(t, content,
-			"m off, shift-drag", "wheel scroll body", "click Link follow",
+			"m release, shift-drag", "wheel scroll body", "click Link follow",
 			"esc/u back/watchlist", "tab/⇧tab links", "enter follow",
 			"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
 	})
@@ -736,7 +736,7 @@ func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
 		if !strings.Contains(normalized, "current · never read") {
 			t.Errorf("narrow error does not identify current Detail staleness: %q", normalized)
 		}
-		requireHelpText(t, content, "m off, shift-drag", "esc back", "q quit")
+		requireHelpText(t, content, "m/⇧drag", "esc back", "q quit")
 	})
 }
 
@@ -909,32 +909,32 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 			name: "complete expanded list help at 80", width: 80, expanded: true,
 			golden: "mouse_help_full_80.golden.txt",
 			wants: append([]string{
-				"m off · shift-drag to select text", "click select Ticket",
+				"m release · shift-drag to select text", "click select Ticket",
 				"double-click open Ticket", "wheel move selection",
 			}, listFull...),
 		},
 		{
 			name: "actionable enabled list short help at 42", width: 42,
 			golden: "mouse_help_short_42.golden.txt",
-			wants:  []string{"m off, shift-drag", "enter open", "q quit"},
+			wants:  []string{"m release/⇧drag", "enter open", "q quit"},
 		},
 		{
 			name: "actionable disabled list short help at 42", width: 42, noMouse: true,
 			golden: "mouse_help_short_disabled_42.golden.txt",
-			wants:  []string{"m on", "enter open", "q quit"}, forbids: []string{"shift-drag"},
+			wants:  []string{"m capture", "enter open", "q quit"}, forbids: []string{"shift-drag"},
 		},
 		{
 			name: "complete enabled list full help at 42", width: 42, expanded: true,
 			golden: "mouse_help_full_42.golden.txt",
 			wants: append([]string{
-				"m off, shift-drag", "click select Ticket",
+				"m release, shift-drag", "click select Ticket",
 				"double-click open Ticket", "wheel move selection",
 			}, listFull...),
 		},
 		{
 			name: "complete disabled list full help at 42", width: 42, expanded: true, noMouse: true,
 			golden: "mouse_help_full_disabled_42.golden.txt",
-			wants:  append([]string{"m on"}, listFull...), forbids: []string{"shift-drag"},
+			wants:  append([]string{"m capture"}, listFull...), forbids: []string{"shift-drag"},
 		},
 		{
 			name: "actionable enabled Detail short help at 42", screen: modeDetail, width: 42,
@@ -944,29 +944,29 @@ func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 		{
 			name: "actionable disabled Detail short help at 42", screen: modeDetail, width: 42, noMouse: true,
 			golden: "mouse_detail_short_disabled_42.golden.txt",
-			wants:  []string{"m on", "esc back", "q quit", "tab/⇧", "? help", "u↑"}, forbids: []string{"shift-drag"},
+			wants:  []string{"m capture", "esc back", "q quit", "tab/⇧", "? help", "u↑"}, forbids: []string{"shift-drag"},
 		},
 		{
 			name: "complete enabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true,
 			golden: "mouse_detail_full_42.golden.txt",
 			wants: append([]string{
-				"m off · shift-drag to select text", "wheel scroll body", "click Link follow",
+				"m release · shift-drag to select text", "wheel scroll body", "click Link follow",
 			}, detailFull...),
 		},
 		{
 			name: "complete disabled Detail full help at 42", screen: modeDetail, width: 42, expanded: true, noMouse: true,
 			golden: "mouse_detail_full_disabled_42.golden.txt",
-			wants:  append([]string{"m on"}, detailFull...), forbids: []string{"shift-drag"},
+			wants:  append([]string{"m capture"}, detailFull...), forbids: []string{"shift-drag"},
 		},
 		{
 			name: "enabled find short help exposes cancel at 42", search: true, width: 42,
 			golden: "mouse_find_short_42.golden.txt",
-			wants:  []string{"shift-drag select text", "esc cancel"}, forbids: []string{"m off"},
+			wants:  []string{"shift-drag select text", "esc cancel"}, forbids: []string{"m release"},
 		},
 		{
 			name: "disabled find short help exposes cancel at 42", search: true, width: 42, noMouse: true,
 			golden: "mouse_find_short_disabled_42.golden.txt",
-			wants:  []string{"esc cancel", "enter apply"}, forbids: []string{"shift-drag", "m on"},
+			wants:  []string{"esc cancel", "enter apply"}, forbids: []string{"shift-drag", "m capture"},
 		},
 	}
 
@@ -1027,7 +1027,7 @@ func TestMouseToggleDoesNotStealSearchText(t *testing.T) {
 	if got := m.search.Value(); got != "m" {
 		t.Errorf("search value = %q, want m", got)
 	}
-	if content := m.View().Content; !strings.Contains(content, "shift-drag") || strings.Contains(content, "m off") {
+	if content := m.View().Content; !strings.Contains(content, "shift-drag") || strings.Contains(content, "m release") {
 		t.Errorf("search help does not own the keyboard honestly:\n%s", content)
 	}
 }

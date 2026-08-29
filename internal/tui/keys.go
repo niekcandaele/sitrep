@@ -321,8 +321,17 @@ type FrontierKeyMap struct {
 func DefaultFrontierKeyMap() FrontierKeyMap {
 	list := DefaultKeyMap()
 	return FrontierKeyMap{
-		Up:   list.Up,
-		Down: list.Down,
+		// The list's keys, the graph's words: "up" and "down" beside "blocker
+		// side" and "wheel scroll" read as scrolling the canvas, which is what
+		// the wheel does and these do not.
+		Up: key.NewBinding(
+			key.WithKeys(list.Up.Keys()...),
+			key.WithHelp("↑/k", "previous node"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys(list.Down.Keys()...),
+			key.WithHelp("↓/j", "next node"),
+		),
 		Left: key.NewBinding(
 			key.WithKeys("left", "h"),
 			key.WithHelp("←/h", "blocker side"),
@@ -345,7 +354,10 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 		),
 		Toggle: key.NewBinding(
 			key.WithKeys("v", "esc"),
-			key.WithHelp("v", "list"),
+			// Both keys are named: esc is the one a reader reaches for to leave
+			// a screen, and advertising only v hides it on the footer and in the
+			// ? panel alike.
+			key.WithHelp("v/esc", "list"),
 		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
@@ -365,16 +377,19 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the Frontier's one-line footer shows.
+// ShortHelp returns the bindings the Frontier's one-line footer shows, in the
+// order they survive a narrow terminal: the one-line footer is cut from the
+// right, so first is what a reader keeps.
 //
-// The escape hatches come before movement: q, ? and r are what a reader needs
-// when the screen is not doing what they expected, and r is the only remedy for
-// the failure banner drawn directly above this line. Movement is discoverable
-// by trying the arrow keys; "? help" is not discoverable by anything. This is
-// the same trade KeyMap.ShortHelp names, made the same way, so the two footers
-// are visibly one decision.
+// The escape hatches come first — leaving the screen, retrying the reads, the
+// help panel, quitting. r is the only remedy for the failure banner drawn
+// directly above this line, and "? help" is not discoverable by anything.
+// Opening a Ticket and the mouse toggle follow, then movement, which is
+// discoverable by trying the arrow keys. This is the same trade
+// KeyMap.ShortHelp names, made the same way, so the two footers are visibly one
+// decision.
 func (k FrontierKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.ToggleMouse, k.Open, k.Toggle, k.Quit, k.Refresh, k.Help,
+	return []key.Binding{k.Toggle, k.Refresh, k.Help, k.Quit, k.Open, k.ToggleMouse,
 		k.Up, k.Down, k.Left, k.Right}
 }
 

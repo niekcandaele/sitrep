@@ -4,7 +4,7 @@
 
 ▸ is blocked by     #115  Reconcile w…  [o
 
-m          off, shift-drag
+m          release, shift-drag
 wheel      scroll body
 click Link follow
 esc/u      back/watchlist
