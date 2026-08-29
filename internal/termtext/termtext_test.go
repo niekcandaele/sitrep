@@ -192,6 +192,10 @@ func TestLineAndBodyAreIdempotent(t *testing.T) {
 		"# Café 東京 👩🏽‍💻\r\n\n\t- [x] **done** é",
 		string([]byte{'a', 0xff, 0xc0, 0xaf, 'b'}),
 		"héllo — 世界 ✓ 東京 👩🏽‍💻",
+		"a" + rlo + "b",
+		"a" + pdi + "b",
+		lri + "a " + rli + "ب" + pdi + " c" + pdi,
+		lre + rli + "x",
 	}
 	for i, in := range inputs {
 		t.Run(fmt.Sprintf("input-%d", i), func(t *testing.T) {
