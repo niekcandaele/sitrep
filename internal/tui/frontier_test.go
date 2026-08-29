@@ -991,3 +991,145 @@ func TestFrontierWheelScrollsTheCanvas(t *testing.T) {
 		t.Errorf("the wheel moved focus to %q", m.frontier.focusID)
 	}
 }
+
+// blockingSnapshotSwapping returns the blocking fixture with one member dropped
+// and one appended, which is the shape a refresh has to survive: a node
+// arrives, a node leaves.
+func blockingSnapshotSwapping(t *testing.T, drop model.TicketID, add model.Ticket) model.WatchlistSnapshot {
+	t.Helper()
+	s := fake.FixtureBlockingSnapshot()
+	kept := make([]model.Ticket, 0, len(s.Tickets))
+	for _, member := range s.Tickets {
+		if member.ID != drop {
+			kept = append(kept, member)
+		}
+	}
+	if len(kept) == len(s.Tickets) {
+		t.Fatalf("%s is not in the fixture, so this test proves nothing", drop)
+	}
+	s.Tickets = append(kept, add)
+	return s
+}
+
+// addedMember is deliberately absent from FixtureBlockingDetails: a member a
+// refresh introduces has no Links until somebody reads them.
+var addedMember = model.Ticket{
+	ID:           "acme/widgets#214",
+	Key:          "#214",
+	Title:        "Audit the rebalancer rollout",
+	URL:          "https://tracker.example.test/acme/widgets/214",
+	Status:       model.StatusTodo,
+	NativeStatus: "open",
+	Repository:   "acme/widgets",
+}
+
+// ADR-0003 Amendment 4: a whole-Watchlist Detail fan-out is permitted only in
+// response to an explicit user action. The --interval heartbeat is not one, so
+// a refresh landing with the Frontier open re-seats the screen and issues
+// nothing — a member the refresh introduced stays UNVERIFIED until r.
+func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
+	after := blockingSnapshotSwapping(t, "acme/widgets#213", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+
+	fetched := p.DetailCalls()
+	if fetched == 0 {
+		t.Fatal("the fan-out fetched nothing, so a fan-out on refresh would be invisible here")
+	}
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, "15 nodes"+separator+"2 ghosts")
+	m, got := s.finish(t)
+
+	if n := p.DetailCalls(); n != fetched {
+		t.Errorf("DetailCalls = %d, want the fan-out's %d: a refresh must fan out no Detail", n, fetched)
+	}
+	if _, drawn := m.frontier.layout.nodeAt[addedMember.ID]; !drawn {
+		t.Error("the member the refresh added is not on the canvas")
+	}
+	if _, drawn := m.frontier.layout.nodeAt["acme/widgets#213"]; drawn {
+		t.Error("the member the refresh removed is still on the canvas")
+	}
+	if _, seated := m.frontier.input.Links[addedMember.ID]; seated {
+		t.Error("the added member has Links, so something fetched them off a timer")
+	}
+	if !strings.Contains(string(got), "UNVERIFIED") {
+		t.Error("the frame claims every member is verified after a refresh introduced one that is not")
+	}
+}
+
+// The re-seat preserves where the reader was. A Watchlist that changed shape
+// under them must not also move the window and the focus.
+func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
+	// #212 leaves rather than #213, so the node G lands on survives the refresh
+	// and preserving focus is what the assertion below can see.
+	after := blockingSnapshotSwapping(t, "acme/widgets#212", addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+	s.tm.Send(keyPress("G"))
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, separator+"2 actionable")
+	m, _ := s.finish(t)
+
+	if m.frontier.focusID != "acme/widgets#403" {
+		t.Errorf("focus = %q after the refresh, want the node G left it on", m.frontier.focusID)
+	}
+	if m.frontier.offsetX == 0 && m.frontier.offsetY == 0 {
+		t.Fatal("the window sat at the canvas origin, so preserving the offsets proves nothing")
+	}
+	if _, drawn := m.frontier.layout.nodeAt[m.frontier.focusID]; !drawn {
+		t.Errorf("focus = %q after the refresh, which is not a node on the canvas", m.frontier.focusID)
+	}
+}
+
+// The re-seat advances the generation, so an answer in flight for the previous
+// reading is dropped rather than seated onto a Watchlist that has moved under
+// it. The read is still real, so it warms the session cache.
+func TestFrontierRefreshDropsAnInFlightAnswer(t *testing.T) {
+	release := make(chan struct{})
+	// Nothing leaves here: with every read still held there are no Links and so
+	// no Ghosts, and one added node is the only thing that moves the counts.
+	after := fake.FixtureBlockingSnapshot()
+	after.Tickets = append(after.Tickets, addedMember)
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(fake.FixtureBlockingDetails()))
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: blockedDetailSource(release, TicketDetailSource(p)),
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	s.waitFor(t, "reading Detail")
+
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, "14 nodes")
+	close(release)
+	waitUntil(t, "every held read to answer", func() bool {
+		return p.DetailCalls() == detailfanout.Parallelism
+	})
+	m, _ := s.finish(t)
+
+	if m.frontier.done != 0 {
+		t.Errorf("the re-seated Frontier counted %d answers from the reading it replaced", m.frontier.done)
+	}
+	if len(m.frontier.input.Links) != 0 {
+		t.Errorf("the re-seated Frontier seated %d Links from the reading it replaced",
+			len(m.frontier.input.Links))
+	}
+	if len(m.details) == 0 {
+		t.Error("the answers were dropped from the session cache too, so the reads were wasted")
+	}
+}

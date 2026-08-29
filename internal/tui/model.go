@@ -14,7 +14,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
@@ -478,27 +477,28 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 
 // reseatFrontier rebuilds the Frontier on a Watchlist that has just changed
 // shape. The generation advances, so every outstanding answer from the previous
-// reading is dropped, and emphasis is withheld again while the new members are
-// read: a Watchlist that just changed has not been verified.
+// reading is dropped, and the session's Detail cache is read again so that every
+// Ticket the previous seat paid for is still verified.
+//
+// It issues no fetch. A refresh reaches here from the --interval timer as
+// readily as from r, and ADR-0003 Amendment 4 permits a whole-Watchlist Detail
+// fan-out only in response to an explicit user action. A member the refresh
+// introduced therefore stays UNVERIFIED until the user presses r: a timer is not
+// a user action. enterFrontier and refreshFrontier are the only two fan-out
+// doors, and both are keypresses.
 func (m Model) reseatFrontier() (Model, tea.Cmd) {
 	m.frontierGeneration++
 	m.mouseEpoch++
 	focus := m.frontier.focusID
 	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
 	m.frontier = frontierState{
-		input:   FrontierFromList(m.input, m.linksFromCache()),
-		focusID: focus,
-		offsetX: offsetX,
-		offsetY: offsetY,
+		input:    FrontierFromList(m.input, m.linksFromCache()),
+		focusID:  focus,
+		offsetX:  offsetX,
+		offsetY:  offsetY,
+		resolved: true,
 	}
-	if m.frontier.input.Capabilities.BlockingLinks {
-		m.frontier.queued = detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
-		m.frontier.planned = len(m.frontier.queued)
-	}
-	m.frontier.resolved = len(m.frontier.queued) == 0
-	m = m.rebuildFrontier()
-	next, cmd := m.issueFrontierFetches()
-	return next.(Model), cmd
+	return m.rebuildFrontier(), repaint
 }
 
 // onRefreshed folds one reading in. A failed refresh keeps the last good data
