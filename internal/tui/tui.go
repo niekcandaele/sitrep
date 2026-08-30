@@ -106,14 +106,20 @@
 // order, cache skipping, bounded concurrency, and the rule that only a
 // successful read is recorded — lives in internal/detailfanout, which the
 // one-shot renderers share. Results land in the same per-Ticket Detail cache a
-// drill-in uses, so a Ticket already opened this session costs nothing.
+// drill-in uses, so a Ticket already opened this session costs nothing. Each
+// explicit fan-out has a generation-scoped child context: leaving or reseating
+// the Frontier, abandoning it with u, or quitting cancels its Provider reads.
+// Opening a node keeps that lifetime alive behind Detail because root esc returns
+// to the same Frontier seat. A successful read still warms the shared cache even
+// when it races with cancellation.
 //
 // Emphasis is withheld until every planned read has answered. Fail-closed plus
 // a progressive fetch means a half-loaded Frontier would give wrong answers to
 // anyone glancing at it, so the cards draw in Status Category colours with no
-// badge and the header counts the reads still outstanding. Leaving the screen
-// advances frontierGeneration, which drops every outstanding answer: that is
-// what makes the fan-out interruptible.
+// badge and the header counts the reads still outstanding. Generation checks
+// remain the correctness guard against Providers that race with or ignore
+// cancellation; contexts stop the actual work rather than merely dropping its
+// eventual answer.
 //
 // # The program can start in Detail, and can be seeded
 //
