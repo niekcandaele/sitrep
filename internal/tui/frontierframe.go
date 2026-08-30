@@ -168,10 +168,10 @@ type frontierNode struct {
 // frontierNodes derives every drawable node from the graph and the Watchlist
 // that produced it: members in canonical order, then Ghost Tickets.
 //
-// resolved says whether every planned Detail read has answered. Until it has,
-// no Actionable or blocked emphasis is drawn at all: fail-closed plus a
-// progressive fetch means a half-loaded Frontier gives wrong answers to anyone
-// glancing at it, so the screen waits and says why.
+// resolved says whether every current Watchlist member has seated Links or a
+// recorded Detail failure. Until then, no Actionable or blocked emphasis is
+// drawn at all: fail-closed plus a progressive fetch means a partial Frontier
+// gives wrong answers to anyone glancing at it, so the screen waits and says why.
 func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool) []frontierNode {
 	byID := make(map[model.TicketID]model.Ticket, len(tickets))
 	for _, t := range tickets {

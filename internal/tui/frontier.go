@@ -71,13 +71,9 @@ type frontierState struct {
 	// Model, not here: re-seating frontierState on every entry would reset it
 	// to zero while the previous entry's fetches are still running, and N
 	// toggles would then run N concurrent Parallelism-sized batches.
-	queued []model.TicketID
-	// resolved is true once every planned fetch has answered. Actionable and
-	// blocked emphasis is drawn only then: fail-closed plus a progressive fetch
-	// means a half-loaded Frontier gives wrong answers to anyone glancing at it.
-	resolved bool
-	planned  int
-	done     int
+	queued  []model.TicketID
+	planned int
+	done    int
 	// failed names the Tickets whose Links could not be read. Their dependents
 	// are not Actionable, and the footer says so rather than guessing. It is a
 	// set rather than a count because adoption has to credit the one Ticket it
@@ -86,6 +82,30 @@ type frontierState struct {
 	// fail while its card still says UNVERIFIED.
 	failed  map[model.TicketID]struct{}
 	lastErr error
+}
+
+// isResolved reports whether the current Watchlist seat is complete enough to
+// publish Actionability. Plan counters describe one fan-out; resolution covers
+// every identifiable current member, including successful reads with no Links.
+// An empty ID is not fetchable and stays visibly unverified rather than keeping
+// the whole seat in an inescapable loading state.
+func (f frontierState) isResolved() bool {
+	if !f.input.Capabilities.BlockingLinks || len(f.input.Tickets) == 0 {
+		return true
+	}
+	for _, ticket := range f.input.Tickets {
+		if ticket.ID == "" {
+			continue
+		}
+		if _, seated := f.input.Links[ticket.ID]; seated {
+			continue
+		}
+		if _, failed := f.failed[ticket.ID]; failed {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // frontierDetailMsg carries one answer from the bulk fan-out. Cancellation stops
@@ -130,8 +150,7 @@ func (m Model) enterFrontier() (tea.Model, tea.Cmd) {
 		m.frontier.queued = detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
 		m.frontier.planned = len(m.frontier.queued)
 	}
-	m.frontier.resolved = len(m.frontier.queued) == 0
-	if !m.frontier.resolved {
+	if len(m.frontier.queued) > 0 {
 		m = m.startFrontierFanout()
 	}
 	m = m.rebuildFrontier()
@@ -191,14 +210,13 @@ func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
 	return m
 }
 
-// settleFrontier marks the fan-out resolved once this seat's own plan has been
-// answered in full, from the Tracker or session cache, and releases the child
-// context without invalidating the seat. It counts seat bookkeeping rather than
-// the shared in-flight counter: cancelled reads from an older generation may
-// still be unwinding.
+// settleFrontier releases the child context once this seat's own plan has been
+// answered in full, from the Tracker or session cache. Plan completion is not
+// resolution: the latter is derived from full Watchlist Links-or-failure
+// coverage. It counts seat bookkeeping rather than the shared in-flight counter
+// because cancelled reads from an older generation may still be unwinding.
 func (m Model) settleFrontier() Model {
 	if m.frontier.done == m.frontier.planned && len(m.frontier.queued) == 0 {
-		m.frontier.resolved = true
 		m = m.finishFrontierFanout()
 	}
 	return m
@@ -289,7 +307,7 @@ func (m Model) rebuildFrontier() Model {
 		m.frontier.input.Capabilities)
 	m.frontier.graph = g
 	m.frontier.layout = layoutFrontier(g,
-		frontierNodes(g, m.frontier.input.Tickets, m.frontier.resolved), m.width)
+		frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved()), m.width)
 
 	l := m.frontier.layout
 	if _, drawn := l.nodeAt[m.frontier.focusID]; !drawn {
@@ -409,7 +427,6 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 	m.frontier.done = 0
 	m.frontier.failed = nil
 	m.frontier.lastErr = nil
-	m.frontier.resolved = false
 	m = m.startFrontierFanout()
 	m = m.rebuildFrontier()
 	return m.issueFrontierFetches()
@@ -494,7 +511,7 @@ func (m Model) frontierHeader() string {
 	switch {
 	case !f.input.Capabilities.BlockingLinks:
 		counts = "frontier" + separator + "this Provider reports no blocking links"
-	case f.resolved:
+	case f.isResolved():
 		// Counted over the layout's order rather than the graph's members: a
 		// Watchlist may name one Ticket twice, and a header claiming more
 		// Actionable Tickets than there are cards is not a count of anything.
@@ -607,7 +624,7 @@ func (m Model) frontierFooterBlock() []string {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			"filters do not apply here: the Frontier renders the whole Watchlist", m.width)))
 	}
-	if failed := len(m.frontier.failed); m.frontier.resolved && failed > 0 {
+	if failed := len(m.frontier.failed); m.frontier.isResolved() && failed > 0 {
 		notice := detailfanout.UnreadableLinksNotice(failed)
 		lines = append(lines, m.styles.Error.Render(balancedTruncate(notice, m.width, "…")))
 	}

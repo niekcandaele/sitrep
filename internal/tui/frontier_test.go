@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -244,7 +245,7 @@ func TestFrontierWithholdsEmphasisUntilEveryDetailHasAnswered(t *testing.T) {
 			t.Errorf("a half-loaded Frontier claimed %q:\n%s", badge, frame)
 		}
 	}
-	if m.frontier.resolved {
+	if m.frontier.isResolved() {
 		t.Error("the Frontier reported itself resolved with every read outstanding")
 	}
 }
@@ -881,7 +882,7 @@ func TestFrontierRefreshOnlyRetriesWhatFailed(t *testing.T) {
 	if n := p.DetailCallsFor("acme/widgets#211"); n != 2 {
 		t.Errorf("DetailCallsFor(#211) = %d, want the original read and the retry", n)
 	}
-	if !m.frontier.resolved {
+	if !m.frontier.isResolved() {
 		t.Error("the retry left the Frontier unresolved")
 	}
 }
@@ -1030,7 +1031,7 @@ func frontierMouseModel(t *testing.T, tickets []model.Ticket,
 		})
 		m = updated.(Model)
 	}
-	if !m.frontier.resolved {
+	if !m.frontier.isResolved() {
 		t.Fatal("the fan-out never resolved")
 	}
 	return m
@@ -1398,6 +1399,198 @@ func frontierWithDeferredFanout(t *testing.T, members []model.Ticket,
 	return m, p, m.frontierGeneration
 }
 
+func TestFrontierResolutionRequiresFullSeatCoverage(t *testing.T) {
+	first := model.Ticket{ID: "T-1"}
+	second := model.Ticket{ID: "T-2"}
+	blocking := model.Capabilities{BlockingLinks: true}
+
+	for _, tt := range []struct {
+		name     string
+		tickets  []model.Ticket
+		links    map[model.TicketID][]model.Link
+		failed   map[model.TicketID]struct{}
+		caps     model.Capabilities
+		planned  int
+		done     int
+		resolved bool
+	}{
+		{
+			name:     "every member has a Links key including zero Links",
+			tickets:  []model.Ticket{first, second},
+			links:    map[model.TicketID][]model.Link{first.ID: nil, second.ID: {}},
+			caps:     blocking,
+			resolved: true,
+		},
+		{
+			name:     "a recorded failure covers its member",
+			tickets:  []model.Ticket{first, second},
+			links:    map[model.TicketID][]model.Link{first.ID: nil},
+			failed:   map[model.TicketID]struct{}{second.ID: {}},
+			caps:     blocking,
+			resolved: true,
+		},
+		{
+			name:    "plan completion does not cover an omitted member",
+			tickets: []model.Ticket{first, second},
+			links:   map[model.TicketID][]model.Link{first.ID: nil},
+			caps:    blocking,
+			planned: 1,
+			done:    1,
+		},
+		{
+			name:     "duplicate rows add no obligation",
+			tickets:  []model.Ticket{first, first},
+			links:    map[model.TicketID][]model.Link{first.ID: nil},
+			caps:     blocking,
+			resolved: true,
+		},
+		{
+			name:     "anonymous rows cannot create a fetch obligation",
+			tickets:  []model.Ticket{{}, {}},
+			caps:     blocking,
+			resolved: true,
+		},
+		{
+			name:     "empty Watchlist is terminal",
+			caps:     blocking,
+			resolved: true,
+		},
+		{
+			name:     "Capability absent is terminal",
+			tickets:  []model.Ticket{first},
+			resolved: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frontier := frontierState{
+				input: FrontierInput{
+					Tickets:      tt.tickets,
+					Links:        tt.links,
+					Capabilities: tt.caps,
+				},
+				failed:  tt.failed,
+				planned: tt.planned,
+				done:    tt.done,
+			}
+			if got := frontier.isResolved(); got != tt.resolved {
+				t.Errorf("isResolved() = %v, want %v", got, tt.resolved)
+			}
+		})
+	}
+}
+
+func TestFrontierPlanSettlementReleasesContextWithoutResolvingAnUncoveredSeat(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	m := Model{
+		frontierContext: ctx,
+		cancelFrontier:  cancel,
+		frontier: frontierState{
+			input: FrontierInput{
+				Tickets: []model.Ticket{{ID: "T-seated"}, {ID: "T-uncovered"}},
+				Links: map[model.TicketID][]model.Link{
+					"T-seated": nil,
+				},
+				Capabilities: model.Capabilities{BlockingLinks: true},
+			},
+			planned: 1,
+			done:    1,
+		},
+	}
+
+	m = m.settleFrontier()
+
+	if m.frontierContext != nil || m.cancelFrontier != nil {
+		t.Error("settled plan retained its child context")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(waitTimeout):
+		t.Fatal("settled plan did not cancel its child context")
+	}
+	if m.frontier.isResolved() {
+		t.Error("plan-local completion resolved a seat with an uncovered member")
+	}
+}
+
+func TestFrontierResolvedHeaderMatchesListAndRefreshRepairsAStaleSeat(t *testing.T) {
+	members, details := successfulFrontierMembers(t, 3)
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	p := fake.New(fake.WithDetails(details))
+	in := ListInput{
+		Header:       Header{Key: "#104", Title: "resolution truth"},
+		Tickets:      members,
+		Capabilities: p.Capabilities(),
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial:      &in,
+		DetailSource: TicketDetailSource(p),
+		Now:          func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	for _, ticket := range members {
+		updated, _ = m.Update(frontierDetailMsg{
+			generation: m.frontierGeneration,
+			id:         ticket.ID,
+			detail:     details[ticket.ID],
+			caps:       in.Capabilities,
+		})
+		m = updated.(Model)
+	}
+
+	markers := m.listMarkers()
+	if !markers.active || !m.frontier.isResolved() {
+		t.Fatalf("complete cache/seat is not resolved and list-active: markers=%+v resolved=%v",
+			markers, m.frontier.isResolved())
+	}
+	wantTally := fmt.Sprintf("%s%d actionable", separator, markers.count)
+	if header := m.frontierHeader(); !strings.Contains(header, wantTally) {
+		t.Fatalf("resolved Frontier header does not agree with list count %d:\n%s", markers.count, header)
+	}
+
+	missing := members[0].ID
+	delete(m.frontier.input.Links, missing)
+	m = m.rebuildFrontier()
+	if !m.listMarkers().active {
+		t.Fatal("removing a seated key also cooled the independent session cache")
+	}
+	if m.frontier.isResolved() {
+		t.Fatal("a member absent from the seat remained resolved")
+	}
+	if header := m.frontierHeader(); strings.Contains(header, " actionable") {
+		t.Fatalf("unresolved Frontier published an Actionable tally:\n%s", header)
+	}
+
+	epoch := m.mouseEpoch
+	before := p.DetailCalls()
+	updated, cmd := m.Update(keyPress("r"))
+	m = updated.(Model)
+	if !carriesClearScreen(cmd) {
+		t.Fatal("repairing the stale seat returned no full repaint")
+	}
+	if got := p.DetailCalls(); got != before {
+		t.Fatalf("repair fetched %d cached Details, want 0", got-before)
+	}
+	if _, seated := m.frontier.input.Links[missing]; !seated {
+		t.Fatalf("r did not adopt cached member %s", missing)
+	}
+	if m.mouseEpoch == epoch {
+		t.Fatal("repair changed the seat without invalidating captured mouse callbacks")
+	}
+	markers = m.listMarkers()
+	if !markers.active || !m.frontier.isResolved() {
+		t.Fatalf("repaired cache/seat is not resolved and list-active: markers=%+v resolved=%v",
+			markers, m.frontier.isResolved())
+	}
+	wantTally = fmt.Sprintf("%s%d actionable", separator, markers.count)
+	if header := m.frontierHeader(); !strings.Contains(header, wantTally) {
+		t.Fatalf("repaired Frontier header does not agree with list count %d:\n%s", markers.count, header)
+	}
+}
+
 func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T) {
 	members, details := successfulFrontierMembers(t, detailfanout.Parallelism)
 	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
@@ -1425,8 +1618,11 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 	if m.detailFanoutInflight != 0 {
 		t.Fatalf("shared in-flight reads = %d after every stale answer landed, want 0", m.detailFanoutInflight)
 	}
-	if frame := m.View().Content; !strings.Contains(frame, "UNVERIFIED") {
-		t.Fatalf("the pre-r frame does not expose the stranded seat:\n%s", frame)
+	if m.frontier.isResolved() {
+		t.Fatal("the pre-r frame resolved a replacement seat with no Links")
+	}
+	if header := m.frontierHeader(); !strings.Contains(header, "reading Detail 0/0") || strings.Contains(header, " actionable") {
+		t.Fatalf("the pre-r frame does not expose the stranded seat as incomplete:\n%s", header)
 	}
 	staleTarget := members[0].ID
 	if staleTarget == focus {
@@ -1537,7 +1733,7 @@ func TestFrontierRefreshAdoptsLateBatchBeforePlanningRemainder(t *testing.T) {
 	if calls := p.DetailCallsFor(last); calls != 1 {
 		t.Errorf("remainder %s was fetched %d times, want 1", last, calls)
 	}
-	if !m.frontier.resolved {
+	if !m.frontier.isResolved() {
 		t.Error("the one-Ticket retry left the Frontier unresolved")
 	}
 	for _, ticket := range members {
@@ -1593,9 +1789,8 @@ func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
 			m = updated.(Model)
 			m.mode = modeFrontier
 			m.frontier = frontierState{
-				input:    FrontierFromList(in, nil),
-				focusID:  cached.ID,
-				resolved: true,
+				input:   FrontierFromList(in, nil),
+				focusID: cached.ID,
 			}
 			m.details[cached.ID] = detailEntry{detail: detail, caps: in.Capabilities, fetchedAt: now}
 			if tt.cacheMissing {
@@ -1611,7 +1806,6 @@ func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
 			if tt.queued {
 				m.frontier.queued = []model.TicketID{missing.ID}
 				m.frontier.planned = 1
-				m.frontier.resolved = false
 			}
 			if tt.preserveWork {
 				ctx, cancel := context.WithCancel(t.Context())
@@ -1622,7 +1816,7 @@ func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
 			generation := m.frontierGeneration
 			ctx := m.frontierContext
 			queue := slices.Clone(m.frontier.queued)
-			planned, done, resolved := m.frontier.planned, m.frontier.done, m.frontier.resolved
+			planned, done := m.frontier.planned, m.frontier.done
 
 			updated, cmd := m.refreshFrontier()
 			m = updated.(Model)
@@ -1651,10 +1845,9 @@ func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
 						m.frontierGeneration, generation, m.frontierContext, ctx, m.cancelFrontier == nil)
 				}
 				if !slices.Equal(m.frontier.queued, queue) || m.frontier.planned != planned ||
-					m.frontier.done != done || m.frontier.resolved != resolved {
-					t.Errorf("guard changed queue bookkeeping: queued=%v/%v planned=%d/%d done=%d/%d resolved=%v/%v",
-						m.frontier.queued, queue, m.frontier.planned, planned,
-						m.frontier.done, done, m.frontier.resolved, resolved)
+					m.frontier.done != done {
+					t.Errorf("guard changed queue bookkeeping: queued=%v/%v planned=%d/%d done=%d/%d",
+						m.frontier.queued, queue, m.frontier.planned, planned, m.frontier.done, done)
 				}
 			}
 		})
@@ -1664,7 +1857,7 @@ func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
 // ADR-0003 Amendment 4: a whole-Watchlist Detail fan-out is permitted only in
 // response to an explicit user action. The --interval heartbeat is not one, so
 // a refresh landing with the Frontier open re-seats the screen and issues
-// nothing — a member the refresh introduced stays UNVERIFIED until r.
+// nothing — a member the refresh introduced keeps the seat unresolved until r.
 func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 	after := blockingSnapshotSwapping(t, "acme/widgets#213", addedMember)
 	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
@@ -1680,7 +1873,7 @@ func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, "15 nodes"+separator+"2 ghosts")
+	s.waitFor(t, "reading Detail 0/0")
 	m, got := s.finish(t)
 
 	if n := p.DetailCalls(); n != fetched {
@@ -1695,8 +1888,21 @@ func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 	if _, seated := m.frontier.input.Links[addedMember.ID]; seated {
 		t.Error("the added member has Links, so something fetched them off a timer")
 	}
-	if !strings.Contains(string(got), "UNVERIFIED") {
-		t.Error("the frame claims every member is verified after a refresh introduced one that is not")
+	if m.frontier.isResolved() {
+		t.Error("the re-seated Frontier resolved with an uncovered member")
+	}
+	header := m.frontierHeader()
+	if strings.Contains(header, " actionable") {
+		t.Errorf("the partial Frontier published an Actionable tally:\n%s", header)
+	}
+	if !strings.Contains(header, "reading Detail 0/0") {
+		t.Errorf("the unresolved re-seat does not identify itself as incomplete:\n%s", header)
+	}
+	frame := string(got)
+	for _, badge := range []string{"ACTIONABLE", "blocked by"} {
+		if strings.Contains(frame, badge) {
+			t.Errorf("the partial Frontier published resolved emphasis %q:\n%s", badge, frame)
+		}
 	}
 }
 
@@ -1715,7 +1921,7 @@ func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, separator+"2 actionable")
+	s.waitFor(t, "reading Detail 0/0")
 	m, _ := s.finish(t)
 
 	if m.frontier.focusID != "acme/widgets#403" {
@@ -1941,7 +2147,7 @@ func TestFrontierRefreshOnAWarmFrontierIssuesNothing(t *testing.T) {
 	if n := p.DetailCalls(); n != warm {
 		t.Errorf("r issued %d reads on a warm Frontier, want none", n-warm)
 	}
-	if !m.frontier.resolved {
+	if !m.frontier.isResolved() {
 		t.Error("r left a warm Frontier unresolved")
 	}
 }
@@ -2053,8 +2259,8 @@ func TestFrontierMovementKeysReachTheirDirections(t *testing.T) {
 }
 
 // A read that failed is still failed after the Watchlist is read again. The
-// re-seat issues nothing, so dropping the failure record would leave cards
-// marked UNVERIFIED with nothing on screen saying why or what to press.
+// re-seat issues nothing, so the retry remedy remains visible even while an
+// introduced uncovered member keeps the settled failure count withheld.
 func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 	after := blockingSnapshotSwapping(t, "acme/widgets#212", addedMember)
 	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
@@ -2064,7 +2270,7 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 	openFrontier(t, s)
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, separator+"2 actionable")
+	s.waitFor(t, "reading Detail 0/0")
 	m, got := s.finish(t)
 
 	// #211 is the fixture's unreadable member and is still on the Watchlist.
@@ -2072,10 +2278,10 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 		t.Errorf("failed = %v after a refresh, want the Ticket whose read failed", m.frontier.failed)
 	}
 	frame := string(got)
-	if !strings.Contains(frame, "1 Ticket's Links could not be read") {
-		t.Errorf("the failure notice went away across a refresh:\n%s", frame)
+	if strings.Contains(frame, "Ticket's Links could not be read") {
+		t.Errorf("an unresolved seat published a settled failure count:\n%s", frame)
 	}
-	if !strings.Contains(frame, "press r to retry") {
-		t.Errorf("the remedy went away across a refresh:\n%s", frame)
+	if !strings.Contains(frame, "read failed:") || !strings.Contains(frame, "press r to retry") {
+		t.Errorf("the carried failure remedy went away across a refresh:\n%s", frame)
 	}
 }
