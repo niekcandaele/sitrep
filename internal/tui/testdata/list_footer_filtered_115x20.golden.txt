@@ -1,0 +1,20 @@
+#103  Responsive list footer
+██████████████░░░░░░░░░░░░░░  1/2 done · 50%                                                          never updated
+
+TODO (1)
+▸ #1       #1
+
+
+
+
+
+
+
+
+
+
+
+
+
+filter: done+cancelled hidden · 1 of 2 Tickets                                                            esc clear
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1048,9 +1049,9 @@ func compactMouseHelp(binding key.Binding) (string, bool) {
 	return "", false
 }
 
-// shortenHelpItem drops one rung off the first short-help item until the three
-// items a reader cannot do without fit. Those three are what makes a footer
-// actionable: without them the reader has no way out of the screen.
+// shortenHelpItem owns the narrow fallback: it shortens the first item until
+// the first three short-help roles fit. Wider list discovery has a separate
+// projection that also protects Help.
 func shortenHelpItem(short []key.Binding, renderer help.Model, width int) {
 	if len(short) < 3 {
 		return
@@ -1072,6 +1073,101 @@ func shorterHelpDesc(binding key.Binding) (string, bool) {
 		return searchMouseHintCompactHelp, true
 	}
 	return compactMouseHelp(binding)
+}
+
+// listHelpDiscoveryWidth is the narrowest list width that reserves the mouse,
+// open, quit, and Help roles. Below it the existing three-control fallback wins
+// because both mouse states cannot guarantee all four. Expanded help remains
+// complete at every supported width.
+const listHelpDiscoveryWidth = 60
+
+// projectListShortHelp spends a list footer's width without changing the source
+// priority order. The escape hatches and Help are selected first; optional
+// bindings then compete for the remaining cells in their declared order.
+func projectListShortHelp(short []key.Binding, keys KeyMap, renderer help.Model, width int) []key.Binding {
+	fallback := append([]key.Binding(nil), short...)
+	if width <= 0 || width < listHelpDiscoveryWidth {
+		shortenHelpItem(fallback, renderer, width)
+		return fallback
+	}
+
+	helpIndex := helpBindingIndex(short, keys.Help)
+	mouseIndex := helpBindingIndex(short, keys.ToggleMouse)
+	if helpIndex < 0 || mouseIndex < 0 || !short[helpIndex].Enabled() {
+		shortenHelpItem(fallback, renderer, width)
+		return fallback
+	}
+	// Keep byte-stable wide output when the source prefix already exposes the
+	// complete Help segment. The renderer may still mark a trailing optional
+	// binding as clipped; that established suffix does not hide discovery.
+	if lipgloss.Width(renderer.ShortHelpView(short[:helpIndex+1])) <= width {
+		return fallback
+	}
+
+	selected := make([]bool, len(short))
+	protected := 0
+	for i := range short {
+		if short[i].Enabled() && protected < 3 {
+			selected[i] = true
+			protected++
+		}
+	}
+	selected[helpIndex] = true
+
+	for lipgloss.Width(renderer.ShortHelpView(selectedHelpBindings(short, selected))) > width {
+		desc, ok := shorterHelpDesc(short[mouseIndex])
+		if !ok {
+			shortenHelpItem(fallback, renderer, width)
+			return fallback
+		}
+		short[mouseIndex].SetHelp(short[mouseIndex].Help().Key, desc)
+	}
+
+	for i := range short {
+		if i == helpIndex {
+			continue
+		}
+		if i > helpIndex {
+			break
+		}
+		if !short[i].Enabled() || selected[i] {
+			continue
+		}
+		selected[i] = true
+		if lipgloss.Width(renderer.ShortHelpView(selectedHelpBindings(short, selected))) > width {
+			selected[i] = false
+		}
+	}
+	for i := helpIndex + 1; i < len(short); i++ {
+		if !short[i].Enabled() {
+			continue
+		}
+		selected[i] = true
+		if lipgloss.Width(renderer.ShortHelpView(selectedHelpBindings(short, selected))) > width {
+			selected[i] = false
+		}
+	}
+
+	return selectedHelpBindings(short, selected)
+}
+
+func helpBindingIndex(bindings []key.Binding, role key.Binding) int {
+	for i, binding := range bindings {
+		if binding.Help() == role.Help() && slices.Equal(binding.Keys(), role.Keys()) {
+			return i
+		}
+	}
+	return -1
+}
+
+func selectedHelpBindings(bindings []key.Binding, selected []bool) []key.Binding {
+	result := make([]key.Binding, 0, len(bindings))
+	for i := range bindings {
+		if selected[i] {
+			result = append(result, bindings[i])
+		}
+	}
+	return result
 }
 
 type responsiveHelpKeyMap struct {
@@ -1107,7 +1203,11 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 
 	unbounded := m.help
 	unbounded.SetWidth(0)
-	shortenHelpItem(short, unbounded, m.width)
+	if listKeys, ok := keys.(KeyMap); ok {
+		short = projectListShortHelp(short, listKeys, unbounded, m.width)
+	} else {
+		shortenHelpItem(short, unbounded, m.width)
+	}
 	if listKeys, ok := keys.(KeyMap); ok && m.help.ShowAll &&
 		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
 		full = compactListFullHelp(listKeys)
