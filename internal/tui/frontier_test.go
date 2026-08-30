@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -760,6 +761,8 @@ func TestFrontierWithoutBlockingLinksDisablesEveryGraphKey(t *testing.T) {
 		{name: "right", msg: tea.KeyPressMsg{Code: tea.KeyRight}},
 		{name: "up", msg: tea.KeyPressMsg{Code: tea.KeyUp}},
 		{name: "down", msg: tea.KeyPressMsg{Code: tea.KeyDown}},
+		{name: "page up", msg: tea.KeyPressMsg{Code: tea.KeyPgUp}},
+		{name: "page down", msg: tea.KeyPressMsg{Code: tea.KeyPgDown}},
 		{name: "refresh", msg: keyPress("r")},
 	}
 
@@ -779,6 +782,19 @@ func TestFrontierWithoutBlockingLinksDisablesEveryGraphKey(t *testing.T) {
 				t.Fatalf("Detail calls = %d, want 0", got)
 			}
 		})
+	}
+
+	m, _ := noBlockingFrontierModel(t)
+	effective := m.effectiveFrontierKeys()
+	if effective.PageUp.Enabled() || effective.PageDown.Enabled() {
+		t.Fatalf("no-Capability page bindings are enabled: up=%t down=%t", effective.PageUp.Enabled(), effective.PageDown.Enabled())
+	}
+	for _, group := range effective.FullHelp() {
+		for _, binding := range group {
+			if binding.Enabled() && (binding.Help().Key == "pgup" || binding.Help().Key == "pgdn") {
+				t.Errorf("effective Frontier help contains enabled %q", binding.Help().Key)
+			}
+		}
 	}
 }
 
@@ -2569,6 +2585,241 @@ func TestAdoptCachedLinksCreditsOnlyTheTicketItSeats(t *testing.T) {
 	}
 }
 
+func TestFrontierPageBindingsReuseListSurfaceAndExpandedHelpPlacement(t *testing.T) {
+	frontier := DefaultFrontierKeyMap()
+	list := DefaultKeyMap()
+	for _, tt := range []struct {
+		name    string
+		msg     tea.KeyPressMsg
+		got     key.Binding
+		want    key.Binding
+		helpKey string
+	}{
+		{"page up", tea.KeyPressMsg{Code: tea.KeyPgUp}, frontier.PageUp, list.PageUp, "pgup"},
+		{"page down", tea.KeyPressMsg{Code: tea.KeyPgDown}, frontier.PageDown, list.PageDown, "pgdn"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !key.Matches(tt.msg, tt.got) {
+				t.Fatalf("%s does not match its real Bubble Tea key event", tt.name)
+			}
+			if got, want := tt.got.Keys(), tt.want.Keys(); !slices.Equal(got, want) {
+				t.Errorf("keys = %v, want reused list keys %v", got, want)
+			}
+			if got, want := tt.got.Help(), tt.want.Help(); got != want {
+				t.Errorf("help = %+v, want reused list help %+v", got, want)
+			}
+			if got := tt.got.Help(); got.Key != tt.helpKey || got.Desc != "page "+strings.TrimPrefix(tt.name, "page ") {
+				t.Errorf("help = %+v, want %s page %s", got, tt.helpKey, strings.TrimPrefix(tt.name, "page "))
+			}
+		})
+	}
+
+	short := frontier.ShortHelp()
+	if len(short) != 10 {
+		t.Fatalf("ShortHelp has %d bindings, want unchanged 10", len(short))
+	}
+	for _, binding := range short {
+		if binding.Help().Key == "pgup" || binding.Help().Key == "pgdn" {
+			t.Fatalf("ShortHelp unexpectedly includes %q", binding.Help().Key)
+		}
+	}
+
+	groups := frontier.FullHelp()
+	if got, want := len(groups), 2; got != want {
+		t.Fatalf("FullHelp groups = %d, want %d", got, want)
+	}
+	movement := groups[1]
+	if got, want := []string{
+		movement[0].Help().Key, movement[1].Help().Key, movement[2].Help().Key, movement[3].Help().Key,
+		movement[4].Help().Key, movement[5].Help().Key, movement[6].Help().Key, movement[7].Help().Key,
+	}, []string{"↑/k", "↓/j", "←/h", "→/l", "pgup", "pgdn", "g", "G"}; !slices.Equal(got, want) {
+		t.Errorf("movement help order = %v, want %v", got, want)
+	}
+}
+
+func frontierPagingModel(t *testing.T, width, height int) Model {
+	t.Helper()
+	tickets := make([]model.Ticket, 30)
+	links := make(map[model.TicketID][]model.Link, len(tickets))
+	for i := range tickets {
+		id := model.TicketID(fmt.Sprintf("T-%02d", i))
+		tickets[i] = model.Ticket{ID: id, Key: string(id), Title: string(id), Status: model.StatusTodo}
+		switch {
+		case i >= 8:
+			links[id] = blockedBy("T-04")
+		case i >= 4:
+			links[id] = blockedBy("T-00")
+		}
+	}
+	m := frontierMouseModel(t, tickets, links, width, height)
+	m = m.reconcileFrontier(true)
+	m.frontier.offsetX = clampFrontierOffset(1, m.frontier.layout.width, m.width)
+	if m.frontier.layout.height <= m.frontierBodyHeight() {
+		t.Fatalf("paging fixture canvas fits vertically: layout=%dx%d body=%d columns=%v", m.frontier.layout.width, m.frontier.layout.height, m.frontierBodyHeight(), m.frontier.layout.columnOf)
+	}
+	return m
+}
+
+func assertFrontierPageFooter(t *testing.T, m Model, maxY int) {
+	t.Helper()
+	want := fmt.Sprintf("y %d/%d", m.frontier.offsetY, maxY)
+	if got := m.frontierScrollPosition(); !strings.Contains(got, want) {
+		t.Errorf("scroll position = %q, want %q", got, want)
+	}
+	if got := string(frame(m.View().Content)); !strings.Contains(got, want) {
+		t.Errorf("footer omits %q:\n%s", want, got)
+	}
+}
+
+func TestFrontierPageKeysMoveOnlyCurrentCanvasWindow(t *testing.T) {
+	m := frontierPagingModel(t, 60, 20)
+	page := m.frontierBodyHeight()
+	maxY := max(m.frontier.layout.height-page, 0)
+	if m.frontier.layout.width <= m.width || m.frontier.offsetX == 0 {
+		t.Fatalf("paging fixture lacks a non-zero horizontal offset: layout=%dx%d width=%d body=%d offsetX=%d columns=%v", m.frontier.layout.width, m.frontier.layout.height, m.width, m.frontierBodyHeight(), m.frontier.offsetX, m.frontier.layout.columnOf)
+	}
+	focus, offsetX := m.frontier.focusID, m.frontier.offsetX
+	baseline := fmt.Sprintf("layout=%#v hasFocus=%t generation=%d planned=%d done=%d inflight=%d mouseEpoch=%d details=%d links=%d",
+		m.frontier.layout, m.frontier.hasFocus, m.frontierGeneration, m.frontier.planned, m.frontier.done,
+		m.detailFanoutInflight, m.mouseEpoch, len(m.details), len(m.frontier.input.Links))
+
+	press := func(msg tea.KeyPressMsg, want int) {
+		t.Helper()
+		updated, cmd := m.onFrontierKey(msg)
+		if cmd != nil {
+			t.Fatalf("%s returned command", msg.String())
+		}
+		m = updated.(Model)
+		if m.frontier.offsetY != want {
+			t.Fatalf("%s offsetY = %d, want %d", msg.String(), m.frontier.offsetY, want)
+		}
+		if m.frontier.offsetX != offsetX {
+			t.Errorf("%s changed offsetX from %d to %d", msg.String(), offsetX, m.frontier.offsetX)
+		}
+		if m.frontier.focusID != focus || !m.frontier.hasFocus {
+			t.Errorf("%s changed focus to %q/%t, want %q/true", msg.String(), m.frontier.focusID, m.frontier.hasFocus, focus)
+		}
+		if got := fmt.Sprintf("layout=%#v hasFocus=%t generation=%d planned=%d done=%d inflight=%d mouseEpoch=%d details=%d links=%d",
+			m.frontier.layout, m.frontier.hasFocus, m.frontierGeneration, m.frontier.planned, m.frontier.done,
+			m.detailFanoutInflight, m.mouseEpoch, len(m.details), len(m.frontier.input.Links)); got != baseline {
+			t.Errorf("%s changed non-window state\nbefore: %s\nafter:  %s", msg.String(), baseline, got)
+		}
+		assertFrontierPageFooter(t, m, maxY)
+	}
+
+	for m.frontier.offsetY < maxY {
+		press(tea.KeyPressMsg{Code: tea.KeyPgDown}, min(m.frontier.offsetY+page, maxY))
+	}
+	bottom := frontierInteractionSnapshot(m)
+	press(tea.KeyPressMsg{Code: tea.KeyPgDown}, maxY)
+	if got := frontierInteractionSnapshot(m); got != bottom {
+		t.Errorf("page down at endpoint changed model\nbefore: %s\nafter:  %s", bottom, got)
+	}
+	if rect := m.frontier.layout.nodeAt[focus]; rect.Y+rect.H > m.frontier.offsetY {
+		t.Errorf("focus %q remained visible after paging to bottom", focus)
+	}
+	for m.frontier.offsetY > 0 {
+		press(tea.KeyPressMsg{Code: tea.KeyPgUp}, max(m.frontier.offsetY-page, 0))
+	}
+	top := frontierInteractionSnapshot(m)
+	press(tea.KeyPressMsg{Code: tea.KeyPgUp}, 0)
+	if got := frontierInteractionSnapshot(m); got != top {
+		t.Errorf("page up at endpoint changed model\nbefore: %s\nafter:  %s", top, got)
+	}
+}
+
+func TestFrontierPageKeysUseCurrentBodyHeightAndPreserveFocusRecovery(t *testing.T) {
+	m := frontierPagingModel(t, 120, 40)
+	collapsedPage := m.frontierBodyHeight()
+	collapsedMax := max(m.frontier.layout.height-collapsedPage, 0)
+	updated, _ := m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = updated.(Model)
+	if got, want := m.frontier.offsetY, min(collapsedPage, collapsedMax); got != want {
+		t.Fatalf("collapsed page offset = %d, want %d", got, want)
+	}
+
+	updated, _ = m.onFrontierKey(keyPress("?"))
+	m = updated.(Model)
+	expandedPage := m.frontierBodyHeight()
+	if expandedPage >= collapsedPage {
+		t.Fatalf("expanded body height = %d, want less than collapsed %d", expandedPage, collapsedPage)
+	}
+	expandedMax := max(m.frontier.layout.height-expandedPage, 0)
+	m.frontier.offsetY = 0
+	updated, cmd := m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if cmd != nil {
+		t.Fatal("expanded page down returned a command")
+	}
+	m = updated.(Model)
+	if got, want := m.frontier.offsetY, min(expandedPage, expandedMax); got != want {
+		t.Errorf("expanded page offset = %d, want current-height step %d", got, want)
+	}
+	assertFrontierPageFooter(t, m, expandedMax)
+
+	focus := m.frontier.focusID
+	for m.frontier.offsetY < expandedMax {
+		updated, _ = m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = updated.(Model)
+	}
+	if m.frontier.focusID != focus {
+		t.Fatalf("paging changed focus to %q, want %q", m.frontier.focusID, focus)
+	}
+	updated, _ = m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	m = updated.(Model)
+	if m.frontier.focusID == focus {
+		t.Fatal("directional movement did not leave the paged-off focus")
+	}
+	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierBodyHeight() {
+		t.Errorf("directional movement left focus %q outside its canvas window", m.frontier.focusID)
+	}
+	updated, _ = m.onFrontierKey(keyPress("G"))
+	m = updated.(Model)
+	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierBodyHeight() {
+		t.Errorf("End left focus %q outside its canvas window", m.frontier.focusID)
+	}
+	updated, _ = m.onFrontierKey(keyPress("g"))
+	m = updated.(Model)
+	if m.frontier.offsetY != 0 {
+		t.Errorf("Home did not recover focus into view: offsetY = %d", m.frontier.offsetY)
+	}
+
+	updated, _ = m.onFrontierKey(keyPress("?"))
+	m = updated.(Model)
+	if m.frontier.offsetY < 0 || m.frontier.offsetY > max(m.frontier.layout.height-m.frontierBodyHeight(), 0) {
+		t.Errorf("closing help left invalid offsetY %d", m.frontier.offsetY)
+	}
+}
+
+func TestFrontierPageKeysFitAndOneLineBody(t *testing.T) {
+	fit := frontierMouseModel(t, []model.Ticket{{ID: "T-1", Key: "#1", Title: "one", Status: model.StatusTodo}}, nil, 120, 30)
+	for _, msg := range []tea.KeyPressMsg{{Code: tea.KeyPgUp}, {Code: tea.KeyPgDown}} {
+		updated, cmd := fit.onFrontierKey(msg)
+		if cmd != nil {
+			t.Fatalf("fitting %s returned command", msg.String())
+		}
+		fit = updated.(Model)
+		if fit.frontier.offsetY != 0 || strings.Contains(fit.frontierScrollPosition(), "y ") {
+			t.Errorf("fitting %s moved to %d with position %q", msg.String(), fit.frontier.offsetY, fit.frontierScrollPosition())
+		}
+	}
+
+	oneLine := frontierPagingModel(t, 120, headerHeight+1+2)
+	if got := oneLine.frontierBodyHeight(); got != 1 {
+		t.Fatalf("one-line body height = %d, want 1", got)
+	}
+	maxY := oneLine.frontier.layout.height - 1
+	updated, _ := oneLine.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	oneLine = updated.(Model)
+	if oneLine.frontier.offsetY != 1 {
+		t.Errorf("one-line page down offset = %d, want 1", oneLine.frontier.offsetY)
+	}
+	for oneLine.frontier.offsetY < maxY {
+		updated, _ = oneLine.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		oneLine = updated.(Model)
+	}
+	assertFrontierPageFooter(t, oneLine, maxY)
+}
+
 // The Frontier's expanded help is the only place its graph vocabulary is
 // written down, and nothing rendered it. Two sizes: a normal terminal, and one
 // small enough that model.go's keys.(KeyMap) type assertion fails and a
@@ -2585,11 +2836,11 @@ func TestFrontierExpandedHelp(t *testing.T) {
 		wants []string
 	}{
 		{"normal", 120, 40, "frontier_help_120x40.golden.txt", []string{
-			"previous node", "next node", "blocker side", "dependent side",
+			"previous node", "next node", "blocker side", "dependent side", "pgup", "page up", "pgdn", "page down",
 			"first node", "last node", "v/esc", "open Ticket", "re-read Details",
 		}},
 		{"narrow", 42, 28, "frontier_help_42x28.golden.txt", []string{
-			"v/esc", "open Ticket", "re-read Details", "select node",
+			"v/esc", "open Ticket", "re-read Details", "select node", "pgup", "page up", "pgdn", "page down",
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

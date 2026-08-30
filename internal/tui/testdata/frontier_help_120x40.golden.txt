@@ -29,12 +29,12 @@ YCLE                     ║  │││ ┃ACTIONABLE                ┃
 
 1 Ticket's Links could not be read; anything it blocks is not Actionable
 read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
-m            release · shift-drag to select text    ↑/k previous node
-click        select node                            ↓/j next node
-double-click open Ticket                            ←/h blocker side
-wheel        scroll                                 →/l dependent side
-enter        open Ticket                            g   first node
-v/esc        list                                   G   last node
-r            re-read Details
-?            help
+m            release · shift-drag to select text    ↑/k  previous node
+click        select node                            ↓/j  next node
+double-click open Ticket                            ←/h  blocker side
+wheel        scroll                                 →/l  dependent side
+enter        open Ticket                            pgup page up
+v/esc        list                                   pgdn page down
+r            re-read Details                        g    first node
+?            help                                   G    last node
 q            quit                                                                                         x 2/2 · y 0/35

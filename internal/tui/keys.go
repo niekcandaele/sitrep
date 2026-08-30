@@ -279,10 +279,10 @@ func (k DetailKeyMap) FullHelp() [][]key.Binding {
 }
 
 // FrontierKeyMap is the keyboard while the Frontier is open. It reuses list
-// bindings where key and meaning match and replaces the list's paging with
-// movement along the two axes a graph has. Neither d nor / appears: filters do
-// not apply on this screen, and the footer says so rather than binding a key
-// that would quietly lie.
+// bindings where key and meaning match. Arrows move graph focus along its axes;
+// page keys move the vertical canvas window without moving focus. Neither d nor
+// / appears: filters do not apply on this screen, and the footer says so rather
+// than binding a key that would quietly lie.
 type FrontierKeyMap struct {
 	// Up moves focus to the previous node in this column.
 	Up key.Binding
@@ -292,6 +292,10 @@ type FrontierKeyMap struct {
 	Left key.Binding
 	// Right moves focus to the dependent side.
 	Right key.Binding
+	// PageUp moves the canvas window backward by one current visible body-height page.
+	PageUp key.Binding
+	// PageDown moves the canvas window forward by one current visible body-height page.
+	PageDown key.Binding
 	// Home focuses the first node in canonical order.
 	Home key.Binding
 	// End focuses the last node in canonical order.
@@ -339,6 +343,8 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 			key.WithKeys("right", "l"),
 			key.WithHelp("→/l", "dependent side"),
 		),
+		PageUp:   list.PageUp,
+		PageDown: list.PageDown,
 		Home: key.NewBinding(
 			key.WithKeys("home", "g"),
 			key.WithHelp("g", "first node"),
@@ -397,7 +403,7 @@ func (k FrontierKeyMap) ShortHelp() []key.Binding {
 func (k FrontierKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Quit},
-		{k.Up, k.Down, k.Left, k.Right, k.Home, k.End},
+		{k.Up, k.Down, k.Left, k.Right, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }
 
