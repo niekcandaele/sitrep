@@ -2,13 +2,11 @@
 frontier · 16 nodes · 3 ghosts ·… just now
 
 ───────────┐  ┌──────────────────────────┐
-       Todo│─▶│▸ #207         In Progress│
+‹      Todo│─▶│▸ #207         In Progress│
 ncer into …│  │Rewrite the placement heu…│
-‹          │  │[In Review] blocked by 1  │
-───────────┘  └──────────────────────────┘
-
-                     ▼
-                          x 80/80 · y 0/53
+           │  │[In Review] blocked by 1  │
+───────────┘ ▼└──────────────────────────┘
+                          x 80/80 · y 0/55
 1 Ticket's Links could not be read; anyth…
 read failed: fake: no detail for ticket "…
 m            release, shift-drag
@@ -24,5 +22,7 @@ q            quit
 ↓/j          next node
 ←/h          blocker side
 →/l          dependent side
+pgup         page up
+pgdn         page down
 g            first node
 G            last node

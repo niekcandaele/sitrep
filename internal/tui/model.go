@@ -1026,7 +1026,7 @@ func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 		return keys
 	}
 	for _, binding := range []*key.Binding{&keys.Open, &keys.Refresh,
-		&keys.Up, &keys.Down, &keys.Left, &keys.Right, &keys.Home, &keys.End,
+		&keys.Up, &keys.Down, &keys.Left, &keys.Right, &keys.PageUp, &keys.PageDown, &keys.Home, &keys.End,
 		&keys.MouseSelect, &keys.MouseOpen, &keys.MouseWheel} {
 		binding.SetEnabled(false)
 	}

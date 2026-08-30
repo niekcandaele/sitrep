@@ -470,6 +470,10 @@ func (m Model) onFrontierKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.moveFrontierFocus(-1, 0), nil
 	case key.Matches(msg, keys.Right):
 		return m.moveFrontierFocus(1, 0), nil
+	case key.Matches(msg, keys.PageUp):
+		return m.pageFrontier(-1), nil
+	case key.Matches(msg, keys.PageDown):
+		return m.pageFrontier(1), nil
 	case key.Matches(msg, keys.Home):
 		return m.focusFrontierNodeAt(0), nil
 	case key.Matches(msg, keys.End):
@@ -488,6 +492,12 @@ func (m Model) moveFrontierFocus(dx, dy int) Model {
 	}
 	m.frontier.focusID = next
 	return m.reconcileFrontier(true)
+}
+
+// pageFrontier moves the canvas window by current visible body-height pages.
+func (m Model) pageFrontier(pages int) Model {
+	m.frontier.offsetY += pages * m.frontierBodyHeight()
+	return m.reconcileFrontier(false)
 }
 
 func (m Model) focusFrontierNodeAt(i int) Model {
