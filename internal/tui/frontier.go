@@ -119,6 +119,92 @@ type frontierDetailMsg struct {
 	err        error
 }
 
+const frontierRebuildDelay = time.Second / 60
+
+// frontierRebuildMsg is immutable ownership evidence for the sole outstanding
+// deferred canvas replacement tick.
+type frontierRebuildMsg struct {
+	timerID         int
+	observedVersion int
+}
+
+// frontierLayoutForModel keeps layout observation instance-local. Nil is the
+// production default for model-literal tests.
+func (m Model) frontierLayoutForModel(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+	if m.layoutFrontierFn == nil {
+		return layoutFrontier(g, nodes, width)
+	}
+	return m.layoutFrontierFn(g, nodes, width)
+}
+
+// discardPendingFrontierRebuild invalidates deferred work but deliberately
+// retains the physical tick owner. Bubble Tea ticks cannot be cancelled; keeping
+// ownership prevents a replacement request from stacking another one behind it.
+func (m Model) discardPendingFrontierRebuild() Model {
+	m.frontierRebuildVersion++
+	m.frontierRebuildPendingVersion = 0
+	m.frontierRebuildPendingGeneration = 0
+	return m
+}
+
+func (m Model) armFrontierRebuildTimer() (Model, tea.Cmd) {
+	if m.frontierRebuildTimerID != 0 || m.frontierRebuildPendingVersion == 0 {
+		return m, nil
+	}
+	m.frontierRebuildNextTimerID++
+	m.frontierRebuildTimerID = m.frontierRebuildNextTimerID
+	timerID := m.frontierRebuildTimerID
+	observedVersion := m.frontierRebuildPendingVersion
+	return m, tea.Tick(frontierRebuildDelay, func(time.Time) tea.Msg {
+		return frontierRebuildMsg{timerID: timerID, observedVersion: observedVersion}
+	})
+}
+
+// requestFrontierRebuild records the newest visible incomplete evidence or
+// width. It never materialises the canvas synchronously.
+func (m Model) requestFrontierRebuild() (Model, tea.Cmd) {
+	if m.mode != modeFrontier {
+		return m.discardPendingFrontierRebuild(), nil
+	}
+	m.frontierRebuildVersion++
+	m.frontierRebuildPendingVersion = m.frontierRebuildVersion
+	m.frontierRebuildPendingGeneration = m.frontierGeneration
+	return m.armFrontierRebuildTimer()
+}
+
+// onFrontierRebuild services exactly the quiet trailing edge of a request.
+func (m Model) onFrontierRebuild(msg frontierRebuildMsg) (tea.Model, tea.Cmd) {
+	if msg.timerID != m.frontierRebuildTimerID {
+		return m, nil
+	}
+	m.frontierRebuildTimerID = 0
+	if m.frontierRebuildPendingVersion == 0 ||
+		m.frontierRebuildPendingGeneration != m.frontierGeneration ||
+		m.mode != modeFrontier {
+		return m.discardPendingFrontierRebuild(), nil
+	}
+	if msg.observedVersion != m.frontierRebuildPendingVersion {
+		next, cmd := m.armFrontierRebuildTimer()
+		return next, cmd
+	}
+	m.frontierRebuildPendingVersion = 0
+	m.frontierRebuildPendingGeneration = 0
+	m = m.rebuildFrontier()
+	return m, repaint
+}
+
+// frontierEvidenceChanged preserves immediate state updates but chooses whether
+// the expensive stored canvas is replaced now or at a quiet frame boundary.
+func (m Model) frontierEvidenceChanged() (Model, tea.Cmd) {
+	if m.mode != modeFrontier {
+		return m, nil
+	}
+	if m.frontier.isResolved() {
+		return m.rebuildFrontier(), repaint
+	}
+	return m.requestFrontierRebuild()
+}
+
 // linksFromCache builds the Links map from the Details read this session. It
 // delegates the key-presence contract to detailfanout rather than open-coding
 // it: only a Ticket whose Detail was actually read gets a key.
@@ -194,7 +280,10 @@ func (m Model) issueFrontierFetches() (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.frontierFetchCmd(m.frontierGeneration, id))
 	}
 	if adopted {
-		m = m.settleFrontier().rebuildFrontier()
+		m = m.settleFrontier()
+		var rebuildCmd tea.Cmd
+		m, rebuildCmd = m.frontierEvidenceChanged()
+		cmds = append(cmds, rebuildCmd)
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -267,11 +356,9 @@ func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
 	}
 	m = m.settleFrontier()
-	// The badges, and therefore the geometry a queued mouse callback captured,
-	// may have changed.
-	m.mouseEpoch++
-	m = m.rebuildFrontier()
-	return m.issueFrontierFetches()
+	m, rebuildCmd := m.frontierEvidenceChanged()
+	next, fetchCmd := m.issueFrontierFetches()
+	return next, tea.Batch(rebuildCmd, fetchCmd)
 }
 
 // adoptCachedLinks folds Details read since the fan-out into the seated input.
@@ -302,12 +389,14 @@ func (m Model) adoptCachedLinks() Model {
 // blocking graph, the nodes, the canvas, and where focus and the window sit on
 // it.
 func (m Model) rebuildFrontier() Model {
+	m = m.discardPendingFrontierRebuild()
 	previous := indexOfNode(m.frontier.layout.order, m.frontier.focusID)
 	g := model.BuildBlockingGraph(m.frontier.input.Tickets, m.frontier.input.Links,
 		m.frontier.input.Capabilities)
 	m.frontier.graph = g
-	m.frontier.layout = layoutFrontier(g,
+	m.frontier.layout = m.frontierLayoutForModel(g,
 		frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved()), m.width)
+	m.mouseEpoch++
 
 	l := m.frontier.layout
 	if _, drawn := l.nodeAt[m.frontier.focusID]; !drawn {
