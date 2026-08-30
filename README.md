@@ -185,8 +185,12 @@ navigation.
 Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
 renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
 Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — a bulk
-per-Ticket read, which is why it shows a progress count and why `esc` interrupts it
-(`--json --links` is the other one) — and Details already read this session are reused.
+per-Ticket read, which is why it shows a progress count (`--json --links` is the other one).
+The read is cancellable: returning to the list, a Watchlist refresh that reseats the Frontier,
+or quitting stops requests still in flight. Cancelled reads are not reported as Ticket Link
+failures. Details that finished successfully remain in the session cache, so re-entry fetches
+only those still absent. Opening a node's Detail preserves the Frontier and its read behind it,
+because root `esc` returns to that same seat; `u` abandons and cancels both.
 Colour carries the Status Category, exactly as it does on the list, while border weight and
 a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
 is also blocked shows both.
@@ -276,7 +280,7 @@ rather than quitting.
 | double-click | open a node's Ticket |
 | wheel | scroll the canvas |
 | `enter` | open the focused Ticket, Ghost Tickets included |
-| `v`, `esc` | return to the list, interrupting any Detail reads still in flight |
+| `v`, `esc` | return to the list, cancelling Detail reads still in flight |
 | `r` | re-read the Details that never succeeded |
 | `m` | turn mouse capture off or on |
 | `?` | expand help |

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -86,10 +88,9 @@ type frontierState struct {
 	lastErr error
 }
 
-// frontierDetailMsg carries one answer from the bulk fan-out. It is guarded by
-// generation alone: leaving the Frontier or reseating it on a refreshed
-// Watchlist advances the generation, and that is what makes the fan-out
-// interruptible.
+// frontierDetailMsg carries one answer from the bulk fan-out. Cancellation stops
+// Provider work when a seat ends; the generation guard separately prevents a
+// raced or cancellation-ignoring answer from mutating its replacement.
 type frontierDetailMsg struct {
 	generation int
 	id         model.TicketID
@@ -111,13 +112,13 @@ func (m Model) linksFromCache() map[model.TicketID][]model.Link {
 
 // enterFrontier seats the Frontier on the current reading and starts the bulk
 // Detail fan-out ADR-0003's Amendment 4 permits: an explicit user action, with
-// a visible cost the user can interrupt.
+// a visible cost whose generation-scoped context the user can cancel.
 func (m Model) enterFrontier() (tea.Model, tea.Cmd) {
 	if !m.hasData {
 		return m, nil
 	}
 	m = m.clearPendingClick()
-	m.frontierGeneration++
+	m = m.retireFrontierFanout()
 	m.mouseEpoch++
 	m.mode = modeFrontier
 	m.frontier = frontierState{
@@ -130,6 +131,9 @@ func (m Model) enterFrontier() (tea.Model, tea.Cmd) {
 		m.frontier.planned = len(m.frontier.queued)
 	}
 	m.frontier.resolved = len(m.frontier.queued) == 0
+	if !m.frontier.resolved {
+		m = m.startFrontierFanout()
+	}
 	m = m.rebuildFrontier()
 	// The footer changes shape on the way in, so the next frame is drawn whole.
 	return m.issueFrontierFetches()
@@ -188,54 +192,60 @@ func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
 }
 
 // settleFrontier marks the fan-out resolved once this seat's own plan has been
-// answered in full, from the Tracker or from the session cache. It counts this
-// seat's bookkeeping rather than the shared in-flight counter: a fetch left
-// running by a seat the user walked away from holds a slot but says nothing
-// about this one.
+// answered in full, from the Tracker or session cache, and releases the child
+// context without invalidating the seat. It counts seat bookkeeping rather than
+// the shared in-flight counter: cancelled reads from an older generation may
+// still be unwinding.
 func (m Model) settleFrontier() Model {
 	if m.frontier.done == m.frontier.planned && len(m.frontier.queued) == 0 {
 		m.frontier.resolved = true
+		m = m.finishFrontierFanout()
 	}
 	return m
 }
 
-// frontierFetchCmd reads one Ticket's Detail on Bubble Tea's goroutine pool,
-// tagging the answer with the generation that asked for it.
+// frontierFetchCmd reads one Ticket's Detail with the child context owned by
+// this Frontier generation. The command captures both values so replacing the
+// Model cannot redirect an issued read.
 func (m Model) frontierFetchCmd(generation int, id model.TicketID) tea.Cmd {
 	fetch := m.fetchDetail
+	ctx := m.frontierContext
 	return func() tea.Msg {
-		d, caps, err := fetch(id)
+		d, caps, err := fetch(ctx, id)
 		return frontierDetailMsg{generation: generation, id: id, detail: d, caps: caps, err: err}
 	}
 }
 
-// onFrontierDetail folds one fan-out answer in, dropping any the screen is no
-// longer waiting for. A failure writes no Links key at all: key presence is the
-// tri-state that makes fail-closed Actionable real, so a Ticket whose Links
-// could not be read stays unknown rather than looking unblocked.
+// onFrontierDetail folds one fan-out answer in. Every issued command frees its
+// shared slot, and every success warms the session cache before the generation
+// guard: a Provider may complete just before cancellation and that paid-for
+// answer should prevent a duplicate read. Only the current seat's answer changes
+// progress or rendering. A failure writes no Links key, preserving fail-closed
+// Actionable; local cancellation is control flow and never a Ticket failure.
 func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
-	// The read was paid for whether or not this screen still wants it, so the
-	// counter and the session cache are settled before the generation guard.
-	// A re-entered Frontier then plans around what the abandoned one fetched
-	// instead of asking the Tracker again.
 	m.detailFanoutInflight--
 	if msg.err == nil {
 		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
 	}
 	if msg.generation != m.frontierGeneration {
-		// The answer belongs to an abandoned seat, but the slot it held is free
-		// now, so whatever the current seat has queued can start.
+		// An abandoned command has released a shared slot. A re-entered current
+		// generation may now issue from its own distinct queue and context.
 		return m.issueFrontierFetches()
 	}
 	m.frontier.done++
 
-	if msg.err != nil {
+	switch {
+	case errors.Is(msg.err, context.Canceled):
+		// Cancellation never becomes a failed member or footer error. Normally the
+		// generation has already advanced; this protects against reordered local
+		// control messages and wrapped cancellation errors too.
+	case msg.err != nil:
 		if m.frontier.failed == nil {
 			m.frontier.failed = make(map[model.TicketID]struct{})
 		}
 		m.frontier.failed[msg.id] = struct{}{}
 		m.frontier.lastErr = msg.err
-	} else {
+	default:
 		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
 	}
 	m = m.settleFrontier()
@@ -321,11 +331,12 @@ func indexOfNode(order []model.TicketID, id model.TicketID) int {
 	return -1
 }
 
-// leaveFrontier returns to the list. It advances the generation, which drops
-// every outstanding fan-out answer: this is the interruption.
+// leaveFrontier returns to the list, cancels every issued read owned by this
+// seat, and clears its unissued queue. The generation advance separately rejects
+// any Provider outcome that races with cancellation.
 func (m Model) leaveFrontier() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
-	m.frontierGeneration++
+	m = m.retireFrontierFanout()
 	m.mouseEpoch++
 	m.mode = modeList
 	// Selection survives the toggle in both directions. A focused node the list
@@ -386,12 +397,14 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 	if len(outstanding) == 0 || m.detailFanoutInflight > 0 || len(m.frontier.queued) > 0 {
 		return m, nil
 	}
+	m = m.retireFrontierFanout()
 	m.frontier.queued = outstanding
 	m.frontier.planned = len(outstanding)
 	m.frontier.done = 0
 	m.frontier.failed = nil
 	m.frontier.lastErr = nil
 	m.frontier.resolved = false
+	m = m.startFrontierFanout()
 	m = m.rebuildFrontier()
 	return m.issueFrontierFetches()
 }

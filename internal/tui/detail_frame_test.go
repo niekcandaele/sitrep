@@ -207,18 +207,14 @@ func TestDetailFrameScrolled(t *testing.T) {
 // The loading state names the Ticket it is loading: a screen that cannot say
 // what it is waiting for is worse than the list it replaced.
 func TestDetailFrameWhileLoading(t *testing.T) {
-	blocked := make(chan struct{})
-	t.Cleanup(func() { close(blocked) })
-
+	started := make(chan context.Context, 1)
 	p := fake.New()
 	c := newClock()
 	s := startWith(t, c, Options{
 		Source: selectorSource(p, c),
 		DetailSource: func(ctx context.Context, _ model.TicketID) (model.Detail, model.Capabilities, error) {
-			select {
-			case <-blocked:
-			case <-ctx.Done():
-			}
+			started <- ctx
+			<-ctx.Done()
 			return model.Detail{}, model.Capabilities{}, ctx.Err()
 		},
 		Interval: time.Minute,
@@ -228,8 +224,22 @@ func TestDetailFrameWhileLoading(t *testing.T) {
 
 	s.tm.Send(enterKey)
 	s.waitFor(t, "Reading Ticket detail…")
+	var detailCtx context.Context
+	select {
+	case detailCtx = <-started:
+	case <-time.After(waitTimeout):
+		t.Fatal("Detail source did not receive its generation context")
+	}
 
 	m, got := s.finish(t)
+	select {
+	case <-detailCtx.Done():
+		if !errors.Is(detailCtx.Err(), context.Canceled) {
+			t.Errorf("Detail context ended with %v, want context.Canceled", detailCtx.Err())
+		}
+	default:
+		t.Error("quitting did not cancel the in-flight Detail context")
+	}
 
 	checkGolden(t, "detail_loading.golden.txt", got)
 	if !m.detail.loading {

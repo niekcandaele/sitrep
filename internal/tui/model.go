@@ -76,16 +76,14 @@ type Model struct {
 	// frontier is the Frontier screen's own state. Like detailState it is seated
 	// whole; the list's state is never consulted to draw it.
 	frontier frontierState
-	// frontierGeneration guards the bulk fan-out the way detailGeneration guards
-	// a single Detail read: leaving the Frontier, or reseating it on a refreshed
-	// Watchlist, advances it and every outstanding answer is dropped. That is
-	// what makes the fan-out interruptible.
+	// frontierGeneration rejects answers from a Frontier seat that has been
+	// left or replaced. Its generation-scoped context separately cancels the
+	// Provider work; the generation remains the correctness guard when a
+	// Provider races with or ignores cancellation.
 	frontierGeneration int
-	// detailFanoutInflight is how many bulk fan-out fetches are out, counted on
-	// the Model rather than on frontierState so that re-seating the Frontier
-	// does not reset it. It is what bounds concurrency across toggles: the
-	// generation drops an old fetch's answer, but the fetch itself is still
-	// running and still costing the Tracker a request.
+	// detailFanoutInflight counts issued bulk reads across Frontier generations.
+	// Cancellation does not release a slot until the command returns, so rapid
+	// leave/re-entry cycles can never exceed detailfanout.Parallelism.
 	detailFanoutInflight int
 	// detailReturn is the mode a root Detail seat returns to on esc. The
 	// Frontier is a second rendering of the list, not a Trail entry, so a Ticket
@@ -95,8 +93,18 @@ type Model struct {
 	// mouse callbacks. Rereads leave it stable so callbacks can re-resolve facts
 	// from the same seat; navigation and mouse toggles advance it so an older frame
 	// cannot act after capture changes or after leaving and returning to the same ID.
-	mouseEpoch  int
-	fetchDetail func(model.TicketID) (model.Detail, model.Capabilities, error)
+	mouseEpoch int
+
+	fetchDetail DetailSource
+	// newReadContext derives one independently cancellable Detail or Frontier
+	// generation from the monitor session. The cancel functions live on Model,
+	// never in the render seats restored by Detail Trail or Frontier reseats.
+	newReadContext  func() (context.Context, context.CancelFunc)
+	cancelSession   context.CancelFunc
+	detailContext   context.Context
+	cancelDetail    context.CancelFunc
+	frontierContext context.Context
+	cancelFrontier  context.CancelFunc
 
 	width, height int
 	ready         bool
@@ -129,25 +137,24 @@ const interruptKey = "ctrl+c"
 
 // New returns the monitor's Model reading from opts.Source.
 //
-// ctx is the program's lifetime, bound into the refresh command here: a Bubble
-// Tea command is handed no context of its own, and a context field on a model
-// outlives every update it was correct for. Binding it once means quitting
-// cancels an in-flight Resolve instead of holding the process open for the
-// Tracker's HTTP timeout.
+// ctx belongs to the caller. New derives one monitor-session context from it:
+// key-driven quit cancels that child without cancelling the caller, while caller
+// cancellation still reaches every Provider request. Each single-Detail read and
+// Frontier fan-out generation gets a further child context. Cancelling those
+// children stops abandoned work; generation checks remain the guard that rejects
+// an answer from a Provider that races with or ignores cancellation.
 func New(ctx context.Context, opts Options) Model {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
 	src := opts.Source
+	sessionCtx, cancelSession := context.WithCancel(ctx)
 
-	// The Detail seam is bound to the same lifetime as the refresh, and for the
-	// same reason: quitting while a Detail read is in flight cancels it instead
-	// of holding the process open for the Tracker's HTTP timeout. A Provider
-	// that cannot serve Detail leaves this nil, and enter says so rather than
-	// panicking.
+	// Detail remains context-aware here so each screen generation can choose its
+	// own lifetime. Intake sanitization still happens at this one funnel.
 	detailSrc := opts.DetailSource
-	fetchDetail := func(id model.TicketID) (model.Detail, model.Capabilities, error) {
+	fetchDetail := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
 		if detailSrc == nil {
 			return model.Detail{}, model.Capabilities{}, errNoDetailSource
 		}
@@ -168,7 +175,7 @@ func New(ctx context.Context, opts Options) Model {
 			if src == nil {
 				return ListInput{}, errNoSource
 			}
-			in, err := src(ctx)
+			in, err := src(sessionCtx)
 			return safeListInput(in), safeErr(err)
 		},
 		now:      now,
@@ -181,6 +188,10 @@ func New(ctx context.Context, opts Options) Model {
 		hasSource:     src != nil,
 		search:        search,
 		fetchDetail:   fetchDetail,
+		cancelSession: cancelSession,
+		newReadContext: func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(sessionCtx)
+		},
 		mouseEnabled:  !opts.NoMouse,
 		details:       make(map[model.TicketID]detailEntry),
 		keys:          DefaultKeyMap(),
@@ -230,6 +241,67 @@ var errNoDetailSource = errors.New("this monitor was opened without a Detail sou
 // screen. A decoded Ticket with no parent has none, and the walk-up key is
 // disabled rather than offered — so reaching this is a wiring mistake.
 var errNoSource = errors.New("this monitor was opened without a Watchlist to watch")
+
+// retireDetailRead ends the current single-Detail lifetime and advances its
+// correctness guard. Every transition that abandons or replaces a Detail seat
+// goes through this helper.
+func (m Model) retireDetailRead() Model {
+	if m.cancelDetail != nil {
+		m.cancelDetail()
+	}
+	m.detailContext = nil
+	m.cancelDetail = nil
+	m.detailGeneration++
+	return m
+}
+
+// startDetailRead gives the current Detail generation its own session child.
+// Callers invoke it only when they will issue a Provider command.
+func (m Model) startDetailRead() Model {
+	m.detailContext, m.cancelDetail = m.newReadContext()
+	return m
+}
+
+// finishDetailRead releases a naturally completed child without advancing the
+// generation that just landed.
+func (m Model) finishDetailRead() Model {
+	if m.cancelDetail != nil {
+		m.cancelDetail()
+	}
+	m.detailContext = nil
+	m.cancelDetail = nil
+	return m
+}
+
+// retireFrontierFanout cancels all issued reads owned by the current Frontier
+// seat, abandons work not yet issued, and advances the stale-answer guard. The
+// shared in-flight count is deliberately untouched until those commands return.
+func (m Model) retireFrontierFanout() Model {
+	if m.cancelFrontier != nil {
+		m.cancelFrontier()
+	}
+	m.frontierContext = nil
+	m.cancelFrontier = nil
+	m.frontierGeneration++
+	m.frontier.queued = nil
+	return m
+}
+
+// startFrontierFanout gives an accepted non-empty plan one session child.
+func (m Model) startFrontierFanout() Model {
+	m.frontierContext, m.cancelFrontier = m.newReadContext()
+	return m
+}
+
+// finishFrontierFanout releases a settled child without invalidating the seat.
+func (m Model) finishFrontierFanout() Model {
+	if m.cancelFrontier != nil {
+		m.cancelFrontier()
+	}
+	m.frontierContext = nil
+	m.cancelFrontier = nil
+	return m
+}
 
 // Init starts the heartbeat, the background-colour query that decides the
 // palette, and whichever first read this session is for: the list's, the
@@ -476,9 +548,9 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 }
 
 // reseatFrontier rebuilds the Frontier on a Watchlist that has just changed
-// shape. The generation advances, so every outstanding answer from the previous
-// reading is dropped, and the session's Detail cache is read again so that every
-// Ticket the previous seat paid for is still verified.
+// shape. It cancels the old seat's Provider reads and advances the generation,
+// so no old answer can mutate the replacement. The session Detail cache is read
+// again so every Ticket the previous seat successfully paid for stays verified.
 //
 // It issues no fetch. A refresh reaches here from the --interval timer as
 // readily as from r, and ADR-0003 Amendment 4 permits a whole-Watchlist Detail
@@ -487,9 +559,9 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 // a user action. enterFrontier and refreshFrontier are the only two fan-out
 // doors, and both are keypresses.
 func (m Model) reseatFrontier() (Model, tea.Cmd) {
-	m.frontierGeneration++
-	m.mouseEpoch++
 	previous := m.frontier
+	m = m.retireFrontierFanout()
+	m.mouseEpoch++
 	m.frontier = frontierState{
 		input:    FrontierFromList(m.input, m.linksFromCache()),
 		focusID:  previous.focusID,
@@ -587,9 +659,16 @@ func (m Model) rebuildRows() Model {
 	return m
 }
 
-// quit records that the program is ending, and whether the key that ended it
-// was the interrupt. q and esc exit 0; ctrl+c exits 130.
+// quit is the single key-driven shutdown funnel. It invalidates both read
+// generations, cancels a visible or hidden Frontier fan-out, then cancels the
+// monitor session so Source and every remaining Provider child can return before
+// Bubble Tea waits for its command pool. q and esc exit 0; ctrl+c exits 130.
 func (m Model) quit(msg tea.KeyPressMsg) Model {
+	m = m.retireDetailRead()
+	m = m.retireFrontierFanout()
+	if m.cancelSession != nil {
+		m.cancelSession()
+	}
 	m.quitting = true
 	m.interrupted = msg.String() == interruptKey
 	return m

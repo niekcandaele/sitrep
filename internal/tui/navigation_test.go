@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -17,7 +18,7 @@ func navigableDetailModel(t *testing.T) (Model, *[]model.TicketID) {
 	t.Helper()
 	m := detailModel(t)
 	calls := make([]model.TicketID, 0)
-	m.fetchDetail = func(id model.TicketID) (model.Detail, model.Capabilities, error) {
+	m.fetchDetail = func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
 		calls = append(calls, id)
 		d, ok := fake.FixtureDetails()[id]
 		if !ok {

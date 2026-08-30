@@ -124,6 +124,95 @@ func blockedDetailSource(release <-chan struct{}, inner DetailSource) DetailSour
 	}
 }
 
+type controlledFrontierReply struct {
+	detail model.Detail
+	caps   model.Capabilities
+	err    error
+}
+
+type controlledFrontierCall struct {
+	id    model.TicketID
+	ctx   context.Context
+	reply chan controlledFrontierReply
+}
+
+type controlledFrontierReads struct {
+	calls  chan controlledFrontierCall
+	active atomic.Int64
+	peak   atomic.Int64
+	total  atomic.Int64
+}
+
+func newControlledFrontierReads() *controlledFrontierReads {
+	return &controlledFrontierReads{calls: make(chan controlledFrontierCall, 64)}
+}
+
+func (r *controlledFrontierReads) source(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+	active := r.active.Add(1)
+	for peak := r.peak.Load(); active > peak && !r.peak.CompareAndSwap(peak, active); peak = r.peak.Load() {
+	}
+	r.total.Add(1)
+	defer r.active.Add(-1)
+
+	call := controlledFrontierCall{id: id, ctx: ctx, reply: make(chan controlledFrontierReply, 1)}
+	select {
+	case r.calls <- call:
+	case <-ctx.Done():
+		return model.Detail{}, model.Capabilities{}, ctx.Err()
+	}
+	select {
+	case reply := <-call.reply:
+		return reply.detail, reply.caps, reply.err
+	case <-ctx.Done():
+		return model.Detail{}, model.Capabilities{}, ctx.Err()
+	}
+}
+
+func (r *controlledFrontierReads) next(t *testing.T) controlledFrontierCall {
+	t.Helper()
+	select {
+	case call := <-r.calls:
+		return call
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for controlled Frontier Detail read")
+		return controlledFrontierCall{}
+	}
+}
+
+func (r *controlledFrontierReads) batch(t *testing.T, n int) []controlledFrontierCall {
+	t.Helper()
+	calls := make([]controlledFrontierCall, n)
+	for i := range n {
+		calls[i] = r.next(t)
+	}
+	return calls
+}
+
+func assertFrontierCallsCanceled(t *testing.T, calls ...controlledFrontierCall) {
+	t.Helper()
+	for _, call := range calls {
+		select {
+		case <-call.ctx.Done():
+			if !errors.Is(call.ctx.Err(), context.Canceled) {
+				t.Errorf("Detail context for %s ended with %v, want context.Canceled", call.id, call.ctx.Err())
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("Detail context for %s was not cancelled", call.id)
+		}
+	}
+}
+
+func assertFrontierCallsLive(t *testing.T, calls ...controlledFrontierCall) {
+	t.Helper()
+	for _, call := range calls {
+		select {
+		case <-call.ctx.Done():
+			t.Fatalf("Detail context for %s ended while its Frontier seat was still active: %v", call.id, call.ctx.Err())
+		default:
+		}
+	}
+}
+
 // Emphasis is withheld until every Detail read has answered, then applied at
 // once: one honest moment, no flipping. Asserted as two frames from the same
 // session — absent, then present.
@@ -197,38 +286,132 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 	}
 }
 
-// esc mid-fetch returns to a readable list, and a late answer from the
-// abandoned generation moves nothing on screen: that is what makes the fan-out
-// interruptible. The read itself still warms the session cache — see
-// TestAnAbandonedFanOutAnswerStillWarmsTheCache.
+func TestFrontierCancellationIsControlFlowButDeadlineIsFailure(t *testing.T) {
+	in := ListInput{
+		Header:       Header{Key: "W-1", Title: "one member"},
+		Tickets:      []model.Ticket{{ID: "T-1", Key: "T-1", Title: "first", Status: model.StatusTodo}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    newClock().now(),
+	}
+	read := func(t *testing.T, readErr error) Model {
+		t.Helper()
+		var received context.Context
+		m := New(t.Context(), Options{
+			Initial: &in,
+			DetailSource: func(ctx context.Context, _ model.TicketID) (model.Detail, model.Capabilities, error) {
+				received = ctx
+				return model.Detail{}, in.Capabilities, readErr
+			},
+		})
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+		m = updated.(Model)
+		updated, _ = m.Update(keyPress("v"))
+		m = updated.(Model)
+
+		// Drive the same captured-context command that Bubble Tea's batch owns. The
+		// ignored batch is never run in this unit test, so exactly one result lands.
+		msg := m.frontierFetchCmd(m.frontierGeneration, "T-1")().(frontierDetailMsg)
+		if received != m.frontierContext {
+			t.Fatal("Frontier command did not pass its generation context to DetailSource")
+		}
+		updated, _ = m.onFrontierDetail(msg)
+		return updated.(Model)
+	}
+
+	t.Run("wrapped cancellation", func(t *testing.T) {
+		m := read(t, errors.Join(errors.New("provider wrapper"), context.Canceled))
+		frame := m.View().Content
+		if len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
+			t.Errorf("cancellation became a failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+		}
+		if strings.Contains(frame, "could not be read") || strings.Contains(frame, "provider wrapper") {
+			t.Errorf("cancellation rendered a failure footer:\n%s", frame)
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		m := read(t, context.DeadlineExceeded)
+		frame := m.View().Content
+		if _, failed := m.frontier.failed["T-1"]; !failed || !errors.Is(m.frontier.lastErr, context.DeadlineExceeded) {
+			t.Errorf("deadline was hidden: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+		}
+		if !strings.Contains(frame, "could not be read") || !strings.Contains(frame, context.DeadlineExceeded.Error()) {
+			t.Errorf("deadline did not render as a retryable failure:\n%s", frame)
+		}
+	})
+}
+
+// Esc cancels every issued read, clears work not yet issued, and returns to a
+// readable list. Cancellation outcomes are stale control flow: they cannot add
+// progress, a failed member, or a footer error.
 func TestFrontierFetchIsInterruptible(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
-	release := make(chan struct{})
+	reads := newControlledFrontierReads()
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
-		DetailSource: blockedDetailSource(release, TicketDetailSource(p)),
+		DetailSource: reads.source,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
+	calls := reads.batch(t, detailfanout.Parallelism)
 	s.waitFor(t, "reading Detail")
 	s.tm.Send(escKey)
 	s.waitFor(t, "TODO")
-
-	// A late answer tagged with the abandoned generation.
-	s.tm.Send(frontierDetailMsg{generation: 0, id: "acme/widgets#201"})
+	assertFrontierCallsCanceled(t, calls...)
 
 	m, got := s.finish(t)
-	close(release)
 
 	checkGolden(t, "frontier_interrupted.golden.txt", got)
 	if m.mode != modeList {
 		t.Errorf("mode = %v, want the list", m.mode)
 	}
-	if m.frontier.done != 0 || len(m.frontier.failed) != 0 {
-		t.Errorf("a stale answer landed: done %d failed %v", m.frontier.done, m.frontier.failed)
+	if m.frontier.done != 0 || len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
+		t.Errorf("cancellation landed as progress/failure: done=%d failed=%v err=%v",
+			m.frontier.done, m.frontier.failed, m.frontier.lastErr)
+	}
+	if len(m.frontier.queued) != 0 {
+		t.Errorf("abandoned Frontier retained %d queued reads", len(m.frontier.queued))
+	}
+	if got := reads.total.Load(); got != detailfanout.Parallelism {
+		t.Errorf("issued reads = %d, want only the first batch of %d", got, detailfanout.Parallelism)
+	}
+}
+
+func TestFrontierImmediateReentryUsesDistinctBoundedLifetime(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	reads := newControlledFrontierReads()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	oldCalls := reads.batch(t, detailfanout.Parallelism)
+	s.tm.Send(escKey)
+	s.waitFor(t, "TODO")
+	s.tm.Send(keyPress("v"))
+	assertFrontierCallsCanceled(t, oldCalls...)
+	newCalls := reads.batch(t, detailfanout.Parallelism)
+
+	if oldCalls[0].ctx == newCalls[0].ctx {
+		t.Fatal("re-entered Frontier reused the abandoned generation context")
+	}
+	assertFrontierCallsLive(t, newCalls...)
+	m, _ := s.finish(t)
+	assertFrontierCallsCanceled(t, newCalls...)
+
+	if peak := reads.peak.Load(); peak > detailfanout.Parallelism {
+		t.Errorf("peak concurrent reads = %d, want at most %d", peak, detailfanout.Parallelism)
+	}
+	if m.frontier.done != 0 || len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
+		t.Errorf("stale cancellations changed the new seat: done=%d failed=%v err=%v",
+			m.frontier.done, m.frontier.failed, m.frontier.lastErr)
 	}
 }
 
@@ -497,6 +680,100 @@ func TestFrontierOpenReturnsToTheFrontier(t *testing.T) {
 	m, _ := s.finish(t)
 	if m.mode != modeFrontier {
 		t.Errorf("esc from a Frontier-opened Detail landed in %v, want the Frontier", m.mode)
+	}
+}
+
+func TestFrontierFanoutLivesThroughDetailAndRootEscape(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	reads := newControlledFrontierReads()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+
+	s.tm.Send(enterKey)
+	detailCall := reads.next(t)
+	assertFrontierCallsLive(t, frontierCalls...)
+	detailCall.reply <- controlledFrontierReply{
+		detail: model.Detail{TicketID: detailCall.id, Description: "FRONTIER DETAIL BODY"},
+		caps:   model.Capabilities{BlockingLinks: true},
+	}
+	s.waitFor(t, "FRONTIER DETAIL BODY")
+	assertFrontierCallsLive(t, frontierCalls...)
+	s.tm.Send(escKey)
+	s.waitFor(t, "nodes")
+	assertFrontierCallsLive(t, frontierCalls...)
+
+	m, _ := s.finish(t)
+	assertFrontierCallsCanceled(t, frontierCalls...)
+	if m.detailReturn != modeFrontier {
+		t.Errorf("Detail return mode = %v, want Frontier", m.detailReturn)
+	}
+}
+
+func TestHiddenFrontierFanoutIsCancelledByWalkUp(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	reads := newControlledFrontierReads()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+	s.tm.Send(enterKey)
+	detailCall := reads.next(t)
+	detailCall.reply <- controlledFrontierReply{
+		detail: model.Detail{TicketID: detailCall.id, Description: "HIDDEN FRONTIER DETAIL"},
+		caps:   model.Capabilities{BlockingLinks: true},
+	}
+	s.waitFor(t, "HIDDEN FRONTIER DETAIL")
+
+	s.tm.Send(keyPress("u"))
+	s.waitFor(t, "TODO")
+	assertFrontierCallsCanceled(t, frontierCalls...)
+	m, _ := s.finish(t)
+	if got := reads.total.Load(); got != detailfanout.Parallelism+1 {
+		t.Errorf("u issued %d total Detail reads, want the first Frontier batch plus opened Detail", got)
+	}
+	if m.mode != modeList {
+		t.Errorf("u from hidden Frontier landed in %v, want list", m.mode)
+	}
+}
+
+func TestQuitCancelsHiddenFrontierAndDetailReads(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	reads := newControlledFrontierReads()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+	s.tm.Send(enterKey)
+	detailCall := reads.next(t)
+
+	m, _ := s.finish(t)
+	assertFrontierCallsCanceled(t, frontierCalls...)
+	assertFrontierCallsCanceled(t, detailCall)
+	if got := reads.total.Load(); got != detailfanout.Parallelism+1 {
+		t.Errorf("quit issued %d total Detail reads, want the first Frontier batch plus opened Detail", got)
+	}
+	if !m.quitting {
+		t.Error("q did not quit from a Frontier-opened Detail")
 	}
 }
 
@@ -836,9 +1113,9 @@ func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
 	}
 }
 
-// Leaving the Frontier drops the answer but not the fetch behind it, so the
-// in-flight count lives on the Model: re-seating frontierState must not reset
-// it to zero and let a second toggle start a second full-width batch.
+// Cancellation does not release a fan-out slot until its command returns, so
+// the in-flight count lives on the Model: re-seating frontierState must not
+// reset it to zero and let a second toggle start a second full-width batch.
 func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
@@ -886,45 +1163,54 @@ func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
 	}
 }
 
-// An answer for an abandoned fan-out generation is still a real Detail: the
-// read was paid for, so it warms the session cache and a re-entered Frontier
-// plans around it instead of asking the Tracker again. The abandoned seat's own
-// bookkeeping stays out, because that seat is gone.
-func TestAnAbandonedFanOutAnswerStillWarmsTheCache(t *testing.T) {
-	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
-	in := ListInput{
-		Header:       Header{Key: "#0", Title: "abandoned"},
-		Tickets:      []model.Ticket{{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo}},
-		Capabilities: model.Capabilities{BlockingLinks: true},
-		FetchedAt:    now,
+// A completed answer remains a real Detail when the rest of its generation is
+// abandoned: it warms the session cache, and re-entry plans around it instead
+// of asking the Tracker again. The abandoned seat's bookkeeping stays out.
+func TestCompletedFrontierAnswerSurvivesLaterCancellation(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	reads := newControlledFrontierReads()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("v"))
+	calls := reads.batch(t, detailfanout.Parallelism)
+	completed := calls[0]
+	completed.reply <- controlledFrontierReply{
+		detail: model.Detail{TicketID: completed.id},
+		caps:   model.Capabilities{BlockingLinks: true},
 	}
-	m := New(t.Context(), Options{
-		Initial: &in,
-		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-			return model.Detail{TicketID: id}, in.Capabilities, nil
-		},
-		Now: func() time.Time { return now },
-	})
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	m = updated.(Model)
-	updated, _ = m.Update(keyPress("v"))
-	m = updated.(Model)
-	abandoned := m.frontierGeneration
-	updated, _ = m.Update(keyPress("v"))
-	m = updated.(Model)
+	s.waitFor(t, "reading Detail 1/13")
+	// The bounded scheduler immediately replaces the completed slot while this
+	// generation is still live; that replacement belongs to the old lifetime too.
+	replacement := reads.next(t)
 
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: abandoned, id: "T-1",
-		detail: model.Detail{TicketID: "T-1"}, caps: in.Capabilities,
-	})
-	m = updated.(Model)
+	s.tm.Send(escKey)
+	s.waitFor(t, "TODO")
+	assertFrontierCallsCanceled(t, calls[1:]...)
+	assertFrontierCallsCanceled(t, replacement)
+	s.tm.Send(keyPress("v"))
+	newCalls := reads.batch(t, detailfanout.Parallelism)
+	for _, call := range newCalls {
+		if call.id == completed.id {
+			t.Errorf("re-entered Frontier fetched cached Ticket %s again", completed.id)
+		}
+	}
+	m, _ := s.finish(t)
+	assertFrontierCallsCanceled(t, newCalls...)
 
-	if !m.haveDetail("T-1") {
-		t.Error("the answer was discarded, so re-entering the Frontier would pay for it again")
+	if !m.haveDetail(completed.id) {
+		t.Errorf("completed Detail %s was discarded when its peers were cancelled", completed.id)
 	}
 	if m.frontier.done != 0 {
-		t.Errorf("frontier.done = %d, want 0: an abandoned seat's answer is not this seat's progress",
-			m.frontier.done)
+		t.Errorf("frontier.done = %d, want 0 before the new generation answers", m.frontier.done)
+	}
+	if got := reads.total.Load(); got != 2*detailfanout.Parallelism+1 {
+		t.Errorf("issued reads = %d, want the old batch, its replacement, and one new bounded batch", got)
 	}
 }
 
@@ -1116,11 +1402,10 @@ func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
 	}
 }
 
-// The re-seat advances the generation, so an answer in flight for the previous
-// reading is dropped rather than seated onto a Watchlist that has moved under
-// it. The read is still real, so it warms the session cache.
-func TestFrontierRefreshDropsAnInFlightAnswer(t *testing.T) {
-	release := make(chan struct{})
+// A refresh reseat cancels reads issued for the previous Watchlist instead of
+// merely dropping their answers. Cancelled reads neither warm the cache nor
+// become failures on the replacement seat.
+func TestFrontierRefreshCancelsInFlightAnswers(t *testing.T) {
 	// Nothing leaves here: with every read still held there are no Links and so
 	// no Ghosts, and one added node is the only thing that moves the counts.
 	after := fake.FixtureBlockingSnapshot()
@@ -1128,34 +1413,39 @@ func TestFrontierRefreshDropsAnInFlightAnswer(t *testing.T) {
 	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
 		fake.WithDetails(fake.FixtureBlockingDetails()))
 	c := newClock()
+	reads := newControlledFrontierReads()
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
-		DetailSource: blockedDetailSource(release, TicketDetailSource(p)),
+		DetailSource: reads.source,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
+	calls := reads.batch(t, detailfanout.Parallelism)
 	s.waitFor(t, "reading Detail")
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
 	s.waitFor(t, "14 nodes")
-	close(release)
-	waitUntil(t, "every held read to answer", func() bool {
-		return p.DetailCalls() == detailfanout.Parallelism
-	})
+	assertFrontierCallsCanceled(t, calls...)
 	m, _ := s.finish(t)
 
 	if m.frontier.done != 0 {
 		t.Errorf("the re-seated Frontier counted %d answers from the reading it replaced", m.frontier.done)
 	}
 	if len(m.frontier.input.Links) != 0 {
-		t.Errorf("the re-seated Frontier seated %d Links from the reading it replaced",
-			len(m.frontier.input.Links))
+		t.Errorf("the re-seated Frontier seated %d Links from the reading it replaced", len(m.frontier.input.Links))
 	}
-	if len(m.details) == 0 {
-		t.Error("the answers were dropped from the session cache too, so the reads were wasted")
+	if len(m.details) != 0 {
+		t.Errorf("cancelled reads warmed %d Detail cache entries", len(m.details))
+	}
+	if got := reads.total.Load(); got != detailfanout.Parallelism {
+		t.Errorf("interval refresh issued %d reads, want only the original batch of %d",
+			got, detailfanout.Parallelism)
+	}
+	if len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
+		t.Errorf("cancellation became a Frontier failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
 	}
 }
 
@@ -1367,11 +1657,10 @@ func TestFrontierRefreshDuringAFanOutIssuesNothing(t *testing.T) {
 		t.Errorf("issued %d reads, want the %d already in flight: r started a second batch",
 			n, detailfanout.Parallelism)
 	}
-	// The queue is the fan-out's own remainder. Re-planning over a fan-out in
-	// flight would put every member back on it, and the reads already running
-	// would then be issued a second time as slots freed.
-	if got, want := len(m.frontier.queued), len(m.frontier.input.Tickets)-detailfanout.Parallelism; got != want {
-		t.Errorf("queued = %d, want the fan-out's own remaining %d: r re-planned over it", got, want)
+	// quit retires the generation and clears its unissued queue. r must not have
+	// started a second batch before that retirement.
+	if got := len(m.frontier.queued); got != 0 {
+		t.Errorf("queued = %d after quit, want abandoned work cleared", got)
 	}
 }
 
