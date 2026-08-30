@@ -59,6 +59,14 @@ A per-Provider declaration of supported Selector kinds and optional data feature
 hierarchy, blocking links, comments, and pull requests. Missing optional data Capabilities
 are silent; choosing an unsupported Selector fails loudly.
 
+**Rate Limit Budget**:
+What a Provider can report about the request allowance it has left with its Tracker, and when
+that allowance resets. Trackers meter differently and some cannot report one at all, so a Rate
+Limit Budget is an optional Capability: when it is absent sitrep says nothing rather than
+inventing a number. Spending the allowance well — batching reads, backing off after a refusal,
+not polling a screen nobody is watching — is required of every Provider whether or not it can
+report one.
+
 **Link**:
 A directed relationship from one Ticket to another (BlockedBy, Blocks, Relates), carrying
 the Tracker's Native label for display.
