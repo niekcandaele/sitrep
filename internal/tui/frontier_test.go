@@ -1428,6 +1428,11 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 	if frame := m.View().Content; !strings.Contains(frame, "UNVERIFIED") {
 		t.Fatalf("the pre-r frame does not expose the stranded seat:\n%s", frame)
 	}
+	staleTarget := members[0].ID
+	if staleTarget == focus {
+		staleTarget = members[1].ID
+	}
+	staleClick := frontierMouseClickMsg{epoch: m.mouseEpoch, id: staleTarget}
 
 	before := p.DetailCalls()
 	updated, cmd := m.Update(keyPress("r"))
@@ -1437,6 +1442,14 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 	}
 	if got := p.DetailCalls(); got != before {
 		t.Fatalf("r issued %d Provider calls on a cache-complete Frontier, want 0", got-before)
+	}
+	if m.mouseEpoch == staleClick.epoch {
+		t.Fatal("adoption relaid the Frontier without retiring callbacks captured against the old layout")
+	}
+	updated, _ = m.Update(staleClick)
+	m = updated.(Model)
+	if m.frontier.focusID != focus {
+		t.Errorf("stale click focused %s after adoption, want %s to remain focused", m.frontier.focusID, focus)
 	}
 	for _, ticket := range members {
 		if _, seated := m.frontier.input.Links[ticket.ID]; !seated {

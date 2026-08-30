@@ -390,7 +390,11 @@ func (m Model) frontierTicket(id model.TicketID) (model.Ticket, bool) {
 // would turn a recovery key into a fan-out, which is what Amendment 4 says must
 // be deliberate; one Ticket's r in Detail remains the way to re-read one Ticket.
 func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
+	seated := len(m.frontier.input.Links)
 	m = m.adoptCachedLinks()
+	if len(m.frontier.input.Links) > seated {
+		m.mouseEpoch++
+	}
 	m = m.rebuildFrontier()
 	if !m.frontier.input.Capabilities.BlockingLinks {
 		return m, repaint
