@@ -553,24 +553,25 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 // session Detail cache again, so every Ticket cached at the instant of reseating
 // stays verified. Adopting here would be redundant and cannot catch an old-
 // generation success that lands afterward: that answer remains cacheable but
-// cannot mutate this seat, and the next explicit Frontier r reconciles it.
+// cannot mutate this seat, and the next explicit Frontier r reconciles it. Until
+// then, a current member without seated Links or a carried failure keeps the
+// Frontier derived-unresolved.
 //
 // It issues no fetch. A refresh reaches here from the --interval timer as
 // readily as from r, and ADR-0003 Amendment 4 permits a whole-Watchlist Detail
 // fan-out only in response to an explicit user action. A member the refresh
-// introduced therefore stays UNVERIFIED until the user presses r: a timer is not
-// a user action. enterFrontier and refreshFrontier are the only two fan-out
-// doors, and both are keypresses.
+// introduced therefore stays uncovered and keeps the Frontier unresolved until
+// the user presses r: a timer is not a user action. enterFrontier and
+// refreshFrontier are the only two fan-out doors, and both are keypresses.
 func (m Model) reseatFrontier() (Model, tea.Cmd) {
 	previous := m.frontier
 	m = m.retireFrontierFanout()
 	m.mouseEpoch++
 	m.frontier = frontierState{
-		input:    FrontierFromList(m.input, m.linksFromCache()),
-		focusID:  previous.focusID,
-		offsetX:  previous.offsetX,
-		offsetY:  previous.offsetY,
-		resolved: true,
+		input:   FrontierFromList(m.input, m.linksFromCache()),
+		focusID: previous.focusID,
+		offsetX: previous.offsetX,
+		offsetY: previous.offsetY,
 	}
 	// A read that failed is still failed, so the footer keeps saying so and
 	// keeps pointing at r. Dropping the record because the Watchlist was read
