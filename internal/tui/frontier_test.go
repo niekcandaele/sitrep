@@ -786,6 +786,10 @@ func TestFrontierWithoutBlockingLinksKeepsEscapeBindingsLive(t *testing.T) {
 	for _, msg := range []tea.KeyPressMsg{keyPress("v"), escKey} {
 		m, _ := noBlockingFrontierModel(t)
 		selected := m.selectedID
+		m.frontier.focusID = "T-1"
+		if _, drawn := m.frontier.layout.nodeAt[m.frontier.focusID]; !drawn {
+			t.Fatalf("hidden focus %q is not in the layout", m.frontier.focusID)
+		}
 		updated, cmd := m.Update(msg)
 		got := updated.(Model)
 		if got.mode != modeList {
