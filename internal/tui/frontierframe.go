@@ -168,10 +168,10 @@ type frontierNode struct {
 // frontierNodes derives every drawable node from the graph and the Watchlist
 // that produced it: members in canonical order, then Ghost Tickets.
 //
-// resolved says whether every current Watchlist member has seated Links or a
-// recorded Detail failure. Until then, no Actionable or blocked emphasis is
-// drawn at all: fail-closed plus a progressive fetch means a partial Frontier
-// gives wrong answers to anyone glancing at it, so the screen waits and says why.
+// resolved says whether every identifiable current Watchlist member has seated
+// Links or a recorded Detail failure. Until then, every member is visibly
+// PENDING: fail-closed plus a progressive fetch means a partial Frontier gives
+// wrong answers to anyone glancing at it, so the screen waits and says why.
 func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool) []frontierNode {
 	byID := make(map[model.TicketID]model.Ticket, len(tickets))
 	for _, t := range tickets {
@@ -207,6 +207,8 @@ func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool)
 	}
 	for _, ghost := range ghosts {
 		target := ghost.Target
+		// GHOST identifies why this node exists; unlike a current member's
+		// evidence badge, that identity stays true while the seat is unresolved.
 		nodes = append(nodes, frontierNode{
 			id:     target.ID,
 			key:    target.Key,
@@ -234,10 +236,11 @@ func nativeStatusFor(t model.Ticket) string {
 	return "[" + t.NativeStatus + "]"
 }
 
-// memberEmphasis picks one member's emphasis. The states are a precedence
-// ladder and the first match wins: a cycle is malformed data and outranks
-// anything derived from it, an unverified Ticket outranks a claim about it, and
-// only then does Actionable get the loudest treatment on screen.
+// memberEmphasis picks one member's emphasis. Until the full seat resolves,
+// provisional evidence outranks every graph-derived conclusion. Once resolved,
+// a cycle is malformed data and outranks anything derived from it, an unverified
+// Ticket outranks a claim about it, and only then does Actionable get the loudest
+// treatment on screen.
 func memberEmphasis(a model.Actionability, resolved bool) frontierEmphasis {
 	normal := frontierEmphasis{
 		border:    frontierLightBorder,
@@ -245,6 +248,9 @@ func memberEmphasis(a model.Actionability, resolved bool) frontierEmphasis {
 		badgeRole: frontierRoleMuted,
 	}
 	switch {
+	case !resolved:
+		normal.badge = "PENDING"
+		return normal
 	case a.InCycle:
 		return frontierEmphasis{
 			border:    frontierDoubleBorder,
@@ -252,8 +258,6 @@ func memberEmphasis(a model.Actionability, resolved bool) frontierEmphasis {
 			badgeRole: frontierRoleBold,
 			badge:     "CYCLE",
 		}
-	case !resolved:
-		return normal
 	case a.HasUnknown():
 		normal.badge = "UNVERIFIED"
 		return normal

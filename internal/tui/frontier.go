@@ -540,9 +540,12 @@ func (m Model) frontierHeader() string {
 			counts += separator + plural(ghosts, "ghost", "ghosts")
 		}
 		counts += separator + tally
-	default:
+	case m.frontierContext != nil:
 		counts = fmt.Sprintf("frontier%s%s%sreading Detail %d/%d",
 			separator, plural(nodes, "node", "nodes"), separator, f.done, f.planned)
+	default:
+		counts = fmt.Sprintf("frontier%s%s%sDetails pending · press r",
+			separator, plural(nodes, "node", "nodes"), separator)
 	}
 
 	return strings.Join([]string{
