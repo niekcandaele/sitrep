@@ -1445,6 +1445,12 @@ func TestFrontierResolutionRequiresFullSeatCoverage(t *testing.T) {
 			resolved: true,
 		},
 		{
+			name:     "anonymous rows cannot create a fetch obligation",
+			tickets:  []model.Ticket{{}, {}},
+			caps:     blocking,
+			resolved: true,
+		},
+		{
 			name:     "empty Watchlist is terminal",
 			caps:     blocking,
 			resolved: true,

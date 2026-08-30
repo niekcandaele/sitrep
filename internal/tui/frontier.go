@@ -86,12 +86,17 @@ type frontierState struct {
 
 // isResolved reports whether the current Watchlist seat is complete enough to
 // publish Actionability. Plan counters describe one fan-out; resolution covers
-// every current member, including successful reads with no Links.
+// every identifiable current member, including successful reads with no Links.
+// An empty ID is not fetchable and stays visibly unverified rather than keeping
+// the whole seat in an inescapable loading state.
 func (f frontierState) isResolved() bool {
 	if !f.input.Capabilities.BlockingLinks || len(f.input.Tickets) == 0 {
 		return true
 	}
 	for _, ticket := range f.input.Tickets {
+		if ticket.ID == "" {
+			continue
+		}
 		if _, seated := f.input.Links[ticket.ID]; seated {
 			continue
 		}
