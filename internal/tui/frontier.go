@@ -385,17 +385,19 @@ func (m Model) frontierTicket(id model.TicketID) (model.Ticket, bool) {
 	return model.Ticket{}, false
 }
 
-// refreshFrontier re-issues only the reads that never succeeded. Re-reading a
-// warm cache would turn a recovery key into a fan-out, which is what Amendment
-// 4 says must be deliberate; one Ticket's r in Detail remains the way to
-// re-read one Ticket.
+// refreshFrontier first reconciles paid-for cached reads into the current seat,
+// then re-issues only the reads that never succeeded. Re-reading a warm cache
+// would turn a recovery key into a fan-out, which is what Amendment 4 says must
+// be deliberate; one Ticket's r in Detail remains the way to re-read one Ticket.
 func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
+	m = m.adoptCachedLinks()
+	m = m.rebuildFrontier()
 	if !m.frontier.input.Capabilities.BlockingLinks {
-		return m, nil
+		return m, repaint
 	}
 	outstanding := detailfanout.Plan(m.frontier.input.Tickets, m.haveDetail)
 	if len(outstanding) == 0 || m.detailFanoutInflight > 0 || len(m.frontier.queued) > 0 {
-		return m, nil
+		return m, repaint
 	}
 	m = m.retireFrontierFanout()
 	m.frontier.queued = outstanding

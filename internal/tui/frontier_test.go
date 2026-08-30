@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1332,6 +1333,319 @@ var addedMember = model.Ticket{
 	Status:       model.StatusTodo,
 	NativeStatus: "open",
 	Repository:   "acme/widgets",
+}
+
+func successfulFrontierMembers(t *testing.T, count int) ([]model.Ticket, map[model.TicketID]model.Detail) {
+	t.Helper()
+	fixtureDetails := fake.FixtureBlockingDetails()
+	members := make([]model.Ticket, 0, count)
+	details := make(map[model.TicketID]model.Detail, count)
+	for _, ticket := range fake.FixtureBlockingSnapshot().Tickets {
+		detail, ok := fixtureDetails[ticket.ID]
+		if !ok {
+			continue
+		}
+		// #204 points at a Ghost whose native status is unknown and therefore
+		// legitimately renders UNVERIFIED even after its own Links were read. These
+		// tests isolate an absent seat from that separate graph condition.
+		if ticket.ID == "acme/widgets#204" {
+			continue
+		}
+		members = append(members, ticket)
+		details[ticket.ID] = detail
+		if len(members) == count {
+			break
+		}
+	}
+	if len(members) != count {
+		t.Fatalf("blocking fixture has %d successful members, want %d", len(members), count)
+	}
+	return members, details
+}
+
+// frontierWithDeferredFanout opens a real Frontier but deliberately does not
+// execute its returned fetch commands. Tests can then model a Provider that
+// finishes after cancellation by injecting the messages those commands own.
+func frontierWithDeferredFanout(t *testing.T, members []model.Ticket,
+	details map[model.TicketID]model.Detail) (Model, *fake.Provider, int) {
+	t.Helper()
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	p := fake.New(fake.WithDetails(details))
+	in := ListInput{
+		Header:       Header{Key: "#93", Title: "late cache answers"},
+		Tickets:      members,
+		Capabilities: p.Capabilities(),
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial:      &in,
+		DetailSource: TicketDetailSource(p),
+		Now:          func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	updated, cmd := m.Update(keyPress("v"))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("opening the Frontier issued no command")
+	}
+	if want := min(len(members), detailfanout.Parallelism); m.detailFanoutInflight != want {
+		t.Fatalf("in-flight reads = %d, want the deferred first batch of %d", m.detailFanoutInflight, want)
+	}
+	if calls := p.DetailCalls(); calls != 0 {
+		t.Fatalf("DetailCalls = %d before deferred commands ran, want 0", calls)
+	}
+	return m, p, m.frontierGeneration
+}
+
+func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T) {
+	members, details := successfulFrontierMembers(t, detailfanout.Parallelism)
+	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
+	focus := m.frontier.focusID
+
+	m, _ = m.reseatFrontier()
+	if m.frontierGeneration == oldGeneration {
+		t.Fatal("reseating the Frontier did not retire its fan-out generation")
+	}
+	for _, ticket := range members {
+		updated, _ := m.onFrontierDetail(frontierDetailMsg{
+			generation: oldGeneration,
+			id:         ticket.ID,
+			detail:     details[ticket.ID],
+			caps:       m.frontier.input.Capabilities,
+		})
+		m = updated.(Model)
+		if _, cached := m.details[ticket.ID]; !cached {
+			t.Errorf("late answer for %s was not cached", ticket.ID)
+		}
+		if _, seated := m.frontier.input.Links[ticket.ID]; seated {
+			t.Errorf("stale-generation answer for %s mutated the replacement seat", ticket.ID)
+		}
+	}
+	if m.detailFanoutInflight != 0 {
+		t.Fatalf("shared in-flight reads = %d after every stale answer landed, want 0", m.detailFanoutInflight)
+	}
+	if frame := m.View().Content; !strings.Contains(frame, "UNVERIFIED") {
+		t.Fatalf("the pre-r frame does not expose the stranded seat:\n%s", frame)
+	}
+
+	before := p.DetailCalls()
+	updated, cmd := m.Update(keyPress("r"))
+	m = updated.(Model)
+	if !carriesClearScreen(cmd) {
+		t.Fatal("r adopted cached Links without returning a full repaint")
+	}
+	if got := p.DetailCalls(); got != before {
+		t.Fatalf("r issued %d Provider calls on a cache-complete Frontier, want 0", got-before)
+	}
+	for _, ticket := range members {
+		if _, seated := m.frontier.input.Links[ticket.ID]; !seated {
+			t.Errorf("cached answer for %s was not seated by r", ticket.ID)
+		}
+		actionability, member := m.frontier.graph.For(ticket.ID)
+		if !member || !actionability.LinksKnown {
+			t.Errorf("rebuilt graph still treats %s as unverified: member=%v actionable=%+v",
+				ticket.ID, member, actionability)
+		}
+	}
+	if frame := m.View().Content; strings.Contains(frame, "UNVERIFIED") {
+		t.Fatalf("the post-r frame still strands a successfully read Ticket:\n%s", frame)
+	}
+	if m.frontier.focusID != focus || !m.frontier.hasFocus {
+		t.Errorf("focus = %q/%v after adoption, want %q/true", m.frontier.focusID, m.frontier.hasFocus, focus)
+	}
+	if _, visible := m.frontier.layout.nodeAt[focus]; !visible {
+		t.Errorf("focused Ticket %s is absent from the rebuilt layout", focus)
+	}
+}
+
+func TestFrontierRefreshAdoptsLateBatchBeforePlanningRemainder(t *testing.T) {
+	members, details := successfulFrontierMembers(t, detailfanout.Parallelism+1)
+	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
+	m, _ = m.reseatFrontier()
+
+	for _, ticket := range members[:detailfanout.Parallelism] {
+		updated, _ := m.onFrontierDetail(frontierDetailMsg{
+			generation: oldGeneration,
+			id:         ticket.ID,
+			detail:     details[ticket.ID],
+			caps:       m.frontier.input.Capabilities,
+		})
+		m = updated.(Model)
+	}
+	last := members[len(members)-1].ID
+	for _, ticket := range members[:detailfanout.Parallelism] {
+		if _, cached := m.details[ticket.ID]; !cached {
+			t.Errorf("late answer for %s is not cached", ticket.ID)
+		}
+		if _, seated := m.frontier.input.Links[ticket.ID]; seated {
+			t.Errorf("late answer for %s entered the replacement seat before r", ticket.ID)
+		}
+	}
+	if _, cached := m.details[last]; cached {
+		t.Fatalf("remainder %s is already cached, so retry planning proves nothing", last)
+	}
+
+	updated, cmd := m.Update(keyPress("r"))
+	m = updated.(Model)
+	for _, ticket := range members[:detailfanout.Parallelism] {
+		if _, seated := m.frontier.input.Links[ticket.ID]; !seated {
+			t.Errorf("r did not seat cached first-batch member %s before fetching", ticket.ID)
+		}
+	}
+	if m.frontier.planned != 1 || m.frontier.done != 0 || len(m.frontier.queued) != 0 || m.detailFanoutInflight != 1 {
+		t.Fatalf("retry state = planned %d done %d queued %d in-flight %d, want one issued remainder",
+			m.frontier.planned, m.frontier.done, len(m.frontier.queued), m.detailFanoutInflight)
+	}
+	if calls := p.DetailCalls(); calls != 0 {
+		t.Fatalf("DetailCalls = %d before the retry command ran, want 0", calls)
+	}
+
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("r returned %T, want a repaint and one Detail fetch", msg)
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		updated, _ = m.Update(sub())
+		m = updated.(Model)
+	}
+	if calls := p.DetailCalls(); calls != 1 {
+		t.Fatalf("r issued %d Provider calls, want the one genuine cache miss", calls)
+	}
+	for _, ticket := range members[:detailfanout.Parallelism] {
+		if calls := p.DetailCallsFor(ticket.ID); calls != 0 {
+			t.Errorf("cached member %s was fetched %d times, want 0", ticket.ID, calls)
+		}
+	}
+	if calls := p.DetailCallsFor(last); calls != 1 {
+		t.Errorf("remainder %s was fetched %d times, want 1", last, calls)
+	}
+	if !m.frontier.resolved {
+		t.Error("the one-Ticket retry left the Frontier unresolved")
+	}
+	for _, ticket := range members {
+		if _, cached := m.details[ticket.ID]; !cached {
+			t.Errorf("final cache is missing %s", ticket.ID)
+		}
+		if _, seated := m.frontier.input.Links[ticket.ID]; !seated {
+			t.Errorf("final seat is missing %s", ticket.ID)
+		}
+	}
+	if frame := m.View().Content; strings.Contains(frame, "UNVERIFIED") {
+		t.Fatalf("the resolved frame still strands a successful read:\n%s", frame)
+	}
+}
+
+func TestFrontierRefreshReconcilesBeforeEveryGuard(t *testing.T) {
+	cached := model.Ticket{ID: "T-cached", Key: "T-cached", Title: "cached", Status: model.StatusTodo}
+	missing := model.Ticket{ID: "T-missing", Key: "T-missing", Title: "missing", Status: model.StatusTodo}
+	detail := model.Detail{TicketID: cached.ID}
+
+	for _, tt := range []struct {
+		name          string
+		blockingLinks bool
+		cacheMissing  bool
+		inflight      int
+		queued        bool
+		preserveWork  bool
+	}{
+		{name: "Capability absent"},
+		{name: "empty plan", blockingLinks: true, cacheMissing: true},
+		{name: "shared slot busy", blockingLinks: true, inflight: 1, preserveWork: true},
+		{name: "retry queue active", blockingLinks: true, queued: true, preserveWork: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+			allDetails := map[model.TicketID]model.Detail{
+				cached.ID:  detail,
+				missing.ID: {TicketID: missing.ID},
+			}
+			p := fake.New(fake.WithDetails(allDetails))
+			in := ListInput{
+				Header:       Header{Key: "#93", Title: tt.name},
+				Tickets:      []model.Ticket{cached, missing},
+				Capabilities: model.Capabilities{BlockingLinks: tt.blockingLinks},
+				FetchedAt:    now,
+			}
+			m := New(t.Context(), Options{
+				Initial:      &in,
+				DetailSource: TicketDetailSource(p),
+				Now:          func() time.Time { return now },
+			})
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+			m = updated.(Model)
+			m.mode = modeFrontier
+			m.frontier = frontierState{
+				input:    FrontierFromList(in, nil),
+				focusID:  cached.ID,
+				resolved: true,
+			}
+			m.details[cached.ID] = detailEntry{detail: detail, caps: in.Capabilities, fetchedAt: now}
+			if tt.cacheMissing {
+				m.details[missing.ID] = detailEntry{detail: allDetails[missing.ID], caps: in.Capabilities, fetchedAt: now}
+			}
+			m = m.rebuildFrontier()
+			if actionability, member := m.frontier.graph.For(cached.ID); tt.blockingLinks && (!member || actionability.LinksKnown) {
+				t.Fatalf("cached-but-unseated precondition failed: member=%v actionable=%+v", member, actionability)
+			}
+
+			m.frontierGeneration = 7
+			m.detailFanoutInflight = tt.inflight
+			if tt.queued {
+				m.frontier.queued = []model.TicketID{missing.ID}
+				m.frontier.planned = 1
+				m.frontier.resolved = false
+			}
+			if tt.preserveWork {
+				ctx, cancel := context.WithCancel(t.Context())
+				t.Cleanup(cancel)
+				m.frontierContext = ctx
+				m.cancelFrontier = cancel
+			}
+			generation := m.frontierGeneration
+			ctx := m.frontierContext
+			queue := slices.Clone(m.frontier.queued)
+			planned, done, resolved := m.frontier.planned, m.frontier.done, m.frontier.resolved
+
+			updated, cmd := m.refreshFrontier()
+			m = updated.(Model)
+			if !carriesClearScreen(cmd) {
+				t.Fatal("guard returned without repainting the reconciled seat")
+			}
+			if calls := p.DetailCalls(); calls != 0 {
+				t.Fatalf("guard issued %d Provider calls, want 0", calls)
+			}
+			if _, seated := m.frontier.input.Links[cached.ID]; !seated {
+				t.Error("guard ran before adopting the cached member")
+			}
+			if _, drawn := m.frontier.layout.nodeAt[cached.ID]; !drawn {
+				t.Error("guard returned before rebuilding the Frontier layout")
+			}
+			if tt.blockingLinks {
+				actionability, member := m.frontier.graph.For(cached.ID)
+				if !member || !actionability.LinksKnown {
+					t.Errorf("rebuilt graph did not credit the cached member: member=%v actionable=%+v",
+						member, actionability)
+				}
+			}
+			if tt.preserveWork {
+				if m.frontierGeneration != generation || m.frontierContext != ctx || m.cancelFrontier == nil {
+					t.Errorf("guard replaced active work: generation %d/%d context %v/%v cancel-nil=%v",
+						m.frontierGeneration, generation, m.frontierContext, ctx, m.cancelFrontier == nil)
+				}
+				if !slices.Equal(m.frontier.queued, queue) || m.frontier.planned != planned ||
+					m.frontier.done != done || m.frontier.resolved != resolved {
+					t.Errorf("guard changed queue bookkeeping: queued=%v/%v planned=%d/%d done=%d/%d resolved=%v/%v",
+						m.frontier.queued, queue, m.frontier.planned, planned,
+						m.frontier.done, done, m.frontier.resolved, resolved)
+				}
+			}
+		})
+	}
 }
 
 // ADR-0003 Amendment 4: a whole-Watchlist Detail fan-out is permitted only in
