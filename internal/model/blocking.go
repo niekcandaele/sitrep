@@ -266,7 +266,7 @@ func BuildBlockingGraph(tickets []Ticket, links map[TicketID][]Link, caps Capabi
 				record(i, node(l.Target), l.Target)
 			case LinkBlocks:
 				self := linkTargetFromTicket(t)
-				record(node(l.Target), i, self)
+				record(node(l.Target), node(self), self)
 			case LinkRelates:
 				// Relates carries no ordering, so it is not an edge and
 				// names no Ghost.
