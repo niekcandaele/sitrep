@@ -220,6 +220,258 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 	})
 }
 
+func listDiscoveryModel(t *testing.T, noMouse bool, width int) Model {
+	t.Helper()
+	m := mouseListModel(t, Options{NoMouse: noMouse}, []model.Ticket{
+		ticket("#1", model.StatusTodo),
+		ticket("#2", model.StatusDone),
+	}, width, 20)
+	m.input.Header = Header{Key: "#103", Title: "Responsive list footer"}
+	m.help.SetWidth(width)
+	return m
+}
+
+func listShortHelpLine(content string) string {
+	lines := strings.Split(ansi.Strip(content), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+func requireListDiscoveryFooter(t *testing.T, m Model) {
+	t.Helper()
+	content := m.View().Content
+	lines := strings.Split(content, "\n")
+	if got := len(lines); got != m.height {
+		t.Errorf("frame height = %d, want %d", got, m.height)
+	}
+	for i, line := range lines {
+		if got := ansi.StringWidth(line); got > m.width {
+			t.Errorf("line %d width = %d, want at most %d: %q", i, got, m.width, ansi.Strip(line))
+		}
+	}
+
+	helpLine := listShortHelpLine(content)
+	clippedAfterHelp := strings.HasSuffix(helpLine, " …")
+	if clippedAfterHelp {
+		helpLine = strings.TrimSuffix(helpLine, " …")
+	}
+	if strings.Contains(helpLine, "…") {
+		t.Errorf("short help contains a partial segment: %q", helpLine)
+	}
+	segments := strings.Split(helpLine, " • ")
+	counts := make(map[string]int, len(segments))
+	for _, segment := range segments {
+		counts[segment]++
+	}
+	for _, required := range []string{"enter open", "q quit", "? help"} {
+		if counts[required] != 1 {
+			t.Errorf("short help has %d complete %q segments, want 1: %q", counts[required], required, helpLine)
+		}
+	}
+
+	mouseSegments := []string{"m release · shift-drag to select text", "m release, shift-drag", "m release/⇧drag"}
+	if !m.mouseEnabled {
+		mouseSegments = []string{"m capture"}
+	}
+	mouseCount := 0
+	for _, segment := range mouseSegments {
+		mouseCount += counts[segment]
+	}
+	if mouseCount != 1 {
+		t.Errorf("short help has %d complete mouse segments, want 1: %q", mouseCount, helpLine)
+	}
+
+	sourceOrder := map[string]int{
+		"m release · shift-drag to select text": 0,
+		"m release, shift-drag":                 0,
+		"m release/⇧drag":                       0,
+		"m capture":                             0,
+		"enter open":                            1,
+		"q quit":                                2,
+		"↑/k up":                                3,
+		"↓/j down":                              4,
+		"d hide finished":                       5,
+		"/ find":                                6,
+		"esc clear filter":                      7,
+		"? help":                                8,
+		"v frontier":                            9,
+	}
+	previous := -1
+	for _, segment := range segments {
+		index, ok := sourceOrder[segment]
+		if !ok {
+			t.Errorf("short help contains unknown or partial segment %q: %q", segment, helpLine)
+			continue
+		}
+		if index <= previous {
+			t.Errorf("short help changed source order at %q: %q", segment, helpLine)
+		}
+		previous = index
+	}
+	if clippedAfterHelp && segments[len(segments)-1] != "? help" {
+		t.Errorf("short help clips before its complete Help segment: %q …", helpLine)
+	}
+}
+
+func TestListShortHelpSourceOrder(t *testing.T) {
+	keys := DefaultKeyMap()
+	keys.ClearFilter.SetEnabled(true)
+	keys.Frontier.SetEnabled(true)
+	var got []string
+	for _, binding := range keys.ShortHelp() {
+		got = append(got, binding.Help().Key)
+	}
+	want := []string{"m", "enter", "q", "↑/k", "↓/j", "d", "/", "esc", "?", "v"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ShortHelp source order = %v, want %v", got, want)
+	}
+	if got[len(got)-1] != keys.Frontier.Help().Key || got[len(got)-2] != keys.Help.Help().Key {
+		t.Fatalf("ShortHelp tail = %v, want Help before final Frontier", got[len(got)-2:])
+	}
+}
+
+func TestListResponsiveShortHelpKeepsDiscoveryWithAndWithoutFilter(t *testing.T) {
+	for _, width := range []int{60, 80, 100, 115, 120} {
+		for _, noMouse := range []bool{false, true} {
+			mouseState := "captured"
+			if noMouse {
+				mouseState = "released"
+			}
+			t.Run(fmt.Sprintf("%d/%s", width, mouseState), func(t *testing.T) {
+				m := listDiscoveryModel(t, noMouse, width)
+				unfilteredBodyHeight := m.bodyHeight()
+				unfilteredFooterLines := len(m.footerLines())
+				requireListDiscoveryFooter(t, m)
+
+				next, cmd := m.Update(keyPress("d"))
+				m = next.(Model)
+				if cmd == nil {
+					t.Fatal("d did not request the filter-shape repaint")
+				}
+				if !m.filter.Active() || !m.keys.ClearFilter.Enabled() {
+					t.Fatal("real d transition did not activate Filter and ClearFilter")
+				}
+				if filterLine := ansi.Strip(m.renderFilterLine()); !strings.Contains(filterLine, "esc clear") {
+					t.Errorf("active filter line omitted esc clear: %q", filterLine)
+				}
+				requireListDiscoveryFooter(t, m)
+
+				next, cmd = m.Update(keyPress("?"))
+				m = next.(Model)
+				if cmd != nil || !m.help.ShowAll {
+					t.Fatalf("? did not open expanded help: ShowAll=%t cmd=%v", m.help.ShowAll, cmd)
+				}
+				requireHelpText(t, m.help.View(m.helpKeys()), "esc clear filter", "v frontier",
+					"pgup page up", "pgdn page down", "g first", "G last", "r refresh")
+
+				next, _ = m.Update(keyPress("?"))
+				m = next.(Model)
+				next, cmd = m.Update(keyPress("esc"))
+				m = next.(Model)
+				if cmd == nil || m.filter.Active() || m.keys.ClearFilter.Enabled() {
+					t.Fatalf("esc did not clear Filter and repaint: active=%t ClearFilter=%t cmd nil=%t",
+						m.filter.Active(), m.keys.ClearFilter.Enabled(), cmd == nil)
+				}
+				requireListDiscoveryFooter(t, m)
+				if m.bodyHeight() != unfilteredBodyHeight || len(m.footerLines()) != unfilteredFooterLines {
+					t.Errorf("clear restored body/footer geometry %d/%d, want %d/%d",
+						m.bodyHeight(), len(m.footerLines()), unfilteredBodyHeight, unfilteredFooterLines)
+				}
+				wantMouseDesc := mouseEnabledHelp
+				if noMouse {
+					wantMouseDesc = mouseDisabledHelp
+				}
+				if got := m.keys.ToggleMouse.Help().Desc; got != wantMouseDesc {
+					t.Errorf("responsive rendering mutated source mouse help to %q, want %q", got, wantMouseDesc)
+				}
+			})
+		}
+	}
+}
+
+func TestListFooterFramesAtDiscoveryWidths(t *testing.T) {
+	for _, width := range []int{60, 80, 100, 115} {
+		t.Run(fmt.Sprintf("unfiltered-%d", width), func(t *testing.T) {
+			m := listDiscoveryModel(t, false, width)
+			requireListDiscoveryFooter(t, m)
+			checkGolden(t, fmt.Sprintf("list_footer_%dx20.golden.txt", width), frame(m.View().Content))
+		})
+		t.Run(fmt.Sprintf("filtered-%d", width), func(t *testing.T) {
+			m := listDiscoveryModel(t, false, width)
+			next, _ := m.Update(keyPress("d"))
+			m = next.(Model)
+			if !m.filter.Active() || !m.keys.ClearFilter.Enabled() {
+				t.Fatal("real d transition did not enable ClearFilter")
+			}
+			if filterLine := ansi.Strip(m.renderFilterLine()); !strings.Contains(filterLine, "esc clear") {
+				t.Errorf("filtered frame omitted esc clear: %q", filterLine)
+			}
+			requireListDiscoveryFooter(t, m)
+			checkGolden(t, fmt.Sprintf("list_footer_filtered_%dx20.golden.txt", width), frame(m.View().Content))
+		})
+	}
+}
+
+func TestListResponsiveHelpResizePreservesBehaviorAndGeometry(t *testing.T) {
+	m := mouseListModel(t, Options{}, []model.Ticket{
+		ticket("#1", model.StatusTodo),
+		ticket("#2", model.StatusTodo),
+		ticket("#3", model.StatusTodo),
+	}, 60, 20)
+	m.help.SetWidth(60)
+	requireListDiscoveryFooter(t, m)
+	if helpLine := listShortHelpLine(m.View().Content); strings.Contains(helpLine, "↓/j down") {
+		t.Fatalf("60-column fixture unexpectedly advertises optional Down binding: %q", helpLine)
+	}
+	next, cmd := m.Update(keyPress("j"))
+	m = next.(Model)
+	if cmd != nil || m.selectedID != "#2" {
+		t.Fatalf("omitted j binding is not dispatch-live: selected=%q cmd=%v", m.selectedID, cmd)
+	}
+
+	wantBodyHeight := m.bodyHeight()
+	wantFooterLines := len(m.footerLines())
+	wantTicketY := ticketLineY(t, m, "#1", 0)
+	for _, width := range []int{60, 80, 100, 115, 120, 42, 60} {
+		beforeID, beforeOffset := m.selectedID, m.offset
+		next, cmd = m.Update(tea.WindowSizeMsg{Width: width, Height: 20})
+		m = next.(Model)
+		if cmd != nil {
+			t.Fatalf("resize to %d issued command %v", width, cmd)
+		}
+		if m.selectedID != beforeID || m.offset != beforeOffset {
+			t.Errorf("resize to %d moved selection/offset from %q/%d to %q/%d",
+				width, beforeID, beforeOffset, m.selectedID, m.offset)
+		}
+		if m.bodyHeight() != wantBodyHeight || len(m.footerLines()) != wantFooterLines {
+			t.Errorf("resize to %d changed list geometry: body=%d footer=%d, want %d/%d",
+				width, m.bodyHeight(), len(m.footerLines()), wantBodyHeight, wantFooterLines)
+		}
+		if gotY := ticketLineY(t, m, "#1", 0); gotY != wantTicketY {
+			t.Errorf("resize to %d moved #1 hit row from %d to %d", width, wantTicketY, gotY)
+		}
+		if width >= listHelpDiscoveryWidth {
+			requireListDiscoveryFooter(t, m)
+		}
+
+		m.lastClickID = ""
+		m.lastClickAt = time.Time{}
+		clicked, clickCmd, applied := dispatchMouse(t, m, tea.MouseClickMsg{
+			X: 1, Y: ticketLineY(t, m, "#1", 0), Button: tea.MouseLeft,
+		})
+		if !applied || clickCmd != nil || clicked.selectedID != "#1" {
+			t.Errorf("mouse hit after resize to %d: applied=%t selected=%q cmd=%v",
+				width, applied, clicked.selectedID, clickCmd)
+		}
+		row, ok := rowOf(clicked.rows, "#2")
+		if !ok {
+			t.Fatal("#2 disappeared from resize fixture")
+		}
+		m = clicked.selectRow(row)
+		m.lastClickID = ""
+		m.lastClickAt = time.Time{}
+	}
+}
+
 func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 	for _, noMouse := range []bool{false, true} {
 		state := "enabled"

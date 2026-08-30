@@ -37,4 +37,4 @@ TODO (3)
 
 
 filter: done+cancelled hidden · 5 of 10 Tickets                                                                esc clear
-m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find …
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help

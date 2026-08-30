@@ -124,14 +124,13 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the one-line footer shows. The mouse escape
-// hatch comes first so terminals too narrow for the normal primary-action trio
-// still explain how to recover text selection. Open and quit follow, keeping all
-// three visible at 80 columns. Every binding remains available in FullHelp.
+// ShortHelp returns the stable priority order for the one-line list footer.
+// The model keeps the mouse escape hatch, open, quit, and Help visible from 60
+// columns upward while spending remaining room on this sequence. Every omitted
+// binding remains available in FullHelp and through keyboard dispatch.
 func (k KeyMap) ShortHelp() []key.Binding {
-	// Frontier comes last: at 80 and at 120 columns the line is already full,
-	// and dropping "? help" — the one binding that reveals the rest — to make
-	// room for a binding the expanded listing already carries is a bad trade.
+	// Frontier stays last so Help remains the on-screen route to the complete
+	// binding list before the optional graph shortcut competes for room.
 	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find,
 		k.ClearFilter, k.Help, k.Frontier}
 }
