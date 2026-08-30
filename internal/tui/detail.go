@@ -247,9 +247,11 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 }
 
 // seatDetail is the shared transition for a rich list Ticket and a thin Link
-// target. Every seat advances the generation, including cache hits and cycles.
+// target. Every seat retires the previous read and advances the generation,
+// including cache hits and cycles. Only a cache miss receives a new child
+// context and Provider command.
 func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities) (tea.Model, tea.Cmd) {
-	m.detailGeneration++
+	m = m.retireDetailRead()
 	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
@@ -268,6 +270,7 @@ func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities
 	}
 
 	m.detail.loading = true
+	m = m.startDetailRead()
 	m = m.reconcileDetail(false)
 	return m, m.detailFetchCmd(m.detailGeneration, t.ID)
 }
@@ -436,7 +439,7 @@ func (m Model) followFocusedDetailLink() (tea.Model, tea.Cmd) {
 func (m Model) popDetailTrail() Model {
 	entry := m.trail[len(m.trail)-1]
 	m.trail = m.trail[:len(m.trail)-1]
-	m.detailGeneration++
+	m = m.retireDetailRead()
 	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
@@ -460,7 +463,11 @@ func (m Model) popDetailTrail() Model {
 // session.
 func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
-	m.detailGeneration++
+	leavingFrontier := m.detailReturn == modeFrontier
+	m = m.retireDetailRead()
+	if leavingFrontier {
+		m = m.retireFrontierFanout()
+	}
 	m.mouseEpoch++
 	m.trail = nil
 	m.mode = modeList
@@ -485,22 +492,25 @@ func (m Model) startDetailFetch() (Model, tea.Cmd) {
 	if m.detail.loading {
 		return m, nil
 	}
-	m.detailGeneration++
+	m = m.retireDetailRead()
 	if m.detail.ticket.ID == "" {
 		m.detail.loading = false
 		m.detail.lastErr = errEmptyLinkTargetID
 		return m.reconcileDetail(false), nil
 	}
 	m.detail.loading = true
+	m = m.startDetailRead()
 	return m, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID)
 }
 
-// detailFetchCmd reads the DetailSource on Bubble Tea's goroutine pool, tagging
-// the answer with the generation and the Ticket that asked for it.
+// detailFetchCmd reads the DetailSource with the child context owned by this
+// generation. The command captures both values so a later Model replacement
+// cannot redirect an already-issued read.
 func (m Model) detailFetchCmd(generation int, id model.TicketID) tea.Cmd {
 	fetch := m.fetchDetail
+	ctx := m.detailContext
 	return func() tea.Msg {
-		d, caps, err := fetch(id)
+		d, caps, err := fetch(ctx, id)
 		return detailFetchedMsg{generation: generation, id: id, detail: d, caps: caps, err: err}
 	}
 }
@@ -510,11 +520,16 @@ func (m Model) detailFetchCmd(generation int, id model.TicketID) tea.Cmd {
 func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	if msg.generation != m.detailGeneration || msg.id != m.detail.ticket.ID {
 		// Open #112, esc, open #113: #112's slow answer must not paint over
-		// #113, and must not clear the in-flight flag of the read that is.
+		// #113, and must not clear the in-flight flag or child of the read that is.
 		return m
 	}
+	m = m.finishDetailRead()
 	m.detail.loading = false
 
+	if errors.Is(msg.err, context.Canceled) {
+		m.detail.lastErr = nil
+		return m.reconcileDetail(false)
+	}
 	if msg.err != nil {
 		// A cached Detail stays on screen behind the error: stale detail beats a
 		// blank screen.
@@ -558,14 +573,14 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.trail) > 0 {
 			return m.popDetailTrail(), nil
 		}
-		m.detailGeneration++
-		m.mouseEpoch++
 		if !m.listArmed {
 			// The esc ladder's last rung: a decoded Ticket has no list behind it,
-			// so "one level up" is out of the program. q and ctrl+c still quit
-			// from everywhere, so nobody is trapped either way.
+			// so "one level up" is out of the program. quit retires both read
+			// lifetimes before Bubble Tea waits for commands to finish.
 			return m.quit(msg), tea.Quit
 		}
+		m = m.retireDetailRead()
+		m.mouseEpoch++
 		m = m.clearPendingClick()
 		m.detail = detailState{}
 		if m.detailReturn == modeFrontier {

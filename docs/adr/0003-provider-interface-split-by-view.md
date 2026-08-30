@@ -49,9 +49,13 @@ Detail. The split forbids the list refresh from paying for that, and it still do
 
 A caller may fan `FetchDetail` out across a whole Watchlist **only in response to an explicit
 user action**, never from a refresh, a poll, or a render. The cost is visible and voluntary:
-you pressed a key, you get a progress indicator, and you can interrupt it. Results land in the
-caller's existing per-Ticket Detail cache, so a Ticket already opened this session costs
-nothing. The policy — canonical order, cache skipping, bounded concurrency, and the rule that
+you pressed a key, you get a progress indicator, and the explicit fan-out owns a cancellable
+screen-generation context. Leaving or reseating that screen and quitting cancel issued work;
+a list refresh may therefore cancel and reseat an existing fan-out but must never start one.
+Only successful outcomes enter the caller's existing per-Ticket Detail cache, including a
+success that races with cancellation, so a Ticket already opened or completed this session
+costs nothing. Cancelled and unissued Tickets remain absent and derived blocking answers fail
+closed. The policy — canonical order, cache skipping, bounded concurrency, and the rule that
 only a successful fetch is recorded — lives in `internal/detailfanout` so that every consumer
 pays the same price and fails the same way. A screen may also *read* the cache a fan-out
 filled to render a derived property, provided it issues no fetch of its own and claims nothing
