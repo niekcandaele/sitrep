@@ -304,16 +304,16 @@ func TestFrontierFocusMovement(t *testing.T) {
 	}
 }
 
-// Emphasis is withheld until every Detail read has answered: a half-loaded
-// Frontier that already claims something is Actionable is the one wrong answer
-// this screen must not give.
+// Graph-derived emphasis is withheld until every Detail read has answered: a
+// half-loaded Frontier visibly says PENDING instead of giving a premature graph
+// conclusion.
 func TestFrontierEmphasisIsWithheldUntilResolved(t *testing.T) {
 	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
 	g := graphOf(tickets, map[model.TicketID][]model.Link{"#1": nil})
 
 	loading := frontierNodes(g, tickets, false)
-	if loading[0].emphasis.badge != "" {
-		t.Errorf("badge while loading = %q, want none", loading[0].emphasis.badge)
+	if loading[0].emphasis.badge != "PENDING" {
+		t.Errorf("badge while loading = %q, want PENDING", loading[0].emphasis.badge)
 	}
 	resolved := frontierNodes(g, tickets, true)
 	if resolved[0].emphasis.badge != "ACTIONABLE" {

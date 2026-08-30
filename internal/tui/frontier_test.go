@@ -216,37 +216,277 @@ func assertFrontierCallsLive(t *testing.T, calls ...controlledFrontierCall) {
 }
 
 // Emphasis is withheld until every Detail read has answered, then applied at
-// once: one honest moment, no flipping. Asserted as two frames from the same
-// session — absent, then present.
+// once: one honest moment, no flipping. The loading golden is captured before
+// shutdown retires the live child context, because the header distinguishes
+// active work from a seat that now needs an explicit r.
 func TestFrontierWithholdsEmphasisUntilEveryDetailHasAnswered(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
-	release := make(chan struct{})
-	s := startWith(t, c, Options{
-		Source:       selectorSource(p, c),
-		DetailSource: blockedDetailSource(release, TicketDetailSource(p)),
+	in, err := selectorSource(p, c)(t.Context())
+	if err != nil {
+		t.Fatalf("reading fixture Watchlist: %v", err)
+	}
+	m := New(t.Context(), Options{
+		Initial:      &in,
+		DetailSource: TicketDetailSource(p),
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
-	s.waitFor(t, "Shard rebalancer rollout")
-	s.tm.Send(keyPress("v"))
-	s.waitFor(t, "reading Detail")
-
-	m, got := s.finish(t)
-	close(release)
-
-	checkGolden(t, "frontier_loading.golden.txt", got)
-	frame := string(got)
-	if !strings.Contains(frame, "reading Detail 0/13") {
-		t.Errorf("the header does not report the fan-out's progress:\n%s", frame)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+	m = updated.(Model)
+	updated, cmd := m.Update(keyPress("v"))
+	m = updated.(Model)
+	if cmd == nil || m.frontierContext == nil {
+		t.Fatal("opening the Frontier did not leave live Detail work")
 	}
-	for _, badge := range []string{"ACTIONABLE", "UNVERIFIED", "blocked by"} {
-		if strings.Contains(frame, badge) {
-			t.Errorf("a half-loaded Frontier claimed %q:\n%s", badge, frame)
+
+	got := frame(m.View().Content)
+	checkGolden(t, "frontier_loading.golden.txt", got)
+	loading := string(got)
+	if !strings.Contains(loading, "reading Detail 0/13") {
+		t.Errorf("the header does not report the live fan-out's progress:\n%s", loading)
+	}
+	if !strings.Contains(loading, "PENDING") {
+		t.Errorf("the loading frame has no plain-text provisional badge:\n%s", loading)
+	}
+	for _, badge := range []string{"ACTIONABLE", "UNVERIFIED", "blocked by", "CYCLE"} {
+		if strings.Contains(loading, badge) {
+			t.Errorf("a half-loaded Frontier claimed %q:\n%s", badge, loading)
 		}
 	}
 	if m.frontier.isResolved() {
 		t.Error("the Frontier reported itself resolved with every read outstanding")
+	}
+	m = m.quit(keyPress("q"))
+}
+
+func TestFrontierPendingEmphasisDiffersFromResolved(t *testing.T) {
+	ticket := model.Ticket{
+		ID: "T-1", Key: "T-1", Title: "waiting for evidence",
+		Status: model.StatusInProgress, NativeStatus: "In Review",
+	}
+	actionability := model.Actionability{
+		TicketID:   ticket.ID,
+		Status:     ticket.Status,
+		LinksKnown: true,
+	}
+	pending := memberEmphasis(actionability, false)
+	resolved := memberEmphasis(actionability, true)
+	if pending == resolved {
+		t.Fatal("unresolved and resolved-normal emphasis are identical")
+	}
+	if pending.border != frontierLightBorder || pending.titleRole != frontierRoleText ||
+		pending.badgeRole != frontierRoleMuted || pending.badge != "PENDING" {
+		t.Errorf("pending emphasis = %+v, want a light normal card with muted PENDING badge", pending)
+	}
+	if resolved.badge != "" {
+		t.Errorf("resolved-normal badge = %q, want empty", resolved.badge)
+	}
+
+	m := frontierMouseModel(t, []model.Ticket{ticket}, map[model.TicketID][]model.Link{ticket.ID: nil}, 60, 20)
+	resolvedRect := m.frontier.layout.nodeAt[ticket.ID]
+	resolvedPlain := string(frame(m.View().Content))
+	delete(m.frontier.input.Links, ticket.ID)
+	m = m.rebuildFrontier()
+	pendingRect := m.frontier.layout.nodeAt[ticket.ID]
+	pendingPlain := string(frame(m.View().Content))
+	if strings.Contains(resolvedPlain, "PENDING") || !strings.Contains(pendingPlain, "PENDING") {
+		t.Fatalf("plain rendering does not distinguish the states:\n--- resolved ---\n%s--- pending ---\n%s",
+			resolvedPlain, pendingPlain)
+	}
+	if strings.Count(resolvedPlain, "In Progress") != strings.Count(pendingPlain, "In Progress") {
+		t.Fatalf("Status Category output changed with evidence state:\n--- resolved ---\n%s--- pending ---\n%s",
+			resolvedPlain, pendingPlain)
+	}
+	if pendingRect != resolvedRect {
+		t.Errorf("card geometry changed: pending=%+v resolved=%+v", pendingRect, resolvedRect)
+	}
+	centerX, centerY := pendingRect.X+pendingRect.W/2, pendingRect.Y+pendingRect.H/2
+	if id, ok := m.frontier.layout.nodeAtPoint(centerX, centerY); !ok || id != ticket.ID {
+		t.Errorf("pending card hit target = %q/%v, want %q/true", id, ok, ticket.ID)
+	}
+
+	g := model.BuildBlockingGraph([]model.Ticket{ticket}, map[model.TicketID][]model.Link{ticket.ID: nil},
+		model.Capabilities{BlockingLinks: true})
+	line := frontierBadgeLine(frontierNode{
+		id: ticket.ID, native: "[In Review]", emphasis: pending,
+	}, g, frontierMinCardWidth-2)
+	if !strings.Contains(line, "PENDING") || strings.Contains(line, "PEND…") {
+		t.Errorf("minimum-width badge line = %q, want the complete PENDING token", line)
+	}
+	if width := lipgloss.Width(line); width > frontierMinCardWidth-2 {
+		t.Errorf("minimum-width badge line is %d columns, want at most %d: %q",
+			width, frontierMinCardWidth-2, line)
+	}
+}
+
+func TestFrontierPendingBadgesChangeTogetherAtResolution(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("T-1", model.StatusTodo),
+		blockingTicket("T-2", model.StatusTodo),
+		blockingTicket("T-3", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"T-1": blockedBy("T-2"),
+		"T-2": blockedBy("T-1"),
+		"T-3": nil,
+	}
+	in := ListInput{
+		Header:       Header{Key: "#88", Title: "one honest transition"},
+		Tickets:      tickets,
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    newClock().now(),
+	}
+	m := New(t.Context(), Options{Initial: &in, Now: newClock().now})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+
+	assertPending := func(stage string, m Model) {
+		t.Helper()
+		plain := string(frame(m.View().Content))
+		if m.frontier.isResolved() {
+			t.Errorf("%s: Frontier resolved before every answer", stage)
+		}
+		if got := strings.Count(plain, "PENDING"); got != len(tickets) {
+			t.Errorf("%s: PENDING cards = %d, want %d:\n%s", stage, got, len(tickets), plain)
+		}
+		for _, badge := range []string{"CYCLE", "UNVERIFIED", "ACTIONABLE", "blocked by"} {
+			if strings.Contains(plain, badge) {
+				t.Errorf("%s: partial frame published %q:\n%s", stage, badge, plain)
+			}
+		}
+		if got := strings.Count(plain, "Todo"); got != len(tickets) {
+			t.Errorf("%s: Status Category count = %d, want %d:\n%s", stage, got, len(tickets), plain)
+		}
+	}
+	assertPending("before answers", m)
+
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-1",
+		detail: model.Detail{TicketID: "T-1", Links: links["T-1"]}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+	assertPending("after first answer", m)
+
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-2",
+		detail: model.Detail{TicketID: "T-2", Links: links["T-2"]}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+	assertPending("after cycle evidence", m)
+
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: "T-3",
+		detail: model.Detail{TicketID: "T-3", Links: links["T-3"]}, caps: in.Capabilities,
+	})
+	m = updated.(Model)
+	resolvedPlain := string(frame(m.View().Content))
+	if !m.frontier.isResolved() {
+		t.Fatal("final answer did not resolve the Frontier")
+	}
+	if strings.Contains(resolvedPlain, "PENDING") {
+		t.Fatalf("resolved frame retained PENDING:\n%s", resolvedPlain)
+	}
+	if got := strings.Count(resolvedPlain, "CYCLE"); got != 2 {
+		t.Errorf("resolved cycle badges = %d, want 2:\n%s", got, resolvedPlain)
+	}
+}
+
+func TestFrontierPendingHeadersDistinguishLiveAndInactiveSeats(t *testing.T) {
+	ticket := blockingTicket("T-1", model.StatusTodo)
+	in := ListInput{
+		Header:       Header{Key: "#88", Title: "pending lifetime"},
+		Tickets:      []model.Ticket{ticket},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    newClock().now(),
+	}
+	m := New(t.Context(), Options{Initial: &in, Now: newClock().now})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.frontierContext == nil || !strings.Contains(m.frontierHeader(), "reading Detail 0/1") {
+		t.Fatalf("live unresolved header does not report progress:\n%s", m.frontierHeader())
+	}
+	if !strings.Contains(m.View().Content, "PENDING") {
+		t.Fatalf("live unresolved card has no PENDING badge:\n%s", m.View().Content)
+	}
+
+	// Counters describe a plan, not whether work remains live. Retiring the child
+	// context is what makes an unresolved seat ask for an explicit retry.
+	m.frontier.done = m.frontier.planned
+	m.frontier.queued = nil
+	m = m.retireFrontierFanout()
+	header := m.frontierHeader()
+	if !strings.Contains(header, "Details pending · press r") || strings.Contains(header, "reading Detail") {
+		t.Fatalf("inactive unresolved header claims live work:\n%s", header)
+	}
+	if m.frontier.isResolved() || !strings.Contains(m.View().Content, "PENDING") {
+		t.Fatalf("retiring work changed the unresolved evidence state:\n%s", m.View().Content)
+	}
+}
+
+func TestFrontierPendingMembersKeepGhostIdentity(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("T-1", model.StatusTodo),
+		blockingTicket("T-2", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"T-1": blockedBy("G-1"),
+		"T-2": nil,
+	}
+	m := frontierMouseModel(t, tickets, links, 120, 30)
+	delete(m.frontier.input.Links, "T-2")
+	m = m.rebuildFrontier()
+	plain := string(frame(m.View().Content))
+	if m.frontier.isResolved() {
+		t.Fatal("partial Ghost seat resolved")
+	}
+	if got := strings.Count(plain, "PENDING"); got != len(tickets) {
+		t.Errorf("pending member badges = %d, want %d:\n%s", got, len(tickets), plain)
+	}
+	if got := strings.Count(plain, "GHOST"); got != 1 {
+		t.Errorf("Ghost identity badges = %d, want 1:\n%s", got, plain)
+	}
+	for _, node := range frontierNodes(m.frontier.graph, tickets, false) {
+		if node.id == "G-1" && (node.emphasis.badge != "GHOST" || node.emphasis.border != frontierGhostBorder) {
+			t.Errorf("Ghost emphasis = %+v, want dashed GHOST", node.emphasis)
+		}
+	}
+
+	for _, tt := range []struct {
+		name  string
+		state frontierState
+	}{
+		{
+			name: "anonymous-only seat",
+			state: frontierState{input: FrontierInput{
+				Tickets:      []model.Ticket{{Key: "anonymous", Title: "anonymous"}},
+				Capabilities: model.Capabilities{BlockingLinks: true},
+			}},
+		},
+		{
+			name:  "Capability absent",
+			state: frontierState{input: FrontierInput{Tickets: []model.Ticket{tickets[0]}}},
+		},
+		{
+			name:  "empty Watchlist",
+			state: frontierState{input: FrontierInput{Capabilities: model.Capabilities{BlockingLinks: true}}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.state.isResolved() {
+				t.Fatal("terminal seat is unresolved")
+			}
+			g := model.BuildBlockingGraph(tt.state.input.Tickets, tt.state.input.Links, tt.state.input.Capabilities)
+			for _, node := range frontierNodes(g, tt.state.input.Tickets, tt.state.isResolved()) {
+				if node.emphasis.badge == "PENDING" {
+					t.Errorf("terminal node %q rendered PENDING", node.key)
+				}
+			}
+		})
 	}
 }
 
@@ -1621,8 +1861,9 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 	if m.frontier.isResolved() {
 		t.Fatal("the pre-r frame resolved a replacement seat with no Links")
 	}
-	if header := m.frontierHeader(); !strings.Contains(header, "reading Detail 0/0") || strings.Contains(header, " actionable") {
-		t.Fatalf("the pre-r frame does not expose the stranded seat as incomplete:\n%s", header)
+	if header := m.frontierHeader(); !strings.Contains(header, "Details pending · press r") ||
+		strings.Contains(header, "reading Detail") || strings.Contains(header, " actionable") {
+		t.Fatalf("the pre-r frame does not expose the stranded seat as inactive and incomplete:\n%s", header)
 	}
 	staleTarget := members[0].ID
 	if staleTarget == focus {
@@ -1873,7 +2114,7 @@ func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, "reading Detail 0/0")
+	s.waitFor(t, "Details pending · press r")
 	m, got := s.finish(t)
 
 	if n := p.DetailCalls(); n != fetched {
@@ -1895,14 +2136,87 @@ func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 	if strings.Contains(header, " actionable") {
 		t.Errorf("the partial Frontier published an Actionable tally:\n%s", header)
 	}
-	if !strings.Contains(header, "reading Detail 0/0") {
-		t.Errorf("the unresolved re-seat does not identify itself as incomplete:\n%s", header)
+	if !strings.Contains(header, "Details pending · press r") || strings.Contains(header, "reading Detail") {
+		t.Errorf("the unresolved re-seat does not identify itself as inactive and incomplete:\n%s", header)
 	}
 	frame := string(got)
-	for _, badge := range []string{"ACTIONABLE", "blocked by"} {
+	if !strings.Contains(frame, "PENDING") {
+		t.Errorf("the unresolved re-seat has no provisional member badge:\n%s", frame)
+	}
+	for _, badge := range []string{"ACTIONABLE", "UNVERIFIED", "CYCLE", "blocked by"} {
 		if strings.Contains(frame, badge) {
 			t.Errorf("the partial Frontier published resolved emphasis %q:\n%s", badge, frame)
 		}
+	}
+}
+
+func TestFrontierPendingSeatWaitsForExplicitRetry(t *testing.T) {
+	after := blockingSnapshotSwapping(t, "acme/widgets#213", addedMember)
+	details := fake.FixtureBlockingDetails()
+	p := fake.New(fake.WithSnapshots(fake.FixtureBlockingSnapshot(), after),
+		fake.WithDetails(details))
+	c := newClock()
+	s := frontierSession(t, c, p)
+	openFrontier(t, s)
+
+	fetched := p.DetailCalls()
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	s.waitFor(t, "Details pending · press r")
+	if calls := p.DetailCalls(); calls != fetched {
+		t.Fatalf("first timer re-seat issued %d new Detail calls", calls-fetched)
+	}
+
+	resolvedBeforeHeartbeat := p.ResolveCalls()
+	s.clock.advance(61 * time.Second)
+	s.beat()
+	waitUntil(t, "the pending seat's next list heartbeat", func() bool {
+		return p.ResolveCalls() > resolvedBeforeHeartbeat
+	})
+	if calls := p.DetailCalls(); calls != fetched {
+		t.Fatalf("later heartbeat issued %d new Detail calls", calls-fetched)
+	}
+
+	retryBaselines := make(map[model.TicketID]int)
+	for _, ticket := range after.Tickets {
+		if _, cached := details[ticket.ID]; !cached {
+			retryBaselines[ticket.ID] = p.DetailCallsFor(ticket.ID)
+		}
+	}
+	if len(retryBaselines) == 0 {
+		t.Fatal("replacement seat has no genuine cache miss")
+	}
+
+	s.tm.Send(keyPress("r"))
+	waitUntil(t, "every explicit-retry cache miss", func() bool {
+		for id, baseline := range retryBaselines {
+			if p.DetailCallsFor(id) != baseline+1 {
+				return false
+			}
+		}
+		return true
+	})
+	s.waitFor(t, fmt.Sprintf("%d Tickets' Links could not be read", len(retryBaselines)))
+	m, got := s.finish(t)
+
+	wantCalls := fetched + len(retryBaselines)
+	if calls := p.DetailCalls(); calls != wantCalls {
+		t.Errorf("DetailCalls = %d, want cached reads plus %d explicit misses (%d)",
+			calls, len(retryBaselines), wantCalls)
+	}
+	if _, failed := m.frontier.failed[addedMember.ID]; !failed {
+		t.Errorf("explicit retry did not seat %q's exact-ID failure", addedMember.ID)
+	}
+	if !m.frontier.isResolved() {
+		t.Fatal("explicit retry did not complete the replacement seat")
+	}
+	header := m.frontierHeader()
+	if strings.Contains(header, "reading Detail") || strings.Contains(header, "Details pending") ||
+		!strings.Contains(header, " actionable") {
+		t.Errorf("settled header did not return to resolved copy:\n%s", header)
+	}
+	if frame := string(got); strings.Contains(frame, "PENDING") {
+		t.Errorf("settled frame retained provisional badges:\n%s", frame)
 	}
 }
 
@@ -1921,7 +2235,7 @@ func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, "reading Detail 0/0")
+	s.waitFor(t, "Details pending · press r")
 	m, _ := s.finish(t)
 
 	if m.frontier.focusID != "acme/widgets#403" {
@@ -2270,7 +2584,7 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 	openFrontier(t, s)
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, "reading Detail 0/0")
+	s.waitFor(t, "Details pending · press r")
 	m, got := s.finish(t)
 
 	// #211 is the fixture's unreadable member and is still on the Watchlist.
