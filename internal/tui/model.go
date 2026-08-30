@@ -549,8 +549,11 @@ func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 
 // reseatFrontier rebuilds the Frontier on a Watchlist that has just changed
 // shape. It cancels the old seat's Provider reads and advances the generation,
-// so no old answer can mutate the replacement. The session Detail cache is read
-// again so every Ticket the previous seat successfully paid for stays verified.
+// so no old answer can mutate the replacement. FrontierFromList reads the
+// session Detail cache again, so every Ticket cached at the instant of reseating
+// stays verified. Adopting here would be redundant and cannot catch an old-
+// generation success that lands afterward: that answer remains cacheable but
+// cannot mutate this seat, and the next explicit Frontier r reconciles it.
 //
 // It issues no fetch. A refresh reaches here from the --interval timer as
 // readily as from r, and ADR-0003 Amendment 4 permits a whole-Watchlist Detail
