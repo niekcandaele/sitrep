@@ -492,23 +492,20 @@ func TestSameTrackerDifferentHostsFailsBeforeProvider(t *testing.T) {
 	}
 }
 
-// Run's production path resolves the Provider from --provider, which is how
-// sitrep walks end to end today.
+// RunWith's production construction path keeps bare --provider fake byte-for-byte
+// compatible with the legacy v0.1 fixture.
 func TestRunResolvesTheFakeProvider(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	code := cli.Run([]string{"--provider", "fake", "--json", "111"}, &stdout, &stderr)
+	code := cli.RunWith([]string{"--provider", "fake", "--json", "111"}, &stdout, &stderr, cli.Deps{Now: fixedClock})
 
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
-		t.Fatalf("unmarshalling the epic document: %v", err)
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
-	if got := doc["schema_version"]; got != float64(3) {
-		t.Errorf("schema_version = %v, want 3", got)
-	}
+	checkGolden(t, "epic.golden.json", stdout.Bytes())
 }
 
 func TestRunResolvesTheFakeProviderForQueryWithoutProfileOrOrigin(t *testing.T) {

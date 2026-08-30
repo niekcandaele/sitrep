@@ -64,5 +64,10 @@ Flags:
       --provider <name>   Provider to read from: "auto" (the default) detects
                           from the route or Refs; "github", "gitlab", or "jira"
                           forces that driver; "fake" serves a fixture Watchlist
+      --fake-fixture <name>
+                          with --provider fake, use "blocking" or
+                          "no-blocking-links"; omission keeps the legacy fixture
+      --fake-delay <dur>  with --provider fake, add artificial per-read latency
+                          for observing loading and progress
       --query <query>     exact tracker-native Query selecting a Watchlist
       --version           show version information and exit

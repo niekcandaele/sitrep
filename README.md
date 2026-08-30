@@ -356,6 +356,27 @@ contradict a Ref whose Tracker is known. `--profile` resolves routing ambiguity 
 recommended explicit route for native Queries. One Watchlist has at most one selected Profile
 and uses one Provider, host, connection, credential scope, Capability set, and staleness clock.
 
+### Fake Provider demo fixtures
+
+`--provider fake` is a development and demo affordance, not a supported Tracker. With no
+fake-only flags it retains the ten-Ticket v0.1 fixture. Two named scenarios expose Frontier
+states through the shipped binary:
+
+```sh
+sitrep --provider fake 111
+sitrep --provider fake --fake-fixture blocking 200
+sitrep --provider fake --fake-fixture blocking --fake-delay 750ms 200
+sitrep --provider fake --fake-fixture no-blocking-links 200
+sitrep --provider fake --fake-fixture blocking --json --links 200
+```
+
+The `blocking` fixture includes member blockers, Ghost Tickets, an unknown blocker status, an
+unreadable Detail, a two-Ticket cycle, and a self-cycle. `no-blocking-links` serves the same
+Watchlist without declaring that Capability: the Frontier explains that no graph is available,
+and `--json --links` omits blocking and actionability keys. `--fake-delay` adds cancellable
+latency to fake reads so progress and interruption can be watched at human speed. Both
+`--fake-fixture` and `--fake-delay` require an explicit `--provider fake`.
+
 ### Independent membership and cadence knobs
 
 `max_tickets` and `refresh_interval` are independent settings. A selected Profile supplies

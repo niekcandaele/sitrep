@@ -191,6 +191,68 @@ func TestJSONLinksDocument(t *testing.T) {
 	}
 }
 
+func TestJSONLinksBlockingFixtureThroughCLIConstruction(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{
+		"--provider", "fake", "--fake-fixture", "blocking", "--json", "--links", "200",
+	}, &stdout, &stderr, cli.Deps{Now: fixedClock})
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("result = code %d stderr %q, want 0/empty", code, stderr.String())
+	}
+	checkGolden(t, "blocking.golden.json", stdout.Bytes())
+
+	var doc linksWire
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Blocking == nil || len(doc.Blocking.Cycles) == 0 {
+		t.Fatalf("blocking cycles = %+v, want non-empty", doc.Blocking)
+	}
+	var ghost bool
+	for _, ticket := range doc.Tickets {
+		for _, blocker := range ticket.UnmetBlockers {
+			ghost = ghost || !blocker.Member
+		}
+	}
+	if !ghost {
+		t.Error("document has no non-member unmet blocker")
+	}
+}
+
+func TestJSONLinksNoBlockingCapabilityThroughCLIConstruction(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{
+		"--provider", "fake", "--fake-fixture", "no-blocking-links", "--json", "--links", "200",
+	}, &stdout, &stderr, cli.Deps{Now: fixedClock})
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("result = code %d stderr %q, want 0/empty", code, stderr.String())
+	}
+
+	var doc struct {
+		Provider struct {
+			Capabilities map[string]any `json:"capabilities"`
+		} `json:"provider"`
+		Blocking any              `json:"blocking"`
+		Tickets  []map[string]any `json:"tickets"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, present := doc.Provider.Capabilities["blocking_links"]; !present || got != false {
+		t.Errorf("blocking_links = %v, present=%t; want false", got, present)
+	}
+	if doc.Blocking != nil {
+		t.Errorf("blocking = %v, want absent", doc.Blocking)
+	}
+	for _, ticket := range doc.Tickets {
+		for _, key := range []string{"actionable", "links_known", "in_cycle", "unmet_blockers"} {
+			if _, present := ticket[key]; present {
+				t.Errorf("ticket %v carries %q without blocking_links", ticket["key"], key)
+			}
+		}
+	}
+}
+
 // The ADR-0003 acceptance criterion: without --links the default --json run is
 // still one batched Resolve and no Detail read at all, and the document carries
 // no blocking keys.
