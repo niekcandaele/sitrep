@@ -119,13 +119,14 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
 	epoch := m.mouseEpoch
 	layout := m.frontier.layout
+	keys := m.effectiveFrontierKeys()
 
 	return func(msg tea.MouseMsg) tea.Cmd {
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
 			// Modified primary clicks are reserved for terminal gestures such as
 			// shift-drag text selection, and are transparent here.
-			if msg.Button != tea.MouseLeft || msg.Mod != 0 {
+			if !keys.MouseSelect.Enabled() || msg.Button != tea.MouseLeft || msg.Mod != 0 {
 				return nil
 			}
 			if msg.X < 0 || msg.X >= width ||
@@ -139,7 +140,8 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 			return mouseCmd(frontierMouseClickMsg{epoch: epoch, id: id})
 
 		case tea.MouseWheelMsg:
-			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
+			if !keys.MouseWheel.Enabled() ||
+				msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
 				return nil
 			}
 			switch msg.Button {
@@ -154,6 +156,10 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 }
 
 func (m Model) onFrontierMouseClick(msg frontierMouseClickMsg) (tea.Model, tea.Cmd) {
+	keys := m.effectiveFrontierKeys()
+	if !keys.MouseSelect.Enabled() {
+		return m, nil
+	}
 	if _, drawn := m.frontier.layout.nodeAt[msg.id]; !drawn {
 		return m.clearPendingClick(), nil
 	}
@@ -169,12 +175,19 @@ func (m Model) onFrontierMouseClick(msg frontierMouseClickMsg) (tea.Model, tea.C
 		m.lastClickAt = now
 		return m, nil
 	}
-	return m.clearPendingClick().openFrontierNode()
+	m = m.clearPendingClick()
+	if !keys.MouseOpen.Enabled() {
+		return m, nil
+	}
+	return m.openFrontierNode()
 }
 
 // onFrontierMouseWheel scrolls the canvas rather than moving focus: a graph's
 // rows are six lines tall, and moving focus by wheel would feel broken.
 func (m Model) onFrontierMouseWheel(msg frontierMouseWheelMsg) Model {
+	if !m.effectiveFrontierKeys().MouseWheel.Enabled() {
+		return m
+	}
 	m = m.clearPendingClick()
 	m.frontier.offsetY += msg.delta
 	return m.reconcileFrontier(false)
