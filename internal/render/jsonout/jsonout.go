@@ -304,7 +304,9 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 		out.Blocking = &blockingDoc{Cycles: cyclesDoc(doc.Blocking.Cycles())}
 		byID = make(map[model.TicketID]model.Ticket, len(snap.Tickets))
 		for _, t := range snap.Tickets {
-			byID[t.ID] = t
+			if _, dup := byID[t.ID]; !dup {
+				byID[t.ID] = t
+			}
 		}
 	}
 
@@ -338,12 +340,11 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 //
 // A blocker's status is Blocker.Status, the authoritative one BuildBlockingGraph
 // resolved, not the second-hand copy the Link that named the blocker carried:
-// the same Ticket must not appear twice in one document with two statuses. The
-// native word is resolved the same way, from byID, which keys the snapshot's
-// Tickets — duplicate rows in a Ref-list Watchlist carry identical status, so
-// the lookup is safe for this field. Where no authoritative native word is
-// available and the Link's copy belongs to a different Status Category, the key
-// is omitted rather than emitted as a contradiction.
+// the same Ticket must not appear twice in one document with two statuses. byID
+// keeps the snapshot's first occurrence, matching the graph's canonical member,
+// and supplies that member's Native Status. Where no authoritative native word
+// is available and the Link's copy belongs to a different Status Category, the
+// key is omitted rather than emitted as a contradiction.
 func addBlocking(doc *ticketDoc, a model.Actionability, byID map[model.TicketID]model.Ticket) {
 	doc.Actionable = &a.Actionable
 	doc.LinksKnown = &a.LinksKnown

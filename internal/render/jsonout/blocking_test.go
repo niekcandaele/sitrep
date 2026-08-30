@@ -148,6 +148,72 @@ func TestRenderWatchlistKeepsBlockersDiscoveredThroughAnotherMember(t *testing.T
 	}
 }
 
+func TestRenderWatchlistDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "a", Key: "#a", Status: model.StatusTodo},
+		{ID: "a", Key: "#a", Status: model.StatusTodo},
+		{ID: "c", Key: "#c", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{
+		"a": {{
+			Kind: model.LinkBlocks,
+			Target: model.LinkTarget{
+				ID: "c", Key: "#c", Status: model.StatusTodo,
+			},
+		}},
+		"c": {},
+	}
+	graph := model.BuildBlockingGraph(tickets, links, blockingLinks())
+	snap := model.WatchlistSnapshot{Tickets: tickets, Capabilities: blockingLinks()}
+
+	doc := decodeBlocking(t, renderWatchlist(t, snap, &graph))
+	if got := len(doc.Tickets); got != 3 {
+		t.Fatalf("tickets = %d rows, want both a rows and c", got)
+	}
+	if doc.Tickets[0].Key != "#a" || doc.Tickets[1].Key != "#a" {
+		t.Errorf("duplicate Watchlist rows were not preserved: %q, %q", doc.Tickets[0].Key, doc.Tickets[1].Key)
+	}
+	c := doc.Tickets[2]
+	if c.Actionable == nil || *c.Actionable {
+		t.Error("c is Actionable behind the Todo blocker a")
+	}
+	if got := len(c.UnmetBlockers); got != 1 {
+		t.Fatalf("c has %d unmet_blockers, want one canonical a", got)
+	}
+	if blocker := c.UnmetBlockers[0]; blocker.ID != "a" || !blocker.Member {
+		t.Errorf("c's unmet blocker = %+v, want member a", blocker)
+	}
+}
+
+func TestRenderWatchlistUsesCanonicalNativeStatusForDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "a", Key: "#a", Status: model.StatusTodo, NativeStatus: "open"},
+		{ID: "a", Key: "#a", Status: model.StatusDone, NativeStatus: "closed"},
+		{ID: "c", Key: "#c", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{
+		"a": {{
+			Kind: model.LinkBlocks,
+			Target: model.LinkTarget{
+				ID: "c", Key: "#c", Status: model.StatusTodo,
+			},
+		}},
+		"c": {},
+	}
+	graph := model.BuildBlockingGraph(tickets, links, blockingLinks())
+	snap := model.WatchlistSnapshot{Tickets: tickets, Capabilities: blockingLinks()}
+
+	doc := decodeBlocking(t, renderWatchlist(t, snap, &graph))
+	c := doc.Tickets[2]
+	if got := len(c.UnmetBlockers); got != 1 {
+		t.Fatalf("c has %d unmet_blockers, want canonical a", got)
+	}
+	blocker := c.UnmetBlockers[0]
+	if blocker.Status != model.StatusTodo.String() || blocker.NativeStatus != "open" {
+		t.Errorf("c's blocker status = %q (%q), want canonical a's todo (open)", blocker.Status, blocker.NativeStatus)
+	}
+}
+
 // nil Blocking means "not computed", and every blocking key is then absent —
 // not null, not false.
 func TestRenderWatchlistWithoutABlockingGraphEmitsNoBlockingKeys(t *testing.T) {

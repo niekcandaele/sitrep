@@ -675,6 +675,116 @@ func TestDuplicateMembersShareOneBlockingAnswer(t *testing.T) {
 	}
 }
 
+func TestBlocksLinksCanonicalizeDuplicateMemberBlocker(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{
+			ticket("a", model.StatusTodo, "open"),
+			ticket("a", model.StatusTodo, "open"),
+			ticket("c", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"a": {blocks(target("c", model.StatusTodo))},
+			"c": {},
+		}, allCaps)
+
+	c := forID(t, g, "c")
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers, want the duplicate a rows to name one blocker", got)
+	}
+	if blocker := c.Blockers[0]; blocker.Target.ID != "a" || !blocker.Member {
+		t.Errorf("c's blocker = %+v, want member a", blocker)
+	}
+	if got := blockerKeys(c.Unmet()); len(got) != 1 || got[0] != "a" {
+		t.Errorf("c's unmet blockers = %v, want a", got)
+	}
+	if c.Actionable {
+		t.Error("c is Actionable behind the Todo blocker a")
+	}
+}
+
+func TestBlocksLinksUseCanonicalStatusForDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		ticket("a", model.StatusDone, "closed"),
+		ticket("a", model.StatusTodo, "open"),
+		ticket("c", model.StatusTodo, "open"),
+	}
+	throughBlocks := model.BuildBlockingGraph(tickets, map[model.TicketID][]model.Link{
+		"a": {blocks(target("c", model.StatusTodo))},
+		"c": {},
+	}, allCaps)
+	throughBlockedBy := model.BuildBlockingGraph(tickets, map[model.TicketID][]model.Link{
+		"a": {},
+		"c": {blockedBy(target("a", model.StatusDone))},
+	}, allCaps)
+
+	c := forID(t, throughBlocks, "c")
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers through Blocks, want one", got)
+	}
+	if blocker := c.Blockers[0]; blocker.Target.ID != "a" || !blocker.Member || blocker.Status != model.StatusDone {
+		t.Errorf("c's blocker through Blocks = %+v, want canonical member a at Done", blocker)
+	}
+	if !c.Actionable {
+		t.Error("c is not Actionable although canonical a is Done")
+	}
+	mirror := forID(t, throughBlockedBy, "c")
+	if c.Actionable != mirror.Actionable {
+		t.Errorf("Blocks Actionable = %v, BlockedBy Actionable = %v for the same relation", c.Actionable, mirror.Actionable)
+	}
+}
+
+func TestBlocksLinksCanonicalizeDuplicateGhostBlocker(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{
+			ticket("a", model.StatusTodo, "open"),
+			ticket("a", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"a": {blocks(target("ghost", model.StatusTodo))},
+		}, allCaps)
+
+	ghosts := g.Ghosts()
+	if got := len(ghosts); got != 1 {
+		t.Fatalf("Ghosts() = %d, want one ghost", got)
+	}
+	if got := len(ghosts[0].Blockers); got != 1 {
+		t.Fatalf("the Ghost carries %d blockers, want one canonical a", got)
+	}
+	if blocker := ghosts[0].Blockers[0]; blocker.Target.ID != "a" || !blocker.Member {
+		t.Errorf("the Ghost's blocker = %+v, want member a", blocker)
+	}
+}
+
+func TestBlocksLinksTreatEmptyIDBlockerAsAnonymous(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{
+			ticket("", model.StatusDone, "closed"),
+			ticket("c", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"":  {blocks(target("c", model.StatusTodo))},
+			"c": {},
+		}, allCaps)
+
+	c := forID(t, g, "c")
+	if c.Actionable {
+		t.Error("c is Actionable behind an anonymous blocker")
+	}
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers, want the anonymous reverse blocker", got)
+	}
+	blocker := c.Blockers[0]
+	if blocker.Member || blocker.Target.ID != "" || blocker.StatusKnown {
+		t.Errorf("c's blocker = %+v, want an anonymous member-unknown blocker", blocker)
+	}
+	if blocker.Satisfied() {
+		t.Error("the anonymous blocker is satisfied by the empty-ID row's Done status")
+	}
+	if got := len(c.Unmet()); got != 1 {
+		t.Errorf("c has %d unmet blockers, want the anonymous blocker", got)
+	}
+}
+
 // A member with no ID is not an identity. Before, it was indexed like any other
 // member, so every anonymous blocker Link in the Watchlist resolved to it and it
 // came back Actionable: fail-open on an unidentified blocker, which is the exact

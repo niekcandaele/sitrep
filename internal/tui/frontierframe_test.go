@@ -76,6 +76,44 @@ func TestFrontierLayoutPutsAGhostInColumnZero(t *testing.T) {
 	}
 }
 
+func TestFrontierDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("c", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"a": {{
+			Kind: model.LinkBlocks,
+			Target: model.LinkTarget{
+				ID: "c", Key: "c", Status: model.StatusTodo,
+			},
+		}},
+		"c": {},
+	})
+	nodes := frontierNodes(g, tickets, true)
+	index := make(map[model.TicketID]int, len(nodes))
+	for i, node := range nodes {
+		index[node.id] = i
+	}
+
+	edges := frontierEdges(g, index)
+	want := frontierEdge{from: index["c"], to: index["a"]}
+	if len(edges) != 1 || edges[0] != want {
+		t.Errorf("frontierEdges() = %+v, want only %+v", edges, want)
+	}
+
+	for _, node := range nodes {
+		if node.id == "c" {
+			if node.emphasis.badge != "blocked by 1" {
+				t.Errorf("c badge = %q, want %q", node.emphasis.badge, "blocked by 1")
+			}
+			return
+		}
+	}
+	t.Fatal("c has no Frontier node")
+}
+
 // Cycle members share a component and therefore a column. The test is also the
 // termination case: a layout that recursed through the cycle would hang, and
 // the test would fail by timeout rather than by assertion.
