@@ -1,0 +1,161 @@
+{
+  "schema_version": 3,
+  "generated_at": "2026-01-15T12:00:00Z",
+  "provider": {
+    "name": "fake",
+    "capabilities": {
+      "hierarchy": true,
+      "blocking_links": false,
+      "comments": true,
+      "pull_requests": true,
+      "selectors": {
+        "epic": true,
+        "ref_list": true,
+        "query": true
+      }
+    }
+  },
+  "watchlist": {
+    "selector": {
+      "kind": "epic",
+      "ref": "200"
+    },
+    "epic": {
+      "id": "acme/widgets#200",
+      "key": "#200",
+      "title": "Shard rebalancer rollout",
+      "url": "https://tracker.example.test/acme/widgets/200",
+      "status": "in_progress",
+      "native_status": "open"
+    }
+  },
+  "progress": {
+    "todo": 10,
+    "in_progress": 1,
+    "done": 1,
+    "cancelled": 1,
+    "unknown": 0,
+    "total": 13,
+    "denominator": 12,
+    "percent_done": 8
+  },
+  "tickets": [
+    {
+      "id": "acme/widgets#201",
+      "key": "#201",
+      "title": "Ship the rebalancer CLI",
+      "url": "https://tracker.example.test/acme/widgets/201",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#202",
+      "key": "#202",
+      "title": "Wire the rebalancer into the scheduler",
+      "url": "https://tracker.example.test/acme/widgets/202",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#203",
+      "key": "#203",
+      "title": "Backfill shard weights",
+      "url": "https://tracker.example.test/acme/widgets/203",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#204",
+      "key": "#204",
+      "title": "Drain a shard safely",
+      "url": "https://tracker.example.test/acme/widgets/204",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#205",
+      "key": "#205",
+      "title": "Compute shard weights",
+      "url": "https://tracker.example.test/acme/widgets/205",
+      "status": "done",
+      "native_status": "closed",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#206",
+      "key": "#206",
+      "title": "Legacy weight table",
+      "url": "https://tracker.example.test/acme/widgets/206",
+      "status": "cancelled",
+      "native_status": "not planned",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#207",
+      "key": "#207",
+      "title": "Rewrite the placement heuristic",
+      "url": "https://tracker.example.test/acme/widgets/207",
+      "status": "in_progress",
+      "native_status": "In Review",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#208",
+      "key": "#208",
+      "title": "Split the rebalancer queue",
+      "url": "https://tracker.example.test/acme/widgets/208",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#209",
+      "key": "#209",
+      "title": "Merge the rebalancer queue",
+      "url": "https://tracker.example.test/acme/widgets/209",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#210",
+      "key": "#210",
+      "title": "Deduplicate shard moves",
+      "url": "https://tracker.example.test/acme/widgets/210",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#211",
+      "key": "#211",
+      "title": "Publish the rollout runbook",
+      "url": "https://tracker.example.test/acme/widgets/211",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#212",
+      "key": "#212",
+      "title": "Chart rebalancer latency",
+      "url": "https://tracker.example.test/acme/widgets/212",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    },
+    {
+      "id": "acme/widgets#213",
+      "key": "#213",
+      "title": "Rotate rebalancer credentials",
+      "url": "https://tracker.example.test/acme/widgets/213",
+      "status": "todo",
+      "native_status": "open",
+      "repository": "acme/widgets"
+    }
+  ]
+}

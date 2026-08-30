@@ -165,7 +165,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/term"
+
+	"github.com/niekcandaele/sitrep/internal/terminal"
 )
 
 // Options are the monitor's injectable dependencies. Every zero value that has
@@ -227,7 +228,7 @@ func Run(ctx context.Context, opts Options) error {
 	// never arrive. So the question "am I interactive?" is answered here, once,
 	// before the program exists — rather than left to a caller that would have
 	// to ask it again.
-	if !isTerminal(opts.Input) || !isTerminal(opts.Output) {
+	if !terminal.Is(opts.Input) || !terminal.Is(opts.Output) {
 		return ErrNoTerminal
 	}
 
@@ -245,11 +246,4 @@ func Run(ctx context.Context, opts Options) error {
 		return ErrInterrupted
 	}
 	return nil
-}
-
-// isTerminal reports whether v is a real terminal. Anything without a file
-// descriptor — a buffer, a pipe, a test's reader — is not.
-func isTerminal(v any) bool {
-	f, ok := v.(interface{ Fd() uintptr })
-	return ok && term.IsTerminal(f.Fd())
 }

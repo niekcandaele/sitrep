@@ -602,11 +602,7 @@ func (m Model) frontierFooterBlock() []string {
 			"filters do not apply here: the Frontier renders the whole Watchlist", m.width)))
 	}
 	if failed := len(m.frontier.failed); m.frontier.resolved && failed > 0 {
-		notice := fmt.Sprintf(
-			"%d Tickets' Links could not be read; anything they block is not Actionable", failed)
-		if failed == 1 {
-			notice = "1 Ticket's Links could not be read; anything it blocks is not Actionable"
-		}
+		notice := detailfanout.UnreadableLinksNotice(failed)
 		lines = append(lines, m.styles.Error.Render(balancedTruncate(notice, m.width, "…")))
 	}
 	if m.frontier.lastErr != nil {

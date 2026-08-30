@@ -77,6 +77,24 @@ func TestLinksWritesAKeyOnlyForAReadDetail(t *testing.T) {
 	}
 }
 
+func TestUnreadableLinksNotice(t *testing.T) {
+	for _, tc := range []struct {
+		failed int
+		want   string
+	}{
+		{failed: 0, want: ""},
+		{failed: 1, want: "1 Ticket's Links could not be read; anything it blocks is not Actionable"},
+		{failed: 2, want: "2 Tickets' Links could not be read; anything they block is not Actionable"},
+	} {
+		t.Run(fmt.Sprintf("failed_%d", tc.failed), func(t *testing.T) {
+			if got := detailfanout.UnreadableLinksNotice(tc.failed); got != tc.want {
+				t.Errorf("UnreadableLinksNotice(%d) = %q, want %q", tc.failed, got, tc.want)
+			}
+		})
+	}
+}
+
+// Run fetches one outcome per canonical member and surfaces individual failures.
 func TestRunEmitsOneOutcomePerIDAndSurfacesPerIDErrors(t *testing.T) {
 	boom := errors.New("boom")
 	f := func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
