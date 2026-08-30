@@ -687,6 +687,209 @@ func TestFrontierWithoutTheBlockingLinksCapability(t *testing.T) {
 	}
 }
 
+func noBlockingFrontierModel(t *testing.T) (Model, *atomic.Int64) {
+	t.Helper()
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := ListInput{
+		Header: Header{Key: "#0", Title: "no blocking links"},
+		Tickets: []model.Ticket{
+			{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo},
+			{ID: "T-2", Key: "#2", Title: "second", Status: model.StatusInProgress},
+		},
+		FetchedAt: now,
+	}
+	calls := &atomic.Int64{}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			calls.Add(1)
+			return model.Detail{TicketID: id}, model.Capabilities{}, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	row, ok := rowOf(m.rows, "T-2")
+	if !ok {
+		t.Fatal("T-2 has no list row")
+	}
+	m = m.selectRow(row)
+	if m.selectedID != "T-2" {
+		t.Fatalf("selected Ticket = %q, want T-2 before entering Frontier", m.selectedID)
+	}
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeFrontier {
+		t.Fatalf("mode = %v, want Frontier", m.mode)
+	}
+	if len(m.frontier.layout.order) < 2 {
+		t.Fatalf("hidden layout has %d nodes, want at least 2", len(m.frontier.layout.order))
+	}
+	if m.frontier.hasFocus {
+		t.Fatal("no-Capability Frontier has visible focus")
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("Detail calls = %d, want 0", got)
+	}
+	return m, calls
+}
+
+func frontierInteractionSnapshot(m Model) string {
+	return fmt.Sprintf("mode=%v selected=%d/%s list-offset=%d focus=%s/%t canvas=%d,%d help=%t mouse=%t click=%s/%s generation=%d context=%t queue=%v planned=%d done=%d inflight=%d links=%d failed=%d details=%d frame=%q",
+		m.mode, m.selected, m.selectedID, m.offset,
+		m.frontier.focusID, m.frontier.hasFocus, m.frontier.offsetX, m.frontier.offsetY,
+		m.help.ShowAll, m.mouseEnabled, m.lastClickID, m.lastClickAt,
+		m.frontierGeneration, m.frontierContext != nil, m.frontier.queued,
+		m.frontier.planned, m.frontier.done, m.detailFanoutInflight,
+		len(m.frontier.input.Links), len(m.frontier.failed), len(m.details), m.View().Content)
+}
+
+func TestFrontierWithoutBlockingLinksDisablesEveryGraphKey(t *testing.T) {
+	keys := []struct {
+		name string
+		msg  tea.KeyPressMsg
+	}{
+		{name: "enter", msg: enterKey},
+		{name: "j", msg: keyPress("j")},
+		{name: "k", msg: keyPress("k")},
+		{name: "h", msg: keyPress("h")},
+		{name: "l", msg: keyPress("l")},
+		{name: "g", msg: keyPress("g")},
+		{name: "G", msg: keyPress("G")},
+		{name: "left", msg: tea.KeyPressMsg{Code: tea.KeyLeft}},
+		{name: "right", msg: tea.KeyPressMsg{Code: tea.KeyRight}},
+		{name: "up", msg: tea.KeyPressMsg{Code: tea.KeyUp}},
+		{name: "down", msg: tea.KeyPressMsg{Code: tea.KeyDown}},
+		{name: "refresh", msg: keyPress("r")},
+	}
+
+	for _, tt := range keys {
+		t.Run(tt.name, func(t *testing.T) {
+			m, calls := noBlockingFrontierModel(t)
+			before := frontierInteractionSnapshot(m)
+			updated, cmd := m.Update(tt.msg)
+			got := updated.(Model)
+			if cmd != nil {
+				t.Fatalf("disabled key returned command %T", cmd())
+			}
+			if after := frontierInteractionSnapshot(got); after != before {
+				t.Fatalf("disabled key changed the model\nbefore: %s\nafter:  %s", before, after)
+			}
+			if got := calls.Load(); got != 0 {
+				t.Fatalf("Detail calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestFrontierWithoutBlockingLinksKeepsEscapeBindingsLive(t *testing.T) {
+	for _, msg := range []tea.KeyPressMsg{keyPress("v"), escKey} {
+		m, _ := noBlockingFrontierModel(t)
+		selected := m.selectedID
+		m.frontier.focusID = "T-1"
+		if _, drawn := m.frontier.layout.nodeAt[m.frontier.focusID]; !drawn {
+			t.Fatalf("hidden focus %q is not in the layout", m.frontier.focusID)
+		}
+		updated, cmd := m.Update(msg)
+		got := updated.(Model)
+		if got.mode != modeList {
+			t.Fatalf("%q left mode = %v, want list", msg.String(), got.mode)
+		}
+		if got.selectedID != selected {
+			t.Fatalf("%q moved list selection from %q to %q", msg.String(), selected, got.selectedID)
+		}
+		if cmd == nil {
+			t.Fatalf("%q returned no repaint", msg.String())
+		}
+	}
+
+	m, _ := noBlockingFrontierModel(t)
+	updated, _ := m.Update(keyPress("?"))
+	m = updated.(Model)
+	if !m.help.ShowAll {
+		t.Error("? did not expand help")
+	}
+	beforeMouse := m.mouseEnabled
+	updated, _ = m.Update(keyPress("m"))
+	m = updated.(Model)
+	if m.mouseEnabled == beforeMouse {
+		t.Error("m did not toggle mouse capture")
+	}
+	_, cmd := m.Update(keyPress("q"))
+	if cmd == nil {
+		t.Fatal("q returned no quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("q command returned %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestFrontierWithoutBlockingLinksRejectsMouseAtBothStages(t *testing.T) {
+	m, calls := noBlockingFrontierModel(t)
+	m.mouseEnabled = true
+	rect := m.frontier.layout.nodeAt["T-1"]
+	click := tea.MouseClickMsg{X: rect.X + 1, Y: headerHeight + rect.Y + 1, Button: tea.MouseLeft}
+	wheel := tea.MouseWheelMsg{X: rect.X + 1, Y: headerHeight + rect.Y + 1, Button: tea.MouseWheelDown}
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("mouse capture has no Frontier handler")
+	}
+	if cmd := handler(click); cmd != nil {
+		t.Fatalf("disabled click translated to %T", cmd())
+	}
+	if cmd := handler(wheel); cmd != nil {
+		t.Fatalf("disabled wheel translated to %T", cmd())
+	}
+
+	for _, msg := range []tea.Msg{
+		frontierMouseClickMsg{epoch: m.mouseEpoch, id: "T-1"},
+		frontierMouseClickMsg{epoch: m.mouseEpoch, id: "T-1"},
+		frontierMouseWheelMsg{epoch: m.mouseEpoch, delta: 3},
+	} {
+		before := frontierInteractionSnapshot(m)
+		updated, cmd := m.Update(msg)
+		got := updated.(Model)
+		if cmd != nil {
+			t.Fatalf("queued disabled mouse message returned command %T", cmd())
+		}
+		if after := frontierInteractionSnapshot(got); after != before {
+			t.Fatalf("queued disabled mouse message changed the model\nbefore: %s\nafter:  %s", before, after)
+		}
+		m = got
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("Detail calls = %d, want 0", got)
+	}
+}
+
+func TestFrontierQueuedMouseMessageRechecksCurrentBindings(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second", Status: model.StatusTodo},
+	}
+	m := frontierMouseModel(t, tickets, nil, 120, 30)
+	m.mouseEnabled = true
+	rect := m.frontier.layout.nodeAt["T-2"]
+	handler := m.View().OnMouse
+	cmd := handler(tea.MouseClickMsg{X: rect.X + 1, Y: headerHeight + rect.Y + 1, Button: tea.MouseLeft})
+	if cmd == nil {
+		t.Fatal("capable handler produced no queued click")
+	}
+	domain := cmd()
+
+	m.frontier.input.Capabilities.BlockingLinks = false
+	m = m.rebuildFrontier()
+	before := frontierInteractionSnapshot(m)
+	updated, gotCmd := m.Update(domain)
+	got := updated.(Model)
+	if gotCmd != nil {
+		t.Fatalf("disabled queued click returned command %T", gotCmd())
+	}
+	if after := frontierInteractionSnapshot(got); after != before {
+		t.Fatalf("queued click bypassed current effective bindings\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 // Filters are a list gesture. Hiding a node here would delete an edge, which
 // can make a blocked Ticket look Actionable — so the Frontier renders the
 // complete Watchlist and says plainly that it is doing so.

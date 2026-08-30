@@ -321,6 +321,10 @@ func (m Model) rebuildFrontier() Model {
 	} else {
 		m.frontier.hasFocus = true
 	}
+	if !m.effectiveFrontierKeys().Open.Enabled() {
+		m.frontier.hasFocus = false
+		return m.reconcileFrontier(false)
+	}
 	return m.reconcileFrontier(true)
 }
 
@@ -357,11 +361,13 @@ func (m Model) leaveFrontier() (tea.Model, tea.Cmd) {
 	m = m.retireFrontierFanout()
 	m.mouseEpoch++
 	m.mode = modeList
-	// Selection survives the toggle in both directions. A focused node the list
-	// is currently filtering out is left alone: moving the list selection
-	// somewhere the user cannot see is worse than leaving it where they put it.
-	if row, ok := rowOf(m.rows, m.frontier.focusID); ok {
-		m = m.selectRow(row)
+	// Selection survives the toggle in both directions. Only visible focus may
+	// replace it: the no-Capability screen retains a hidden layout for internal
+	// consistency, but must not move selection to a node the user never saw.
+	if m.frontier.hasFocus {
+		if row, ok := rowOf(m.rows, m.frontier.focusID); ok {
+			m = m.selectRow(row)
+		}
 	}
 	m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 	return m, repaint
@@ -435,37 +441,38 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 // onFrontierKey dispatches a key press on the Frontier. Neither d nor / is
 // bound here: filters do not apply to this screen and the footer says so.
 func (m Model) onFrontierKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	keys := m.effectiveFrontierKeys()
 	switch {
-	case key.Matches(msg, m.frontierKeys.Quit):
+	case key.Matches(msg, keys.Quit):
 		return m.quit(msg), tea.Quit
 
-	case key.Matches(msg, m.frontierKeys.Toggle):
+	case key.Matches(msg, keys.Toggle):
 		return m.leaveFrontier()
 
-	case key.Matches(msg, m.frontierKeys.Open):
+	case key.Matches(msg, keys.Open):
 		return m.openFrontierNode()
 
-	case key.Matches(msg, m.frontierKeys.Refresh):
+	case key.Matches(msg, keys.Refresh):
 		return m.refreshFrontier()
 
-	case key.Matches(msg, m.frontierKeys.ToggleMouse):
+	case key.Matches(msg, keys.ToggleMouse):
 		return m.toggleMouse(), nil
 
-	case key.Matches(msg, m.frontierKeys.Help):
+	case key.Matches(msg, keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m.reconcileFrontier(true), nil
 
-	case key.Matches(msg, m.frontierKeys.Up):
+	case key.Matches(msg, keys.Up):
 		return m.moveFrontierFocus(0, -1), nil
-	case key.Matches(msg, m.frontierKeys.Down):
+	case key.Matches(msg, keys.Down):
 		return m.moveFrontierFocus(0, 1), nil
-	case key.Matches(msg, m.frontierKeys.Left):
+	case key.Matches(msg, keys.Left):
 		return m.moveFrontierFocus(-1, 0), nil
-	case key.Matches(msg, m.frontierKeys.Right):
+	case key.Matches(msg, keys.Right):
 		return m.moveFrontierFocus(1, 0), nil
-	case key.Matches(msg, m.frontierKeys.Home):
+	case key.Matches(msg, keys.Home):
 		return m.focusFrontierNodeAt(0), nil
-	case key.Matches(msg, m.frontierKeys.End):
+	case key.Matches(msg, keys.End):
 		return m.focusFrontierNodeAt(len(m.frontier.layout.order) - 1), nil
 	}
 	return m, nil

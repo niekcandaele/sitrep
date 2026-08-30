@@ -1011,17 +1011,15 @@ func (m Model) helpKeys() help.KeyMap {
 		return m.responsiveHelpKeys(m.searchKeys)
 	}
 	if m.mode == modeFrontier {
-		return m.responsiveHelpKeys(m.frontierGraphKeys())
+		return m.responsiveHelpKeys(m.effectiveFrontierKeys())
 	}
 	return m.responsiveHelpKeys(m.keys)
 }
 
-// frontierGraphKeys is the Frontier's key map with the bindings that need a
-// graph switched off when there is none. Without the BlockingLinks Capability
-// the screen draws no nodes and issued no fetch, so opening a node, re-reading
-// Details and moving focus have nothing to act on — and a footer offering them
-// would quietly lie, which is the reason d and / are not bound here at all.
-func (m Model) frontierGraphKeys() FrontierKeyMap {
+// effectiveFrontierKeys is the Frontier's help and dispatch surface. Without
+// the BlockingLinks Capability, graph interactions are disabled in one place
+// so the advertised bindings and every input path cannot drift apart.
+func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 	keys := m.frontierKeys
 	if m.frontier.input.Capabilities.BlockingLinks {
 		return keys
