@@ -1763,6 +1763,57 @@ func TestListMouseWheelMovesTicketsAndDerivesOffset(t *testing.T) {
 	}
 }
 
+func TestListResizeRejectsStaleMouseCallbackAndFreshFrameActs(t *testing.T) {
+	m := mouseListModel(t, Options{}, []model.Ticket{
+		ticket("#1", model.StatusInProgress),
+		ticket("#2", model.StatusTodo),
+		ticket("#3", model.StatusTodo),
+	}, 80, 8)
+	wheel := tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown}
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("list view has no mouse handler")
+	}
+	cmd := handler(wheel)
+	if cmd == nil {
+		t.Fatal("pre-resize wheel produced no domain message")
+	}
+	stale, ok := cmd().(listMouseWheelMsg)
+	if !ok {
+		t.Fatalf("pre-resize wheel translated to %T", cmd())
+	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 79, Height: 8})
+	resized := updated.(Model)
+	if resized.mouseEpoch != m.mouseEpoch+1 {
+		t.Fatalf("resize epoch = %d, want %d", resized.mouseEpoch, m.mouseEpoch+1)
+	}
+	beforeID, beforeOffset, beforeClick := resized.selectedID, resized.offset, resized.lastClickID
+	updated, cmd = resized.Update(stale)
+	got := updated.(Model)
+	if cmd != nil || got.selectedID != beforeID || got.offset != beforeOffset || got.lastClickID != beforeClick {
+		t.Errorf("stale resize wheel mutated list: selected=%q offset=%d pending=%q cmd=%v", got.selectedID, got.offset, got.lastClickID, cmd)
+	}
+
+	freshHandler := resized.View().OnMouse
+	if freshHandler == nil {
+		t.Fatal("resized list view has no mouse handler")
+	}
+	cmd = freshHandler(wheel)
+	if cmd == nil {
+		t.Fatal("fresh resize wheel produced no domain message")
+	}
+	fresh, ok := cmd().(listMouseWheelMsg)
+	if !ok || fresh.epoch != resized.mouseEpoch {
+		t.Fatalf("fresh resize wheel = %#v, want current-epoch list wheel", fresh)
+	}
+	updated, cmd = resized.Update(fresh)
+	got = updated.(Model)
+	if cmd != nil || got.selectedID == resized.selectedID {
+		t.Errorf("fresh resize wheel did not act: selected=%q want after %q", got.selectedID, resized.selectedID)
+	}
+}
+
 func TestListWheelWorksWhileSearching(t *testing.T) {
 	m := mouseListModel(t, Options{}, []model.Ticket{
 		{ID: "#1", Key: "#1", Title: "match one", Status: model.StatusTodo},
@@ -2062,6 +2113,10 @@ func TestTeatestMouseAfterFilterAndResize(t *testing.T) {
 		})
 		s.waitFor(t, "Widget sync v2")
 		s.tm.Send(tea.WindowSizeMsg{Width: termWidth, Height: 10})
+		// Input handlers are installed with rendered frames. Wait for the short
+		// resized footer before sending mouse input, rather than letting queued
+		// wheel events be translated by the old viewport's handler.
+		s.waitFor(t, "? help …")
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
 		s.waitFor(t, "▸ #7")
@@ -2073,6 +2128,7 @@ func TestTeatestMouseAfterFilterAndResize(t *testing.T) {
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
 		s.waitFor(t, "▸ #7")
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
+		s.waitFor(t, "▸ #115")
 		s.tm.Send(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
 		s.waitFor(t, "CANCELLED (1)")
 

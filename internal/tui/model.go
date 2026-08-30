@@ -82,6 +82,16 @@ type Model struct {
 	// Provider work; the generation remains the correctness guard when a
 	// Provider races with or ignores cancellation.
 	frontierGeneration int
+	// layoutFrontierFn is an instance-owned test seam. Its nil fallback keeps
+	// model-literal fixtures equivalent to production Models.
+	layoutFrontierFn func(model.BlockingGraph, []frontierNode, int) frontierLayout
+	// frontierRebuildVersion identifies the newest evidence or width request.
+	// A pending target is serviced by at most one physical Bubble Tea tick.
+	frontierRebuildVersion           int
+	frontierRebuildPendingVersion    int
+	frontierRebuildPendingGeneration int
+	frontierRebuildTimerID           int
+	frontierRebuildNextTimerID       int
 	// detailFanoutInflight counts issued bulk reads across Frontier generations.
 	// Cancellation does not release a slot until the command returns, so rapid
 	// leave/re-entry cycles can never exceed detailfanout.Parallelism.
@@ -193,16 +203,17 @@ func New(ctx context.Context, opts Options) Model {
 		newReadContext: func() (context.Context, context.CancelFunc) {
 			return context.WithCancel(sessionCtx)
 		},
-		mouseEnabled:  !opts.NoMouse,
-		details:       make(map[model.TicketID]detailEntry),
-		keys:          DefaultKeyMap(),
-		searchKeys:    DefaultSearchKeyMap(),
-		detailKeys:    DefaultDetailKeyMap(),
-		frontierKeys:  DefaultFrontierKeyMap(),
-		help:          help.New(),
-		styles:        DefaultStyles(true),
-		markdownTheme: markdownDark,
-		markdown:      newDetailMarkdownRenderers(0, markdownDark),
+		mouseEnabled:     !opts.NoMouse,
+		details:          make(map[model.TicketID]detailEntry),
+		keys:             DefaultKeyMap(),
+		searchKeys:       DefaultSearchKeyMap(),
+		detailKeys:       DefaultDetailKeyMap(),
+		frontierKeys:     DefaultFrontierKeyMap(),
+		layoutFrontierFn: layoutFrontier,
+		help:             help.New(),
+		styles:           DefaultStyles(true),
+		markdownTheme:    markdownDark,
+		markdown:         newDetailMarkdownRenderers(0, markdownDark),
 	}
 	m = m.syncMouseKeys()
 
@@ -278,6 +289,7 @@ func (m Model) finishDetailRead() Model {
 // seat, abandons work not yet issued, and advances the stale-answer guard. The
 // shared in-flight count is deliberately untouched until those commands return.
 func (m Model) retireFrontierFanout() Model {
+	m = m.discardPendingFrontierRebuild()
 	if m.cancelFrontier != nil {
 		m.cancelFrontier()
 	}
@@ -322,6 +334,11 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		widthChanged := msg.Width != m.width
+		heightChanged := msg.Height != m.height
+		if widthChanged || heightChanged {
+			m.mouseEpoch++
+		}
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.help.SetWidth(msg.Width)
@@ -333,11 +350,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.reconcileDetail(true)
 		}
 		if m.mode == modeFrontier {
-			// The card width can change on a very narrow terminal, so the canvas
-			// is rebuilt rather than only re-clamped.
-			m = m.rebuildFrontier()
+			// Height changes alter only the viewport. A width change may alter card
+			// geometry, but preserves the displayed canvas until its trailing-edge
+			// replacement settles.
+			m = m.reconcileFrontier(true)
+			if widthChanged {
+				m, cmd := m.requestFrontierRebuild()
+				return m, cmd
+			}
 		}
 		return m, nil
+
+	case frontierRebuildMsg:
+		return m.onFrontierRebuild(msg)
 
 	case frontierDetailMsg:
 		return m.onFrontierDetail(msg)

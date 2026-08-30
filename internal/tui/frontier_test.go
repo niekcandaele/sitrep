@@ -3053,3 +3053,215 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 		t.Errorf("the carried failure remedy went away across a refresh:\n%s", frame)
 	}
 }
+
+func TestFrontierRebuildTrailingEdgeAndModelLayoutSeam(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-0", Key: "T-0", Title: "zero", Status: model.StatusTodo},
+		{ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo},
+	}
+	m := Model{
+		mode:               modeFrontier,
+		width:              120,
+		height:             30,
+		frontierKeys:       DefaultFrontierKeyMap(),
+		frontierGeneration: 7,
+		frontier: frontierState{input: FrontierInput{
+			Tickets: tickets, Links: map[model.TicketID][]model.Link{},
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		}},
+	}
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, width)
+	}
+	m = m.rebuildFrontier()
+	layouts = 0
+
+	m, first := m.requestFrontierRebuild()
+	if first == nil || m.frontierRebuildTimerID == 0 {
+		t.Fatal("first unresolved request did not own one physical tick")
+	}
+	firstID, firstVersion := m.frontierRebuildTimerID, m.frontierRebuildPendingVersion
+	m, second := m.requestFrontierRebuild()
+	if second != nil || m.frontierRebuildTimerID != firstID || m.frontierRebuildPendingVersion == firstVersion {
+		t.Fatalf("second request = timer %d version %d cmd %v, want same timer and newer version without a command", m.frontierRebuildTimerID, m.frontierRebuildPendingVersion, second)
+	}
+
+	updated, replacement := m.Update(frontierRebuildMsg{timerID: firstID, observedVersion: firstVersion})
+	m = updated.(Model)
+	if layouts != 0 || replacement == nil || m.frontierRebuildTimerID == 0 {
+		t.Fatalf("stale tick layouts=%d replacement=%v timer=%d, want 0/new timer", layouts, replacement, m.frontierRebuildTimerID)
+	}
+	settledID, settledVersion := m.frontierRebuildTimerID, m.frontierRebuildPendingVersion
+	updated, _ = m.Update(frontierRebuildMsg{timerID: settledID, observedVersion: settledVersion})
+	m = updated.(Model)
+	if layouts != 1 || m.frontierRebuildTimerID != 0 || m.frontierRebuildPendingVersion != 0 {
+		t.Fatalf("quiet tick layouts=%d timer=%d pending=%d, want one settled replacement", layouts, m.frontierRebuildTimerID, m.frontierRebuildPendingVersion)
+	}
+
+	m = m.seatFanoutLinks("T-0", nil).seatFanoutLinks("T-1", nil)
+	m, immediate := m.frontierEvidenceChanged()
+	if layouts != 2 || immediate == nil || !m.frontier.isResolved() {
+		t.Fatalf("resolved evidence layouts=%d immediate=%v resolved=%t, want one synchronous replacement", layouts, immediate, m.frontier.isResolved())
+	}
+}
+
+func TestFrontierResizeDefersOnlyWidthAndInvalidatesMouseEpoch(t *testing.T) {
+	m, _ := noBlockingFrontierModel(t)
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, width)
+	}
+	startEpoch := m.mouseEpoch
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 119, Height: 30})
+	m = updated.(Model)
+	if layouts != 0 || cmd == nil || m.mouseEpoch == startEpoch {
+		t.Fatalf("width resize layouts=%d cmd=%v epoch=%d, want deferred layout and invalidated mouse", layouts, cmd, m.mouseEpoch)
+	}
+	updated, _ = m.Update(frontierRebuildMsg{timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion})
+	m = updated.(Model)
+	if layouts != 1 {
+		t.Fatalf("settled width layouts=%d, want 1", layouts)
+	}
+	epoch := m.mouseEpoch
+	updated, cmd = m.Update(tea.WindowSizeMsg{Width: 119, Height: 31})
+	m = updated.(Model)
+	if layouts != 1 || cmd != nil || m.frontierRebuildTimerID != 0 || m.mouseEpoch == epoch {
+		t.Fatalf("height resize layouts=%d cmd=%v timer=%d epoch=%d, want no layout/timer and invalidated mouse", layouts, cmd, m.frontierRebuildTimerID, m.mouseEpoch)
+	}
+}
+
+func TestFrontierBurstCoalescesOneHundredEvidenceUpdates(t *testing.T) {
+	tickets := make([]model.Ticket, 100)
+	for i := range tickets {
+		id := model.TicketID(fmt.Sprintf("T-%03d", i))
+		tickets[i] = model.Ticket{ID: id, Key: string(id), Title: string(id), Status: model.StatusTodo}
+	}
+	m := Model{
+		mode:               modeFrontier,
+		width:              120,
+		height:             30,
+		frontierKeys:       DefaultFrontierKeyMap(),
+		frontierGeneration: 1,
+		details:            make(map[model.TicketID]detailEntry),
+		now:                time.Now,
+		frontier: frontierState{input: FrontierInput{
+			Tickets: tickets, Links: map[model.TicketID][]model.Link{},
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		}, planned: len(tickets)},
+	}
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, width)
+	}
+	m = m.rebuildFrontier()
+	layouts = 0
+
+	var firstID, firstVersion int
+	for i, ticket := range tickets[:99] {
+		links := []model.Link(nil)
+		if i == 1 {
+			links = blockedBy(string(tickets[0].ID))
+		}
+		if i == 2 {
+			links = blockedBy("GHOST")
+		}
+		updated, _ := m.Update(frontierDetailMsg{
+			generation: m.frontierGeneration, id: ticket.ID,
+			detail: model.Detail{TicketID: ticket.ID, Links: links}, caps: m.frontier.input.Capabilities,
+		})
+		m = updated.(Model)
+		if i == 0 {
+			firstID, firstVersion = m.frontierRebuildTimerID, m.frontierRebuildPendingVersion
+		}
+	}
+	if layouts != 0 || m.frontier.isResolved() || m.frontierRebuildTimerID == 0 {
+		t.Fatalf("partial burst layouts=%d resolved=%t timer=%d, want no layout/unresolved/one timer", layouts, m.frontier.isResolved(), m.frontierRebuildTimerID)
+	}
+	for _, node := range frontierNodes(m.frontier.graph, tickets, false) {
+		if node.id != "GHOST" && node.emphasis.badge != "PENDING" {
+			t.Fatalf("partial burst node %q badge=%q, want PENDING", node.id, node.emphasis.badge)
+		}
+	}
+
+	updated, cmd := m.Update(frontierRebuildMsg{timerID: firstID, observedVersion: firstVersion})
+	m = updated.(Model)
+	if layouts != 0 || cmd == nil || m.frontierRebuildTimerID == 0 {
+		t.Fatalf("stale burst tick layouts=%d cmd=%v timer=%d, want no layout/new tick", layouts, cmd, m.frontierRebuildTimerID)
+	}
+	updated, _ = m.Update(frontierRebuildMsg{timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion})
+	m = updated.(Model)
+	if layouts != 1 {
+		t.Fatalf("quiet partial burst layouts=%d, want one", layouts)
+	}
+
+	epoch := m.mouseEpoch
+	last := tickets[len(tickets)-1]
+	updated, _ = m.Update(frontierDetailMsg{
+		generation: m.frontierGeneration, id: last.ID,
+		detail: model.Detail{TicketID: last.ID}, caps: m.frontier.input.Capabilities,
+	})
+	m = updated.(Model)
+	if layouts != 2 || !m.frontier.isResolved() || m.mouseEpoch == epoch {
+		t.Fatalf("final evidence layouts=%d resolved=%t epoch=%d/%d, want synchronous final replacement", layouts, m.frontier.isResolved(), m.mouseEpoch, epoch)
+	}
+	if layouts >= len(tickets) {
+		t.Fatalf("burst used %d layouts for %d answers", layouts, len(tickets))
+	}
+}
+
+func TestFrontierImmediateRebuildRetainsOutstandingTickOwnership(t *testing.T) {
+	m := Model{
+		mode:         modeFrontier,
+		width:        120,
+		height:       30,
+		frontierKeys: DefaultFrontierKeyMap(),
+		frontier: frontierState{input: FrontierInput{
+			Tickets:      []model.Ticket{{ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo}},
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		}},
+	}
+	m = m.rebuildFrontier()
+	m, first := m.requestFrontierRebuild()
+	if first == nil {
+		t.Fatal("initial request did not arm a tick")
+	}
+	owned := m.frontierRebuildTimerID
+	m = m.rebuildFrontier()
+	m, second := m.requestFrontierRebuild()
+	if second != nil || m.frontierRebuildTimerID != owned {
+		t.Fatalf("immediate rebuild stacked a physical tick: cmd=%v timer=%d want retained %d", second, m.frontierRebuildTimerID, owned)
+	}
+}
+
+func TestFrontierHiddenDetailEvidenceDoesNotScheduleOrLayout(t *testing.T) {
+	m := Model{
+		mode:               modeDetail,
+		width:              120,
+		height:             30,
+		frontierKeys:       DefaultFrontierKeyMap(),
+		frontierGeneration: 1,
+		details:            make(map[model.TicketID]detailEntry),
+		now:                time.Now,
+		frontier: frontierState{input: FrontierInput{
+			Tickets:      []model.Ticket{{ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo}},
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		}, planned: 1},
+	}
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, width)
+	}
+	updated, cmd := m.Update(frontierDetailMsg{
+		generation: 1, id: "T-1", detail: model.Detail{TicketID: "T-1"},
+		caps: model.Capabilities{BlockingLinks: true},
+	})
+	m = updated.(Model)
+	if layouts != 0 || cmd != nil || m.frontierRebuildTimerID != 0 || !m.frontier.isResolved() {
+		t.Fatalf("hidden answer layouts=%d cmd=%v timer=%d resolved=%t, want folded evidence only", layouts, cmd, m.frontierRebuildTimerID, m.frontier.isResolved())
+	}
+}
