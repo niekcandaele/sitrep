@@ -127,6 +127,11 @@ Flags:
       --provider <name>   Provider to read from: "auto" (the default) detects
                           from the route or Refs; "github", "gitlab", or "jira"
                           forces that driver; "fake" serves a fixture Watchlist
+      --fake-fixture <name>
+                          with --provider fake, use "blocking" or
+                          "no-blocking-links"; omission keeps the legacy fixture
+      --fake-delay <dur>  with --provider fake, add artificial per-read latency
+                          for observing loading and progress
       --query <query>     exact tracker-native Query selecting a Watchlist
       --version           show version information and exit
 `
@@ -261,6 +266,8 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	withLinks := fs.Bool("links", false, "with --json, add Actionable and unmet blockers (per-Ticket fetch)")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
+	fakeFixture := fs.String("fake-fixture", "", "fake fixture: blocking or no-blocking-links")
+	fakeDelay := fs.Duration("fake-delay", 0, "artificial latency for fake Provider reads")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
 	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
 	noMouse := fs.Bool("no-mouse", false, "start the monitor without mouse capture")
@@ -305,6 +312,17 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	if !knownProviderName(*providerName) {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
+	}
+
+	fakeSettings := fakeProviderSettings{
+		fixture:    *fakeFixture,
+		fixtureSet: isFlagSet(fs, "fake-fixture"),
+		delay:      *fakeDelay,
+		delaySet:   isFlagSet(fs, "fake-delay"),
+	}
+	if code, ok := checkFakeProviderSettings(stderr,
+		isFlagSet(fs, "provider") && *providerName == providerFake, fakeSettings); !ok {
+		return code
 	}
 
 	querySelected := isFlagSet(fs, "query")
@@ -355,7 +373,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	p := deps.Provider
 	if p == nil {
-		if p, err = deps.newProvider(*providerName, selection.route, prof, cfg.Path); err != nil {
+		if p, err = deps.newProvider(*providerName, selection.route, prof, cfg.Path, fakeSettings); err != nil {
 			return runtimeError(stderr, err)
 		}
 	}
@@ -590,6 +608,31 @@ func checkInterval(stderr io.Writer, d time.Duration) (int, bool) {
 	default:
 		return exitOK, true
 	}
+}
+
+func checkFakeProviderSettings(stderr io.Writer, explicitFake bool, settings fakeProviderSettings) (int, bool) {
+	if !explicitFake {
+		switch {
+		case settings.fixtureSet:
+			return usageError(stderr, "--fake-fixture requires --provider fake"), false
+		case settings.delaySet:
+			return usageError(stderr, "--fake-delay requires --provider fake"), false
+		default:
+			return exitOK, true
+		}
+	}
+	if settings.fixtureSet {
+		switch settings.fixture {
+		case fakeFixtureBlocking, fakeFixtureNoBlockingLinks:
+		default:
+			return usageError(stderr,
+				`--fake-fixture must be "blocking" or "no-blocking-links"`), false
+		}
+	}
+	if settings.delaySet && settings.delay <= 0 {
+		return usageError(stderr, "--fake-delay must be positive"), false
+	}
+	return exitOK, true
 }
 
 // writeReport writes one rendered report to stdout. render is the mode's
@@ -1142,7 +1185,7 @@ func flagErrorMessage(fs *flag.FlagSet, err error) string {
 	// An undeclared flag is not in that list, and the flag package strips the
 	// second dash off whatever the user typed.
 	msg = strings.Replace(msg, "not defined: -", "not defined: --", 1)
-	if strings.Contains(msg, "--interval") {
+	if strings.Contains(msg, "--interval") || strings.Contains(msg, "--fake-delay") {
 		msg += " (durations need a unit: 60s, 2m)"
 	}
 	return msg
@@ -1212,7 +1255,17 @@ const (
 	providerGitLab = "gitlab"
 	providerJira   = "jira"
 	providerFake   = "fake"
+
+	fakeFixtureBlocking        = "blocking"
+	fakeFixtureNoBlockingLinks = "no-blocking-links"
 )
+
+type fakeProviderSettings struct {
+	fixture    string
+	fixtureSet bool
+	delay      time.Duration
+	delaySet   bool
+}
 
 // defaultProviderName auto-detects the Provider from the Ref: sitrep can
 // tell a GitHub URL from a GitLab one, so it should not make the user say.
@@ -1251,10 +1304,12 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 //
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
-func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string) (provider.Provider, error) {
+func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string,
+	fakeSettings fakeProviderSettings,
+) (provider.Provider, error) {
 	maxTickets := effectiveMaxTickets(prof)
 	if name == providerFake {
-		return fake.New(fake.WithMaxTickets(maxTickets)), nil
+		return newFakeProvider(maxTickets, fakeSettings), nil
 	}
 
 	switch route.tracker {
@@ -1267,6 +1322,25 @@ func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profi
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", route.raw)
 	}
+}
+
+func newFakeProvider(maxTickets int, settings fakeProviderSettings) *fake.Provider {
+	options := []fake.Option{fake.WithMaxTickets(maxTickets)}
+	switch settings.fixture {
+	case "":
+	case fakeFixtureBlocking:
+		options = append(options, fake.WithBlockingFixture())
+	case fakeFixtureNoBlockingLinks:
+		caps := fake.FixtureBlockingSnapshot().Capabilities
+		caps.BlockingLinks = false
+		options = append(options, fake.WithBlockingFixture(), fake.WithCapabilities(caps))
+	default:
+		panic("unvalidated fake fixture " + settings.fixture)
+	}
+	if settings.delay > 0 {
+		options = append(options, fake.WithDelay(settings.delay))
+	}
+	return fake.New(options...)
 }
 
 // forceTracker applies an explicit --provider to a Ref, which is the one thing

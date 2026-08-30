@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -139,6 +140,123 @@ func TestRun(t *testing.T) {
 			}
 			if tt.wantEmptyError && stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestFakeProviderFlagsValidateBeforeRuntimeWork(t *testing.T) {
+	help, err := os.ReadFile("testdata/help.golden.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name         string
+		args         []string
+		wantPrefix   string
+		wantContains []string
+	}{
+		{
+			name:       "fixture requires explicit fake Provider",
+			args:       []string{"--fake-fixture", "blocking", "111"},
+			wantPrefix: "sitrep: --fake-fixture requires --provider fake\n\n",
+		},
+		{
+			name:       "delay requires explicit fake Provider",
+			args:       []string{"--fake-delay", "1s", "111"},
+			wantPrefix: "sitrep: --fake-delay requires --provider fake\n\n",
+		},
+		{
+			name:       "fixture rejects a real Provider",
+			args:       []string{"--provider", "github", "--fake-fixture", "blocking", "111"},
+			wantPrefix: "sitrep: --fake-fixture requires --provider fake\n\n",
+		},
+		{
+			name:         "empty fixture",
+			args:         []string{"--provider", "fake", "--fake-fixture=", "111"},
+			wantPrefix:   "sitrep: --fake-fixture must be",
+			wantContains: []string{"blocking", "no-blocking-links"},
+		},
+		{
+			name:         "unknown fixture",
+			args:         []string{"--provider", "fake", "--fake-fixture", "dense", "111"},
+			wantPrefix:   "sitrep: --fake-fixture must be",
+			wantContains: []string{"blocking", "no-blocking-links"},
+		},
+		{
+			name:       "explicit zero delay",
+			args:       []string{"--provider", "fake", "--fake-delay=0", "111"},
+			wantPrefix: "sitrep: --fake-delay must be positive\n\n",
+		},
+		{
+			name:       "negative delay",
+			args:       []string{"--provider", "fake", "--fake-delay", "-1s", "111"},
+			wantPrefix: "sitrep: --fake-delay must be positive\n\n",
+		},
+		{
+			name:         "malformed delay",
+			args:         []string{"--provider", "fake", "--fake-delay=slow", "111"},
+			wantPrefix:   "sitrep: ",
+			wantContains: []string{"--fake-delay", "durations need a unit"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{
+				Stdin:      panicReader{},
+				OpenTTY:    panicTTY,
+				ConfigPath: "/config/must-not-be-read",
+				RemoteLookup: func(context.Context, string, string) (string, error) {
+					panic("origin was read")
+				},
+			})
+			if code != 2 || stdout.Len() != 0 {
+				t.Fatalf("result = code %d stdout %q stderr %q, want 2/empty", code, stdout.String(), stderr.String())
+			}
+			if !strings.HasPrefix(stderr.String(), tt.wantPrefix) {
+				t.Errorf("stderr = %q, want prefix %q", stderr.String(), tt.wantPrefix)
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if !strings.HasSuffix(stderr.String(), string(help)) {
+				t.Error("usage error does not append exact help")
+			}
+		})
+	}
+}
+
+func TestFakeProviderFlagsPreserveEarlierValidationAndEarlyResults(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "help", args: []string{"--help", "--fake-fixture", "blocking"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "version", args: []string{"--version", "--provider", "fake", "--fake-delay", "1s"}, wantCode: 0, wantStdout: "sitrep "},
+		{name: "mode conflict", args: []string{"--json", "--plain", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "mutually exclusive"},
+		{name: "links mode", args: []string{"--links", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "--links requires --json"},
+		{name: "monitor interval", args: []string{"--interval", "0", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "refresh interval must be positive"},
+		{name: "unknown Provider", args: []string{"--provider", "bogus", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "unknown provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{Stdin: panicReader{}, OpenTTY: panicTTY})
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tt.wantCode)
+			}
+			if tt.wantStdout != "" && !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+			if tt.wantStderr != "" && !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
 			}
 		})
 	}
