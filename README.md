@@ -371,15 +371,18 @@ sitrep --provider fake 111
 sitrep --provider fake --fake-fixture blocking 200
 sitrep --provider fake --fake-fixture blocking --fake-delay 750ms 200
 sitrep --provider fake --fake-fixture no-blocking-links 200
-sitrep --provider fake --fake-fixture blocking --json --links 200
+sitrep --provider fake --fake-fixture blocking --fake-delay 750ms --json --links 200
+sitrep --provider fake --fake-fixture no-blocking-links --json --links 200
 ```
 
 The `blocking` fixture includes member blockers, Ghost Tickets, an unknown blocker status, an
-unreadable Detail, a two-Ticket cycle, and a self-cycle. `no-blocking-links` serves the same
+unreadable Detail, a two-Ticket cycle, and a self-cycle. The delayed `--json --links` command
+shows its one-shot stderr progress at human speed. `no-blocking-links` serves the same
 Watchlist without declaring that Capability: the Frontier explains that no graph is available,
-and `--json --links` omits blocking and actionability keys. `--fake-delay` adds cancellable
-latency to fake reads so progress and interruption can be watched at human speed. Both
-`--fake-fixture` and `--fake-delay` require an explicit `--provider fake`.
+and its `--json --links` command demonstrates the explanatory stderr notice while blocking
+and actionability keys stay absent. `--fake-delay` adds cancellable latency to fake reads so
+progress and interruption can be watched at human speed. Both `--fake-fixture` and
+`--fake-delay` require an explicit `--provider fake`.
 
 ### Independent membership and cadence knobs
 
@@ -612,13 +615,23 @@ with `status: "todo", status_known: true` is honestly blocked; one with
 the Ticket not actionable, and a consumer can tell which is which.
 
 These keys are **absent, not null**, when they were not computed — without `--links`, or
-when the Provider does not declare the `blocking_links` Capability (which is silent, like
-every other optional Capability, and issues no fetch). Absence means "not computed"; a
-`false` under `--links` is a computed answer, and the two must never look alike.
+when the Provider does not declare the `blocking_links` Capability. Absence means "not
+computed"; a `false` under `--links` is a computed answer, and the two must never look alike.
+An explicit `--links` request against a Provider without that Capability makes no Detail
+fetches, exits `0`, and writes one explanatory `sitrep:` line to stderr while those keys remain
+absent.
 
-A failed Detail fetch is not fatal: the run still exits `0` and the affected Ticket carries
-`links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
-passing a half-fetched Watchlist off as complete.
+Status reporting never changes the JSON document or its schema. With stderr attached to a
+terminal, sitrep redraws one transient `reading Detail N/M` line in place and erases it when
+the fan-out finishes. Redirected or piped stderr receives no progress or carriage-return
+sequences. If one or more Detail reads fail, both transports receive one durable aggregate
+singular/plural notice after the completed fan-out; individual Provider errors are not printed.
+The failed reads remain non-fatal: the run exits `0` and each affected Ticket carries
+`links_known: false`.
+
+An interrupted run erases transient terminal progress, emits no aggregate warning or JSON,
+and exits `130` rather than passing a half-fetched Watchlist off as complete. Piped stderr
+therefore remains quiet on interrupt.
 
 A single Ref that resolves to a plain Ticket fails with `--links` rather than exiting `0`
 with a document missing every key that was asked for: Actionable is a Watchlist-level

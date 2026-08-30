@@ -16,6 +16,7 @@ package detailfanout
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -78,6 +79,19 @@ type Outcome struct {
 // multiply rate-limit pressure, and a fan-out the user asked for is still a
 // fan-out.
 const Parallelism = 4
+
+// UnreadableLinksNotice describes how unreadable member Links constrain the
+// blocking graph. An empty string means every planned read succeeded.
+func UnreadableLinksNotice(failed int) string {
+	switch failed {
+	case 0:
+		return ""
+	case 1:
+		return "1 Ticket's Links could not be read; anything it blocks is not Actionable"
+	default:
+		return fmt.Sprintf("%d Tickets' Links could not be read; anything they block is not Actionable", failed)
+	}
+}
 
 // Run fetches every id with bounded concurrency, calling emit once per Outcome
 // as it resolves, and returns when every id has resolved or ctx is done. It is
