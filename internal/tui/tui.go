@@ -191,11 +191,17 @@ type Options struct {
 	// caller just fetched. The refresh clock starts from the reading's own
 	// FetchedAt, not from startup.
 	Initial *ListInput
+	// InitialError carries a retryable pre-flight rate-limit refusal into the
+	// monitor so its policy can hold the first TUI fetch until the known reset.
+	InitialError error
 	// Interval is how long the monitor waits between automatic refreshes.
 	Interval time.Duration
 	// Now reads the clock the staleness indicator and the refresh schedule are
 	// measured against. When nil it is time.Now.
 	Now func() time.Time
+	// Heartbeat schedules the next monitor heartbeat. Nil uses the production
+	// one-second tick; tests can inject a no-op command and deliver beats directly.
+	Heartbeat tea.Cmd
 	// NoMouse starts the monitor without terminal mouse capture. The user can
 	// enable it at runtime with m.
 	NoMouse bool

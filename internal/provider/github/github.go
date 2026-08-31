@@ -717,10 +717,10 @@ func (p *Provider) checkStatus(res *http.Response) error {
 	case res.StatusCode == http.StatusOK:
 		return nil
 	case isRateLimited(res):
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: rateLimitResetAt(res.Header)},
 			"github: API rate limit exceeded; resets at %s", rateLimitReset(res.Header))
 	case isSecondaryRateLimited(res):
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(provider.RateLimitMetadata{RetryAfter: retryAfterDuration(res.Header)},
 			"github: secondary rate limit hit; retry after %s", retryAfter(res.Header))
 	case res.StatusCode == http.StatusUnauthorized:
 		return provider.Errorf(provider.KindAuth,
@@ -786,22 +786,38 @@ func ssoHint(value string) string {
 // rateLimitReset renders the reset moment in the user's own timezone, because
 // "resets at 14:32" is actionable and a unix timestamp is not.
 func rateLimitReset(header http.Header) string {
-	secs, err := strconv.ParseInt(header.Get("x-ratelimit-reset"), 10, 64)
-	if err != nil || secs <= 0 {
+	reset := rateLimitResetAt(header)
+	if reset.IsZero() {
 		return "an unknown time"
 	}
-	return time.Unix(secs, 0).Local().Format(time.RFC1123)
+	return reset.Local().Format(time.RFC1123)
+}
+
+func rateLimitResetAt(header http.Header) time.Time {
+	secs, err := strconv.ParseInt(header.Get("x-ratelimit-reset"), 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0)
 }
 
 // retryAfter renders the retry-after header a secondary limit carries, which
 // GitHub sends in seconds. It mirrors rateLimitReset: an unparseable value says
 // so rather than being echoed back as a number with no unit.
 func retryAfter(header http.Header) string {
-	secs, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
-	if err != nil || secs <= 0 {
+	delay := retryAfterDuration(header)
+	if delay <= 0 {
 		return "an unknown time"
 	}
-	return (time.Duration(secs) * time.Second).String()
+	return delay.String()
+}
+
+func retryAfterDuration(header http.Header) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // resolveToken resolves the token once and then reuses it for the process

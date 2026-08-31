@@ -412,6 +412,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
 			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
+			InitialError: err,
 			Interval:     refresh,
 			NoMouse:      *noMouse,
 		})

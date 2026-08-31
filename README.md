@@ -160,7 +160,11 @@ good reading is. When a Provider reports a request budget, the List and Frontier
 it beside staleness: wide terminals include its UTC reset, medium terminals show the remaining
 count, and narrow terminals preserve progress and staleness instead. `--interval` overrides the
 cadence down to a 5-second floor. A failed refresh leaves the last good Watchlist on screen and
-reports the failure in the footer.
+reports the failure in the footer. Rate-limit refusals with a supplied reset hold automatic and
+manual refresh until that deadline; a refusal without one disables automatic refresh and lets `r`
+try once more. A valid exhausted budget is the same hard hold. A remaining budget of 1–100 slows
+only automatic refreshes to spread calls across its reset window, while `r` remains available.
+These decisions are local to the monitor session; Providers only report the headers they receive.
 
 Mouse capture is on by default. Click a Ticket row to select it, double-click one to open its
 Detail, and use the wheel to move one Ticket at a time in the list or three lines at a time in

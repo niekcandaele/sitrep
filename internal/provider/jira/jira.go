@@ -43,6 +43,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -795,7 +796,7 @@ func checkStatus(res *http.Response, resource, path, host string) error {
 	case http.StatusNotFound:
 		return provider.Errorf(provider.KindBadRef, "jira: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(rateLimitRefusalMetadata(res),
 			"jira: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
@@ -861,6 +862,20 @@ func retryAfter(res *http.Response) string {
 		}
 	}
 	return "an unknown time"
+}
+
+func rateLimitRefusalMetadata(res *http.Response) provider.RateLimitMetadata {
+	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
+		if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 {
+			return provider.RateLimitMetadata{RetryAfter: time.Duration(secs) * time.Second}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("X-RateLimit-Reset")); value != "" {
+		if reset, err := time.Parse(time.RFC3339, value); err == nil {
+			return provider.RateLimitMetadata{ResetAt: reset}
+		}
+	}
+	return provider.RateLimitMetadata{}
 }
 
 // resolveCredentials resolves the email + token pair once per Provider. A 60s

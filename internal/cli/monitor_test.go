@@ -54,13 +54,14 @@ func TestOneShotModesIgnoreNoMouse(t *testing.T) {
 
 func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		provider   provider.Provider
-		stdin      io.Reader
-		stdinEntry bool
-		wantOpen   bool
-		wantSeed   bool
+		name             string
+		args             []string
+		provider         provider.Provider
+		stdin            io.Reader
+		stdinEntry       bool
+		wantOpen         bool
+		wantSeed         bool
+		wantInitialError bool
 	}{
 		{
 			name:     "ordinary seeded monitor",
@@ -77,10 +78,11 @@ func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 			wantOpen: true,
 		},
 		{
-			name:     "retryable preflight monitor",
-			args:     []string{"--no-mouse", "acme/widgets#111"},
-			provider: fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down"))),
-			stdin:    strings.NewReader(""),
+			name:             "retryable preflight monitor",
+			args:             []string{"--no-mouse", "acme/widgets#111"},
+			provider:         fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down"))),
+			stdin:            strings.NewReader(""),
+			wantInitialError: true,
 		},
 		{
 			name:       "stdin-selected monitor",
@@ -125,6 +127,9 @@ func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 			}
 			if (captured.Initial != nil) != tt.wantSeed {
 				t.Errorf("Initial present = %t, want %t", captured.Initial != nil, tt.wantSeed)
+			}
+			if (captured.InitialError != nil) != tt.wantInitialError {
+				t.Errorf("InitialError present = %t, want %t", captured.InitialError != nil, tt.wantInitialError)
 			}
 			if tty != nil && !tty.closed {
 				t.Error("stdin-selected monitor did not close its controlling terminal")

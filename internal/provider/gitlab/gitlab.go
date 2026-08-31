@@ -1301,7 +1301,7 @@ func statusMessage(res *http.Response, resource, path, host string) error {
 	case http.StatusNotFound:
 		return provider.Errorf(provider.KindBadRef, "gitlab: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(rateLimitRefusalMetadata(res),
 			"gitlab: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
@@ -1363,6 +1363,27 @@ func retryAfter(res *http.Response) string {
 		}
 	}
 	return "an unknown time"
+}
+
+// rateLimitRefusalMetadata mirrors the documented refusal-header precedence.
+// It is intentionally separate from successful-response budget collection.
+func rateLimitRefusalMetadata(res *http.Response) provider.RateLimitMetadata {
+	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
+		if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 {
+			return provider.RateLimitMetadata{RetryAfter: time.Duration(secs) * time.Second}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("ratelimit-reset")); value != "" {
+		if unix, err := strconv.ParseInt(value, 10, 64); err == nil && unix > 0 {
+			return provider.RateLimitMetadata{ResetAt: time.Unix(unix, 0)}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("ratelimit-resettime")); value != "" {
+		if reset, err := http.ParseTime(value); err == nil {
+			return provider.RateLimitMetadata{ResetAt: reset}
+		}
+	}
+	return provider.RateLimitMetadata{}
 }
 
 // resolveToken resolves the token once and then reuses it for the process

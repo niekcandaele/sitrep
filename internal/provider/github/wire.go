@@ -400,7 +400,7 @@ func graphQLErrors(errs []graphQLError, notFound, endpoint string, header http.H
 	for _, e := range errs {
 		switch {
 		case strings.EqualFold(e.Type, "RATE_LIMITED"):
-			return provider.Errorf(provider.KindRateLimit,
+			return provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: rateLimitResetAt(header)},
 				"github: API rate limit exceeded; resets at %s", rateLimitReset(header))
 		case strings.EqualFold(e.Type, "NOT_FOUND"):
 			return provider.Errorf(provider.KindBadRef, "%s", notFound)
