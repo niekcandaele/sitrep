@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -57,12 +58,44 @@ func FrontierFromList(in ListInput, links map[model.TicketID][]model.Link) Front
 	})
 }
 
+type frontierCanvasRefusal struct {
+	direction          frontierRankDirection
+	width, height      int
+	projectedCells     string
+	arithmeticOverflow bool
+	nodes, ghosts      int
+}
+
+func refuseFrontierCandidate(candidate frontierLayoutCandidate, nodes, ghosts int) *frontierCanvasRefusal {
+	if candidate.withinCellLimit(frontierCanvasCellLimit) {
+		return nil
+	}
+	cells, ok := candidate.projectedCells()
+	projected := "overflowed checked arithmetic"
+	if ok {
+		projected = fmt.Sprintf("%d", cells)
+	} else if !candidate.overflow && candidate.width >= 0 && candidate.height >= 0 {
+		projected = new(big.Int).Mul(
+			big.NewInt(int64(candidate.width)), big.NewInt(int64(candidate.height))).String()
+	}
+	return &frontierCanvasRefusal{
+		direction:          candidate.direction,
+		width:              candidate.width,
+		height:             candidate.height,
+		projectedCells:     projected,
+		arithmeticOverflow: candidate.overflow,
+		nodes:              nodes,
+		ghosts:             ghosts,
+	}
+}
+
 // frontierState is the Frontier screen's own state, kept in one struct so that
 // it can be seated whole: the list's state is never consulted to draw it.
 type frontierState struct {
-	input  FrontierInput
-	graph  model.BlockingGraph
-	layout frontierLayout
+	input   FrontierInput
+	graph   model.BlockingGraph
+	layout  frontierLayout
+	refusal *frontierCanvasRefusal
 	// direction is seat-local. A fresh entry or Watchlist reseat leaves it unset;
 	// every other rebuild applies strict hysteresis and retains it.
 	direction    frontierRankDirection
@@ -391,16 +424,21 @@ func (m Model) adoptCachedLinks() Model {
 }
 
 // rebuildFrontier recomputes everything derived from the seated input. It owns
-// the only production installation of a materialized canvas.
+// the only production installation of a materialized canvas, and admission at
+// this boundary precedes every dummy, route, stroke, hit-map, and grid allocation.
 func (m Model) rebuildFrontier() Model {
 	m = m.discardPendingFrontierRebuild()
-	previous := indexOfNode(m.frontier.layout.order, m.frontier.focusID)
+	preferredFocus := m.frontier.focusID
+	previous := indexOfNode(m.frontier.layout.order, preferredFocus)
+	if preferredFocus == "" && !m.frontier.hasFocus {
+		preferredFocus = m.selectedID
+	}
 	g := model.BuildBlockingGraph(m.frontier.input.Tickets, m.frontier.input.Links,
 		m.frontier.input.Capabilities)
 	nodes := frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved())
 	inner := m.frontierCanvasRect()
-	plan := planFrontierRanks(g, nodes)
-	candidates := frontierCandidates(plan, inner.W)
+	projection := projectFrontierRanks(g, nodes, inner.W)
+	candidates := projection.candidates
 	direction := m.frontier.direction
 	if !m.frontier.directionSet {
 		direction = chooseFrontierDirection(candidates, inner.W, inner.H)
@@ -411,15 +449,28 @@ func (m Model) rebuildFrontier() Model {
 	m.frontier.graph = g
 	m.frontier.direction = direction
 	m.frontier.directionSet = true
+	m.mouseEpoch++
+	if refusal := refuseFrontierCandidate(candidates[direction], len(nodes), len(g.Ghosts())); refusal != nil {
+		m = m.clearPendingClick()
+		m.frontier.layout = frontierLayout{}
+		m.frontier.refusal = refusal
+		m.frontier.focusID = ""
+		m.frontier.hasFocus = false
+		m.frontier.offsetX = 0
+		m.frontier.offsetY = 0
+		return m
+	}
+
+	m.frontier.refusal = nil
 	m.frontier.layout = m.frontierLayoutForModel(g, nodes, frontierLayoutOptions{
 		innerWidth: inner.W,
 		direction:  direction,
-		plan:       &plan,
+		projection: &projection,
 	})
-	m.mouseEpoch++
 
 	l := m.frontier.layout
-	if _, drawn := l.nodeAt[m.frontier.focusID]; !drawn {
+	m.frontier.focusID = preferredFocus
+	if _, drawn := l.nodeAt[preferredFocus]; !drawn {
 		// The focused Ticket left the Watchlist under a refresh. Focus lands on
 		// the nearest node in canonical order rather than jumping to the top.
 		m.frontier.hasFocus = false
@@ -442,7 +493,16 @@ func (m Model) frontierCanvasRect() frontierRect {
 }
 
 func (m Model) frontierResizeNeedsDirectionFlip() bool {
-	if !m.frontier.directionSet || !m.frontierShowsCanvas() {
+	if !m.frontier.directionSet {
+		return false
+	}
+	if m.frontier.refusal != nil {
+		// A refused seat retains no candidate layout metadata. Re-projecting on a
+		// height change is the only honest way to discover a newly fitting admitted
+		// orientation, and still settles through #101's replacement boundary.
+		return true
+	}
+	if !m.frontierShowsCanvas() {
 		return false
 	}
 	inner := m.frontierCanvasRect()
@@ -645,11 +705,29 @@ func (m Model) frontierHeader() string {
 	f := m.frontier
 	nodes := len(f.layout.order)
 	ghosts := len(f.graph.Ghosts())
+	if f.refusal != nil {
+		nodes = f.refusal.nodes
+		ghosts = f.refusal.ghosts
+	}
 
 	var counts string
 	switch {
 	case !f.input.Capabilities.BlockingLinks:
 		counts = "frontier" + separator + "this Provider reports no blocking links"
+	case f.refusal != nil:
+		counts = "frontier" + separator + plural(nodes, "node", "nodes")
+		if ghosts > 0 {
+			counts += separator + plural(ghosts, "ghost", "ghosts")
+		}
+		counts += separator + "canvas refused"
+		switch {
+		case f.isResolved():
+			counts += separator + "Details complete"
+		case m.frontierContext != nil:
+			counts += fmt.Sprintf("%sreading Detail %d/%d", separator, f.done, f.planned)
+		default:
+			counts += separator + "Details pending"
+		}
 	case f.isResolved():
 		// Counted over the layout's order rather than the graph's members: a
 		// Watchlist may name one Ticket twice, and a header claiming more
@@ -709,6 +787,17 @@ func (m Model) frontierBody(height int) []string {
 			"This Provider does not report blocking links, so sitrep cannot tell which "+
 				"Tickets are blocked or which can be picked up. The Watchlist itself is "+
 				"unaffected — press v or esc to go back to it."), height)
+	case m.frontier.refusal != nil:
+		refusal := m.frontier.refusal
+		return padLines(m.wrappedMuted(fmt.Sprintf(
+			"The selected Frontier canvas projects to %d × %d cells (%s projected cells), "+
+				"above the permitted 500,000 cells. sitrep refused the entire canvas without "+
+				"clipping: no Frontier graph or subset was drawn, while the fetched Watchlist "+
+				"evidence remains intact. On linux/amd64, the raw frontierCell grid payload for "+
+				"500,000 cells is 24,000,000 bytes only. Row slices, metadata, routes, "+
+				"Go/runtime overhead, and total process memory are additional and "+
+				"architecture-dependent. Press v or esc to return to the Watchlist.",
+			refusal.width, refusal.height, refusal.projectedCells)), height)
 	case len(m.frontier.input.Tickets) == 0:
 		return padLines([]string{m.styles.Muted.Render("This Watchlist has no Tickets.")}, height)
 	}
@@ -774,12 +863,16 @@ func (m Model) frontierFooterBlock() []string {
 		lines = append(lines, m.styles.Error.Render(balancedTruncate(notice, m.width, "…")))
 	}
 	if m.frontier.lastErr != nil {
-		// Whichever parallel read failed last, labelled as one failure and
-		// pointed at its remedy: bare, it reads as the cause of everything on
-		// screen. The text is the Tracker's, so the cut is re-balanced.
-		lines = append(lines, m.styles.Error.Render(balancedTruncate(fmt.Sprintf(
-			"read failed: %s — press r to retry the Tickets that failed",
-			m.frontier.lastErr.Error()), m.width, "…")))
+		// Whichever parallel read failed last, labelled as one failure rather than
+		// the cause of everything on screen. A refused canvas disables Refresh, so
+		// its footer reports evidence without advertising an inert remedy.
+		message := fmt.Sprintf("read failed: %s — press r to retry the Tickets that failed",
+			m.frontier.lastErr.Error())
+		if m.frontier.refusal != nil {
+			message = fmt.Sprintf("read failed: %s — the fetched evidence remains recorded",
+				m.frontier.lastErr.Error())
+		}
+		lines = append(lines, m.styles.Error.Render(balancedTruncate(message, m.width, "…")))
 	}
 
 	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")...)
@@ -788,7 +881,8 @@ func (m Model) frontierFooterBlock() []string {
 // frontierShowsCanvas reports whether the body is the graph rather than one of
 // the states that stands in for it.
 func (m Model) frontierShowsCanvas() bool {
-	return m.frontier.input.Capabilities.BlockingLinks && len(m.frontier.input.Tickets) > 0
+	return m.frontier.input.Capabilities.BlockingLinks &&
+		len(m.frontier.input.Tickets) > 0 && m.frontier.refusal == nil
 }
 
 // frontierScrollPosition reports where the window sits on a canvas bigger than

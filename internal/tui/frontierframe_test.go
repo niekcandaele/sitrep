@@ -3,8 +3,10 @@ package tui
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -1056,6 +1058,126 @@ func TestFrontierDirectionHysteresisIsStrictAndSeatLocal(t *testing.T) {
 	}
 	if got := frontierDirectionAfterResize(frontierRanksHorizontal, bothFit, 30, 30); got != frontierRanksHorizontal {
 		t.Errorf("ordinary both-fit resize flipped back to %v", got)
+	}
+}
+
+func TestFrontierProjectionMatchesAdmittedPlanAndIsPure(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	for _, width := range []int{20, 80, 200} {
+		projection := projectFrontierRanks(g, nodes, width)
+		again := projectFrontierRanks(g, nodes, width)
+		if !reflect.DeepEqual(projection, again) {
+			t.Fatalf("width %d repeated projection differs\nfirst:  %#v\nsecond: %#v", width, projection, again)
+		}
+		plan := materializeFrontierRankPlan(nodes, projection)
+		if got, want := projection.candidates, frontierCandidates(plan, width); !reflect.DeepEqual(got, want) {
+			t.Errorf("width %d projected candidates = %+v, materialized shape = %+v", width, got, want)
+		}
+		for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+			candidate := projection.candidates[direction]
+			if !candidate.withinCellLimit(frontierCanvasCellLimit) {
+				t.Fatalf("width %d direction %d unexpectedly exceeds test ceiling: %+v", width, direction, candidate)
+			}
+			withProjection := layoutFrontier(g, nodes, frontierLayoutOptions{
+				innerWidth: width, direction: direction, projection: &projection,
+			})
+			withPlan := layoutFrontier(g, nodes, frontierLayoutOptions{
+				innerWidth: width, direction: direction, plan: &plan,
+			})
+			if !reflect.DeepEqual(withProjection, withPlan) {
+				t.Errorf("width %d direction %d projection changed admitted geometry", width, direction)
+			}
+		}
+	}
+}
+
+func TestFrontierCanvasCeilingAdmitsBoundaryAndRefusesOneOverWithoutClipping(t *testing.T) {
+	atLimit := frontierLayoutCandidate{
+		direction: frontierRanksHorizontal, width: frontierCanvasCellLimit, height: 1,
+	}
+	if refusal := refuseFrontierCandidate(atLimit, 1, 0); refusal != nil {
+		t.Fatalf("exactly %d cells refused: %+v", frontierCanvasCellLimit, refusal)
+	}
+
+	oneOver := frontierLayoutCandidate{
+		direction: frontierRanksVertical, width: frontierCanvasCellLimit + 1, height: 1,
+	}
+	refusal := refuseFrontierCandidate(oneOver, 17, 3)
+	if refusal == nil {
+		t.Fatalf("%d cells admitted", frontierCanvasCellLimit+1)
+	}
+	if refusal.width != oneOver.width || refusal.height != oneOver.height ||
+		refusal.projectedCells != "500001" || refusal.direction != oneOver.direction {
+		t.Errorf("refusal clipped or rewrote selected geometry: %+v, want %+v and 500001 cells", refusal, oneOver)
+	}
+}
+
+func TestFrontierProjectionAndAdmissionFailClosedOnOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	candidate := frontierLayoutCandidate{width: maxInt, height: 2}
+	if candidate.withinCellLimit(frontierCanvasCellLimit) {
+		t.Fatal("overflowing projected cell multiplication admitted")
+	}
+	refusal := refuseFrontierCandidate(candidate, 1, 0)
+	if refusal == nil || refusal.projectedCells == "" {
+		t.Fatalf("overflow refusal = %+v, want immutable projected-cell metadata", refusal)
+	}
+
+	projected := frontierCandidatesFromShape(maxInt, 1, nil, 120)
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		if !projected[direction].overflow || projected[direction].withinCellLimit(frontierCanvasCellLimit) {
+			t.Errorf("direction %d checked dimension overflow = %+v, want refused", direction, projected[direction])
+		}
+	}
+}
+
+func TestFrontierHostileProjectionRetainsNoMaterializedTopology(t *testing.T) {
+	const n = 1000
+	tickets, links := benchmarkFrontierFixture("hostile", n)
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth)
+	direction := chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30)
+	if refusal := refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(g.Ghosts())); refusal == nil {
+		t.Fatalf("hostile N=%d admitted candidate %+v", n, projection.candidates[direction])
+	}
+	if len(projection.ranks) != n || len(projection.realPeerOf) != n ||
+		len(projection.slotCounts) != n || len(projection.channelCounts) != n-1 {
+		t.Errorf("projection scalar metadata sizes = ranks %d peers %d slots %d channels %d, want O(N) rank data",
+			len(projection.ranks), len(projection.realPeerOf), len(projection.slotCounts), len(projection.channelCounts))
+	}
+
+	forbidden := map[reflect.Type]string{
+		reflect.TypeOf(frontierSlot{}):    "dummy slots",
+		reflect.TypeOf(frontierSegment{}): "segments",
+		reflect.TypeOf(frontierRoute{}):   "routes",
+		reflect.TypeOf(frontierStroke{}):  "strokes",
+		reflect.TypeOf(frontierCell{}):    "cells",
+	}
+	projectionType := reflect.TypeOf(projection)
+	for i := range projectionType.NumField() {
+		field := projectionType.Field(i)
+		typeOf := field.Type
+		for typeOf.Kind() == reflect.Array || typeOf.Kind() == reflect.Slice || typeOf.Kind() == reflect.Pointer {
+			typeOf = typeOf.Elem()
+		}
+		if name, found := forbidden[typeOf]; found {
+			t.Errorf("projection field %q retains %s", field.Name, name)
+		}
+	}
+}
+
+func TestFrontierRawGridPayloadQualificationMatchesLinuxAMD64(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("the diagnostic explicitly qualifies the measured linux/amd64 payload")
+	}
+	if got := unsafe.Sizeof(frontierCell{}); got != 48 {
+		t.Fatalf("linux/amd64 frontierCell size = %d bytes, diagnostic assumes 48", got)
+	}
+	if got := frontierCanvasCellLimit * int(unsafe.Sizeof(frontierCell{})); got != frontierRawGridBytesLinuxAMD64 {
+		t.Errorf("raw payload = %d bytes, want %d", got, frontierRawGridBytesLinuxAMD64)
 	}
 }
 
