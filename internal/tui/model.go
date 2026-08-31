@@ -16,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
 )
 
@@ -32,6 +33,15 @@ type Model struct {
 	refreshing  bool
 	generation  int
 	lastAttempt time.Time
+	// rateHold blocks refreshes after a current rate-limit refusal or an exhausted
+	// successful budget. An empty reset is the deliberate manual-only hold for a
+	// refusal whose headers supplied no usable deadline.
+	rateHold rateHold
+	// lowBudget widens only automatic cadence after a successful low-budget read.
+	lowBudget lowBudgetSchedule
+	// heartbeatCmd is injectable so scheduler tests advance only their controlled
+	// clock and deliver heartbeatMsg themselves.
+	heartbeatCmd tea.Cmd
 	// listArmed reports whether the list holds a reading or has a fetch in
 	// flight. It starts false in decoder mode — a session opened straight on one
 	// Ticket's Detail — so the heartbeat never fetches a Watchlist the user has
@@ -141,6 +151,27 @@ type Model struct {
 	interrupted bool
 }
 
+type rateHold struct {
+	err       error
+	resetAt   time.Time
+	exhausted bool
+	manual    bool
+}
+
+func (h rateHold) active(now time.Time) bool {
+	return h.manual || now.Before(h.resetAt)
+}
+
+type lowBudgetSchedule struct {
+	resetAt time.Time
+	nextAt  time.Time
+	cadence time.Duration
+}
+
+func (s lowBudgetSchedule) active(now time.Time) bool {
+	return !s.resetAt.IsZero() && now.Before(s.resetAt)
+}
+
 // interruptKey is the key press that means "the user interrupted this", as
 // opposed to the other keys bound to quitting. It is compared by name because
 // that is what the Model has: raw mode gives a key press, not a signal.
@@ -158,6 +189,10 @@ func New(ctx context.Context, opts Options) Model {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
+	}
+	heartbeatCmd := opts.Heartbeat
+	if heartbeatCmd == nil {
+		heartbeatCmd = heartbeat()
 	}
 	src := opts.Source
 	sessionCtx, cancelSession := context.WithCancel(ctx)
@@ -189,8 +224,9 @@ func New(ctx context.Context, opts Options) Model {
 			in, err := src(sessionCtx)
 			return safeListInput(in), safeErr(err)
 		},
-		now:      now,
-		interval: opts.Interval,
+		now:          now,
+		interval:     opts.Interval,
+		heartbeatCmd: heartbeatCmd,
 		// The first refresh is already on its way out of Init.
 		generation:    1,
 		refreshing:    true,
@@ -223,6 +259,7 @@ func New(ctx context.Context, opts Options) Model {
 		// clock runs from when the reading was *taken*, so the first auto-refresh
 		// lands one interval after that rather than one interval after startup.
 		m.input = safeListInput(*opts.Initial)
+		m = m.applySuccessfulBudgetPolicy(m.input)
 		m.hasData = true
 		m.refreshing = false
 		m.generation = 0
@@ -320,7 +357,7 @@ func (m Model) finishFrontierFanout() Model {
 // palette, and whichever first read this session is for: the list's, the
 // decoded Ticket's Detail, or — for a seeded monitor — neither.
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{heartbeat(), requestBackgroundColor}
+	cmds := []tea.Cmd{m.heartbeatCmd, requestBackgroundColor}
 	if m.mode == modeDetail && m.detail.loading {
 		cmds = append(cmds, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID))
 	}
@@ -523,23 +560,63 @@ func (m Model) cursor() *tea.Cursor {
 // no filter can move the bar.
 func (m Model) visibleTickets() []model.Ticket { return m.filter.Apply(m.input.Tickets) }
 
-// onHeartbeat re-arms the timer and starts a refresh when the interval has
-// elapsed. The beat is also what makes the staleness indicator count up
-// without a data change.
+// onHeartbeat re-arms the timer and starts a refresh only when the shared
+// automatic admission gate says the effective cadence is due.
 func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
-	// An unarmed list is a decoder session that has not walked up yet: the beat
-	// still drives the staleness indicator, but there is no Watchlist anyone
-	// asked to see and Resolve must not be called at all.
-	if !m.listArmed || m.refreshing || m.now().Sub(m.lastAttempt) < m.interval {
-		return m, heartbeat()
+	if m.quitting {
+		return m, nil
 	}
-	next, cmd := m.startRefresh()
-	return next, tea.Batch(cmd, heartbeat())
+	next, allowed, _ := m.automaticRefreshAdmission()
+	if !allowed {
+		return next, next.heartbeatCmd
+	}
+	next, cmd := next.startRefresh()
+	return next, tea.Batch(cmd, next.heartbeatCmd)
 }
 
-// startRefresh begins one refresh, or does nothing when one is already in
-// flight. Refusing to overlap is what stops a user leaning on `r` from
-// stacking requests at a rate-limited API.
+// automaticRefreshAdmission is the single automatic-refresh gate. Future
+// scheduler policy extends it rather than copying its rate-limit decisions.
+func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
+	now := m.now()
+	m = m.expireRatePolicy(now)
+	if !m.listArmed || m.refreshing || m.rateHold.active(now) {
+		return m, false, time.Time{}
+	}
+	due := m.effectiveAutomaticDue(now)
+	return m, !now.Before(due), due
+}
+
+// manualRefreshAdmission deliberately bypasses only a positive low-budget
+// widening. A known refusal and an exhausted budget remain hard holds.
+func (m Model) manualRefreshAdmission() (Model, bool) {
+	now := m.now()
+	m = m.expireRatePolicy(now)
+	if m.refreshing || (m.rateHold.active(now) && !m.rateHold.manual) {
+		return m, false
+	}
+	return m, true
+}
+
+func (m Model) expireRatePolicy(now time.Time) Model {
+	if !m.rateHold.manual && !m.rateHold.resetAt.IsZero() && !now.Before(m.rateHold.resetAt) {
+		m.rateHold = rateHold{}
+	}
+	if !m.lowBudget.resetAt.IsZero() && !now.Before(m.lowBudget.resetAt) {
+		m.lowBudget = lowBudgetSchedule{}
+	}
+	return m
+}
+
+func (m Model) effectiveAutomaticDue(now time.Time) time.Time {
+	due := m.lastAttempt.Add(m.interval)
+	if m.lowBudget.active(now) && m.lowBudget.nextAt.After(due) {
+		return m.lowBudget.nextAt
+	}
+	return due
+}
+
+// startRefresh is the sole outbound Source launch point. Callers must pass
+// automatic or manual admission before reaching it.
 func (m Model) startRefresh() (Model, tea.Cmd) {
 	if m.refreshing {
 		return m, nil
@@ -646,12 +723,78 @@ func (m Model) onRefreshed(msg refreshedMsg) Model {
 
 	if msg.err != nil {
 		m.lastErr = msg.err
+		if provider.KindOf(msg.err) == provider.KindRateLimit {
+			m.lowBudget = lowBudgetSchedule{}
+			m.rateHold = m.rateLimitHold(msg.err)
+		} else if m.lowBudget != (lowBudgetSchedule{}) {
+			m = m.advanceLowBudgetAfterAttempt()
+		}
 		return m
 	}
 	m.lastErr = nil
+	m = m.applySuccessfulBudgetPolicy(msg.input)
 	m.input = msg.input
 	m.hasData = true
 	return m.rebuildRows()
+}
+
+func (m Model) rateLimitHold(err error) rateHold {
+	metadata, ok := provider.RateLimitMetadataOf(err)
+	if !ok {
+		return rateHold{err: err, manual: true}
+	}
+	resetAt, hasDeadline := metadata.Deadline(m.now())
+	if !hasDeadline || !m.now().Before(resetAt) {
+		return rateHold{}
+	}
+	return rateHold{err: err, resetAt: resetAt}
+}
+
+func (m Model) applySuccessfulBudgetPolicy(in ListInput) Model {
+	m.rateHold = rateHold{}
+	m.lowBudget = lowBudgetSchedule{}
+	budget := in.RateLimitBudget
+	if !in.Capabilities.RateLimitBudget || !budget.Valid() {
+		return m
+	}
+	now := m.now()
+	if !now.Before(budget.ResetsAt) {
+		return m
+	}
+	if budget.Remaining == 0 {
+		m.rateHold = rateHold{resetAt: budget.ResetsAt, exhausted: true}
+		return m
+	}
+	if budget.Remaining > 100 {
+		return m
+	}
+	window := budget.ResetsAt.Sub(now)
+	spread := window / time.Duration(budget.Remaining)
+	if window%time.Duration(budget.Remaining) != 0 {
+		spread++
+	}
+	m.lowBudget = lowBudgetSchedule{
+		resetAt: budget.ResetsAt,
+		nextAt:  now.Add(max(2*m.interval, spread)),
+		cadence: max(2*m.interval, spread),
+	}
+	return m
+}
+
+// advanceLowBudgetAfterAttempt retains the established low-budget cadence after
+// a failed automatic request. A manual retry before its scheduled turn leaves
+// that turn intact.
+func (m Model) advanceLowBudgetAfterAttempt() Model {
+	now := m.now()
+	if !m.lowBudget.active(now) || m.lowBudget.cadence <= 0 || m.lastAttempt.Before(m.lowBudget.nextAt) {
+		return m
+	}
+	nextAt := m.lastAttempt.Add(m.lowBudget.cadence)
+	if !now.Before(nextAt) {
+		nextAt = now.Add(m.lowBudget.cadence)
+	}
+	m.lowBudget.nextAt = nextAt
+	return m
 }
 
 // rebuildRows derives the list from the current reading and puts the cursor
@@ -759,7 +902,11 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Refresh):
-		next, cmd := m.startRefresh()
+		next, allowed := m.manualRefreshAdmission()
+		if !allowed {
+			return next, nil
+		}
+		next, cmd := next.startRefresh()
 		return next, cmd
 
 	case key.Matches(msg, m.keys.Open):
@@ -950,16 +1097,36 @@ func (m Model) footerLines() []string {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			plain.LimitNotice(len(m.input.Tickets)), m.width)))
 	}
-	if m.lastErr != nil && m.hasData {
-		remaining := m.interval - m.now().Sub(m.lastAttempt)
+	if m.lastErr != nil && m.hasData && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+		remaining := m.effectiveAutomaticDue(m.now()).Sub(m.now())
 		lines = append(lines, m.styles.Error.Render(truncateLine(
 			fmt.Sprintf("refresh failed: %v%sretrying in %s", m.lastErr, separator, countdown(remaining)), m.width)))
+	}
+	if policy := m.ratePolicyFooter(); policy != "" {
+		lines = append(lines, m.styles.Error.Render(truncateLine(policy, m.width)))
 	}
 	if filter := m.renderFilterLine(); filter != "" {
 		lines = append(lines, filter)
 	}
 	// The expanded help is several lines, so it is clipped line by line.
 	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")...)
+}
+
+func (m Model) ratePolicyFooter() string {
+	now := m.now()
+	if m.rateHold.active(now) {
+		if m.rateHold.exhausted {
+			return "refresh held: rate limit budget exhausted · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
+		}
+		if m.rateHold.manual {
+			return "refresh held: " + m.rateHold.err.Error() + " · press r to try again"
+		}
+		return "refresh held: " + m.rateHold.err.Error() + " · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
+	}
+	if m.lowBudget.active(now) {
+		return "refresh slowed: low rate limit budget · next automatic refresh in " + countdown(m.lowBudget.nextAt.Sub(now))
+	}
+	return ""
 }
 
 // renderFilterLine draws the footer's filter line: the find box while it is
@@ -1022,7 +1189,10 @@ func (m Model) filterLineIndex() int {
 	if m.hasData && m.input.LimitReached {
 		index++
 	}
-	if m.lastErr != nil && m.hasData {
+	if m.lastErr != nil && m.hasData && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+		index++
+	}
+	if m.ratePolicyFooter() != "" {
 		index++
 	}
 	return index

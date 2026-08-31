@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -88,11 +89,37 @@ func (k Kind) String() string {
 	}
 }
 
+// RateLimitMetadata is optional machine-readable timing supplied with a
+// rate-limit refusal. Providers only parse headers into it; deciding whether to
+// wait belongs to their caller.
+type RateLimitMetadata struct {
+	ResetAt    time.Time
+	RetryAfter time.Duration
+}
+
+// Valid reports whether metadata carries one usable timing fact.
+func (m RateLimitMetadata) Valid() bool {
+	return !m.ResetAt.IsZero() || m.RetryAfter > 0
+}
+
+// Deadline resolves an absolute reset or a relative retry delay using the
+// caller's clock. It deliberately does not read the wall clock.
+func (m RateLimitMetadata) Deadline(now time.Time) (time.Time, bool) {
+	if !m.ResetAt.IsZero() {
+		return m.ResetAt, true
+	}
+	if m.RetryAfter > 0 {
+		return now.Add(m.RetryAfter), true
+	}
+	return time.Time{}, false
+}
+
 // Error is a Provider failure carrying its Kind. Its message is the driver's
 // own prose, unchanged: this type classifies, it does not rewrite.
 type Error struct {
-	Kind Kind
-	Err  error
+	Kind      Kind
+	Err       error
+	RateLimit RateLimitMetadata
 }
 
 func (e *Error) Error() string { return e.Err.Error() }
@@ -118,6 +145,27 @@ func Errorf(kind Kind, format string, a ...any) error {
 		err = &sanitizedMessage{msg: msg, err: err}
 	}
 	return &Error{Kind: kind, Err: err}
+}
+
+// RateLimitErrorf builds a KindRateLimit error while retaining the optional
+// header timing that accompanied the refusal. Existing callers keep using
+// Errorf so their message and wrapping behaviour remain unchanged.
+func RateLimitErrorf(metadata RateLimitMetadata, format string, a ...any) error {
+	err := fmt.Errorf(format, a...)
+	if msg := termtext.Line(err.Error()); msg != err.Error() {
+		err = &sanitizedMessage{msg: msg, err: err}
+	}
+	return &Error{Kind: KindRateLimit, Err: err, RateLimit: metadata}
+}
+
+// RateLimitMetadataOf finds timing attached to a classified rate-limit error,
+// including one that has been wrapped or redacted.
+func RateLimitMetadataOf(err error) (RateLimitMetadata, bool) {
+	var classified *Error
+	if errors.As(err, &classified) && classified.Kind == KindRateLimit && classified.RateLimit.Valid() {
+		return classified.RateLimit, true
+	}
+	return RateLimitMetadata{}, false
 }
 
 // sanitizedMessage replaces an error's rendered text while keeping everything
@@ -361,9 +409,11 @@ func RedactQueryError(err error, query string) error {
 	if message == err.Error() {
 		return err
 	}
+	metadata, _ := RateLimitMetadataOf(err)
 	return &Error{
-		Kind: KindOf(err),
-		Err:  &sanitizedMessage{msg: message, err: err},
+		Kind:      KindOf(err),
+		Err:       &sanitizedMessage{msg: message, err: err},
+		RateLimit: metadata,
 	}
 }
 
