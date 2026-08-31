@@ -1047,6 +1047,12 @@ func (m Model) helpKeys() help.KeyMap {
 // so the advertised bindings and every input path cannot drift apart.
 func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 	keys := m.frontierKeys
+	if m.frontier.direction == frontierRanksVertical {
+		keys.Up.SetHelp(keys.Up.Help().Key, "blocker side")
+		keys.Down.SetHelp(keys.Down.Help().Key, "dependent side")
+		keys.Left.SetHelp(keys.Left.Help().Key, "previous node")
+		keys.Right.SetHelp(keys.Right.Help().Key, "next node")
+	}
 	if m.frontier.input.Capabilities.BlockingLinks {
 		return keys
 	}

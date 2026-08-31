@@ -772,6 +772,36 @@ func frontierInteractionSnapshot(m Model) string {
 		len(m.frontier.input.Links), len(m.frontier.failed), len(m.details), m.View().Content)
 }
 
+func TestFrontierEffectiveHelpTracksPhysicalRankDirection(t *testing.T) {
+	m := Model{
+		frontierKeys: DefaultFrontierKeyMap(),
+		frontier: frontierState{
+			input: FrontierInput{Capabilities: model.Capabilities{BlockingLinks: true}},
+		},
+	}
+	assertHelp := func(direction frontierRankDirection, want map[string]string) {
+		t.Helper()
+		m.frontier.direction = direction
+		keys := m.effectiveFrontierKeys()
+		for keyName, binding := range map[string]key.Binding{
+			"up": keys.Up, "down": keys.Down, "left": keys.Left, "right": keys.Right,
+		} {
+			if got := binding.Help().Desc; got != want[keyName] {
+				t.Errorf("direction %v %s help = %q, want %q", direction, keyName, got, want[keyName])
+			}
+		}
+	}
+
+	assertHelp(frontierRanksHorizontal, map[string]string{
+		"up": "previous node", "down": "next node",
+		"left": "blocker side", "right": "dependent side",
+	})
+	assertHelp(frontierRanksVertical, map[string]string{
+		"up": "blocker side", "down": "dependent side",
+		"left": "previous node", "right": "next node",
+	})
+}
+
 func TestFrontierWithoutBlockingLinksDisablesEveryGraphKey(t *testing.T) {
 	keys := []struct {
 		name string
