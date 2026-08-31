@@ -729,10 +729,13 @@ func (m Model) wrappedMuted(text string) []string {
 // padLines grows a block to exactly height lines so the footer stays at the
 // bottom of the screen.
 func padLines(lines []string, height int) []string {
+	if height <= 0 {
+		return nil
+	}
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
-	return lines[:max(height, 1)]
+	return lines[:height]
 }
 
 // frontierFooterLines is the Frontier's bottom block with the scroll position
@@ -820,8 +823,9 @@ func (m Model) frontierFooterHeight() int {
 	return len(m.frontierFooterBlock())
 }
 
-// frontierBodyHeight is the room left for the canvas once the header and footer
-// have taken theirs, floored at one line so a tiny terminal still renders.
+// frontierBodyHeight is the non-negative room left for the canvas once the
+// header and footer have taken theirs. A positive remainder keeps its full
+// extent; no synthetic body row is created when none remains.
 func (m Model) frontierBodyHeight() int {
-	return max(m.height-headerHeight-m.frontierFooterHeight(), 1)
+	return max(m.height-headerHeight-m.frontierFooterHeight(), 0)
 }

@@ -123,6 +123,9 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	keys := m.effectiveFrontierKeys()
 
 	return func(msg tea.MouseMsg) tea.Cmd {
+		if inner.W <= 0 || inner.H <= 0 {
+			return nil
+		}
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
 			// Modified primary clicks are reserved for terminal gestures such as

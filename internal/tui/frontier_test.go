@@ -2727,6 +2727,52 @@ func assertFrontierPageFooter(t *testing.T, m Model, maxY int) {
 	}
 }
 
+func TestFrontierZeroExtentDoesNotInventViewportCoordinates(t *testing.T) {
+	m := frontierPagingModel(t, 120, 20)
+
+	m.width = 0
+	inner := m.frontierCanvasRect()
+	if inner.W != 0 || inner.H <= 0 {
+		t.Fatalf("zero-width inner = %+v, want zero width and positive height", inner)
+	}
+	m.frontier.offsetX = clampFrontierOffset(m.frontier.layout.width, m.frontier.layout.width, inner.W)
+	wantX := fmt.Sprintf("x %d/%d", m.frontier.layout.width, m.frontier.layout.width)
+	if got := m.frontierScrollPosition(); !strings.Contains(got, wantX) {
+		t.Errorf("zero-width scroll position = %q, want %q", got, wantX)
+	}
+
+	m.width = 120
+	m.height = headerHeight + m.frontierFooterHeight()
+	inner = m.frontierCanvasRect()
+	if inner.H != 0 || inner.W <= 0 {
+		t.Fatalf("zero-height inner = %+v, want positive width and zero height", inner)
+	}
+	m.frontier.offsetY = 0
+	updated, cmd := m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if cmd != nil {
+		t.Fatal("zero-height page down returned a command")
+	}
+	m = updated.(Model)
+	if m.frontier.offsetY != 0 {
+		t.Errorf("zero-height page down moved to %d, want 0", m.frontier.offsetY)
+	}
+	wantY := fmt.Sprintf("y 0/%d", m.frontier.layout.height)
+	if got := m.frontierScrollPosition(); !strings.Contains(got, wantY) {
+		t.Errorf("zero-height scroll position = %q, want %q", got, wantY)
+	}
+	if body := m.frontierBody(0); len(body) != 0 {
+		t.Errorf("zero-height body has %d rows, want 0", len(body))
+	}
+	withoutGraph := m
+	withoutGraph.frontier.input.Capabilities.BlockingLinks = false
+	if body := withoutGraph.frontierBody(0); len(body) != 0 {
+		t.Errorf("zero-height capability fallback has %d rows, want 0", len(body))
+	}
+	if got := lipgloss.Height(m.frontierFrame()); got != m.height {
+		t.Errorf("zero-height-body frame has %d rows, want exact outer height %d", got, m.height)
+	}
+}
+
 func TestFrontierScrollPositionUsesExactInnerDenominators(t *testing.T) {
 	m := frontierMouseModel(t, []model.Ticket{{
 		ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo,
@@ -3376,6 +3422,48 @@ func TestFrontierChromeClickIsInertAndInnerClickTranslates(t *testing.T) {
 	if m.frontier.focusID != "T-2" {
 		t.Errorf("inner translated click focused %q, want T-2", m.frontier.focusID)
 	}
+}
+
+func TestFrontierZeroExtentMouseIsInert(t *testing.T) {
+	m := frontierMouseModel(t, []model.Ticket{{
+		ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo,
+	}}, nil, 40, 20)
+	m.lastClickID = "T-1"
+	m.lastClickAt = m.now()
+
+	assertInert := func(label string, click tea.MouseClickMsg, wheel tea.MouseWheelMsg) {
+		t.Helper()
+		handler := m.View().OnMouse
+		if handler == nil {
+			t.Fatalf("%s view has no mouse handler", label)
+		}
+		if cmd := handler(click); cmd != nil {
+			t.Fatalf("%s click produced %T, want no command", label, cmd())
+		}
+		if cmd := handler(wheel); cmd != nil {
+			t.Fatalf("%s wheel produced %T, want no command", label, cmd())
+		}
+		if m.lastClickID != "T-1" {
+			t.Errorf("%s mouse input mutated pending-click state", label)
+		}
+	}
+
+	m.width = 0
+	if inner := m.frontierCanvasRect(); inner.W != 0 {
+		t.Fatalf("zero-width mouse inner = %+v, want W=0", inner)
+	}
+	assertInert("zero-width",
+		tea.MouseClickMsg{X: 0, Y: headerHeight + 1, Button: tea.MouseLeft},
+		tea.MouseWheelMsg{X: 0, Y: headerHeight + 1, Button: tea.MouseWheelDown})
+
+	m.width = 40
+	m.height = headerHeight + m.frontierFooterHeight()
+	if inner := m.frontierCanvasRect(); inner.H != 0 {
+		t.Fatalf("zero-height mouse inner = %+v, want H=0", inner)
+	}
+	assertInert("zero-height",
+		tea.MouseClickMsg{X: 1, Y: headerHeight, Button: tea.MouseLeft},
+		tea.MouseWheelMsg{X: 1, Y: headerHeight, Button: tea.MouseWheelDown})
 }
 
 func TestFrontierResizeDefersOnlyWidthAndInvalidatesMouseEpoch(t *testing.T) {

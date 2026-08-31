@@ -551,6 +551,9 @@ func TestFrontierInnerRectDegradesPerAxisAndChromeStaysInRing(t *testing.T) {
 		width, height int
 		want          frontierRect
 	}{
+		{0, 5, frontierRect{Y: 1, H: 3}},
+		{5, 0, frontierRect{X: 1, W: 3}},
+		{-1, 3, frontierRect{Y: 1, H: 1}},
 		{1, 1, frontierRect{W: 1, H: 1}},
 		{2, 2, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
 		{3, 3, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
@@ -582,6 +585,8 @@ func TestFrontierInnerRectDegradesPerAxisAndChromeStaysInRing(t *testing.T) {
 		width, height int
 		want          map[[2]int]rune
 	}{
+		{0, 5, map[[2]int]rune{}},
+		{5, 0, map[[2]int]rune{}},
 		{1, 1, map[[2]int]rune{}},
 		{2, 2, map[[2]int]rune{{1, 0}: '▲', {0, 1}: '‹'}},
 		{3, 3, map[[2]int]rune{{1, 0}: '▲', {1, 2}: '▼', {0, 1}: '‹', {2, 1}: '›'}},

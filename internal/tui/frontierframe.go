@@ -980,11 +980,14 @@ func (s Styles) frontierStyle(entry frontierStyle) lipgloss.Style {
 }
 
 // frontierInnerRect reserves a deterministic fixed ring inside the outer body.
-// Every axis keeps at least one inner cell, degrading from both sides to the
-// leading side and finally to no chrome as space disappears.
+// Each positive axis keeps at least one inner cell, degrading from both sides to
+// the leading side and finally to no chrome. A non-positive outer axis has no
+// drawable inner extent.
 func frontierInnerRect(width, height int) frontierRect {
 	axis := func(dimension int) (origin, size int) {
 		switch {
+		case dimension <= 0:
+			return 0, 0
 		case dimension >= 3:
 			return 1, dimension - 2
 		case dimension == 2:
@@ -1090,6 +1093,9 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 func frontierChromeGlyphs(l frontierLayout, inner frontierRect,
 	offsetX, offsetY, outerWidth, outerHeight int) map[[2]int]rune {
 	out := make(map[[2]int]rune, 4)
+	if inner.W <= 0 || inner.H <= 0 {
+		return out
+	}
 	place := func(at [2]int, glyph rune) {
 		if _, occupied := out[at]; !occupied {
 			out[at] = glyph
@@ -1130,8 +1136,8 @@ func renderFrontierBody(l frontierLayout, focus model.TicketID, hasFocus bool,
 		return line.String()
 	}
 
-	lines := make([]string, outerHeight)
-	for y := range outerHeight {
+	lines := make([]string, max(outerHeight, 0))
+	for y := range lines {
 		var line strings.Builder
 		if y >= inner.Y && y < inner.Y+inner.H {
 			line.WriteString(renderRing(y, 0, inner.X))
