@@ -25,7 +25,6 @@ DESCRIPTION
   linked ticket.
 
 
-COMMENTS (3)
                                         0%
 m release · shift-drag to select text
 
@@ -37,4 +36,5 @@ tab        next link        pgdn page down
 u          watchlist        G    last
 r          refresh
 ?          help
+L          legend
 q          quit

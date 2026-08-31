@@ -28,7 +28,6 @@ CANCELLED (1)
 
 
 
-
 m            release · shift-drag to select text    ↑/k  up
 click        select Ticket                          ↓/j  down
 double-click open Ticket                            pgup page up
@@ -37,4 +36,5 @@ enter        open                                   g    first
 v            frontier                               G    last
 r            refresh                                d    hide finished
 ?            help                                   /    find
+L            legend
 q            quit

@@ -496,7 +496,7 @@ func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 				} else {
 					requireHelpText(t, content,
 						"↑/↓/k/j move", "pgup/pgdn page", "g/G first/last",
-						"enter/r open/refresh", "d / hide finished/find", "?/q help/quit")
+						"enter/r open/refresh", "d / hide finished/find", "L/?/q legend/help/quit")
 				}
 				if noMouse {
 					requireHelpText(t, content, "m capture")
@@ -539,7 +539,7 @@ func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 				} else {
 					requireHelpText(t, content,
 						"esc/u back/watchlist", "tab/⇧tab links", "enter follow",
-						"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
+						"r/L/?/q refresh/legend/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
 				}
 				if noMouse {
 					requireHelpText(t, content, "m capture")
@@ -965,7 +965,7 @@ func TestDetailFramesFitConstrainedTerminalHeight(t *testing.T) {
 		requireHelpText(t, content,
 			"m release, shift-drag", "wheel scroll body", "click Link follow",
 			"esc/u back/watchlist", "tab/⇧tab links", "enter follow",
-			"r/?/q refresh/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
+			"r/L/?/q refresh/legend/help/quit", "↑/↓/k/j scroll", "pgup/pgdn page", "g/G first/last")
 	})
 
 	t.Run("readable initial error at 42x16", func(t *testing.T) {

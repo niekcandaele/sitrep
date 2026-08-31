@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-01-02T03:04:05Z                       just now
+frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic evidence) · budget 4870               just now
 
 
  ───────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌──────────────────────────┐
@@ -24,11 +24,10 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
  209                Todo║  ││┌▶┃  #213                Todo┃
  ge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
  LE                     ║  │││ ┃ACTIONABLE                ┃
- ═══════════════════════╝  │││ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
                                                             ▼
 
 1 Ticket's Links could not be read; anything it blocks is not Actionable
-read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
+read failed for #211: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
 m            release · shift-drag to select text    ↑/k  previous node
 click        select node                            ↓/j  next node
 double-click open Ticket                            ←/h  blocker side
@@ -37,4 +36,5 @@ enter        open Ticket                            pgup page up
 v/esc        list                                   pgdn page down
 r            re-read Details                        g    first node
 ?            help                                   G    last node
-q            quit                                                                                         x 4/4 · y 0/37
+L            legend
+q            quit                                                                                         x 4/4 · y 0/38

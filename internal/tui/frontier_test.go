@@ -52,7 +52,7 @@ func openFrontier(t *testing.T, s *session) {
 	t.Helper()
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	s.waitFor(t, "actionable")
+	s.waitFor(t, "blocking cycles")
 	s.tm.Send(keyPress("g"))
 	s.tm.Send(keyPress("h"))
 }
@@ -388,6 +388,7 @@ func TestFrontierPendingBadgesChangeTogetherAtResolution(t *testing.T) {
 		FetchedAt:    newClock().now(),
 	}
 	m := New(t.Context(), Options{Initial: &in, Now: newClock().now})
+	m.legendVisible = false
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 	m = updated.(Model)
 	updated, _ = m.Update(keyPress("v"))
@@ -488,6 +489,7 @@ func TestFrontierPendingMembersKeepGhostIdentity(t *testing.T) {
 		"T-2": nil,
 	}
 	m := frontierMouseModel(t, tickets, links, 120, 30)
+	m.legendVisible = false
 	delete(m.frontier.input.Links, "T-2")
 	m = m.rebuildFrontier()
 	plain := string(frame(m.View().Content))
@@ -602,7 +604,7 @@ func TestFrontierCancellationIsControlFlowButDeadlineIsFailure(t *testing.T) {
 
 		// Drive the same captured-context command that Bubble Tea's batch owns. The
 		// ignored batch is never run in this unit test, so exactly one result lands.
-		msg := m.frontierFetchCmd(m.frontierGeneration, "T-1")().(frontierDetailMsg)
+		msg := m.frontierFetchCmd(m.frontierGeneration, m.detailEvidenceVersion, "T-1")().(frontierDetailMsg)
 		if received != m.frontierContext {
 			t.Fatal("Frontier command did not pass its generation context to DetailSource")
 		}
@@ -1001,7 +1003,7 @@ func TestFrontierIgnoresListFilters(t *testing.T) {
 	s.waitFor(t, "filter:")
 
 	s.tm.Send(keyPress("v"))
-	s.waitFor(t, "actionable")
+	s.waitFor(t, "blocking cycles")
 	s.tm.Send(keyPress("g"))
 
 	m, got := s.finish(t)
@@ -1151,7 +1153,7 @@ func TestFrontierSelectionFollowsTheFocusOut(t *testing.T) {
 	// The list opens on #207, the first In Progress Ticket; g on the Frontier
 	// focuses the first node in canonical order, which is #201.
 	s.tm.Send(keyPress("v"))
-	s.waitFor(t, "actionable")
+	s.waitFor(t, "blocking cycles")
 	s.tm.Send(keyPress("g"))
 	s.tm.Send(keyPress("v"))
 	s.waitFor(t, "TODO")
@@ -2217,6 +2219,55 @@ func TestFrontierResolvedHeaderMatchesListAndRefreshRepairsAStaleSeat(t *testing
 	}
 }
 
+func TestFrontierReseatPreservesRemainingFailureProvenance(t *testing.T) {
+	capabilities := model.Capabilities{BlockingLinks: true}
+	removed := model.Ticket{ID: "one", Key: "ONE", Status: model.StatusTodo}
+	remaining := model.Ticket{ID: "two", Key: "TWO", Status: model.StatusTodo}
+	m := cachedFrontierModel(t, []model.Ticket{removed, remaining}, nil, 120, 40, nil)
+	m.details = make(map[model.TicketID]detailEntry)
+	m.input = ListInput{
+		Header:       Header{Key: "#105", Title: "reseated"},
+		Tickets:      []model.Ticket{remaining},
+		Capabilities: capabilities,
+		FetchedAt:    m.now(),
+	}
+	removedErr := errors.New("removed member failure")
+	remainingErr := errors.New("remaining member failure")
+	m.frontier = frontierState{
+		input: FrontierInput{
+			Tickets: []model.Ticket{removed, remaining},
+			Links:   make(map[model.TicketID][]model.Link), Capabilities: capabilities,
+		},
+		failed:        map[model.TicketID]struct{}{removed.ID: {}, remaining.ID: {}},
+		failureErrors: map[model.TicketID]error{removed.ID: removedErr, remaining.ID: remainingErr},
+		lastErr:       removedErr,
+	}
+
+	m, cmd := m.reseatFrontier()
+	if cmd == nil {
+		t.Fatal("successful Watchlist reseat returned no repaint")
+	}
+	if _, carried := m.frontier.failed[removed.ID]; carried {
+		t.Fatal("reseat retained a removed member's failure")
+	}
+	if _, carried := m.frontier.failureErrors[removed.ID]; carried {
+		t.Fatal("reseat retained a removed member's failure error")
+	}
+	if _, carried := m.frontier.failed[remaining.ID]; !carried {
+		t.Fatal("reseat dropped the remaining member's failure")
+	}
+	if got := m.frontier.failureErrors[remaining.ID]; !errors.Is(got, remainingErr) {
+		t.Fatalf("remaining failure error = %v, want %v", got, remainingErr)
+	}
+	if !errors.Is(m.frontier.lastErr, remainingErr) {
+		t.Fatalf("failure footer error = %v, want %v", m.frontier.lastErr, remainingErr)
+	}
+	footer := strings.Join(m.frontierFooterLines(), "\n")
+	if !strings.Contains(footer, "TWO") || !strings.Contains(footer, remainingErr.Error()) || strings.Contains(footer, removedErr.Error()) {
+		t.Fatalf("reseated Frontier footer = %q", footer)
+	}
+}
+
 func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T) {
 	members, details := successfulFrontierMembers(t, detailfanout.Parallelism)
 	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
@@ -3097,7 +3148,7 @@ func TestFrontierExpandedHelp(t *testing.T) {
 			tm.Send(keyPress("v"))
 			// The counts line, not the word "actionable": at 42 columns the
 			// header is clipped before it reaches that far.
-			s.waitFor(t, "16 nodes")
+			s.waitFor(t, "blocking cycles")
 			tm.Send(keyPress("?"))
 			s.waitFor(t, "re-read Details")
 
@@ -3289,7 +3340,7 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 	if strings.Contains(frame, "Ticket's Links could not be read") {
 		t.Errorf("an unresolved seat published a settled failure count:\n%s", frame)
 	}
-	if !strings.Contains(frame, "read failed:") || !strings.Contains(frame, "press r to retry") {
+	if !strings.Contains(frame, "read failed for #211:") || !strings.Contains(frame, "press r to retry") {
 		t.Errorf("the carried failure remedy went away across a refresh:\n%s", frame)
 	}
 }

@@ -24,6 +24,7 @@ type detailHelpRoles struct {
 	parent       key.Binding
 	refresh      key.Binding
 	help         key.Binding
+	legend       key.Binding
 	up           key.Binding
 	down         key.Binding
 	pageUp       key.Binding
@@ -48,6 +49,7 @@ func detailHelpRolesFrom(keys DetailKeyMap) detailHelpRoles {
 		parent:       keys.Parent,
 		refresh:      keys.Refresh,
 		help:         keys.Help,
+		legend:       keys.Legend,
 		up:           keys.Up,
 		down:         keys.Down,
 		pageUp:       keys.PageUp,
@@ -81,14 +83,14 @@ func (r detailHelpRoles) supplementalShortBindings() []key.Binding {
 func (r detailHelpRoles) actionBindings() []key.Binding {
 	return []key.Binding{
 		r.mouse, r.mouseWheel, r.mouseFollow, r.back, r.follow, r.nextLink, r.previousLink,
-		r.parent, r.refresh, r.help, r.quit,
+		r.parent, r.refresh, r.help, r.legend, r.quit,
 	}
 }
 
 func (r detailHelpRoles) actionsWithoutMouse() []key.Binding {
 	return []key.Binding{
 		r.back, r.follow, r.nextLink, r.previousLink,
-		r.parent, r.refresh, r.help, r.quit,
+		r.parent, r.refresh, r.help, r.legend, r.quit,
 	}
 }
 
@@ -123,7 +125,7 @@ func compactDetailFullHelp(r detailHelpRoles) [][]key.Binding {
 		bindings = append(bindings, r.follow)
 	}
 	bindings = append(bindings,
-		helpOnlyBinding("r/?/q", "refresh/help/quit"),
+		helpOnlyBinding("r/L/?/q", "refresh/legend/help/quit"),
 		helpOnlyBinding("↑/↓/k/j", "scroll"),
 		helpOnlyBinding("pgup/pgdn", "page"),
 		helpOnlyBinding("g/G", "first/last"),

@@ -36,5 +36,5 @@ frontier · 13 nodes · actionable unknown · budget 4870 · resets 2030-01-02T0
                                                             ▼
 
 13 Tickets' Links could not be read; anything they block is not Actionable
-read failed: tracker said no — press r to retry the Tickets that failed
+read failed for #201: tracker said no — press r to retry the Tickets that failed
 v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 0/47

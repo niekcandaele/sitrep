@@ -22,8 +22,8 @@ DONE (1)
 
 CANCELLED (1)
   #206       Legacy weight table
-
-
+Legend · L hide
+● — actionable — all known blockers are satisfied
 
 
 
