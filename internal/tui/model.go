@@ -565,9 +565,14 @@ func (m Model) View() tea.View {
 	frame := m
 	frame.now = func() time.Time { return now }
 	markers := frame.listMarkers()
-	header := renderHeader(frame.input, frame.staleness(), frame.hasData, frame.width, markers, frame.styles)
-	v.SetContent(strings.Join(append([]string{header, frame.renderBody(markers)}, frame.footerLines()...), "\n"))
-	v.Cursor = frame.cursor()
+	actionableRead := ""
+	if fetchedAt, complete := actionableEvidenceSnapshot(frame.input.Tickets, frame.details, markers); complete {
+		actionableRead = detailStaleness(fetchedAt, now, false)
+	}
+	header := renderHeader(frame.input, frame.staleness(), frame.hasData, frame.width, markers,
+		actionableRead, frame.styles)
+	v.SetContent(strings.Join(append([]string{header, frame.renderBody(markers)}, frame.footerLines(markers)...), "\n"))
+	v.Cursor = frame.cursor(markers)
 	if m.mouseEnabled {
 		v.OnMouse = frame.listMouseHandler()
 	}
@@ -577,7 +582,7 @@ func (m Model) View() tea.View {
 // cursor places the real terminal cursor inside the find box, and nowhere else:
 // the list marks its selection with "▸", and a second cursor parked in the
 // top-left corner only draws the eye away from it.
-func (m Model) cursor() *tea.Cursor {
+func (m Model) cursor(markers ...listMarkers) *tea.Cursor {
 	if !m.searching {
 		return nil
 	}
@@ -588,7 +593,7 @@ func (m Model) cursor() *tea.Cursor {
 	// The box is drawn at column 0 of the filter line, so only the row needs
 	// shifting: past the header, past the body, and past the footer's blank
 	// spacer plus any cutoff notice or refresh error above it.
-	c.Y += headerHeight + m.bodyHeight() + m.filterLineIndex()
+	c.Y += headerHeight + m.bodyHeight(markers...) + m.filterLineIndex()
 	return c
 }
 
@@ -1111,7 +1116,7 @@ func (m Model) selectRow(i int) Model {
 // the rows and nothing else: an empty, failed or loading body has no row to
 // mark.
 func (m Model) renderBody(markers listMarkers) string {
-	height := m.bodyHeight()
+	height := m.bodyHeight(markers)
 
 	switch {
 	case m.hasData && len(m.rows) > 0:
@@ -1170,7 +1175,7 @@ func (m Model) retryBodyHint() string {
 // It is returned as lines rather than a block because the footer's height is
 // what the body is measured against, and because the find box needs to know
 // which row it was drawn on to put the cursor there.
-func (m Model) footerLines() []string {
+func (m Model) footerLines(markers ...listMarkers) []string {
 	now := m.now()
 	lines := []string{""}
 	if m.hasData && m.input.LimitReached {
@@ -1197,7 +1202,7 @@ func (m Model) footerLines() []string {
 		lines = append(lines, filter)
 	}
 	// The expanded help is several lines, so it is clipped line by line.
-	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys()), m.width), "\n")...)
+	return append(lines, strings.Split(truncateBlock(m.help.View(m.helpKeys(markers...)), m.width), "\n")...)
 }
 
 func (m Model) ratePolicyFooter() string {
@@ -1316,14 +1321,14 @@ func (m Model) filterLineIndex() int {
 // one the keyboard is on whenever that footer is drawn. A footer offering list
 // commands while the find box holds the keyboard would be describing a program
 // the user is not in.
-func (m Model) helpKeys() help.KeyMap {
+func (m Model) helpKeys(markers ...listMarkers) help.KeyMap {
 	if m.searching {
 		return m.responsiveHelpKeys(m.searchKeys)
 	}
 	if m.mode == modeFrontier {
 		return m.responsiveHelpKeys(m.effectiveFrontierKeys())
 	}
-	return m.responsiveHelpKeys(m.keys)
+	return m.responsiveHelpKeys(m.keys, markers...)
 }
 
 // effectiveFrontierKeys is the Frontier's help and dispatch surface. Without
@@ -1494,9 +1499,25 @@ func (k responsiveHelpKeyMap) FullHelp() [][]key.Binding { return k.full }
 
 // responsiveHelpKeys keeps list and search help actionable at narrow widths.
 // Detail owns its richer role-aware layout in detailhelp.go.
-func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
+func (m Model) responsiveHelpKeys(keys help.KeyMap, markerSnapshot ...listMarkers) help.KeyMap {
 	short := append([]key.Binding(nil), keys.ShortHelp()...)
-	groups := keys.FullHelp()
+	listKeys, isList := keys.(KeyMap)
+	fullKeys := keys
+	computesActionability := false
+	if isList && m.help.ShowAll && m.hasData && m.input.Capabilities.BlockingLinks &&
+		hasActionabilityMembers(m.input.Tickets) && listKeys.Frontier.Enabled() {
+		markers := m.listMarkers()
+		if len(markerSnapshot) > 0 {
+			markers = markerSnapshot[0]
+		}
+		if !markers.active {
+			contextual := listKeys
+			contextual.Frontier.SetHelp("v", "compute actionability")
+			fullKeys = contextual
+			computesActionability = true
+		}
+	}
+	groups := fullKeys.FullHelp()
 	full := make([][]key.Binding, len(groups))
 	for i := range groups {
 		full[i] = append([]key.Binding(nil), groups[i]...)
@@ -1517,26 +1538,34 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap) help.KeyMap {
 
 	unbounded := m.help
 	unbounded.SetWidth(0)
-	if listKeys, ok := keys.(KeyMap); ok {
+	if isList {
 		short = projectListShortHelp(short, listKeys, unbounded, m.width)
 	} else {
 		shortenHelpItem(short, unbounded, m.width)
 	}
-	if listKeys, ok := keys.(KeyMap); ok && m.help.ShowAll &&
+	if isList && m.help.ShowAll &&
 		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
-		full = compactListFullHelp(listKeys)
+		full = compactListFullHelp(fullKeys.(KeyMap))
 	} else if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
-		stacked := make([]key.Binding, 0)
-		for _, group := range full {
-			stacked = append(stacked, group...)
+		if computesActionability {
+			candidate := actionabilityListFullHelp(fullKeys.(KeyMap))
+			if lipgloss.Width(unbounded.FullHelpView(candidate)) <= m.width {
+				full = candidate
+			}
 		}
-		full = [][]key.Binding{stacked}
+		if lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
+			stacked := make([]key.Binding, 0)
+			for _, group := range full {
+				stacked = append(stacked, group...)
+			}
+			full = [][]key.Binding{stacked}
+		}
 	}
 	return responsiveHelpKeyMap{short: short, full: full}
 }
 
-// staleness is the header's age indicator, read from the injected clock. It is
-// the only place in the TUI a clock reaches the screen.
+// staleness is the Watchlist header's age indicator, read from the injected
+// clock.
 func (m Model) staleness() string {
 	return Staleness(m.input.FetchedAt, m.now(), m.refreshing)
 }
@@ -1548,8 +1577,8 @@ func (m Model) staleness() string {
 // the expanded help listing is as tall as its longest column. A constant here
 // would be a number to keep in step with a layout, and the frame that overflows
 // by one line is the frame that scrolls the alternate screen.
-func (m Model) bodyHeight() int {
-	return max(m.height-headerHeight-len(m.footerLines()), 1)
+func (m Model) bodyHeight(markers ...listMarkers) int {
+	return max(m.height-headerHeight-len(m.footerLines(markers...)), 1)
 }
 
 // headerHeight is what renderHeader always draws: identity, progress, blank.

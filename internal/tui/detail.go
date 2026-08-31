@@ -150,6 +150,7 @@ type detailEntry struct {
 	// ID aliases a Watchlist member.
 	frontierIneligible bool
 	frontierDetail     model.Detail
+	frontierFetchedAt  time.Time
 	frontierEvidence   bool
 	// directDetailVersion orders every successful singular Detail completion
 	// against captured Frontier fan-out reads. It is session-local and never
@@ -165,6 +166,19 @@ func (entry detailEntry) frontierLinks() (model.Detail, bool) {
 		return entry.frontierDetail, true
 	}
 	return entry.detail, !entry.frontierIneligible
+}
+
+// frontierEvidenceStamp dates the Detail that frontierLinks returns. Production
+// writes always stamp explicit evidence; the fallback preserves legacy test
+// fixtures whose zero-value provenance makes their display Detail eligible.
+func (entry detailEntry) frontierEvidenceStamp() (time.Time, bool) {
+	if _, eligible := entry.frontierLinks(); !eligible {
+		return time.Time{}, false
+	}
+	if entry.frontierEvidence && !entry.frontierFetchedAt.IsZero() {
+		return entry.frontierFetchedAt, true
+	}
+	return entry.fetchedAt, !entry.fetchedAt.IsZero()
 }
 
 // detailState is the Detail screen's own state, kept in one struct so that it
@@ -591,6 +605,7 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	entry.directDetailVersion = m.detailEvidenceVersion
 	if !entry.frontierIneligible {
 		entry.frontierDetail = msg.detail
+		entry.frontierFetchedAt = at
 		entry.frontierEvidence = true
 	}
 	m.details[msg.id] = entry

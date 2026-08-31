@@ -1,40 +1,40 @@
 #111  Widget sync v2: shards, retries & te
-███░░░░░░░  3/9 done · 1 cancelled · 33% j
+███░░░░░░░  3/9 done · 1 cancell… just now
 
 IN PROGRESS (3)
-▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 o…
-  #113     Retry & backoff for the sync w…
-           @mara-vos @tobias  #502 open c…
-  #7       Teach the gadget agent to spea…
-           #18 draft ci ...
+▸ #112       Draft the shard sync protocol
+             [In Review]  @mara-vos  #501…
+  #113       Retry & backoff for the sync…
+             @mara-vos @tobias  #502 open…
+  #7         Teach the gadget agent to sp…
+             #18 draft ci ...
 
 TODO (3)
-  #115     Reconcile widget IDs across sh…
-  #116     Protocol conformance tests
-           [Selected for Development]  @t…
-  #117     Renseigner la métrique « éclai…
+  #115       Reconcile widget IDs across …
+  #116       Protocol conformance tests
+             [Selected for Development]  …
+  #117       Renseigner la métrique « écl…
 
 DONE (3)
-  #118     Cache shard lookups
-           @mara-vos  #504 merged
-  #119     Emit sync telemetry
-           @tobias
-  #120     Write the sync v2 runbook
+  #118       Cache shard lookups
+             @mara-vos  #504 merged
+  #119       Emit sync telemetry
+             @tobias
+  #120       Write the sync v2 runbook
 
 CANCELLED (1)
-  #121     Mirror shards to the legacy fe…
+  #121       Mirror shards to the legacy …
 
 
 
 
 
 
-m     capture     ↑/k  up
-enter open        ↓/j  down
-v     frontier    pgup page up
-r     refresh     pgdn page down
-?     help        g    first
-L     legend      G    last
-q     quit        d    hide finished
-                  /    find
+enter open      m    capture
+?     help      v    compute actionability
+L     legend    r    refresh
+q     quit      pgup page up
+↑/k   up        pgdn page down
+↓/j   down      G    last
+g     first     d    hide finished
+                /    find

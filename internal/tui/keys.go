@@ -151,6 +151,17 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	}
 }
 
+// actionabilityListFullHelp redistributes the longer cold Frontier description
+// and the short disabled-mouse roles across the two columns. It is a measured
+// fallback only: callers retain the ordinary groups whenever those already fit,
+// and stack if this arrangement still does not.
+func actionabilityListFullHelp(k KeyMap) [][]key.Binding {
+	return [][]key.Binding{
+		{k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Help, k.Legend, k.Quit, k.Up, k.Down, k.Home},
+		{k.ToggleMouse, k.Frontier, k.Refresh, k.PageUp, k.PageDown, k.End, k.HideFinished, k.Find, k.ClearFilter},
+	}
+}
+
 func compactListFullHelp(k KeyMap) [][]key.Binding {
 	mouse := k.ToggleMouse
 	if mouse.Help().Desc == mouseEnabledHelp {

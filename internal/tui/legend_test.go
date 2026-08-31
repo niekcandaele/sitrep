@@ -72,14 +72,103 @@ func TestFrontierCycleHeaderCountsSetsNotMembers(t *testing.T) {
 }
 
 func TestLegendToggleDoesNotIssueProviderCommand(t *testing.T) {
-	m := Model{legendVisible: true, keys: DefaultKeyMap()}
+	m := Model{
+		legendVisible: true,
+		keys:          DefaultKeyMap(),
+		details: map[model.TicketID]detailEntry{
+			"one": {fetchedAt: time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)},
+		},
+		selected: 2,
+		offset:   1,
+	}
 	updated, cmd := m.onKey(tea.KeyPressMsg{Code: 'L', Text: "L"})
 	got := updated.(Model)
 	if got.legendVisible || cmd == nil {
 		t.Fatalf("toggle result visible=%t command=%v", got.legendVisible, cmd != nil)
 	}
+	if _, cached := got.details["one"]; !cached || got.selected != m.selected || got.offset != m.offset {
+		t.Fatalf("toggle mutated non-display state: cache=%#v selected=%d offset=%d", got.details, got.selected, got.offset)
+	}
 	if cmd() == nil {
 		t.Fatal("toggle repaint command returned no message")
+	}
+}
+
+func TestListLegendUsesOneSharedActionableFactWithoutMovingListState(t *testing.T) {
+	at := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	tickets := []model.Ticket{
+		{ID: "one", Key: "ONE", Title: "One", Status: model.StatusTodo},
+		{ID: "two", Key: "TWO", Title: "Two", Status: model.StatusTodo},
+	}
+	m := mouseListModel(t, Options{Now: func() time.Time { return at }}, tickets, 100, 20)
+	m.input.FetchedAt = at
+	m.input.Capabilities.BlockingLinks = true
+	m.help.SetWidth(m.width)
+	definition := legendCatalog[legendActionable]
+	fact := definition.name + " — " + definition.description
+
+	cold := string(frame(m.View().Content))
+	if strings.Count(cold, fact) != 0 {
+		t.Fatalf("cold List selected the shared Actionable fact:\n%s", cold)
+	}
+	coldY := ticketLineY(t, m, "two", 0)
+	coldClicked, _, applied := dispatchMouse(t, m, tea.MouseClickMsg{X: 1, Y: coldY, Button: tea.MouseLeft})
+	if !applied || coldClicked.selectedID != "two" {
+		t.Fatalf("cold marker geometry selected %q, applied=%t, want two", coldClicked.selectedID, applied)
+	}
+
+	for _, ticket := range tickets {
+		m.details[ticket.ID] = detailEntry{
+			detail:            model.Detail{TicketID: ticket.ID},
+			fetchedAt:         at,
+			frontierDetail:    model.Detail{TicketID: ticket.ID},
+			frontierFetchedAt: at,
+			frontierEvidence:  true,
+		}
+	}
+	warm := string(frame(m.View().Content))
+	if got := strings.Count(warm, fact); got != 1 {
+		t.Fatalf("warm List selected shared Actionable fact %d times, want exactly once:\n%s", got, warm)
+	}
+	warmY := ticketLineY(t, m, "two", 0)
+	if warmY != coldY {
+		t.Fatalf("marker transition moved Ticket hit row from %d to %d", coldY, warmY)
+	}
+	warmClicked, _, applied := dispatchMouse(t, m, tea.MouseClickMsg{X: 1, Y: warmY, Button: tea.MouseLeft})
+	if !applied || warmClicked.selectedID != "two" {
+		t.Fatalf("warm marker geometry selected %q, applied=%t, want two", warmClicked.selectedID, applied)
+	}
+	m = warmClicked
+
+	wantSelected, wantID := m.selected, m.selectedID
+	wantOffset, wantEpoch := m.offset, m.mouseEpoch
+	wantBodyHeight, wantFooterLines := m.bodyHeight(), len(m.footerLines())
+	oneStamp := m.details["one"].frontierFetchedAt
+	twoStamp := m.details["two"].frontierFetchedAt
+	updated, cmd := m.Update(keyPress("L"))
+	got := updated.(Model)
+	if cmd == nil || got.legendVisible {
+		t.Fatalf("L toggle visible=%t command=%v, want hidden repaint", got.legendVisible, cmd != nil)
+	}
+	if strings.Count(string(frame(got.View().Content)), fact) != 0 {
+		t.Fatal("hidden List legend still rendered the Actionable fact")
+	}
+	if got.selected != wantSelected || got.selectedID != wantID || got.offset != wantOffset || got.mouseEpoch != wantEpoch {
+		t.Fatalf("L moved list state: selected=%d/%q offset=%d epoch=%d, want %d/%q %d %d",
+			got.selected, got.selectedID, got.offset, got.mouseEpoch, wantSelected, wantID, wantOffset, wantEpoch)
+	}
+	if got.bodyHeight() != wantBodyHeight || len(got.footerLines()) != wantFooterLines ||
+		ticketLineY(t, got, "two", 0) != warmY {
+		t.Fatalf("L moved primary layout: body/footer/y=%d/%d/%d, want %d/%d/%d",
+			got.bodyHeight(), len(got.footerLines()), ticketLineY(t, got, "two", 0),
+			wantBodyHeight, wantFooterLines, warmY)
+	}
+	if len(got.details) != 2 || !got.details["one"].frontierFetchedAt.Equal(oneStamp) ||
+		!got.details["two"].frontierFetchedAt.Equal(twoStamp) {
+		t.Fatalf("L mutated cache/evidence: %#v", got.details)
+	}
+	if msg := cmd(); msg == nil {
+		t.Fatal("L repaint command returned no message")
 	}
 }
 
@@ -991,9 +1080,10 @@ func TestEligibleDetailReadsSeedFrontierCache(t *testing.T) {
 		{name: "native Frontier Detail", returnMode: modeFrontier, member: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			fetchedAt := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 			m := Model{
 				mode: modeDetail, detailReturn: tc.returnMode, detailGeneration: 1,
-				details: make(map[model.TicketID]detailEntry), now: time.Now,
+				details: make(map[model.TicketID]detailEntry), now: func() time.Time { return fetchedAt },
 				detail: detailState{ticket: ticket, frontierMember: tc.member, watchlistMember: true, loading: true},
 				frontier: frontierState{input: FrontierInput{
 					Tickets: []model.Ticket{ticket}, Links: make(map[model.TicketID][]model.Link), Capabilities: capabilities,
@@ -1003,8 +1093,12 @@ func TestEligibleDetailReadsSeedFrontierCache(t *testing.T) {
 				generation: 1, id: ticket.ID, caps: capabilities, detail: model.Detail{},
 			})
 			m = updated.(Model)
-			if m.details[ticket.ID].frontierIneligible {
+			entry := m.details[ticket.ID]
+			if entry.frontierIneligible {
 				t.Fatalf("%s was not eligible for Frontier cache", tc.name)
+			}
+			if got, ok := entry.frontierEvidenceStamp(); !ok || !got.Equal(fetchedAt) {
+				t.Fatalf("%s evidence stamp = (%v, %v), want (%v, true)", tc.name, got, ok, fetchedAt)
 			}
 			if _, seeded := m.linksFromCache()[ticket.ID]; !seeded || !m.haveDetail(ticket.ID) {
 				t.Fatalf("%s did not seed eligible Frontier cache", tc.name)
@@ -1066,6 +1160,8 @@ func TestListDetailOriginDoesNotTransferToFollowedAlias(t *testing.T) {
 
 func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	alias := model.Ticket{ID: "two", Key: "TWO"}
+	priorAt := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	displayAt := priorAt.Add(time.Hour)
 	prior := model.Detail{Links: []model.Link{{
 		Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "prior", Key: "PRIOR"},
 	}}}
@@ -1074,12 +1170,13 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	}}}
 	m := Model{
 		mode: modeDetail, detailReturn: modeFrontier, detailGeneration: 1,
-		detailEvidenceVersion: 7, now: time.Now,
+		detailEvidenceVersion: 7, now: func() time.Time { return displayAt },
 		detail:             detailState{ticket: alias, loading: true},
 		frontierGeneration: 1,
 		details: map[model.TicketID]detailEntry{
 			alias.ID: {
-				detail: prior, frontierDetail: prior, frontierEvidence: true, directDetailVersion: 7,
+				detail: prior, fetchedAt: priorAt, frontierDetail: prior,
+				frontierFetchedAt: priorAt, frontierEvidence: true, directDetailVersion: 7,
 			},
 		},
 	}
@@ -1089,6 +1186,9 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	got, eligible := entry.frontierLinks()
 	if !entry.frontierIneligible || !eligible || !slices.Equal(got.Links, prior.Links) || entry.directDetailVersion != 8 {
 		t.Fatalf("followed alias replaced prior evidence: entry=%#v evidence=%#v eligible=%t", entry, got, eligible)
+	}
+	if evidenceAt, ok := entry.frontierEvidenceStamp(); !ok || !evidenceAt.Equal(priorAt) || !entry.fetchedAt.Equal(displayAt) {
+		t.Fatalf("followed alias moved evidence time: evidence=(%v, %v) display=%v", evidenceAt, ok, entry.fetchedAt)
 	}
 
 	stale := model.Detail{Links: []model.Link{{Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "stale", Key: "STALE"}}}}
@@ -1109,6 +1209,9 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	got, eligible = m.details[alias.ID].frontierLinks()
 	if !eligible || !slices.Equal(got.Links, current.Links) {
 		t.Fatalf("current fan-out did not replace stale eligible evidence: %#v", got)
+	}
+	if evidenceAt, ok := m.details[alias.ID].frontierEvidenceStamp(); !ok || !evidenceAt.Equal(displayAt) {
+		t.Fatalf("current fan-out evidence stamp = (%v, %v), want (%v, true)", evidenceAt, ok, displayAt)
 	}
 }
 

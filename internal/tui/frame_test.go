@@ -3,8 +3,10 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
@@ -139,7 +141,7 @@ func TestMetaLineTruncatesWithAnEllipsis(t *testing.T) {
 		width     = 60
 		keyColumn = 6
 	)
-	budget := width - selectionGutter - keyColumn
+	budget := width - selectionGutter - keyColumn - actionableColumn
 
 	lines := rowLines([]Row{{Kind: RowTicket, Ticket: t3}}, 0, keyColumn, width,
 		false, model.Capabilities{PullRequests: true}, listMarkers{}, Styles{})
@@ -151,7 +153,7 @@ func TestMetaLineTruncatesWithAnEllipsis(t *testing.T) {
 	if !strings.HasSuffix(meta, "…") {
 		t.Errorf("meta line %q does not end in an ellipsis; a clipped verdict reads as a whole one", meta)
 	}
-	if w := lipgloss.Width(meta) - selectionGutter - keyColumn; w > budget {
+	if w := lipgloss.Width(meta) - selectionGutter - keyColumn - actionableColumn; w > budget {
 		t.Errorf("meta line is %d cells of content, want at most the title's budget of %d", w, budget)
 	}
 }
@@ -184,20 +186,18 @@ func TestHeaderDrawsAZeroActionableCount(t *testing.T) {
 	p := model.Progress{Done: 1, Denominator: 2, PercentDone: 50}
 	warm := listMarkers{active: true, actionable: map[model.TicketID]bool{}}
 
-	got := headerProgress(p, "just now", 120, warm, Styles{})
+	got := headerProgress(p, "just now", 120, warm, "", Styles{})
 
 	if !strings.Contains(got, separator+"0 actionable") {
 		t.Errorf("a warm header with nothing Actionable says nothing about it:\n%s", got)
 	}
-	if cold := headerProgress(p, "just now", 120, listMarkers{}, Styles{}); cold == got {
+	if cold := headerProgress(p, "just now", 120, listMarkers{}, "", Styles{}); cold == got {
 		t.Errorf("warm-and-none renders identically to cold:\n%s", got)
 	}
 }
 
-// The marker column takes two cells from the title's budget, and the budget is
-// what keeps a line inside the terminal. A cold listMarkers reserves nothing,
-// so the discipline has to be asserted warm, at a width where the titles
-// actually reach the edge.
+// The marker gutter always takes two cells from the title's budget, even while
+// evidence is cold. Assert both states at widths where titles reach the edge.
 func TestRenderRowsFitsTheWindowWithMarkersActive(t *testing.T) {
 	long := func(key string) model.Ticket {
 		t := ticket(key, model.StatusTodo)
@@ -227,6 +227,114 @@ func TestRenderRowsFitsTheWindowWithMarkersActive(t *testing.T) {
 		}
 		if !drew {
 			t.Fatalf("width %d: no marker was drawn, so this proves nothing", width)
+		}
+	}
+}
+
+func TestTicketMarkerGutterIsStableAcrossEvidenceStates(t *testing.T) {
+	ticket := ticket("#1", model.StatusTodo)
+	ticket.Title = "Ship the placement heuristic"
+	ticket.NativeStatus = "Selected for Development"
+	rows := []Row{{Kind: RowTicket, Ticket: ticket}}
+
+	cold := rowLines(rows, 0, 4, 60, false, model.Capabilities{}, listMarkers{}, Styles{})
+	nonActionable := rowLines(rows, 0, 4, 60, false, model.Capabilities{},
+		listMarkers{active: true, actionable: map[model.TicketID]bool{}}, Styles{})
+	actionable := rowLines(rows, 0, 4, 60, false, model.Capabilities{},
+		listMarkers{active: true, actionable: map[model.TicketID]bool{"#1": true}}, Styles{})
+
+	if strings.Join(cold, "\n") != strings.Join(nonActionable, "\n") {
+		t.Errorf("cold and warm non-actionable geometry differ:\ncold %q\nwarm %q", cold, nonActionable)
+	}
+	if len(cold) != 2 || len(actionable) != 2 || cold[1] != actionable[1] {
+		t.Fatalf("marker changed row height or meta geometry: cold=%q actionable=%q", cold, actionable)
+	}
+	markerStart := selectionGutter + 4
+	coldRunes := []rune(cold[0])
+	actionableRunes := []rune(actionable[0])
+	if got := string(coldRunes[markerStart : markerStart+actionableColumn]); got != notActionableMarker {
+		t.Errorf("cold marker gutter = %q, want blank reservation", got)
+	}
+	if got := string(actionableRunes[markerStart : markerStart+actionableColumn]); got != actionableMarker {
+		t.Errorf("warm marker gutter = %q, want %q", got, actionableMarker)
+	}
+	if string(coldRunes[markerStart+actionableColumn:]) != string(actionableRunes[markerStart+actionableColumn:]) {
+		t.Errorf("marker moved title: cold=%q actionable=%q", cold[0], actionable[0])
+	}
+}
+
+func TestHeaderProgressCandidatesKeepFactsAtomicAndPrioritized(t *testing.T) {
+	base := "1/2 done" + separator + "50%"
+	markers := listMarkers{active: true, count: 0}
+	reset := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	budget := rateLimitHeaderFact{valid: true, budget: model.RateLimitBudget{Remaining: 7, ResetsAt: reset}}
+	compact, full := budget.fragments()
+	asOf := "actionable as of" + separator + "read 4m ago"
+	want := []string{
+		joinHeaderFacts(base, "0 actionable", full, asOf),
+		joinHeaderFacts(base, "0 actionable", compact, asOf),
+		joinHeaderFacts(base, "0 actionable", full),
+		joinHeaderFacts(base, "0 actionable", compact),
+		joinHeaderFacts(base, "0 actionable", asOf),
+		joinHeaderFacts(base, "0 actionable"),
+		base,
+	}
+
+	got := headerProgressCandidates(base, markers, "read 4m ago", budget)
+	if len(got) != len(want) {
+		t.Fatalf("candidate count = %d, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestHeaderProgressPackingPreservesWholeFactsAndBar(t *testing.T) {
+	p := model.Progress{Done: 1, Denominator: 2, PercentDone: 50}
+	markers := listMarkers{active: true, count: 0}
+	reset := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	budget := rateLimitHeaderFact{valid: true, budget: model.RateLimitBudget{Remaining: 7, ResetsAt: reset}}
+	for width := 42; width <= 180; width++ {
+		got := headerProgress(p, "updated 7m ago", width, markers, "read 4m ago", Styles{}, budget)
+		if w := lipgloss.Width(got); w > width {
+			t.Errorf("width %d: rendered line is %d cells: %q", width, w, got)
+		}
+		if !strings.HasSuffix(got, "updated 7m ago") {
+			t.Errorf("width %d: Watchlist age was not retained: %q", width, got)
+		}
+		bar := strings.Fields(got)[0]
+		if lipgloss.Width(bar) < minBarWidth {
+			t.Errorf("width %d: bar is %d cells, want at least %d: %q", width, lipgloss.Width(bar), minBarWidth, got)
+		}
+		for _, partial := range []string{"actionabl…", "actionable as o…", "rea…", "budge…", "reset…"} {
+			if strings.Contains(got, partial) {
+				t.Errorf("width %d: atomic fact was clipped as %q: %q", width, partial, got)
+			}
+		}
+	}
+}
+
+func TestStyledHeaderProgressPackingMatchesVisiblePlainSemantics(t *testing.T) {
+	p := model.Progress{Done: 1, Denominator: 2, PercentDone: 50}
+	markers := listMarkers{active: true, count: 0}
+	reset := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	budget := rateLimitHeaderFact{valid: true, budget: model.RateLimitBudget{Remaining: 7, ResetsAt: reset}}
+	for width := 42; width <= 180; width++ {
+		plain := headerProgress(p, "updated 7m ago", width, markers, "read 4m ago", Styles{}, budget)
+		styled := headerProgress(p, "updated 7m ago", width, markers, "read 4m ago", DefaultStyles(true), budget)
+		if !strings.Contains(styled, "\x1b[") {
+			t.Fatalf("width %d: production styles emitted no ANSI, so the test proves nothing", width)
+		}
+		if got := ansi.Strip(styled); got != plain {
+			t.Errorf("width %d: styled visible semantics differ:\ngot  %q\nwant %q", width, got, plain)
+		}
+		if got := ansi.StringWidth(styled); got > width {
+			t.Errorf("width %d: styled line is %d cells: %q", width, got, styled)
+		}
+		if !strings.HasSuffix(styled, "\x1b[m") {
+			t.Errorf("width %d: styled line has no terminal SGR reset: %q", width, styled)
 		}
 	}
 }
