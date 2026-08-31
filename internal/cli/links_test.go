@@ -491,11 +491,20 @@ func TestJSONLinksReportsInvalidBatchWithoutPoisoningValidDetails(t *testing.T) 
 		t.Errorf("stderr = %q, want %q", got, want)
 	}
 	tickets := decodeLinks(t, stdout.String())
+	if _, present := tickets["unrequested"]; present {
+		t.Error("JSON emitted the unrequested native Detail")
+	}
+	if len(tickets) != len(fake.FixtureBlockingSnapshot().Tickets) {
+		t.Errorf("tickets = %d, want only %d requested Watchlist members", len(tickets), len(fake.FixtureBlockingSnapshot().Tickets))
+	}
 	if got := tickets["#201"].LinksKnown; got == nil || !*got {
 		t.Errorf("#201 links_known = %v, want true for its valid Detail", got)
 	}
 	if got := tickets["#211"].LinksKnown; got == nil || *got {
 		t.Errorf("#211 links_known = %v, want false for its actual failed Detail", got)
+	}
+	if tickets["#211"].UnmetBlockers != nil {
+		t.Errorf("#211 unmet_blockers = %+v, want absent because no Links were read", tickets["#211"].UnmetBlockers)
 	}
 }
 

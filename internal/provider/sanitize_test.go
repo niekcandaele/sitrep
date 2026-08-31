@@ -150,28 +150,51 @@ func (p pluralHostileProvider) FetchDetails(ctx context.Context, ids []model.Tic
 }
 
 func TestSanitizedFetchDetailsDoesNotMutateProviderResults(t *testing.T) {
-	inner := &sharedPluralProvider{details: map[model.TicketID]model.Detail{
-		"t1": {TicketID: "t1", Description: hostile},
-	}}
+	newHostileDetail := func() model.Detail {
+		return model.Detail{
+			TicketID:    "t1",
+			Description: hostile,
+			Comments: []model.Comment{{
+				ID:     hostile,
+				Author: model.User{Login: hostile, DisplayName: hostile},
+				Body:   hostile,
+				URL:    hostile,
+			}},
+			Links: []model.Link{{
+				NativeLabel: hostile,
+				Target: model.LinkTarget{
+					Key: hostile, Title: hostile, URL: hostile, NativeStatus: hostile,
+				},
+			}},
+		}
+	}
+	wantUnderlying := newHostileDetail()
+	boom := errors.New("shared error")
+	inner := &sharedPluralProvider{
+		details: map[model.TicketID]model.Detail{"t1": newHostileDetail()},
+		err:     boom,
+	}
 	got, err := provider.Sanitized(inner).FetchDetails(context.Background(), []model.TicketID{"t1"})
-	if err != nil {
-		t.Fatalf("FetchDetails: %v", err)
+	if !errors.Is(err, boom) {
+		t.Fatalf("FetchDetails error = %v, want preserved %v", err, boom)
 	}
-	if inner.details["t1"].Description != hostile {
-		t.Errorf("underlying Detail = %q, want unsanitized shared value", inner.details["t1"].Description)
+	if !reflect.DeepEqual(inner.details["t1"], wantUnderlying) {
+		t.Errorf("underlying Detail = %#v, want unchanged %#v", inner.details["t1"], wantUnderlying)
 	}
-	if got["t1"].Description == hostile {
-		t.Errorf("sanitized Detail = %q, want terminal-safe copy", got["t1"].Description)
+	if reflect.DeepEqual(got["t1"], wantUnderlying) {
+		t.Errorf("sanitized Detail = %#v, want terminal-safe copy", got["t1"])
 	}
+	checkClean(t, "detail", reflect.ValueOf(got["t1"]), true)
 }
 
 type sharedPluralProvider struct {
 	hostileProvider
 	details map[model.TicketID]model.Detail
+	err     error
 }
 
 func (p *sharedPluralProvider) FetchDetails(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, error) {
-	return p.details, nil
+	return p.details, p.err
 }
 
 func TestStampSnapshotPreservesLimitReached(t *testing.T) {
