@@ -165,8 +165,8 @@ func TestFrontierDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
 
 	for _, node := range nodes {
 		if node.id == "c" {
-			if node.emphasis.badge != "blocked by 1" {
-				t.Errorf("c badge = %q, want %q", node.emphasis.badge, "blocked by 1")
+			if got := frontierBadgeLine(node, g, 60); got != "blocked by 1" {
+				t.Errorf("c badge = %q, want %q", got, "blocked by 1")
 			}
 			return
 		}
@@ -1284,31 +1284,68 @@ func TestFrontierEmphasisIsWithheldUntilResolved(t *testing.T) {
 	}
 }
 
-func TestFrontierBadgeWords(t *testing.T) {
+func TestFrontierEvidenceLabelsSeparateCausesAndPreserveKnownBlockers(t *testing.T) {
 	tickets := []model.Ticket{
 		blockingTicket("#1", model.StatusTodo),
 		blockingTicket("#2", model.StatusTodo),
-		blockingTicket("#3", model.StatusTodo),
-		blockingTicket("#4", model.StatusTodo),
+		blockingTicket("#3", model.StatusUnknown),
 	}
-	// #2 is blocked by a Todo member; #3's own Links were never read; #4 sits on
-	// a self-loop.
-	g := graphOf(tickets, map[model.TicketID][]model.Link{
-		"#1": nil,
-		"#2": blockedBy("#1"),
-		"#4": blockedBy("#4"),
-	})
+	links := map[model.TicketID][]model.Link{
+		"#2": {
+			{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}},
+		},
+		"#3": nil,
+	}
+	g := graphOf(tickets, links)
 	nodes := frontierNodes(g, tickets, true)
-
-	want := map[model.TicketID]string{
-		"#1": "ACTIONABLE",
-		"#2": "blocked by 1",
-		"#3": "UNVERIFIED",
-		"#4": "CYCLE",
-	}
+	byID := make(map[model.TicketID]frontierNode, len(nodes))
 	for _, n := range nodes {
-		if n.emphasis.badge != want[n.id] {
-			t.Errorf("badge of %s = %q, want %q", n.id, n.emphasis.badge, want[n.id])
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, 60); got != "blocked by 1 LINKS FAILED" {
+		t.Errorf("failed own Links with known blocker = %q, want distinct local failure", got)
+	}
+
+	g = graphOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"), "#2": nil, "#3": nil,
+	})
+	nodes = frontierNodes(g, tickets, true)
+	byID = make(map[model.TicketID]frontierNode, len(nodes))
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, frontierCardWidth-2); got != "blocked by 1 BLOCKER?" {
+		t.Errorf("known and unresolved blockers = %q, want known count plus blocker uncertainty", got)
+	}
+}
+
+func TestFrontierEvidenceLabelsNameOutsideWatchlistAndNeverClipWords(t *testing.T) {
+	ticket := blockingTicket("#1", model.StatusTodo)
+	outside := model.LinkTarget{ID: "OUT-1", Key: "OUT-1", Title: "outside", Status: model.StatusUnknown}
+	g := graphOf([]model.Ticket{ticket}, map[model.TicketID][]model.Link{
+		"#1": {{Kind: model.LinkBlockedBy, Target: outside}},
+	})
+	nodes := frontierNodes(g, []model.Ticket{ticket}, true)
+	byID := make(map[model.TicketID]frontierNode, len(nodes))
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, 60); got != "BLOCKER UNKNOWN" {
+		t.Errorf("outside unresolved blocker badge = %q, want BLOCKER UNKNOWN", got)
+	}
+	if got := frontierBadgeLine(byID[outside.ID], g, 26); got != "NOT IN WATCHLIST" {
+		t.Errorf("ordinary outside-Watchlist badge = %q", got)
+	}
+	if got := frontierBadgeLine(byID[outside.ID], g, 15); got != "NOT LISTED" {
+		t.Errorf("compact outside-Watchlist badge = %q", got)
+	}
+	for _, width := range []int{10, 15, 16, 26} {
+		label := frontierBadgeLine(byID[outside.ID], g, width)
+		if lipgloss.Width(label) > width {
+			t.Errorf("badge %q is wider than %d", label, width)
+		}
+		if strings.Contains(label, "…") {
+			t.Errorf("semantic badge was clipped at %d columns: %q", width, label)
 		}
 	}
 }
@@ -1325,8 +1362,8 @@ func TestFrontierBadgeCountsAnonymousBlockers(t *testing.T) {
 	})
 	nodes := frontierNodes(g, tickets, true)
 
-	if got := frontierBadgeLine(nodes[0], g, 60); got != "UNVERIFIED +2 unnamed blockers" {
-		t.Errorf("badge line = %q, want an unverified card carrying the unnamed blocker count", got)
+	if got := frontierBadgeLine(nodes[0], g, 60); got != "BLOCKER UNKNOWN +2 unnamed blockers" {
+		t.Errorf("badge line = %q, want blocker uncertainty with the unnamed blocker count", got)
 	}
 }
 
@@ -1436,9 +1473,8 @@ func TestFrontierBadgeLineGivesTheNativeStatusWhatIsLeft(t *testing.T) {
 	})
 	node := frontierNodes(g, tickets, true)[0]
 	const badge = "blocked by 3"
-	if node.emphasis.badge != badge {
-		t.Fatalf("badge = %q, want %q: this test asserts the wrong thing otherwise",
-			node.emphasis.badge, badge)
+	if got := frontierBadgeLine(node, g, 60); !strings.HasSuffix(got, badge) {
+		t.Fatalf("badge line = %q, want it to preserve %q: this test asserts the wrong thing otherwise", got, badge)
 	}
 
 	// Wide enough for both: the Native Status leads, in full.

@@ -5,31 +5,31 @@ frontier · 13 nodes · actionable unknown · budget 4870 · resets 2030-01-02T0
  ┌──────────────────────────┐
  │▸ #201                Todo│
  │Ship the rebalancer CLI   │
- │UNVERIFIED                │
+ │LINKS FAILED              │
  └──────────────────────────┘
 
  ┌──────────────────────────┐
  │  #202                Todo│
  │Wire the rebalancer into …│
- │UNVERIFIED                │
+ │LINKS FAILED              │
  └──────────────────────────┘
 
  ┌──────────────────────────┐
  │  #203                Todo│
  │Backfill shard weights    │
- │UNVERIFIED                │
+ │LINKS FAILED              │
  └──────────────────────────┘
 
  ┌──────────────────────────┐
  │  #204                Todo│
  │Drain a shard safely      │
- │UNVERIFIED                │
+ │LINKS FAILED              │
  └──────────────────────────┘
 
  ┌──────────────────────────┐
  │  #205                Done│
  │Compute shard weights     │
- │UNVERIFIED                │
+ │LINKS FAILED              │
  └──────────────────────────┘
 
  ┌──────────────────────────┐

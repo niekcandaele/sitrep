@@ -103,7 +103,7 @@ func TestFrontierFrame(t *testing.T) {
 	if !strings.Contains(frame, separator+"3 actionable") {
 		t.Errorf("the header does not carry a computed Actionable count:\n%s", frame)
 	}
-	for _, want := range []string{"ACTIONABLE", "blocked by 1", "CYCLE", "UNVERIFIED"} {
+	for _, want := range []string{"ACTIONABLE", "blocked by 1", "CYCLE", "LINKS FAILED"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("the frame is missing %q:\n%s", want, frame)
 		}
@@ -149,7 +149,7 @@ func TestFrontierDrawsGhostTickets(t *testing.T) {
 	s := frontierSession(t, c, p)
 	openFrontier(t, s)
 	s.tm.Send(keyPress("G"))
-	s.waitFor(t, "GHOST")
+	s.waitFor(t, "NOT IN WATCHLIST")
 
 	m, got := s.finish(t)
 
@@ -157,8 +157,8 @@ func TestFrontierDrawsGhostTickets(t *testing.T) {
 	if n := len(m.frontier.graph.Ghosts()); n != 3 {
 		t.Errorf("Ghosts = %d, want the fixture's 3", n)
 	}
-	if !strings.Contains(string(got), "GHOST") {
-		t.Errorf("the frame drew no Ghost Ticket:\n%s", got)
+	if !strings.Contains(string(got), "NOT IN WATCHLIST") {
+		t.Errorf("the frame drew no Ticket outside the Watchlist:\n%s", got)
 	}
 }
 
@@ -299,7 +299,7 @@ func TestFrontierWithholdsEmphasisUntilEveryDetailHasAnswered(t *testing.T) {
 	if !strings.Contains(loading, "PENDING") {
 		t.Errorf("the loading frame has no plain-text provisional badge:\n%s", loading)
 	}
-	for _, badge := range []string{"ACTIONABLE", "UNVERIFIED", "blocked by", "CYCLE"} {
+	for _, badge := range []string{"ACTIONABLE", "LINKS FAILED", "blocked by", "CYCLE"} {
 		if strings.Contains(loading, badge) {
 			t.Errorf("a half-loaded Frontier claimed %q:\n%s", badge, loading)
 		}
@@ -402,7 +402,7 @@ func TestFrontierPendingBadgesChangeTogetherAtResolution(t *testing.T) {
 		if got := strings.Count(plain, "PENDING"); got != len(tickets) {
 			t.Errorf("%s: PENDING cards = %d, want %d:\n%s", stage, got, len(tickets), plain)
 		}
-		for _, badge := range []string{"CYCLE", "UNVERIFIED", "ACTIONABLE", "blocked by"} {
+		for _, badge := range []string{"CYCLE", "LINKS FAILED", "ACTIONABLE", "blocked by"} {
 			if strings.Contains(plain, badge) {
 				t.Errorf("%s: partial frame published %q:\n%s", stage, badge, plain)
 			}
@@ -497,12 +497,12 @@ func TestFrontierPendingMembersKeepGhostIdentity(t *testing.T) {
 	if got := strings.Count(plain, "PENDING"); got != len(tickets) {
 		t.Errorf("pending member badges = %d, want %d:\n%s", got, len(tickets), plain)
 	}
-	if got := strings.Count(plain, "GHOST"); got != 1 {
-		t.Errorf("Ghost identity badges = %d, want 1:\n%s", got, plain)
+	if got := strings.Count(plain, "NOT IN WATCHLIST"); got != 1 {
+		t.Errorf("outside-Watchlist identity badges = %d, want 1:\n%s", got, plain)
 	}
 	for _, node := range frontierNodes(m.frontier.graph, tickets, false) {
-		if node.id == "G-1" && (node.emphasis.badge != "GHOST" || node.emphasis.border != frontierGhostBorder) {
-			t.Errorf("Ghost emphasis = %+v, want dashed GHOST", node.emphasis)
+		if node.id == "G-1" && (node.emphasis.badge != "" || node.emphasis.border != frontierGhostBorder) {
+			t.Errorf("outside-Watchlist emphasis = %+v, want dashed card with semantic identity", node.emphasis)
 		}
 	}
 
@@ -556,7 +556,7 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 
 	checkGolden(t, "frontier_unverified.golden.txt", got)
 	frame := string(got)
-	if !strings.Contains(frame, "UNVERIFIED") {
+	if !strings.Contains(frame, "LINKS FAILED") {
 		t.Errorf("no card is marked unverified:\n%s", frame)
 	}
 	if !strings.Contains(frame, "13 Tickets' Links could not be read") {
@@ -1336,7 +1336,7 @@ func TestFrontierOpensAGhostTicketThin(t *testing.T) {
 	s := frontierSession(t, c, p)
 	openFrontier(t, s)
 	s.tm.Send(keyPress("G"))
-	s.waitFor(t, "GHOST")
+	s.waitFor(t, "NOT IN WATCHLIST")
 
 	// G focuses the last node in canonical order, which is the last Ghost the
 	// fixture's Links reach.
@@ -1569,7 +1569,7 @@ func frontierMouseModel(t *testing.T, tickets []model.Ticket,
 }
 
 // One cache, one answer. A fan-out read that failed leaves no Links key, so the
-// card is UNVERIFIED and the footer counts it; opening that Ticket by hand fills
+// card is LINKS FAILED and the footer counts it; opening that Ticket by hand fills
 // the session cache, and coming back must adopt it. Otherwise the Frontier keeps
 // claiming a read failed that has since succeeded, while the list — which reads
 // the same cache directly — draws the Ticket as Actionable, and r is a silent
@@ -1610,8 +1610,8 @@ func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
 	})
 	m = updated.(Model)
 
-	if !strings.Contains(m.View().Content, "UNVERIFIED") {
-		t.Fatalf("the failed read left no UNVERIFIED card:\n%s", m.View().Content)
+	if !strings.Contains(m.View().Content, "LINKS FAILED") {
+		t.Fatalf("the failed read left no LINKS FAILED card:\n%s", m.View().Content)
 	}
 	if m.frontier.focusID != "T-1" {
 		t.Fatalf("focus = %q, want the Ticket whose read failed", m.frontier.focusID)
@@ -1632,7 +1632,7 @@ func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
 		t.Fatalf("esc landed in %v, want the Frontier", m.mode)
 	}
 	frame := m.View().Content
-	if strings.Contains(frame, "UNVERIFIED") {
+	if strings.Contains(frame, "LINKS FAILED") {
 		t.Errorf("the card is still unverified after its Detail was read by hand:\n%s", frame)
 	}
 	if strings.Contains(frame, "could not be read") {
@@ -1973,7 +1973,7 @@ func successfulFrontierMembers(t *testing.T, count int) ([]model.Ticket, map[mod
 			continue
 		}
 		// #204 points at a Ghost whose native status is unknown and therefore
-		// legitimately renders UNVERIFIED even after its own Links were read. These
+		// legitimately renders LINKS FAILED even after its own Links were read. These
 		// tests isolate an absent seat from that separate graph condition.
 		if ticket.ID == "acme/widgets#204" {
 			continue
@@ -2284,7 +2284,7 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 				ticket.ID, member, actionability)
 		}
 	}
-	if frame := m.View().Content; strings.Contains(frame, "UNVERIFIED") {
+	if frame := m.View().Content; strings.Contains(frame, "LINKS FAILED") {
 		t.Fatalf("the post-r frame still strands a successfully read Ticket:\n%s", frame)
 	}
 	if m.frontier.focusID != focus || !m.frontier.hasFocus {
@@ -2371,7 +2371,7 @@ func TestFrontierRefreshAdoptsLateBatchBeforePlanningRemainder(t *testing.T) {
 			t.Errorf("final seat is missing %s", ticket.ID)
 		}
 	}
-	if frame := m.View().Content; strings.Contains(frame, "UNVERIFIED") {
+	if frame := m.View().Content; strings.Contains(frame, "LINKS FAILED") {
 		t.Fatalf("the resolved frame still strands a successful read:\n%s", frame)
 	}
 }
@@ -2529,7 +2529,7 @@ func TestFrontierRefreshIssuesNoDetailFanout(t *testing.T) {
 	if !strings.Contains(frame, "PENDING") {
 		t.Errorf("the unresolved re-seat has no provisional member badge:\n%s", frame)
 	}
-	for _, badge := range []string{"ACTIONABLE", "UNVERIFIED", "CYCLE", "blocked by"} {
+	for _, badge := range []string{"ACTIONABLE", "LINKS FAILED", "CYCLE", "blocked by"} {
 		if strings.Contains(frame, badge) {
 			t.Errorf("the partial Frontier published resolved emphasis %q:\n%s", badge, frame)
 		}
@@ -2707,7 +2707,7 @@ func TestFrontierHeaderCountsCardsNotMemberRows(t *testing.T) {
 // than detailfanout.Parallelism a Ticket can still be queued when its Detail is
 // read by hand, and a bare failure count cannot tell which Ticket it is
 // clearing: it would absolve one that really did fail, dropping the footer's
-// count and its "press r to retry" line while that card still says UNVERIFIED.
+// count and its "press r to retry" line while that card still says LINKS FAILED.
 //
 // The keyboard cannot reach this interleaving deterministically, so it is
 // driven through the state the two paths share.
@@ -3149,7 +3149,7 @@ func TestFrontierRefreshOnAWarmFrontierIssuesNothing(t *testing.T) {
 
 	s.tm.Send(keyPress("r"))
 	s.tm.Send(keyPress("G"))
-	s.waitFor(t, "GHOST")
+	s.waitFor(t, "NOT IN WATCHLIST")
 	m, _ := s.finish(t)
 
 	if n := p.DetailCalls(); n != warm {

@@ -5,7 +5,7 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
  ┌──────────────────────────┐┌──────────────────────────┐╔══════════════════════════╗╔══════════════════════════╗╔══════════════════════════╗┌──────────────────────────┐┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮
  │▸ #205                Done││  #206           Cancelled│║  #208                Todo║║  #209                Todo║║  #210                Todo║│  #211                Todo│┃  #212                Todo┃╎  #401                Todo╎╎  #402             Unknown╎╎  #403                Done╎
  │Compute shard weights     ││Legacy weight table       │║Split the rebalancer queue║║Merge the rebalancer queue║║Deduplicate shard moves   ║│Publish the rollout runbo…│┃Chart rebalancer latency  ┃╎Approve the rebalancing R…╎╎Vendor capacity sign-off  ╎╎Ops capacity ticket       ╎
- │                          ││                          │║CYCLE                     ║║CYCLE                     ║║CYCLE                     ║│UNVERIFIED                │┃ACTIONABLE                ┃╎GHOST                     ╎╎GHOST                     ╎╎GHOST                     ╎
+ │                          ││                          │║CYCLE                     ║║CYCLE                     ║║CYCLE                     ║│LINKS FAILED              │┃ACTIONABLE                ┃╎NOT IN WATCHLIST          ╎╎NOT IN WATCHLIST          ╎╎NOT IN WATCHLIST          ╎
  └──────────────────────────┘└──────────────────────────┘╚══════════════════════════╝╚══════════════════════════╝╚══════════════════════════╝└──────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
                ┃                           │                                                                                                                                                                       │                           │                           │
                ╋───────────────────────────┘                                                                                                                                                                       │                           │                           │
@@ -17,7 +17,7 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌──────────────────────────┐┌──────────────────────────┐┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
  ┃  #201                Todo┃│  #203                Todo││  #204                Todo│┃  #213                Todo┃
  ┃Ship the rebalancer CLI   ┃│Backfill shard weights    ││Drain a shard safely      │┃Rotate rebalancer credent…┃
- ┃ACTIONABLE                ┃│blocked by 1              ││UNVERIFIED                │┃ACTIONABLE                ┃
+ ┃ACTIONABLE                ┃│blocked by 1              ││BLOCKER UNKNOWN           │┃ACTIONABLE                ┃
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
                │
                │

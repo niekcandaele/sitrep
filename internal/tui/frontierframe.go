@@ -239,7 +239,6 @@ func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool)
 				border:    frontierGhostBorder,
 				titleRole: frontierRoleText,
 				badgeRole: frontierRoleMuted,
-				badge:     "GHOST",
 			},
 		})
 	}
@@ -277,9 +276,6 @@ func memberEmphasis(a model.Actionability, resolved bool) frontierEmphasis {
 			badgeRole: frontierRoleBold,
 			badge:     "CYCLE",
 		}
-	case a.HasUnknown():
-		normal.badge = "UNVERIFIED"
-		return normal
 	case a.Actionable:
 		return frontierEmphasis{
 			border:    frontierHeavyBorder,
@@ -287,15 +283,33 @@ func memberEmphasis(a model.Actionability, resolved bool) frontierEmphasis {
 			badgeRole: frontierRoleBold,
 			badge:     "ACTIONABLE",
 		}
-	case len(a.Unmet()) > 0:
-		return frontierEmphasis{
-			border:    frontierLightBorder,
-			titleRole: frontierRoleFaint,
-			badgeRole: frontierRoleFaint,
-			badge:     fmt.Sprintf("blocked by %d", len(a.Unmet())),
-		}
+	case knownUnmetBlockers(a) > 0:
+		normal.titleRole = frontierRoleFaint
+		normal.badgeRole = frontierRoleFaint
 	}
 	return normal
+}
+
+// knownUnmetBlockers excludes unresolved and anonymous Links. Those are evidence
+// facts of their own, not named blockers that can truthfully contribute to a
+// "blocked by N" count.
+func knownUnmetBlockers(a model.Actionability) int {
+	n := 0
+	for _, b := range a.Blockers {
+		if b.Target.ID != "" && b.StatusKnown && !b.Satisfied() {
+			n++
+		}
+	}
+	return n
+}
+
+func hasUnknownBlocker(a model.Actionability) bool {
+	for _, b := range a.Blockers {
+		if !b.StatusKnown {
+			return true
+		}
+	}
+	return false
 }
 
 // anonymousBlockers counts one member's blocking Links that carried no Ticket
@@ -1208,44 +1222,84 @@ func (l *frontierLayout) drawCard(n frontierNode, g model.BlockingGraph, rect fr
 	l.write(rect.X+1, rect.Y+3, frontierBadgeLine(n, g, inner), badge, 0, rect.X+rect.W-1)
 }
 
-// frontierBadgeLine is a card's fourth line, fitted to width: the Native Status
-// where it says something the Status Category does not, then the emphasis badge,
-// then a count of blocking Links that named no Ticket.
-//
-// The badge and the unnamed-blocker count answer the question this screen exists
-// to answer, so they are assembled first and keep their columns. The Native
-// Status is display-only and takes what is left; where nothing useful is left it
-// is dropped outright. Truncating the joined line instead lets a long Native
-// Status eat "blocked by 3".
+// frontierBadgeLine selects complete semantic facts before Native Status. Native
+// Status is display-only, so only it may be balanced-truncated to use leftover
+// columns; selected evidence words are never generically clipped.
 func frontierBadgeLine(n frontierNode, g model.BlockingGraph, width int) string {
-	var carried []string
-	if n.emphasis.badge != "" {
-		carried = append(carried, n.emphasis.badge)
-	}
-	if a, ok := g.For(n.id); ok {
-		if anonymous := anonymousBlockers(a); anonymous > 0 {
-			noun := "blocker"
-			if anonymous > 1 {
-				noun = "blockers"
-			}
-			carried = append(carried, fmt.Sprintf("+%d unnamed %s", anonymous, noun))
-		}
-	}
-	load := strings.Join(carried, " ")
+	semantic := frontierSemanticBadge(n, g, width)
 	switch {
 	case n.native == "":
-		return balancedTruncate(load, width, "…")
-	case load == "":
+		return semantic
+	case semantic == "":
 		return balancedTruncate(n.native, width, "…")
 	}
-	// One column for the separating space, and at least two for the Native
-	// Status itself: a lone ellipsis where a status used to be says less than
-	// the blank it replaces.
-	budget := width - lipgloss.Width(load) - 1
+	budget := width - lipgloss.Width(semantic) - 1
 	if budget < 2 {
-		return balancedTruncate(load, width, "…")
+		return semantic
 	}
-	return balancedTruncate(n.native, budget, "…") + " " + load
+	return balancedTruncate(n.native, budget, "…") + " " + semantic
+}
+
+func frontierSemanticBadge(n frontierNode, g model.BlockingGraph, width int) string {
+	a, member := g.For(n.id)
+	if !member {
+		return firstFittingFrontierLabel(width, "NOT IN WATCHLIST", "NOT LISTED")
+	}
+	if n.emphasis.badge != "" {
+		return firstFittingFrontierLabel(width, n.emphasis.badge)
+	}
+
+	labels := frontierEvidenceLabels(a)
+	if anonymous := anonymousBlockers(a); anonymous > 0 {
+		noun := "blocker"
+		if anonymous > 1 {
+			noun = "blockers"
+		}
+		unnamed := fmt.Sprintf("+%d unnamed %s", anonymous, noun)
+		for _, label := range labels {
+			if candidate := label + " " + unnamed; lipgloss.Width(candidate) <= width {
+				return candidate
+			}
+		}
+	}
+	return firstFittingFrontierLabel(width, labels...)
+}
+
+func frontierEvidenceLabels(a model.Actionability) []string {
+	known := knownUnmetBlockers(a)
+	linksFailed := !a.LinksKnown
+	blockerUnknown := hasUnknownBlocker(a)
+	if known > 0 {
+		full, compact := fmt.Sprintf("blocked by %d", known), fmt.Sprintf("BLOCKED %d", known)
+		switch {
+		case linksFailed && blockerUnknown:
+			return []string{full + " LINKS FAILED BLOCKER?", compact + " LINK FAIL BLOCKER?", full + " LINKS FAILED", full + " BLOCKER?", compact + " LINKS FAIL", compact + " BLOCKER?", full, compact}
+		case linksFailed:
+			return []string{full + " LINKS FAILED", compact + " LINKS FAIL", full, compact}
+		case blockerUnknown:
+			return []string{full + " BLOCKER?", compact + " BLOCKER?", full, compact}
+		default:
+			return []string{full, compact}
+		}
+	}
+	switch {
+	case linksFailed && blockerUnknown:
+		return []string{"LINKS FAILED BLOCKER?", "LINK FAIL BLOCKER?", "LINKS FAILED", "BLOCKER UNKNOWN", "LINK FAIL", "BLOCKER?"}
+	case linksFailed:
+		return []string{"LINKS FAILED", "LINK FAIL"}
+	case blockerUnknown:
+		return []string{"BLOCKER UNKNOWN", "BLOCKER?"}
+	}
+	return nil
+}
+
+func firstFittingFrontierLabel(width int, labels ...string) string {
+	for _, label := range labels {
+		if lipgloss.Width(label) <= width {
+			return label
+		}
+	}
+	return ""
 }
 
 // write blits a string onto the canvas from x, stopping at limit. Card text
