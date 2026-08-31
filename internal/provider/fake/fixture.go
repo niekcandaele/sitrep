@@ -24,6 +24,13 @@ func fixtureTime(day, hour, min int) time.Time {
 	return time.Date(2026, time.January, day, hour, min, 0, 0, time.UTC)
 }
 
+func fixtureRateLimitBudget() model.RateLimitBudget {
+	return model.RateLimitBudget{
+		Remaining: 4870,
+		ResetsAt:  time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC),
+	}
+}
+
 // FixtureSnapshot returns the built-in fixture epic: one Epic and ten Tickets
 // spanning every Status Category, differing Native Statuses inside a category,
 // zero/one/many assignees, a parent-child pair, a cross-repo Ticket, all four
@@ -45,7 +52,8 @@ func FixtureSnapshot() model.WatchlistSnapshot {
 			Status:       model.StatusInProgress,
 			NativeStatus: "open",
 		},
-		Capabilities: allCapabilities,
+		Capabilities:    allCapabilities,
+		RateLimitBudget: fixtureRateLimitBudget(),
 		Tickets: []model.Ticket{
 			{
 				ID:           "acme/widgets#112",
@@ -198,9 +206,10 @@ func FixtureRefListSnapshot() model.WatchlistSnapshot {
 		epic.Tickets[9],
 	}
 	return model.WatchlistSnapshot{
-		Header:       provider.RefListHeader(len(tickets)),
-		Tickets:      tickets,
-		Capabilities: allCapabilities,
+		Header:          provider.RefListHeader(len(tickets)),
+		Tickets:         tickets,
+		Capabilities:    allCapabilities,
+		RateLimitBudget: epic.RateLimitBudget,
 	}
 }
 
@@ -236,7 +245,8 @@ func FixtureTicketSnapshot() model.WatchlistSnapshot {
 			Title: epic.Epic.Title,
 			URL:   epic.Epic.URL,
 		},
-		Capabilities: allCapabilities,
+		Capabilities:    allCapabilities,
+		RateLimitBudget: epic.RateLimitBudget,
 	}
 }
 
@@ -262,7 +272,8 @@ func FixtureOrphanTicketSnapshot() model.WatchlistSnapshot {
 			PullRequests:     t.PullRequests,
 			PullRequestTotal: t.PullRequestTotal,
 		},
-		Capabilities: allCapabilities,
+		Capabilities:    allCapabilities,
+		RateLimitBudget: fixtureRateLimitBudget(),
 	}
 }
 

@@ -138,6 +138,7 @@ gh api graphql -f query='{ __type(name:"Issue") { fields { name } } }' | grep -i
 | Fixture | proves |
 |---|---|
 | `ticket_with_parent.json` | no Tickets, a same-repo parent keyed `#2`, and the root issue's own assignees and open pull request landing on the Epic, whose `totalCount: 12` proves the total rides onto the Epic too |
+| `ticket_with_parent_ratelimit.json` | the same hand-written Ticket response with a valid zero GraphQL `rateLimit`, proving that a successful Resolve preserves zero remaining and its UTC reset |
 | `ticket_cross_repo_parent.json` | a parent in another repository keyed `owner/repo#N`, with a null `closedByPullRequestsReferences` and no assignees |
 | `ticket_no_parent.json` | `parent: null` — a Ticket that hangs off nothing, which is an ordinary state and not an error |
 

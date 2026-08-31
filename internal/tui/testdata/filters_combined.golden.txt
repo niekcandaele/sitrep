@@ -1,5 +1,5 @@
 #111  Widget sync v2: shards, retries & telemetry                          https://tracker.example.test/acme/widgets/111
-█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33% · budget 4870 · resets 2030-01-02T03:04:05Z          just now
 
 IN PROGRESS (1)
 ▸ #112     Draft the shard sync protocol

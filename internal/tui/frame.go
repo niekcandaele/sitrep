@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -58,7 +59,8 @@ func renderHeader(in ListInput, staleness string, hasData bool, width int, marke
 	s Styles) string {
 	progress := rightAlign(s.Staleness.Render(staleness), width)
 	if hasData {
-		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, markers, s)
+		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, markers, s,
+			rateLimitHeader(in.Capabilities, in.RateLimitBudget))
 	}
 	return strings.Join([]string{headerIdentity(in.Header, width, s), progress, ""}, "\n")
 }
@@ -104,7 +106,7 @@ func headerIdentity(h Header, width int, s Styles, hyperlinkKey ...bool) string 
 // and "cold, so nothing is claimed" would render identically. It counts the
 // whole reading, like the progress counts, so no filter can move it.
 func headerProgress(p model.Progress, staleness string, width int, markers listMarkers,
-	s Styles) string {
+	s Styles, budget ...rateLimitHeaderFact) string {
 	counts := fmt.Sprintf("%d/%d done", p.Done, p.Denominator)
 	if p.Cancelled > 0 {
 		counts += fmt.Sprintf("%s%d cancelled", separator, p.Cancelled)
@@ -112,6 +114,9 @@ func headerProgress(p model.Progress, staleness string, width int, markers listM
 	counts += fmt.Sprintf("%s%d%%", separator, p.PercentDone)
 	if markers.active {
 		counts += fmt.Sprintf("%s%d actionable", separator, markers.count)
+	}
+	if len(budget) > 0 {
+		counts = budget[0].appendTo(counts, staleness, width)
 	}
 
 	right := s.Staleness.Render(staleness)
@@ -121,6 +126,49 @@ func headerProgress(p model.Progress, staleness string, width int, markers listM
 	barWidth = min(max(barWidth, minBarWidth), maxBarWidth)
 
 	return pairLine(renderBar(p, barWidth, s)+"  "+s.Counts.Render(counts), right, width)
+}
+
+type rateLimitHeaderFact struct {
+	budget model.RateLimitBudget
+	valid  bool
+}
+
+func rateLimitHeader(caps model.Capabilities, budget model.RateLimitBudget) rateLimitHeaderFact {
+	return rateLimitHeaderFact{budget: budget, valid: caps.RateLimitBudget && budget.Valid()}
+}
+
+func (f rateLimitHeaderFact) appendTo(counts, staleness string, width int) string {
+	if !f.valid {
+		return counts
+	}
+	compact := fmt.Sprintf("budget %d", f.budget.Remaining)
+	full := compact + separator + "resets " + f.budget.ResetsAt.UTC().Format(time.RFC3339)
+	if headerFactsFit(counts+separator+full, staleness, width) {
+		return counts + separator + full
+	}
+	if headerFactsFit(counts+separator+compact, staleness, width) {
+		return counts + separator + compact
+	}
+	return counts
+}
+
+func (f rateLimitHeaderFact) appendToLine(counts, staleness string, width int) string {
+	if !f.valid {
+		return counts
+	}
+	compact := fmt.Sprintf("budget %d", f.budget.Remaining)
+	full := compact + separator + "resets " + f.budget.ResetsAt.UTC().Format(time.RFC3339)
+	if lipgloss.Width(counts+separator+full)+lipgloss.Width(staleness)+1 <= width {
+		return counts + separator + full
+	}
+	if lipgloss.Width(counts+separator+compact)+lipgloss.Width(staleness)+1 <= width {
+		return counts + separator + compact
+	}
+	return counts
+}
+
+func headerFactsFit(left, staleness string, width int) bool {
+	return width-lipgloss.Width(left)-lipgloss.Width(staleness)-6 >= minBarWidth
 }
 
 // pairLine lays a left fragment against the right-hand edge of the terminal on

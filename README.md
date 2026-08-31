@@ -156,8 +156,11 @@ normalize or retry them as another language.
 
 The monitor groups Tickets by Status Category with a progress bar, assignees, and correlated
 pull or merge requests. It refreshes every 60 seconds by default and shows how old the last
-good reading is. `--interval` overrides the cadence down to a 5-second floor. A failed
-refresh leaves the last good Watchlist on screen and reports the failure in the footer.
+good reading is. When a Provider reports a request budget, the List and Frontier headers show
+it beside staleness: wide terminals include its UTC reset, medium terminals show the remaining
+count, and narrow terminals preserve progress and staleness instead. `--interval` overrides the
+cadence down to a 5-second floor. A failed refresh leaves the last good Watchlist on screen and
+reports the failure in the footer.
 
 Mouse capture is on by default. Click a Ticket row to select it, double-click one to open its
 Detail, and use the wheel to move one Ticket at a time in the list or three lines at a time in
@@ -471,7 +474,10 @@ instances.
 
 `--json` is the machine-readable contract. Keys are snake_case; timestamps are RFC 3339 UTC
 at second precision; `tickets` is always an array. Optional and Capability-gated fields are
-omitted, never `null`.
+omitted, never `null`. Watchlist and decoded Ticket documents always state the
+`rate_limit_budget` Capability; their top-level `rate_limit_budget` object appears only when
+that Capability is true and the Resolve observed a valid budget. Standalone Detail documents
+never include request-budget data.
 
 There are two independently versioned document families:
 
@@ -492,6 +498,7 @@ There are two independently versioned document families:
 | `watchlist.epic` | Epic identity, present only for an Epic Selector |
 | `watchlist.limit_reached` | optional `true`, present only for a truncated Query |
 | `progress` | Status Category arithmetic over the fetched Tickets |
+| `rate_limit_budget` | optional remaining request budget and UTC reset time; present only when the Provider declares and observed a valid value |
 | `blocking` | `--links` only: `cycles`, always an array |
 | `tickets` | current thin Tickets, flat and in Provider order |
 
@@ -517,6 +524,7 @@ non-Epic shape:
       "blocking_links": true,
       "comments": true,
       "pull_requests": true,
+      "rate_limit_budget": true,
       "selectors": {
         "epic": true,
         "ref_list": true,
@@ -539,6 +547,10 @@ non-Epic shape:
     "total": 1,
     "denominator": 1,
     "percent_done": 0
+  },
+  "rate_limit_budget": {
+    "remaining": 4870,
+    "resets_at": "2030-01-02T03:04:05Z"
   },
   "tickets": [
     {

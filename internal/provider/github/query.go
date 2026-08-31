@@ -22,6 +22,7 @@ const queryMembershipDocument = `query($query:String!, $first:Int!, $after:Strin
       }
     }
   }
+  rateLimit { remaining resetAt }
 }`
 
 // epicQuery is the one GraphQL document the epic hot path sends. It is a
@@ -95,6 +96,7 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
       }
     }
   }
+  rateLimit { remaining resetAt }
 }
 ` + issuePullRequestRelationshipsFragment + "\n" + pullRequestListFragment
 
@@ -144,6 +146,7 @@ func buildRefListQuery(count int) string {
 		document.WriteString("    issue(number:$number" + suffix + ") { ...RefListTicketFields }\n")
 		document.WriteString("  }\n")
 	}
+	document.WriteString("  rateLimit { remaining resetAt }\n")
 	document.WriteString("}\n")
 	document.WriteString(refListTicketFragment)
 	document.WriteString("\n")

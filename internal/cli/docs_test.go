@@ -124,9 +124,10 @@ func TestREADMEStructuredExamplesUseRealContracts(t *testing.T) {
 		t.Fatal("fake fixture no longer contains the README Ticket acme/widgets#115")
 	}
 	snapshot := model.WatchlistSnapshot{
-		Tickets:      []model.Ticket{ticket},
-		Capabilities: fixture.Capabilities,
-		FetchedAt:    time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
+		Tickets:         []model.Ticket{ticket},
+		Capabilities:    fixture.Capabilities,
+		FetchedAt:       time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
+		RateLimitBudget: fixture.RateLimitBudget,
 	}
 	selector := provider.RefListSelector{Refs: []ref.Ref{{
 		Tracker: ref.TrackerGitHub,
