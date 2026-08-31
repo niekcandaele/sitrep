@@ -154,8 +154,8 @@ type Provider interface {
 	// refresh path. Implementations canonicalize first-seen, non-empty IDs;
 	// empty input performs no I/O and returns a non-nil empty map. Successful
 	// entries retain their requested TicketID. A partial result is reported with
-	// a *DetailFailures error, while cancellation stops issuing work and returns
-	// the cancellation error without invented failures.
+	// a *DetailFailures error. Cancellation returns completed successes with the
+	// context error and does not invent per-Ticket failures for incomplete IDs.
 	FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error)
 }
 
