@@ -225,20 +225,6 @@ func TestFetchDetailIsOneRequest(t *testing.T) {
 	}
 }
 
-func TestFetchDetailsUsesTheSingularFallback(t *testing.T) {
-	s := newReplayServer(t, response{file: "detail_full.json"})
-	details, err := newProvider(s).FetchDetails(t.Context(), []model.TicketID{"", detailID, detailID})
-	if err != nil {
-		t.Fatalf("FetchDetails: %v", err)
-	}
-	if len(details) != 1 || details[detailID].TicketID != detailID {
-		t.Errorf("Details = %+v, want one canonical %q result", details, detailID)
-	}
-	if got := len(s.recorded()); got != 1 {
-		t.Errorf("requests = %d, want one singular Detail request", got)
-	}
-}
-
 // ADR-0003, in its executable form: the polled document must never learn to
 // fetch what only a drill-in needs.
 func TestTheEpicQueryCarriesNoDetailSelection(t *testing.T) {

@@ -158,6 +158,117 @@ type detailResponse struct {
 	Errors []graphQLError `json:"errors"`
 }
 
+// detailBatchResponse is keyed by the generated detailN aliases. A map keeps
+// response-object order irrelevant while allowing missing and unexpected aliases
+// to be distinguished explicitly.
+type detailBatchResponse struct {
+	Data   map[string]*detailNode `json:"data"`
+	Errors []graphQLError         `json:"errors"`
+}
+
+// decode classifies a completed aliased response. An error attributable to one
+// alias invalidates that whole Detail while successful siblings survive. An
+// error or data member that cannot be attributed invalidates the entire chunk;
+// request-wide errors retain their native classification.
+func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
+	aliases := make(map[string]struct{}, len(ids))
+	for i := range ids {
+		aliases["detail"+strconv.Itoa(i)] = struct{}{}
+	}
+	for alias := range r.Data {
+		if _, expected := aliases[alias]; !expected {
+			return nil, nil, provider.Errorf(provider.KindUnavailable,
+				"github: malformed Detail response from %s: unexpected data alias %q", endpoint, alias)
+		}
+	}
+
+	attributedErrors := make(map[string][]graphQLError)
+	unattributedErrors := make([]graphQLError, 0, len(r.Errors))
+	for _, graphErr := range r.Errors {
+		if len(graphErr.Path) == 0 {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		alias, ok := graphErr.Path[0].(string)
+		if !ok {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		if _, expected := aliases[alias]; !expected {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		attributedErrors[alias] = append(attributedErrors[alias], graphErr)
+	}
+
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	failures := make(map[model.TicketID]error)
+	if len(unattributedErrors) != 0 {
+		for _, id := range ids {
+			failures[id] = detailBatchUnattributedError(unattributedErrors, id, endpoint, header)
+		}
+		return details, failures, nil
+	}
+	for i, id := range ids {
+		alias := "detail" + strconv.Itoa(i)
+		if graphErrs := attributedErrors[alias]; len(graphErrs) != 0 {
+			failures[id] = graphQLErrors(graphErrs, detailNotFound(id), endpoint, header)
+			continue
+		}
+
+		node, present := r.Data[alias]
+		if !present {
+			failures[id] = provider.Errorf(provider.KindUnavailable,
+				"github: malformed Detail response from %s: missing data alias %q for %q", endpoint, alias, id)
+			continue
+		}
+		if node == nil || node.ID == "" {
+			failures[id] = provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
+			continue
+		}
+		detail := newDetail(*node)
+		if detail.TicketID != id {
+			failures[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+			continue
+		}
+		details[id] = detail
+	}
+	return details, failures, nil
+}
+
+// detailBatchUnattributedError classifies only errors that cannot belong to a
+// generated alias. NOT_FOUND has no authoritative Ticket identity on this path,
+// so it is malformed response data rather than a bad requested ID. Native
+// request-wide auth and rate-limit classifications still take precedence.
+func detailBatchUnattributedError(errs []graphQLError, id model.TicketID, endpoint string, header http.Header) error {
+	normalized := append([]graphQLError(nil), errs...)
+	hasNotFound := false
+	for i := range normalized {
+		if strings.EqualFold(normalized[i].Type, "NOT_FOUND") {
+			hasNotFound = true
+			normalized[i].Type = ""
+		}
+	}
+	classified := graphQLErrors(normalized, detailNotFound(id), endpoint, header)
+	if !hasNotFound || provider.KindOf(classified) != provider.KindUnknown {
+		return classified
+	}
+
+	messages := make([]string, 0, len(errs))
+	for _, graphErr := range errs {
+		if graphErr.Message != "" {
+			messages = append(messages, graphErr.Message)
+		}
+	}
+	explanation := strings.Join(messages, "; ")
+	if explanation == "" {
+		explanation = "the API returned no explanation"
+	}
+	return provider.Errorf(provider.KindUnavailable,
+		"github: malformed Detail response for %q from %s: unattributable NOT_FOUND error: %s",
+		id, endpoint, explanation)
+}
+
 type detailNode struct {
 	ID         string        `json:"id"`
 	Number     int           `json:"number"`
