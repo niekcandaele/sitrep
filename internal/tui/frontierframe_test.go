@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
@@ -40,6 +42,58 @@ func layoutOf(tickets []model.Ticket, links map[model.TicketID][]model.Link) (mo
 		innerWidth: 120,
 		direction:  frontierRanksHorizontal,
 	})
+}
+
+func crossingFrontierFixture() ([]model.Ticket, map[model.TicketID][]model.Link) {
+	tickets := make([]model.Ticket, 0, 7)
+	for _, id := range []string{"A", "B", "C", "D", "E", "F", "G"} {
+		tickets = append(tickets, blockingTicket(id, model.StatusTodo))
+	}
+	return tickets, map[model.TicketID][]model.Link{
+		"A": nil,
+		"B": nil,
+		"C": blockedBy("B"),
+		"D": blockedBy("A"),
+		"E": blockedBy("D"),
+		"F": blockedBy("C"),
+		"G": blockedBy("E", "F", "A"),
+	}
+}
+
+func frontierRouteCells(route frontierRoute) map[frontierPoint]struct{} {
+	cells := make(map[frontierPoint]struct{})
+	for _, stroke := range route.strokes {
+		dx, dy := 0, 0
+		if stroke.from.x < stroke.to.x {
+			dx = 1
+		} else if stroke.from.x > stroke.to.x {
+			dx = -1
+		}
+		if stroke.from.y < stroke.to.y {
+			dy = 1
+		} else if stroke.from.y > stroke.to.y {
+			dy = -1
+		}
+		for at := stroke.from; ; at.x, at.y = at.x+dx, at.y+dy {
+			cells[at] = struct{}{}
+			if at == stroke.to {
+				break
+			}
+		}
+	}
+	return cells
+}
+
+func sharedRouteCrossings(l frontierLayout, first, second frontierRouteID) []frontierPoint {
+	firstCells := frontierRouteCells(l.routes[int(first)-1])
+	secondCells := frontierRouteCells(l.routes[int(second)-1])
+	var crossings []frontierPoint
+	for at := range firstCells {
+		if _, shared := secondCells[at]; shared && l.cells[at.y][at.x].r == '┼' {
+			crossings = append(crossings, at)
+		}
+	}
+	return crossings
 }
 
 // Blockers sit left of their dependents: reading left to right is "this must
@@ -102,7 +156,7 @@ func TestFrontierDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
 	}
 
 	edges := frontierEdges(g, index)
-	want := frontierEdge{from: index["c"], to: index["a"]}
+	want := frontierEdge{dependent: index["c"], blocker: index["a"]}
 	if len(edges) != 1 || edges[0] != want {
 		t.Errorf("frontierEdges() = %+v, want only %+v", edges, want)
 	}
@@ -213,6 +267,294 @@ func insideAnyCard(l frontierLayout, x, y int) bool {
 		}
 	}
 	return false
+}
+
+func TestFrontierRoutesRetainCanonicalIdentityGeometryAndCrossings(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	plan := planFrontierRanks(g, nodes)
+	wantRoutes := []struct {
+		blocker, dependent model.TicketID
+	}{
+		{"B", "C"}, {"A", "D"}, {"D", "E"}, {"C", "F"},
+		{"E", "G"}, {"F", "G"}, {"A", "G"},
+	}
+	if len(plan.routes) != len(wantRoutes) {
+		t.Fatalf("routes = %d, want %d", len(plan.routes), len(wantRoutes))
+	}
+	for i, want := range wantRoutes {
+		got := plan.routes[i]
+		if got.blocker != want.blocker || got.dependent != want.dependent {
+			t.Errorf("route %d endpoints = %s -> %s, want %s -> %s",
+				i+1, got.blocker, got.dependent, want.blocker, want.dependent)
+		}
+	}
+	wantIncident := map[model.TicketID][]frontierRouteID{
+		"A": {2, 7}, "B": {1}, "C": {1, 4}, "D": {2, 3},
+		"E": {3, 5}, "F": {4, 6}, "G": {5, 6, 7},
+	}
+	if !reflect.DeepEqual(plan.incident, wantIncident) {
+		t.Errorf("incident index = %v, want canonical %v", plan.incident, wantIncident)
+	}
+
+	segments := 0
+	for _, rank := range plan.segments {
+		for _, segment := range rank {
+			segments++
+			if segment.routeID == 0 || int(segment.routeID) > len(plan.routes) {
+				t.Errorf("segment %+v has no canonical route", segment)
+			}
+		}
+	}
+	if segments != 9 {
+		t.Errorf("local segments = %d, want six adjacent plus three for the long route", segments)
+	}
+	dummies := 0
+	for _, rank := range plan.slots {
+		for _, slot := range rank {
+			if slot.dummy {
+				dummies++
+				if slot.routeID != 7 {
+					t.Errorf("long-span dummy route = %d, want canonical route 7", slot.routeID)
+				}
+			}
+		}
+	}
+	if dummies != 2 {
+		t.Errorf("long-span dummies = %d, want 2", dummies)
+	}
+
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 200, direction: frontierRanksHorizontal, plan: &plan,
+	})
+	for i, route := range layout.routes {
+		if route.blocker != wantRoutes[i].blocker || route.dependent != wantRoutes[i].dependent {
+			t.Errorf("materialized route %d lost semantic endpoints: %+v", i+1, route)
+		}
+		if len(route.strokes) == 0 {
+			t.Errorf("materialized route %d has no geometry", i+1)
+		}
+		for j := 1; j < len(route.strokes); j++ {
+			previous, current := route.strokes[j-1], route.strokes[j]
+			distance := absInt(previous.to.x-current.from.x) + absInt(previous.to.y-current.from.y)
+			if distance != 1 {
+				t.Errorf("route %d strokes %d and %d are not blocker-to-dependent neighbors: %+v then %+v",
+					i+1, j-1, j, previous, current)
+			}
+		}
+	}
+	for _, pair := range [][2]frontierRouteID{{1, 2}, {3, 4}} {
+		if crossings := sharedRouteCrossings(layout, pair[0], pair[1]); len(crossings) == 0 {
+			t.Errorf("routes %d and %d have no preserved shared crossing", pair[0], pair[1])
+		}
+	}
+
+	againPlan := planFrontierRanks(g, nodes)
+	again := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 200, direction: frontierRanksHorizontal, plan: &againPlan,
+	})
+	if !reflect.DeepEqual(layout, again) {
+		t.Error("identical graph input produced non-deterministic route metadata or materialization")
+	}
+}
+
+func TestFocusedFrontierCrossingUsesEitherOwnerAndIncidentRoutesOnly(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	_, layout := layoutOfDirection(tickets, links, frontierRanksHorizontal, 200)
+	crossings := sharedRouteCrossings(layout, 1, 2)
+	if len(crossings) == 0 {
+		t.Fatal("crossing fixture has no shared route-1/route-2 junction")
+	}
+	crossing := crossings[0]
+	glyphAt := func(focus model.TicketID) rune {
+		t.Helper()
+		lines := renderFrontierCanvas(layout, focus, true, 0, 0,
+			layout.width, layout.height, DefaultStyles(true))
+		row := []rune(ansi.Strip(lines[crossing.y]))
+		if crossing.x >= len(row) {
+			t.Fatalf("crossing x=%d is outside rendered row width %d", crossing.x, len(row))
+		}
+		return row[crossing.x]
+	}
+	if got := glyphAt("C"); got != '╋' {
+		t.Errorf("dependent owner C crossing = %q, want heavy junction", got)
+	}
+	if got := glyphAt("D"); got != '╋' {
+		t.Errorf("dependent owner D crossing = %q, want heavy junction", got)
+	}
+	if got := glyphAt("E"); got != '┼' {
+		t.Errorf("unrelated focus E crossing = %q, want normal junction", got)
+	}
+
+	overlay := focusedFrontierOverlay(layout, "C", 0, 0, layout.width, layout.height)
+	if got := layout.incident["C"]; !reflect.DeepEqual(got, []frontierRouteID{1, 4}) {
+		t.Fatalf("C incident routes = %v, want inbound 1 and outbound 4", got)
+	}
+	for _, routeID := range []frontierRouteID{1, 4} {
+		found := false
+		for at := range frontierRouteCells(layout.routes[int(routeID)-1]) {
+			if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("incident route %d contributes no focused cells", routeID)
+		}
+	}
+	for at := range frontierRouteCells(layout.routes[4]) {
+		if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
+			t.Errorf("nonincident route 5 highlighted at %+v", at)
+			break
+		}
+	}
+}
+
+func TestFocusedFrontierOverlayClipsAndRejectsProtectedCells(t *testing.T) {
+	cells := make([]frontierCell, 8)
+	for i := range cells {
+		cells[i] = frontierCell{r: '─'}
+	}
+	cells[4] = frontierCell{continuation: true}
+	cells[5] = frontierCell{r: '─', link: 1}
+	layout := frontierLayout{
+		cells:  [][]frontierCell{cells},
+		width:  8,
+		height: 1,
+		order:  []model.TicketID{"card"},
+		nodeAt: map[model.TicketID]frontierRect{"card": {X: 2, W: 2, H: 1}},
+		routes: []frontierRoute{
+			{blocker: "focus", dependent: "dependent", strokes: []frontierStroke{{
+				from: frontierPoint{x: -1_000_000}, to: frontierPoint{x: 5},
+			}}},
+			{blocker: "other", dependent: "elsewhere", strokes: []frontierStroke{{
+				from: frontierPoint{x: 6}, to: frontierPoint{x: 7},
+			}}},
+		},
+		incident: map[model.TicketID][]frontierRouteID{"focus": {1}},
+	}
+	overlay := focusedFrontierOverlay(layout, "focus", 0, 0, 8, 1)
+	want := map[[2]int]frontierCell{
+		{0, 0}: {r: '─', style: frontierFocusedEdgeStyle},
+		{1, 0}: {r: '─', style: frontierFocusedEdgeStyle},
+	}
+	if !reflect.DeepEqual(overlay, want) {
+		t.Errorf("protected/clipped overlay = %#v, want only visible unprotected incident cells %#v", overlay, want)
+	}
+}
+
+func TestFocusedFrontierHeavyGlyphsSurviveANSIStripping(t *testing.T) {
+	const light = "─│┌┐└┘┼▶▼"
+	const heavy = "━┃┏┓┗┛╋▶▼"
+	if got := heavyFrontierEdgeText(light); got != heavy {
+		t.Errorf("heavy substitution = %q, want %q", got, heavy)
+	}
+	styled := DefaultStyles(true).FrontierBold.Render(heavyFrontierEdgeText(light))
+	if got := ansi.Strip(styled); got != heavy {
+		t.Errorf("ANSI-stripped heavy geometry = %q, want %q", got, heavy)
+	}
+}
+
+func TestFrontierRouteIdentityPreservesGhostsLongSpansCyclesAndDirections(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("P", model.StatusTodo),
+		blockingTicket("Q", model.StatusTodo),
+		blockingTicket("X", model.StatusTodo),
+		blockingTicket("Y", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"P": blockedBy("Q", "ghost"),
+		"Q": blockedBy("ghost"),
+		"X": blockedBy("Y"),
+		"Y": blockedBy("X"),
+	}
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		t.Run(fmt.Sprintf("direction-%d", direction), func(t *testing.T) {
+			g, layout := layoutOfDirection(tickets, links, direction, 160)
+			wantRoutes := map[[2]model.TicketID]bool{
+				{"Q", "P"}: true, {"ghost", "P"}: true, {"ghost", "Q"}: true,
+			}
+			for _, route := range layout.routes {
+				delete(wantRoutes, [2]model.TicketID{route.blocker, route.dependent})
+			}
+			if len(wantRoutes) != 0 {
+				t.Errorf("direction %d missing semantic routes %v", direction, wantRoutes)
+			}
+			if len(layout.incident["X"]) != 0 || len(layout.incident["Y"]) != 0 {
+				t.Errorf("direction %d routed SCC-internal cycle edges: X=%v Y=%v",
+					direction, layout.incident["X"], layout.incident["Y"])
+			}
+			if len(g.Cycles()) != 1 {
+				t.Errorf("direction %d cycles = %v, want X/Y cycle truth", direction, g.Cycles())
+			}
+			longRoute := -1
+			for i, route := range layout.routes {
+				if route.blocker == "ghost" && route.dependent == "P" {
+					longRoute = i
+				}
+			}
+			if longRoute < 0 || len(layout.routes[longRoute].strokes) < 3 {
+				t.Fatalf("direction %d long Ghost route has no dummy geometry", direction)
+			}
+			overlay := focusedFrontierOverlay(layout, "ghost", 0, 0, layout.width, layout.height)
+			for at := range overlay {
+				if layout.insideCard(at[0], at[1]) {
+					t.Errorf("direction %d focused edge overwrote card at %v", direction, at)
+				}
+			}
+			visible := ansi.Strip(strings.Join(renderFrontierCanvas(layout, "ghost", true,
+				0, 0, layout.width, layout.height, DefaultStyles(true)), "\n"))
+			if !strings.ContainsAny(visible, "━┃┏┓┗┛╋") {
+				t.Errorf("direction %d rendered no heavy Ghost incident geometry", direction)
+			}
+			if direction == frontierRanksHorizontal {
+				if !strings.ContainsRune(visible, '▶') || strings.ContainsRune(visible, '▼') {
+					t.Errorf("horizontal route arrows lost direction:\n%s", visible)
+				}
+			} else if !strings.ContainsRune(visible, '▼') || strings.ContainsRune(visible, '▶') {
+				t.Errorf("vertical route arrows lost direction:\n%s", visible)
+			}
+		})
+	}
+}
+
+func TestFrontierCellsCarryNoRouteOwnershipMetadata(t *testing.T) {
+	cellType := reflect.TypeOf(frontierCell{})
+	for i := range cellType.NumField() {
+		field := cellType.Field(i)
+		name := strings.ToLower(field.Name)
+		if strings.Contains(name, "route") || strings.Contains(name, "owner") {
+			t.Errorf("frontierCell field %q stores topology ownership", field.Name)
+		}
+		if field.Type.Kind() == reflect.Slice {
+			t.Errorf("frontierCell field %q is a per-cell slice", field.Name)
+		}
+	}
+}
+
+func TestClipFrontierStrokePreservesAxisAndTravelOrder(t *testing.T) {
+	clip := frontierRect{X: 2, Y: 3, W: 4, H: 5}
+	for _, test := range []struct {
+		name   string
+		stroke frontierStroke
+		want   frontierStroke
+		ok     bool
+	}{
+		{"right", frontierStroke{frontierPoint{x: -9, y: 4}, frontierPoint{x: 20, y: 4}}, frontierStroke{frontierPoint{x: 2, y: 4}, frontierPoint{x: 5, y: 4}}, true},
+		{"left", frontierStroke{frontierPoint{x: 20, y: 4}, frontierPoint{x: -9, y: 4}}, frontierStroke{frontierPoint{x: 5, y: 4}, frontierPoint{x: 2, y: 4}}, true},
+		{"down", frontierStroke{frontierPoint{x: 3, y: -9}, frontierPoint{x: 3, y: 20}}, frontierStroke{frontierPoint{x: 3, y: 3}, frontierPoint{x: 3, y: 7}}, true},
+		{"up", frontierStroke{frontierPoint{x: 3, y: 20}, frontierPoint{x: 3, y: -9}}, frontierStroke{frontierPoint{x: 3, y: 7}, frontierPoint{x: 3, y: 3}}, true},
+		{"outside", frontierStroke{frontierPoint{x: 1, y: 0}, frontierPoint{x: 1, y: 20}}, frontierStroke{}, false},
+		{"diagonal", frontierStroke{frontierPoint{x: 2, y: 3}, frontierPoint{x: 3, y: 4}}, frontierStroke{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := clipFrontierStroke(test.stroke, clip)
+			if ok != test.ok || got != test.want {
+				t.Errorf("clip = %+v/%t, want %+v/%t", got, ok, test.want, test.ok)
+			}
+		})
+	}
 }
 
 func TestMergeGlyph(t *testing.T) {
@@ -702,8 +1044,8 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 	for i, id := range l.order {
 		index[id] = i
 	}
-	for _, e := range frontierEdges(g, index) {
-		if l.order[e.from] == ghost && l.order[e.to] == "acme/widgets#112" {
+	for _, edge := range frontierEdges(g, index) {
+		if l.order[edge.dependent] == ghost && l.order[edge.blocker] == "acme/widgets#112" {
 			return
 		}
 	}

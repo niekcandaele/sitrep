@@ -119,6 +119,28 @@ func TestFrontierFrame(t *testing.T) {
 	}
 }
 
+func TestFrontierFocusedEdgesFrame(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	m := frontierMouseModel(t, tickets, links, 150, 30)
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if cmd != nil {
+		t.Fatal("focusing a dependent returned a command")
+	}
+	m = updated.(Model)
+	if m.frontier.focusID != "C" {
+		t.Fatalf("focus = %q, want crossing owner C", m.frontier.focusID)
+	}
+	got := frame(m.View().Content)
+	checkGolden(t, "frontier_focused_edges.golden.txt", got)
+	visible := string(got)
+	if strings.Count(visible, "╋") < 2 {
+		t.Errorf("focused frame has fewer than two heavy shared crossings:\n%s", visible)
+	}
+	if !strings.Contains(visible, "▸ C") || !strings.ContainsAny(visible, "━┃┏┓┗┛") {
+		t.Errorf("focused frame lacks marker or heavy incident geometry:\n%s", visible)
+	}
+}
+
 // A Ticket blocked by something outside the Watchlist is drawn as a Ghost
 // Ticket, so it never looks Actionable.
 func TestFrontierDrawsGhostTickets(t *testing.T) {
@@ -1736,6 +1758,96 @@ func frontierMouse(t *testing.T, m Model, msg tea.MouseMsg) tea.Msg {
 		t.Fatal("the mouse event produced no domain message")
 	}
 	return cmd()
+}
+
+func TestFrontierFocusIsRenderOnlyAcrossArrowsHomeEndAndMouse(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	for _, test := range []struct {
+		name          string
+		width, height int
+		direction     frontierRankDirection
+		arrow         tea.KeyPressMsg
+		arrowFocus    model.TicketID
+	}{
+		{"horizontal", 150, 30, frontierRanksHorizontal, tea.KeyPressMsg{Code: tea.KeyRight}, "C"},
+		{"vertical", 100, 50, frontierRanksVertical, tea.KeyPressMsg{Code: tea.KeyDown}, "C"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := frontierMouseModel(t, tickets, links, test.width, test.height)
+			if m.frontier.direction != test.direction {
+				t.Fatalf("direction = %v, want %v", m.frontier.direction, test.direction)
+			}
+			inner := m.frontierCanvasRect()
+			if m.frontier.layout.width > inner.W || m.frontier.layout.height > inner.H {
+				t.Fatalf("layout %dx%d does not fit visible inner %dx%d", m.frontier.layout.width,
+					m.frontier.layout.height, inner.W, inner.H)
+			}
+
+			layouts, providerCalls := 0, 0
+			layoutFn := m.layoutFrontierFn
+			m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode,
+				opts frontierLayoutOptions) frontierLayout {
+				layouts++
+				return layoutFn(g, nodes, opts)
+			}
+			fetchDetail := m.fetchDetail
+			m.fetchDetail = func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+				providerCalls++
+				return fetchDetail(ctx, id)
+			}
+			invariant := func() string {
+				return fmt.Sprintf("layout=%#v selected=%d/%s listOffset=%d offsets=%d,%d direction=%d/%t mouseEpoch=%d generation=%d rebuild=%d/%d/%d timer=%d/%d queue=%v plan=%d/%d inflight=%d graph=%#v links=%#v failures=%#v details=%#v",
+					m.frontier.layout, m.selected, m.selectedID, m.offset,
+					m.frontier.offsetX, m.frontier.offsetY, m.frontier.direction, m.frontier.directionSet,
+					m.mouseEpoch, m.frontierGeneration, m.frontierRebuildVersion,
+					m.frontierRebuildPendingVersion, m.frontierRebuildPendingGeneration,
+					m.frontierRebuildTimerID, m.frontierRebuildNextTimerID, m.frontier.queued,
+					m.frontier.planned, m.frontier.done, m.detailFanoutInflight,
+					m.frontier.graph, m.frontier.input.Links, m.frontier.failed, m.details)
+			}
+			assertFocusOnly := func(label string, msg tea.Msg, want model.TicketID) {
+				t.Helper()
+				beforeState, beforeFrame := invariant(), m.View().Content
+				updated, cmd := m.Update(msg)
+				if cmd != nil {
+					t.Fatalf("%s returned command", label)
+				}
+				m = updated.(Model)
+				if m.frontier.focusID != want || !m.frontier.hasFocus {
+					t.Fatalf("%s focus = %q/%t, want %q/true", label,
+						m.frontier.focusID, m.frontier.hasFocus, want)
+				}
+				if after := invariant(); after != beforeState {
+					t.Errorf("%s changed non-focus state\nbefore: %s\nafter:  %s", label, beforeState, after)
+				}
+				afterFrame := m.View().Content
+				if afterFrame == beforeFrame {
+					t.Errorf("%s changed focus without changing rendered emphasis", label)
+				}
+				if !strings.ContainsAny(string(frame(afterFrame)), "━┃┏┓┗┛╋") {
+					t.Errorf("%s frame has no ANSI-independent heavy incident geometry", label)
+				}
+				if layouts != 0 || providerCalls != 0 {
+					t.Errorf("%s invoked layout/provider = %d/%d", label, layouts, providerCalls)
+				}
+			}
+
+			if m.frontier.focusID != "A" {
+				t.Fatalf("initial focus = %q, want A", m.frontier.focusID)
+			}
+			assertFocusOnly("arrow", test.arrow, test.arrowFocus)
+			assertFocusOnly("Home", keyPress("g"), "A")
+			assertFocusOnly("End", keyPress("G"), "G")
+
+			rect := m.frontier.layout.nodeAt["C"]
+			click := tea.MouseClickMsg{
+				X:      inner.X + rect.X + 1,
+				Y:      headerHeight + inner.Y + rect.Y + 1,
+				Button: tea.MouseLeft,
+			}
+			assertFocusOnly("mouse", frontierMouse(t, m, click), "C")
+		})
+	}
 }
 
 // A click focuses the node under the pointer; a second click on the same node

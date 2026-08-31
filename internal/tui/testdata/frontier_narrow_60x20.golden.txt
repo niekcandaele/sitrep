@@ -3,7 +3,7 @@ frontier · 16 nodes · 3 ghosts · 3 actionable       just now
 
 
  ┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━
- │▸ #205                Done│─┼───▶┃  #201                T
+ │▸ #205                Done│━╋━━━▶┃  #201                T
  │Compute shard weights     │ │    ┃Ship the rebalancer CLI
  │                          │ │    ┃ACTIONABLE
  └──────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━

@@ -41,6 +41,37 @@ func BenchmarkFrontierLayout(b *testing.B) {
 	}
 }
 
+func BenchmarkFrontierFocusedRender(b *testing.B) {
+	for _, n := range []int{50, 100, 200, 500} {
+		b.Run("chain-two-incident/N="+strconv.Itoa(n), func(b *testing.B) {
+			tickets, links := benchmarkFrontierFixture("chain", n)
+			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+			layout := layoutFrontier(graph, frontierNodes(graph, tickets, true), frontierLayoutOptions{
+				innerWidth: frontierBenchmarkWidth,
+				direction:  frontierRanksHorizontal,
+			})
+			focus := model.TicketID("B-" + strconv.Itoa(n/2))
+			if got := len(layout.incident[focus]); got != 2 {
+				b.Fatalf("focused route count = %d, want 2", got)
+			}
+			const height = 30
+			rect := layout.nodeAt[focus]
+			offsetX, offsetY := ensureNodeVisible(rect, 0, 0, frontierBenchmarkWidth, height)
+			offsetX = clampFrontierOffset(offsetX, layout.width, frontierBenchmarkWidth)
+			offsetY = clampFrontierOffset(offsetY, layout.height, height)
+			styles := DefaultStyles(true)
+			b.ReportAllocs()
+			b.ResetTimer()
+			var lines []string
+			for range b.N {
+				lines = renderFrontierCanvas(layout, focus, true, offsetX, offsetY,
+					frontierBenchmarkWidth, height, styles)
+			}
+			runtime.KeepAlive(lines)
+		})
+	}
+}
+
 func benchmarkFrontierFixture(shape string, n int) ([]model.Ticket, map[model.TicketID][]model.Link) {
 	tickets := make([]model.Ticket, n)
 	links := make(map[model.TicketID][]model.Link, n)

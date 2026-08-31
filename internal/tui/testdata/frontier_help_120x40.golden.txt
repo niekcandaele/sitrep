@@ -3,7 +3,7 @@ frontier · 16 nodes · 3 ghosts · 3 actionable                                
 
 
  ───────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌──────────────────────────┐
- 205                Done│─┼───▶┃  #201                Todo┃─▶│  #202                Todo│─▶│▸ #207         In Progress│
+ 205                Done│─┼───▶┃  #201                Todo┃─▶│  #202                Todo│━▶│▸ #207         In Progress│
  pute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu…│
                         │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1  │
  ───────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └──────────────────────────┘
