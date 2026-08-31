@@ -66,11 +66,12 @@ type providerDoc struct {
 }
 
 type capabilitiesDoc struct {
-	Hierarchy     bool                     `json:"hierarchy"`
-	BlockingLinks bool                     `json:"blocking_links"`
-	Comments      bool                     `json:"comments"`
-	PullRequests  bool                     `json:"pull_requests"`
-	Selectors     *selectorCapabilitiesDoc `json:"selectors,omitempty"`
+	Hierarchy       bool                     `json:"hierarchy"`
+	BlockingLinks   bool                     `json:"blocking_links"`
+	Comments        bool                     `json:"comments"`
+	PullRequests    bool                     `json:"pull_requests"`
+	RateLimitBudget *bool                    `json:"rate_limit_budget,omitempty"`
+	Selectors       *selectorCapabilitiesDoc `json:"selectors,omitempty"`
 }
 
 type selectorCapabilitiesDoc struct {
@@ -178,14 +179,20 @@ type watchlistDoc struct {
 	LimitReached bool        `json:"limit_reached,omitempty"`
 }
 
+type rateLimitBudgetDoc struct {
+	Remaining int       `json:"remaining"`
+	ResetsAt  time.Time `json:"resets_at"`
+}
+
 type watchlistDocument struct {
-	SchemaVersion int          `json:"schema_version"`
-	GeneratedAt   time.Time    `json:"generated_at"`
-	Provider      providerDoc  `json:"provider"`
-	Watchlist     watchlistDoc `json:"watchlist"`
-	Progress      progressDoc  `json:"progress"`
-	Blocking      *blockingDoc `json:"blocking,omitempty"`
-	Tickets       []ticketDoc  `json:"tickets"`
+	SchemaVersion   int                 `json:"schema_version"`
+	GeneratedAt     time.Time           `json:"generated_at"`
+	Provider        providerDoc         `json:"provider"`
+	Watchlist       watchlistDoc        `json:"watchlist"`
+	Progress        progressDoc         `json:"progress"`
+	Blocking        *blockingDoc        `json:"blocking,omitempty"`
+	RateLimitBudget *rateLimitBudgetDoc `json:"rate_limit_budget,omitempty"`
+	Tickets         []ticketDoc         `json:"tickets"`
 }
 
 type commentDoc struct {
@@ -224,15 +231,16 @@ type parentDoc struct {
 // the two optional objects nil, which is what keeps its output byte-identical
 // and schema_version at 1.
 type detailDocument struct {
-	SchemaVersion int            `json:"schema_version"`
-	GeneratedAt   time.Time      `json:"generated_at"`
-	Provider      providerDoc    `json:"provider"`
-	Ticket        *ticketDoc     `json:"ticket,omitempty"`
-	Parent        *parentDoc     `json:"parent,omitempty"`
-	TicketID      model.TicketID `json:"ticket_id"`
-	Description   string         `json:"description"`
-	Comments      []commentDoc   `json:"comments,omitempty"`
-	Links         []linkDoc      `json:"links,omitempty"`
+	SchemaVersion   int                 `json:"schema_version"`
+	GeneratedAt     time.Time           `json:"generated_at"`
+	Provider        providerDoc         `json:"provider"`
+	Ticket          *ticketDoc          `json:"ticket,omitempty"`
+	Parent          *parentDoc          `json:"parent,omitempty"`
+	TicketID        model.TicketID      `json:"ticket_id"`
+	Description     string              `json:"description"`
+	Comments        []commentDoc        `json:"comments,omitempty"`
+	Links           []linkDoc           `json:"links,omitempty"`
+	RateLimitBudget *rateLimitBudgetDoc `json:"rate_limit_budget,omitempty"`
 }
 
 // TicketDocument is the decoder's one-shot output: one Ticket's identity, the
@@ -251,6 +259,8 @@ type TicketDocument struct {
 	ProviderName string
 	// GeneratedAt is the caller's clock reading for the wire document.
 	GeneratedAt time.Time
+	// RateLimitBudget is the Resolve observation that produced this decoded Ticket.
+	RateLimitBudget model.RateLimitBudget
 }
 
 // WatchlistDocument is everything the Watchlist renderer needs. It is a struct
@@ -289,6 +299,7 @@ func RenderWatchlist(w io.Writer, doc WatchlistDocument) error {
 		Progress:      newProgressDoc(model.ComputeProgress(snap.Tickets)),
 		Tickets:       make([]ticketDoc, 0, len(snap.Tickets)),
 	}
+	out.RateLimitBudget = newRateLimitBudgetDoc(snap.Capabilities, snap.RateLimitBudget)
 
 	// Members are walked positionally against snap.Tickets rather than looked up
 	// by ID: a Ref-list Watchlist may legitimately contain the same Ticket
@@ -437,6 +448,8 @@ func RenderDetail(w io.Writer, d model.Detail, caps model.Capabilities, provider
 // document with an empty array.
 func RenderTicket(w io.Writer, doc TicketDocument) error {
 	out := newDetailDocument(doc.Detail, doc.Capabilities, doc.ProviderName, doc.GeneratedAt)
+	out.Provider.Capabilities.RateLimitBudget = rateLimitCapability(doc.Capabilities.RateLimitBudget)
+	out.RateLimitBudget = newRateLimitBudgetDoc(doc.Capabilities, doc.RateLimitBudget)
 
 	ticket := newTicketDoc(doc.Ticket, doc.Capabilities)
 	out.Ticket = &ticket
@@ -510,6 +523,7 @@ func wireTime(t time.Time) time.Time {
 
 func newWatchlistProviderDoc(name string, caps model.Capabilities) providerDoc {
 	doc := newProviderDoc(name, caps)
+	doc.Capabilities.RateLimitBudget = rateLimitCapability(caps.RateLimitBudget)
 	doc.Capabilities.Selectors = &selectorCapabilitiesDoc{
 		Epic:    caps.Selectors.Epic,
 		RefList: caps.Selectors.RefList,
@@ -528,6 +542,15 @@ func newProviderDoc(name string, caps model.Capabilities) providerDoc {
 			PullRequests:  caps.PullRequests,
 		},
 	}
+}
+
+func rateLimitCapability(value bool) *bool { return &value }
+
+func newRateLimitBudgetDoc(caps model.Capabilities, budget model.RateLimitBudget) *rateLimitBudgetDoc {
+	if !caps.RateLimitBudget || !budget.Valid() {
+		return nil
+	}
+	return &rateLimitBudgetDoc{Remaining: budget.Remaining, ResetsAt: wireTime(budget.ResetsAt)}
 }
 
 func newProgressDoc(p model.Progress) progressDoc {

@@ -99,8 +99,9 @@ func FixtureBlockingSnapshot() model.WatchlistSnapshot {
 			Status:       model.StatusInProgress,
 			NativeStatus: "open",
 		},
-		Capabilities: allCapabilities,
-		Tickets:      blockingMembers(),
+		Capabilities:    allCapabilities,
+		RateLimitBudget: fixtureRateLimitBudget(),
+		Tickets:         blockingMembers(),
 	}
 }
 

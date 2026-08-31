@@ -41,6 +41,8 @@ type FrontierInput struct {
 	Capabilities model.Capabilities
 	// FetchedAt is when the Watchlist behind this screen was read.
 	FetchedAt time.Time
+	// RateLimitBudget is the optional request budget from the seated List reading.
+	RateLimitBudget model.RateLimitBudget
 }
 
 // FrontierFromList adapts the list's reading and the session's Detail cache to
@@ -50,11 +52,12 @@ type FrontierInput struct {
 // again.
 func FrontierFromList(in ListInput, links map[model.TicketID][]model.Link) FrontierInput {
 	return safeFrontierInput(FrontierInput{
-		Header:       in.Header,
-		Tickets:      in.Tickets,
-		Links:        links,
-		Capabilities: in.Capabilities,
-		FetchedAt:    in.FetchedAt,
+		Header:          in.Header,
+		Tickets:         in.Tickets,
+		Links:           links,
+		Capabilities:    in.Capabilities,
+		FetchedAt:       in.FetchedAt,
+		RateLimitBudget: in.RateLimitBudget,
 	})
 }
 
@@ -764,6 +767,9 @@ func (m Model) frontierHeader() string {
 		counts = fmt.Sprintf("frontier%s%s%sDetails pending · press r",
 			separator, plural(nodes, "node", "nodes"), separator)
 	}
+
+	counts = rateLimitHeader(f.input.Capabilities, f.input.RateLimitBudget).
+		appendToLine(counts, m.staleness(), m.width)
 
 	return strings.Join([]string{
 		headerIdentity(f.input.Header, m.width, m.styles),

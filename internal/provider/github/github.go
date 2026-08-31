@@ -149,10 +149,11 @@ func (p *Provider) Name() string { return "github" }
 // data behind it.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true, // sub-issues are how an Epic is assembled
-		BlockingLinks: true, // blockedBy / blocking on the detail query
-		Comments:      true, // comments on the detail query
-		PullRequests:  true, // closing references and PR-sourced cross-reference events
+		Hierarchy:       true, // sub-issues are how an Epic is assembled
+		BlockingLinks:   true, // blockedBy / blocking on the detail query
+		Comments:        true, // comments on the detail query
+		PullRequests:    true, // closing references and PR-sourced cross-reference events
+		RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{
 			Epic: true, RefList: true, Query: true,
 		},
@@ -166,16 +167,27 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
+	collector := &provider.RateLimitBudgetCollector{}
+	ctx = withRateLimitCollector(ctx, collector)
+	var (
+		snap model.WatchlistSnapshot
+		err  error
+	)
 	switch selected := selector.(type) {
 	case provider.EpicSelector:
-		return p.resolveEpic(ctx, selected.Ref)
+		snap, err = p.resolveEpic(ctx, selected.Ref)
 	case provider.RefListSelector:
-		return p.resolveRefList(ctx, selected.Refs)
+		snap, err = p.resolveRefList(ctx, selected.Refs)
 	case provider.QuerySelector:
-		return p.resolveQuery(ctx, selected.Query)
+		snap, err = p.resolveQuery(ctx, selected.Query)
 	default:
 		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	snap.RateLimitBudget = collector.Budget()
+	return snap, nil
 }
 
 // resolveEpic returns the named Epic and every one of its sub-issues, following
@@ -208,10 +220,11 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 				refKey(r), maxPages*100)
 		}
 
-		issue, err := p.fetchPage(ctx, r, cursor)
+		issue, rateLimit, err := p.fetchPage(ctx, r, cursor)
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
 		}
+		observeRateLimit(ctx, rateLimit)
 
 		if !haveEpic {
 			// The epic's own fields repeat on every page; the first page wins so
@@ -286,6 +299,7 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"github: unexpected response %d from %s", status, p.endpoint)
 		}
+		observeRateLimit(ctx, response.Data.RateLimit)
 
 		strongestIssueCount = max(strongestIssueCount, response.Data.Search.IssueCount)
 		nodes := response.Data.Search.Nodes
@@ -426,6 +440,7 @@ func (p *Provider) readExactRefChunk(ctx context.Context, refs []ref.Ref) ([]mod
 	if err := resp.err(refs, p.endpoint, header); err != nil {
 		return nil, err
 	}
+	observeRateLimit(ctx, resp.RateLimit)
 
 	tickets := make([]model.Ticket, 0, len(refs))
 	for i, r := range refs {
@@ -573,7 +588,7 @@ func refKey(r ref.Ref) string {
 
 // fetchPage issues one query and returns the epic issue it found, with the
 // sub-issue page the cursor selected.
-func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (issueNode, error) {
+func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (issueNode, rateLimitNode, error) {
 	variables := map[string]any{
 		"owner":  r.Owner,
 		"repo":   r.Repo,
@@ -586,14 +601,14 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 	var resp graphQLResponse
 	header, err := p.do(ctx, epicQuery, variables, &resp)
 	if err != nil {
-		return issueNode{}, err
+		return issueNode{}, rateLimitNode{}, err
 	}
 
 	// A GraphQL response can carry both data and errors. A missing repository or
 	// issue is authoritative, but an errors[] entry usually says more, so it is
 	// preferred when there is one.
 	if err := resp.err(r, p.endpoint, header); err != nil {
-		return issueNode{}, err
+		return issueNode{}, rateLimitNode{}, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
 		// GitHub shares one number namespace between issues and pull requests,
@@ -602,13 +617,13 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 		// The aliased issueOrPullRequest selection is what tells the two apart.
 		if kind := resp.Data.Repository; kind != nil && kind.Kind != nil &&
 			kind.Kind.TypeName == "PullRequest" {
-			return issueNode{}, provider.Errorf(provider.KindBadRef,
+			return issueNode{}, rateLimitNode{}, provider.Errorf(provider.KindBadRef,
 				"github: %s is a pull request, not a Ticket", refKey(r))
 		}
-		return issueNode{}, provider.Errorf(provider.KindBadRef,
+		return issueNode{}, rateLimitNode{}, provider.Errorf(provider.KindBadRef,
 			"github: %s not found (or you lack access)", refKey(r))
 	}
-	return *resp.Data.Repository.Issue, nil
+	return *resp.Data.Repository.Issue, resp.Data.RateLimit, nil
 }
 
 // do performs one GraphQL POST of document and decodes the response into out,

@@ -11,6 +11,19 @@ type WatchlistHeader struct {
 	URL   string
 }
 
+// RateLimitBudget is the remaining request capacity observed during one
+// successful Watchlist Resolve. Its zero value means absent.
+type RateLimitBudget struct {
+	Remaining int
+	ResetsAt  time.Time
+}
+
+// Valid reports whether this is an observed rate-limit budget. Zero remaining
+// is a valid, exhausted budget when the reset moment is known.
+func (b RateLimitBudget) Valid() bool {
+	return b.Remaining >= 0 && !b.ResetsAt.IsZero()
+}
+
 // WatchlistSnapshot is one batched reading of a Watchlist produced by
 // Provider.Resolve and re-read by the TUI on every refresh.
 //
@@ -42,6 +55,9 @@ type WatchlistSnapshot struct {
 	// Capabilities are copied from the serving Provider so a snapshot carries
 	// everything a renderer needs to decide what to show.
 	Capabilities Capabilities
+	// RateLimitBudget is an optional request-scoped observation from this Resolve.
+	// It is meaningful only when Capabilities.RateLimitBudget is true.
+	RateLimitBudget RateLimitBudget
 	// FetchedAt is stamped by the caller from its clock, not by the Provider: a
 	// Provider must leave it zero. One authoritative timestamp per snapshot is
 	// what makes golden output deterministic and the TUI's "updated Ns ago"

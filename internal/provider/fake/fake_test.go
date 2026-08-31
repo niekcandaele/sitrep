@@ -43,7 +43,7 @@ func TestNameAndCapabilities(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", p.Name(), "fake")
 	}
 	want := model.Capabilities{
-		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true, RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
 	}
 	if got := p.Capabilities(); got != want {

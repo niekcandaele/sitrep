@@ -64,12 +64,13 @@ func runDecodedOneShot(ctx context.Context, stdout, stderr io.Writer, p provider
 	if asJSON {
 		return writeReport(stdout, stderr, func(w io.Writer) error {
 			return jsonout.RenderTicket(w, jsonout.TicketDocument{
-				Ticket:       ticket,
-				Parent:       snap.Parent,
-				Detail:       detail,
-				Capabilities: snap.Capabilities,
-				ProviderName: p.Name(),
-				GeneratedAt:  snap.FetchedAt,
+				Ticket:          ticket,
+				Parent:          snap.Parent,
+				Detail:          detail,
+				Capabilities:    snap.Capabilities,
+				ProviderName:    p.Name(),
+				GeneratedAt:     snap.FetchedAt,
+				RateLimitBudget: snap.RateLimitBudget,
 			})
 		})
 	}

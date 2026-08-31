@@ -8,6 +8,7 @@
       "blocking_links": false,
       "comments": false,
       "pull_requests": false,
+      "rate_limit_budget": false,
       "selectors": {
         "epic": true,
         "ref_list": false,

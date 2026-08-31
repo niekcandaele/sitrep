@@ -35,6 +35,8 @@ type ListInput struct {
 	LimitReached bool
 	// FetchedAt is when this reading was taken, from the caller's clock.
 	FetchedAt time.Time
+	// RateLimitBudget is the optional request budget observed for this reading.
+	RateLimitBudget model.RateLimitBudget
 }
 
 // ListFromWatchlistSnapshot adapts one Watchlist snapshot to the list-view
@@ -46,10 +48,11 @@ func ListFromWatchlistSnapshot(s model.WatchlistSnapshot) ListInput {
 			Title: s.Header.Title,
 			URL:   s.Header.URL,
 		},
-		Tickets:      s.Tickets,
-		Capabilities: s.Capabilities,
-		LimitReached: s.LimitReached,
-		FetchedAt:    s.FetchedAt,
+		Tickets:         s.Tickets,
+		Capabilities:    s.Capabilities,
+		LimitReached:    s.LimitReached,
+		FetchedAt:       s.FetchedAt,
+		RateLimitBudget: s.RateLimitBudget,
 	}
 }
 

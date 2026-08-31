@@ -1,5 +1,5 @@
 4 tickets
-█████████░░░░░░░░░░░░░░░░░░░  1/3 done · 1 cancelled · 33%                                                      just now
+█████████░░░░░░░░░░░░░░░░░░░  1/3 done · 1 cancelled · 33% · budget 4870 · resets 2030-01-02T03:04:05Z          just now
 
 IN PROGRESS (1)
 ▸ #112     Draft the shard sync protocol

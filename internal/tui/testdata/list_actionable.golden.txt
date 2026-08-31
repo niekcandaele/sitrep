@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-██░░░░░░░░░░░░░░░░░░░░░░░░░░  1/12 done · 1 cancelled · 8% · 4 actionable                                       just now
+██░░░░░░░░░░░░░░░░░  1/12 done · 1 cancelled · 8% · 4 actionable · budget 4870 · resets 2030-01-02T03:04:05Z    just now
 
 IN PROGRESS (1)
 ▸ #207       Rewrite the placement heuristic

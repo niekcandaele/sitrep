@@ -414,7 +414,7 @@ func TestName(t *testing.T) {
 
 func TestCapabilities(t *testing.T) {
 	want := model.Capabilities{
-		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true, RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
 	}
 	if got := gitlab.New(fixtureHost).Capabilities(); got != want {

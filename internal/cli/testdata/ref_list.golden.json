@@ -8,6 +8,7 @@
       "blocking_links": true,
       "comments": true,
       "pull_requests": true,
+      "rate_limit_budget": true,
       "selectors": {
         "epic": true,
         "ref_list": true,
@@ -35,6 +36,10 @@
     "total": 4,
     "denominator": 3,
     "percent_done": 33
+  },
+  "rate_limit_budget": {
+    "remaining": 4870,
+    "resets_at": "2030-01-02T03:04:05Z"
   },
   "tickets": [
     {

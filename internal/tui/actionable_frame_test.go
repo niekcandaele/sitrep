@@ -205,7 +205,7 @@ func TestListMarkersSurviveARefreshAndCostNoDetailCall(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, separator+"3 actionable")
+	waitUntil(t, "the refresh Resolve", func() bool { return p.ResolveCalls() == 2 })
 
 	_, got := s.finish(t)
 

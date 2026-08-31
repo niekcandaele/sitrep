@@ -1,6 +1,7 @@
 package github
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -28,6 +29,7 @@ type graphQLResponse struct {
 				TypeName string `json:"__typename"`
 			} `json:"kind"`
 		} `json:"repository"`
+		RateLimit rateLimitNode `json:"rateLimit"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`
 }
@@ -42,6 +44,7 @@ type queryResponse struct {
 			} `json:"pageInfo"`
 			Nodes []queryMembershipNode `json:"nodes"`
 		} `json:"search"`
+		RateLimit rateLimitNode `json:"rateLimit"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`
 }
@@ -85,8 +88,35 @@ func isNativeQueryError(graphErr graphQLError) bool {
 }
 
 type refListResponse struct {
-	Data   map[string]*refListRepository `json:"data"`
-	Errors []graphQLError                `json:"errors"`
+	Data      map[string]*refListRepository `json:"data"`
+	RateLimit rateLimitNode                 `json:"-"`
+	Errors    []graphQLError                `json:"errors"`
+}
+
+func (r *refListResponse) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Data   map[string]json.RawMessage `json:"data"`
+		Errors []graphQLError             `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	r.Data = make(map[string]*refListRepository, len(envelope.Data))
+	r.Errors = envelope.Errors
+	for key, raw := range envelope.Data {
+		if key == "rateLimit" {
+			if err := json.Unmarshal(raw, &r.RateLimit); err != nil {
+				return err
+			}
+			continue
+		}
+		var repository *refListRepository
+		if err := json.Unmarshal(raw, &repository); err != nil {
+			return err
+		}
+		r.Data[key] = repository
+	}
+	return nil
 }
 
 type refListRepository struct {

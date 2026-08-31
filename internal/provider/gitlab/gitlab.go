@@ -273,10 +273,11 @@ func (p *Provider) Name() string { return "gitlab" }
 // Capabilities declares what this driver actually returns today.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true, // an epic's or milestone's child issues are how an Epic is assembled
-		BlockingLinks: true, // the issue links endpoint, with its own link_type
-		Comments:      true, // notes, minus GitLab's system notes
-		PullRequests:  true, // related merge requests, with review posture and pipeline status
+		Hierarchy:       true, // an epic's or milestone's child issues are how an Epic is assembled
+		BlockingLinks:   true, // the issue links endpoint, with its own link_type
+		Comments:        true, // notes, minus GitLab's system notes
+		PullRequests:    true, // related merge requests, with review posture and pipeline status
+		RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{
 			Epic: true, RefList: true, Query: true,
 		},
@@ -291,16 +292,27 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
+	collector := &provider.RateLimitBudgetCollector{}
+	ctx = withRateLimitCollector(ctx, collector)
+	var (
+		snap model.WatchlistSnapshot
+		err  error
+	)
 	switch s := selector.(type) {
 	case provider.EpicSelector:
-		return p.resolveEpic(ctx, s)
+		snap, err = p.resolveEpic(ctx, s)
 	case provider.RefListSelector:
-		return p.resolveRefList(ctx, s)
+		snap, err = p.resolveRefList(ctx, s)
 	case provider.QuerySelector:
-		return p.resolveQuery(ctx, s.Query)
+		snap, err = p.resolveQuery(ctx, s.Query)
 	default:
 		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	snap.RateLimitBudget = collector.Budget()
+	return snap, nil
 }
 
 // resolveEpic expands a group Epic or milestone by one child level. A project
@@ -845,6 +857,7 @@ func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, ou
 		return nil, provider.Errorf(provider.KindUnavailable,
 			"gitlab: decoding the response from %s: %w", apiBase+path, err)
 	}
+	observeRateLimit(ctx, res.Header)
 	return res.Header, nil
 }
 
@@ -1213,6 +1226,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 		return nil, provider.Errorf(provider.KindUnavailable,
 			"gitlab: decoding the response from %s: %w", apiBase+path, err)
 	}
+	observeRateLimit(ctx, res.Header)
 	return res.Header, nil
 }
 

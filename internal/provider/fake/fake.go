@@ -26,10 +26,11 @@ import (
 // allCapabilities is what New declares by default: everything on, so a test
 // that cares about a capability has to say so.
 var allCapabilities = model.Capabilities{
-	Hierarchy:     true,
-	BlockingLinks: true,
-	Comments:      true,
-	PullRequests:  true,
+	Hierarchy:       true,
+	BlockingLinks:   true,
+	Comments:        true,
+	PullRequests:    true,
+	RateLimitBudget: true,
 	Selectors: model.SelectorCapabilities{
 		Epic: true, RefList: true, Query: true,
 	},
@@ -209,6 +210,9 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	}
 	snap.Capabilities = p.caps
 	snap.FetchedAt = time.Time{}
+	if !p.caps.RateLimitBudget {
+		snap.RateLimitBudget = model.RateLimitBudget{}
+	}
 	applyEpicCapabilities(&snap.Epic, p.caps)
 	if !p.caps.Hierarchy {
 		snap.Parent = model.Parent{}
@@ -240,9 +244,10 @@ func selectRefListSnapshot(snap model.WatchlistSnapshot, refs []ref.Ref) (model.
 		tickets = append(tickets, snap.Tickets[index])
 	}
 	return model.WatchlistSnapshot{
-		Header:       provider.RefListHeader(len(tickets)),
-		Tickets:      tickets,
-		Capabilities: snap.Capabilities,
+		Header:          provider.RefListHeader(len(tickets)),
+		Tickets:         tickets,
+		Capabilities:    snap.Capabilities,
+		RateLimitBudget: snap.RateLimitBudget,
 	}, nil
 }
 

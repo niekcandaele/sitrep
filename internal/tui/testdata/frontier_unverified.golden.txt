@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 13 nodes · actionable unknown                                                                        just now
+frontier · 13 nodes · actionable unknown · budget 4870 · resets 2030-01-02T03:04:05Z                            just now
 
 
  ┌──────────────────────────┐

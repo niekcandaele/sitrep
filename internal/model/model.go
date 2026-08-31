@@ -145,6 +145,8 @@ type Capabilities struct {
 	// PullRequests reports whether the Provider correlates pull or merge
 	// requests to Tickets.
 	PullRequests bool
+	// RateLimitBudget reports whether Resolve can observe a request budget.
+	RateLimitBudget bool
 	// Selectors declares the Watchlist subjects this Provider accepts.
 	Selectors SelectorCapabilities
 }
