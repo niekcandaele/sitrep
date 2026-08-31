@@ -84,7 +84,7 @@ type Model struct {
 	frontierGeneration int
 	// layoutFrontierFn is an instance-owned test seam. Its nil fallback keeps
 	// model-literal fixtures equivalent to production Models.
-	layoutFrontierFn func(model.BlockingGraph, []frontierNode, int) frontierLayout
+	layoutFrontierFn func(model.BlockingGraph, []frontierNode, frontierLayoutOptions) frontierLayout
 	// frontierRebuildVersion identifies the newest evidence or width request.
 	// A pending target is serviced by at most one physical Bubble Tea tick.
 	frontierRebuildVersion           int
@@ -350,11 +350,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.reconcileDetail(true)
 		}
 		if m.mode == modeFrontier {
-			// Height changes alter only the viewport. A width change may alter card
-			// geometry, but preserves the displayed canvas until its trailing-edge
-			// replacement settles.
+			// The displayed canvas remains atomic until the existing trailing-edge
+			// replacement settles. Width changes keep #101's behavior; a height-only
+			// change schedules work only at the strict #109 flip boundary.
 			m = m.reconcileFrontier(true)
-			if widthChanged {
+			if widthChanged || (heightChanged && m.frontierResizeNeedsDirectionFlip()) {
 				m, cmd := m.requestFrontierRebuild()
 				return m, cmd
 			}

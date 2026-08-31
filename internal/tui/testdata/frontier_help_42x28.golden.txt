@@ -1,12 +1,12 @@
 #200  Shard rebalancer rollout
 frontier · 16 nodes · 3 ghosts ·… just now
 
-───────────┐  ┌──────────────────────────┐
-‹      Todo│─▶│▸ #207         In Progress│
-ncer into …│  │Rewrite the placement heu…│
-           │  │[In Review] blocked by 1  │
-───────────┘ ▼└──────────────────────────┘
-                          x 80/80 · y 0/55
+
+ ─────────┐  ┌──────────────────────────┐
+‹     Todo│─▶│▸ #207         In Progress│
+ er into …│  │Rewrite the placement heu…│
+                     ▼
+                          x 82/82 · y 0/57
 1 Ticket's Links could not be read; anyth…
 read failed: fake: no detail for ticket "…
 m            release, shift-drag

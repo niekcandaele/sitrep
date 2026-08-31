@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -27,12 +28,18 @@ import (
 // boundary the screen sits behind (ADR-0006).
 func frontierSession(t *testing.T, c *clock, p *fake.Provider) *session {
 	t.Helper()
-	return startWith(t, c, Options{
+	return frontierSessionAtSize(t, c, p, termWidth, termHeight)
+}
+
+func frontierSessionAtSize(t *testing.T, c *clock, p *fake.Provider, width, height int) *session {
+	t.Helper()
+	tm := teatest.NewTestModel(t, New(t.Context(), Options{
 		Source:       selectorSource(p, c),
 		DetailSource: TicketDetailSource(p),
 		Interval:     time.Minute,
 		Now:          c.now,
-	})
+	}), teatest.WithInitialTermSize(width, height))
+	return &session{tm: tm, clock: c}
 }
 
 // openFrontier waits for the Watchlist, presses v, and waits for the fan-out to
@@ -54,21 +61,41 @@ func openFrontier(t *testing.T, s *session) {
 // channel's border weight and badge words, and edges reading left to right as
 // "this must finish before that".
 //
-// The fixture's graph is deliberately larger than a 120x40 terminal, so this
-// frame is the canvas origin and TestFrontierDrawsGhostTickets scrolls to the
-// far end of it. That is the screen's real behaviour: it scrolls, and is never
-// reflowed or scaled.
+// The fixture's graph is seated in a short, wide 300x45 terminal where only the
+// vertical candidate fully fits. This headline golden therefore owns the
+// non-default rank direction and shows upright cards with downward routing.
+// TestFrontierDrawsGhostTickets retains the default 120x40 scrolling view, and
+// the narrow golden owns inset overflow chrome under constraint.
 func TestFrontierFrame(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
-	s := frontierSession(t, c, p)
+	s := frontierSessionAtSize(t, c, p, 300, 45)
 	openFrontier(t, s)
+	// openFrontier's h reaches the blocker side in horizontal mode. The equivalent
+	// physical motion in this intentionally vertical frame is up.
+	s.tm.Send(keyPress("k"))
 
-	m, got := s.finish(t)
+	s.tm.Send(keyPress("q"))
+	s.tm.WaitFinished(t, teatest.WithFinalTimeout(waitTimeout))
+	m, ok := s.tm.FinalModel(t).(Model)
+	if !ok {
+		t.Fatalf("final model is %T, want tui.Model", s.tm.FinalModel(t))
+	}
+	content := m.View().Content
+	if height := lipgloss.Height(content); height != 45 {
+		t.Errorf("headline frame height = %d, want 45", height)
+	}
+	if width := lipgloss.Width(content); width > 300 {
+		t.Errorf("headline frame width = %d, want at most 300", width)
+	}
+	got := frame(content)
 
 	checkGolden(t, "frontier.golden.txt", got)
 	if m.mode != modeFrontier {
 		t.Errorf("mode = %v, want the Frontier", m.mode)
+	}
+	if m.frontier.direction != frontierRanksVertical {
+		t.Errorf("headline direction = %v, want vertical", m.frontier.direction)
 	}
 	frame := string(got)
 	// The other spelling of the same header field: a Watchlist where some
@@ -87,7 +114,7 @@ func TestFrontierFrame(t *testing.T) {
 	if _, drawn := m.frontier.layout.nodeAt["acme/widgets#212"]; !drawn {
 		t.Fatal("#212 is not on the canvas, so the Relates assertion below proves nothing")
 	}
-	if m.frontier.layout.columnOf["acme/widgets#212"] != 0 {
+	if m.frontier.layout.rankOf["acme/widgets#212"] != 0 {
 		t.Error("a Relates Link was drawn as a blocking edge")
 	}
 }
@@ -886,8 +913,9 @@ func TestFrontierQueuedMouseMessageRechecksCurrentBindings(t *testing.T) {
 	m := frontierMouseModel(t, tickets, nil, 120, 30)
 	m.mouseEnabled = true
 	rect := m.frontier.layout.nodeAt["T-2"]
+	inner := m.frontierCanvasRect()
 	handler := m.View().OnMouse
-	cmd := handler(tea.MouseClickMsg{X: rect.X + 1, Y: headerHeight + rect.Y + 1, Button: tea.MouseLeft})
+	cmd := handler(tea.MouseClickMsg{X: inner.X + rect.X + 1, Y: headerHeight + inner.Y + rect.Y + 1, Button: tea.MouseLeft})
 	if cmd == nil {
 		t.Fatal("capable handler produced no queued click")
 	}
@@ -940,28 +968,20 @@ func TestFrontierIgnoresListFilters(t *testing.T) {
 	}
 }
 
-// An overflow indicator says "there is more that way". Punched into a card's
-// border it says that and also unmakes the card, so it takes the nearest blank
-// cell on its edge instead — and where the edge is full it is dropped, because
-// the footer's scroll position reports the same fact.
+// Overflow cues belong to fixed ring cells and therefore cannot overwrite even
+// a completely occupied canvas edge.
 func TestFrontierOverflowGlyphsNeverOverwriteContent(t *testing.T) {
-	// A canvas whose top row is entirely card border and whose bottom row has
-	// exactly one blank cell, off the midpoint.
-	full := make([]frontierCell, 8)
-	for i := range full {
-		full[i] = frontierCell{r: '─'}
+	l := frontierLayout{width: 20, height: 20}
+	inner := frontierInnerRect(8, 6)
+	got := frontierChromeGlyphs(l, inner, 1, 1, 8, 6)
+	want := map[[2]int]rune{
+		{inner.X + inner.W/2, inner.Y - 1}:       '▲',
+		{inner.X + inner.W/2, inner.Y + inner.H}: '▼',
+		{inner.X - 1, inner.Y + inner.H/2}:       '‹',
+		{inner.X + inner.W, inner.Y + inner.H/2}: '›',
 	}
-	bottom := append([]frontierCell(nil), full...)
-	bottom[1] = frontierCell{r: ' '}
-	l := frontierLayout{cells: [][]frontierCell{full, bottom, full}, width: 8, height: 3}
-
-	got := frontierOverflowGlyphs(l, nil, 0, 1, 8, 2)
-
-	if len(got) != 1 {
-		t.Fatalf("placed %v, want only the ▲ the free cell can carry", got)
-	}
-	if glyph, ok := got[[2]int{1, 0}]; !ok || glyph != '▲' {
-		t.Errorf("placed %v, want ▲ on the one blank cell at x=1", got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chrome = %v, want fixed ring cells %v", got, want)
 	}
 }
 
@@ -982,7 +1002,7 @@ func TestFrontierCardsKeepCombiningMarks(t *testing.T) {
 
 // jsonout walks members positionally because a Ref-list Watchlist may name the
 // same Ticket twice. The Frontier is a graph, where one Ticket is one node: a
-// second card would give nodeAt and columnOf two answers and one winner, so
+// second card would give nodeAt and rankOf two answers and one winner, so
 // clicks and focus would reach a card the eye is not on.
 func TestFrontierDrawsOneNodePerTicket(t *testing.T) {
 	ticket := model.Ticket{ID: "T-1", Key: "#1", Title: "twice", Status: model.StatusTodo}
@@ -1700,7 +1720,12 @@ func TestFrontierClickFocusesAndDoubleClickOpens(t *testing.T) {
 	if !drawn {
 		t.Fatal("#2 is not on the canvas")
 	}
-	click := tea.MouseClickMsg{X: rect.X + 1, Y: headerHeight + rect.Y + 1, Button: tea.MouseLeft}
+	inner := m.frontierCanvasRect()
+	click := tea.MouseClickMsg{
+		X:      inner.X + rect.X - m.frontier.offsetX + 1,
+		Y:      headerHeight + inner.Y + rect.Y - m.frontier.offsetY + 1,
+		Button: tea.MouseLeft,
+	}
 
 	updated, _ := m.Update(frontierMouse(t, m, click))
 	m = updated.(Model)
@@ -1747,8 +1772,8 @@ func TestFrontierWheelScrollsTheCanvas(t *testing.T) {
 		})
 	}
 	m := frontierMouseModel(t, tickets, nil, 120, 20)
-	if m.frontier.layout.height <= m.frontierBodyHeight() {
-		t.Fatal("the canvas fits the body, so there is nothing to scroll")
+	if m.frontier.layout.height <= m.frontierCanvasRect().H {
+		t.Fatal("the canvas fits the inner rect, so there is nothing to scroll")
 	}
 	focus := m.frontier.focusID
 
@@ -2653,9 +2678,10 @@ func frontierPagingModel(t *testing.T, width, height int) Model {
 	}
 	m := frontierMouseModel(t, tickets, links, width, height)
 	m = m.reconcileFrontier(true)
-	m.frontier.offsetX = clampFrontierOffset(1, m.frontier.layout.width, m.width)
-	if m.frontier.layout.height <= m.frontierBodyHeight() {
-		t.Fatalf("paging fixture canvas fits vertically: layout=%dx%d body=%d columns=%v", m.frontier.layout.width, m.frontier.layout.height, m.frontierBodyHeight(), m.frontier.layout.columnOf)
+	inner := m.frontierCanvasRect()
+	m.frontier.offsetX = clampFrontierOffset(1, m.frontier.layout.width, inner.W)
+	if m.frontier.layout.height <= inner.H {
+		t.Fatalf("paging fixture canvas fits vertically: layout=%dx%d inner=%dx%d ranks=%v", m.frontier.layout.width, m.frontier.layout.height, inner.W, inner.H, m.frontier.layout.rankOf)
 	}
 	return m
 }
@@ -2671,12 +2697,38 @@ func assertFrontierPageFooter(t *testing.T, m Model, maxY int) {
 	}
 }
 
+func TestFrontierScrollPositionUsesExactInnerDenominators(t *testing.T) {
+	m := frontierMouseModel(t, []model.Ticket{{
+		ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo,
+	}}, nil, 40, 20)
+	assert := func(label string) {
+		t.Helper()
+		inner := m.frontierCanvasRect()
+		m.frontier.layout.width = inner.W + 7
+		m.frontier.layout.height = inner.H + 9
+		m.frontier.offsetX, m.frontier.offsetY = 2, 3
+		want := fmt.Sprintf("x 2/%d%sy 3/%d", 7, separator, 9)
+		if got := m.frontierScrollPosition(); got != want {
+			t.Errorf("%s scroll position = %q, want exact inner denominators %q (inner=%+v)",
+				label, got, want, inner)
+		}
+	}
+	assert("normal")
+
+	m.height = headerHeight + m.frontierFooterHeight() + 1
+	if got := m.frontierBodyHeight(); got != 1 {
+		t.Fatalf("degraded body height = %d, want 1", got)
+	}
+	assert("one-line")
+}
+
 func TestFrontierPageKeysMoveOnlyCurrentCanvasWindow(t *testing.T) {
 	m := frontierPagingModel(t, 60, 20)
-	page := m.frontierBodyHeight()
+	inner := m.frontierCanvasRect()
+	page := inner.H
 	maxY := max(m.frontier.layout.height-page, 0)
-	if m.frontier.layout.width <= m.width || m.frontier.offsetX == 0 {
-		t.Fatalf("paging fixture lacks a non-zero horizontal offset: layout=%dx%d width=%d body=%d offsetX=%d columns=%v", m.frontier.layout.width, m.frontier.layout.height, m.width, m.frontierBodyHeight(), m.frontier.offsetX, m.frontier.layout.columnOf)
+	if m.frontier.layout.width <= inner.W || m.frontier.offsetX == 0 {
+		t.Fatalf("paging fixture lacks a non-zero horizontal offset: layout=%dx%d inner=%dx%d offsetX=%d ranks=%v", m.frontier.layout.width, m.frontier.layout.height, inner.W, inner.H, m.frontier.offsetX, m.frontier.layout.rankOf)
 	}
 	focus, offsetX := m.frontier.focusID, m.frontier.offsetX
 	baseline := fmt.Sprintf("layout=%#v hasFocus=%t generation=%d planned=%d done=%d inflight=%d mouseEpoch=%d details=%d links=%d",
@@ -2730,7 +2782,7 @@ func TestFrontierPageKeysMoveOnlyCurrentCanvasWindow(t *testing.T) {
 
 func TestFrontierPageKeysUseCurrentBodyHeightAndPreserveFocusRecovery(t *testing.T) {
 	m := frontierPagingModel(t, 120, 40)
-	collapsedPage := m.frontierBodyHeight()
+	collapsedPage := m.frontierCanvasRect().H
 	collapsedMax := max(m.frontier.layout.height-collapsedPage, 0)
 	updated, _ := m.onFrontierKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = updated.(Model)
@@ -2740,9 +2792,9 @@ func TestFrontierPageKeysUseCurrentBodyHeightAndPreserveFocusRecovery(t *testing
 
 	updated, _ = m.onFrontierKey(keyPress("?"))
 	m = updated.(Model)
-	expandedPage := m.frontierBodyHeight()
+	expandedPage := m.frontierCanvasRect().H
 	if expandedPage >= collapsedPage {
-		t.Fatalf("expanded body height = %d, want less than collapsed %d", expandedPage, collapsedPage)
+		t.Fatalf("expanded inner height = %d, want less than collapsed %d", expandedPage, collapsedPage)
 	}
 	expandedMax := max(m.frontier.layout.height-expandedPage, 0)
 	m.frontier.offsetY = 0
@@ -2769,12 +2821,12 @@ func TestFrontierPageKeysUseCurrentBodyHeightAndPreserveFocusRecovery(t *testing
 	if m.frontier.focusID == focus {
 		t.Fatal("directional movement did not leave the paged-off focus")
 	}
-	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierBodyHeight() {
+	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierCanvasRect().H {
 		t.Errorf("directional movement left focus %q outside its canvas window", m.frontier.focusID)
 	}
 	updated, _ = m.onFrontierKey(keyPress("G"))
 	m = updated.(Model)
-	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierBodyHeight() {
+	if rect := m.frontier.layout.nodeAt[m.frontier.focusID]; rect.Y < m.frontier.offsetY || rect.Y+rect.H > m.frontier.offsetY+m.frontierCanvasRect().H {
 		t.Errorf("End left focus %q outside its canvas window", m.frontier.focusID)
 	}
 	updated, _ = m.onFrontierKey(keyPress("g"))
@@ -2785,7 +2837,7 @@ func TestFrontierPageKeysUseCurrentBodyHeightAndPreserveFocusRecovery(t *testing
 
 	updated, _ = m.onFrontierKey(keyPress("?"))
 	m = updated.(Model)
-	if m.frontier.offsetY < 0 || m.frontier.offsetY > max(m.frontier.layout.height-m.frontierBodyHeight(), 0) {
+	if m.frontier.offsetY < 0 || m.frontier.offsetY > max(m.frontier.layout.height-m.frontierCanvasRect().H, 0) {
 		t.Errorf("closing help left invalid offsetY %d", m.frontier.offsetY)
 	}
 }
@@ -2996,8 +3048,8 @@ func TestFrontierMovementKeysReachTheirDirections(t *testing.T) {
 	// The layout the assertions below read: #3 alone on the blocker side, #1
 	// above #2 on the dependent side.
 	l := seat(t, "#1").frontier.layout
-	if l.columnOf["#3"] != 0 || l.columnOf["#1"] != 1 || l.columnOf["#2"] != 1 {
-		t.Fatalf("columns = %v, want #3 left of #1 and #2", l.columnOf)
+	if l.rankOf["#3"] != 0 || l.rankOf["#1"] != 1 || l.rankOf["#2"] != 1 {
+		t.Fatalf("columns = %v, want #3 left of #1 and #2", l.rankOf)
 	}
 	if l.nodeAt["#1"].Y >= l.nodeAt["#2"].Y {
 		t.Fatalf("#1 is not above #2, so up and down assert nothing")
@@ -3071,9 +3123,9 @@ func TestFrontierRebuildTrailingEdgeAndModelLayoutSeam(t *testing.T) {
 		}},
 	}
 	var layouts int
-	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
 		layouts++
-		return layoutFrontier(g, nodes, width)
+		return layoutFrontier(g, nodes, opts)
 	}
 	m = m.rebuildFrontier()
 	layouts = 0
@@ -3107,12 +3159,201 @@ func TestFrontierRebuildTrailingEdgeAndModelLayoutSeam(t *testing.T) {
 	}
 }
 
+func TestFrontierHeightOnlySchedulesExactlyOneLegitimateDirectionFlip(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "D-0", Key: "D-0", Title: "dependent zero", Status: model.StatusTodo},
+		{ID: "D-1", Key: "D-1", Title: "dependent one", Status: model.StatusTodo},
+		{ID: "D-2", Key: "D-2", Title: "dependent two", Status: model.StatusTodo},
+		{ID: "D-3", Key: "D-3", Title: "dependent three", Status: model.StatusTodo},
+		{ID: "B-0", Key: "B-0", Title: "blocker", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{"B-0": nil}
+	for _, ticket := range tickets[:4] {
+		links[ticket.ID] = blockedBy("B-0")
+	}
+	m := frontierMouseModel(t, tickets, links, 120, 40)
+	if m.frontier.direction != frontierRanksHorizontal {
+		t.Fatalf("initial direction = %v, want horizontal for the tall seat; candidates=%+v inner=%+v",
+			m.frontier.direction, m.frontier.layout.candidates, m.frontierCanvasRect())
+	}
+
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+		if opts.plan == nil {
+			t.Error("Model layout seam received no shared rank plan")
+		}
+		layouts++
+		return layoutFrontier(g, nodes, opts)
+	}
+	oldEpoch := m.mouseEpoch
+	focusBeforeFlip := m.frontier.focusID
+	oldInner := m.frontierCanvasRect()
+	staleTarget := model.TicketID("D-1")
+	if staleTarget == m.frontier.focusID {
+		staleTarget = "D-2"
+	}
+	oldRect := m.frontier.layout.nodeAt[staleTarget]
+	staleClick := m.View().OnMouse(tea.MouseClickMsg{
+		X:      oldInner.X + oldRect.X - m.frontier.offsetX + 1,
+		Y:      headerHeight + oldInner.Y + oldRect.Y - m.frontier.offsetY + 1,
+		Button: tea.MouseLeft,
+	})
+	if staleClick == nil {
+		t.Fatal("old horizontal frame did not capture a valid card hit")
+	}
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 25})
+	m = updated.(Model)
+	if m.frontierRebuildTimerID == 0 || m.frontierRebuildPendingVersion == 0 {
+		t.Fatalf("fit-boundary height resize recorded no #101 replacement; cmd=%v inner=%+v candidates=%+v",
+			cmd, m.frontierCanvasRect(), m.frontier.layout.candidates)
+	}
+	if layouts != 0 || m.frontier.direction != frontierRanksHorizontal {
+		t.Fatalf("before settlement layouts=%d direction=%v, want old atomic horizontal canvas", layouts, m.frontier.direction)
+	}
+	if m.mouseEpoch == oldEpoch {
+		t.Error("raw height resize did not invalidate captured mouse geometry")
+	}
+
+	updated, _ = m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	if layouts != 1 || m.frontier.direction != frontierRanksVertical {
+		t.Fatalf("settled boundary layouts=%d direction=%v, want one vertical winner", layouts, m.frontier.direction)
+	}
+	if m.frontier.layout.direction != frontierRanksVertical {
+		t.Errorf("installed layout direction = %v, want vertical", m.frontier.layout.direction)
+	}
+	if m.frontier.focusID != focusBeforeFlip {
+		t.Errorf("replacement focus = %q, want retained identity %q", m.frontier.focusID, focusBeforeFlip)
+	}
+	focusAfterFlip := m.frontier.focusID
+	updated, staleResult := m.Update(staleClick())
+	m = updated.(Model)
+	if staleResult != nil || m.frontier.focusID != focusAfterFlip {
+		t.Errorf("stale pre-flip hit map returned %v and focused %q, want rejected with focus %q",
+			staleResult, m.frontier.focusID, focusAfterFlip)
+	}
+
+	// Growing back makes both candidates fit. Strict hysteresis retains vertical
+	// and ordinary height-only handling remains layout- and timer-free.
+	updated, cmd = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	if cmd != nil || m.frontierRebuildTimerID != 0 || layouts != 1 ||
+		m.frontier.direction != frontierRanksVertical {
+		t.Fatalf("ordinary grow cmd=%v timer=%d layouts=%d direction=%v, want retained vertical without work",
+			cmd, m.frontierRebuildTimerID, layouts, m.frontier.direction)
+	}
+
+	// A Watchlist reseat is a fresh seat, so ideal selection starts over.
+	m.input = ListInput{
+		Tickets: tickets, Capabilities: model.Capabilities{BlockingLinks: true}, FetchedAt: time.Now(),
+	}
+	for id, ticketLinks := range links {
+		m.details[id] = detailEntry{detail: model.Detail{TicketID: id, Links: ticketLinks}}
+	}
+	m, _ = m.reseatFrontier()
+	if m.frontier.direction != frontierRanksHorizontal {
+		t.Errorf("fresh reseat direction = %v, want horizontal reset", m.frontier.direction)
+	}
+}
+
+func TestFrontierHelpGeometryReconcilesWithoutSchedulingDirectionFlip(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "D-0", Key: "D-0", Title: "dependent zero", Status: model.StatusTodo},
+		{ID: "D-1", Key: "D-1", Title: "dependent one", Status: model.StatusTodo},
+		{ID: "D-2", Key: "D-2", Title: "dependent two", Status: model.StatusTodo},
+		{ID: "D-3", Key: "D-3", Title: "dependent three", Status: model.StatusTodo},
+		{ID: "B-0", Key: "B-0", Title: "blocker", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{"B-0": nil}
+	for _, ticket := range tickets[:4] {
+		links[ticket.ID] = blockedBy("B-0")
+	}
+
+	var m Model
+	found := false
+	for height := 20; height <= 60; height++ {
+		candidate := frontierMouseModel(t, tickets, links, 120, height)
+		if candidate.frontier.direction != frontierRanksHorizontal {
+			continue
+		}
+		candidate.help.ShowAll = true
+		if candidate.frontierResizeNeedsDirectionFlip() {
+			candidate.help.ShowAll = false
+			m, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("fixture found no Help-only geometry boundary")
+	}
+	if m.frontierRebuildTimerID != 0 {
+		updated, _ := m.Update(frontierRebuildMsg{timerID: m.frontierRebuildTimerID})
+		m = updated.(Model)
+	}
+
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, opts)
+	}
+	beforeDirection := m.frontier.direction
+	updated, cmd := m.onFrontierKey(keyPress("?"))
+	m = updated.(Model)
+	if cmd != nil || layouts != 0 || m.frontierRebuildTimerID != 0 {
+		t.Fatalf("Help toggle cmd=%v layouts=%d timer=%d, want reconciliation only",
+			cmd, layouts, m.frontierRebuildTimerID)
+	}
+	if m.frontier.direction != beforeDirection || !m.frontierResizeNeedsDirectionFlip() {
+		t.Errorf("Help boundary direction=%v flip=%t, want retained %v despite pure flip condition",
+			m.frontier.direction, m.frontierResizeNeedsDirectionFlip(), beforeDirection)
+	}
+}
+
+func TestFrontierChromeClickIsInertAndInnerClickTranslates(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "T-1", Title: "first", Status: model.StatusTodo},
+		{ID: "T-2", Key: "T-2", Title: "second", Status: model.StatusTodo},
+	}
+	m := frontierMouseModel(t, tickets, nil, 40, 20)
+	m.lastClickID = "T-1"
+	m.lastClickAt = m.now()
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("Frontier view has no mouse handler")
+	}
+	inner := m.frontierCanvasRect()
+	if cmd := handler(tea.MouseClickMsg{X: inner.X - 1, Y: headerHeight + inner.Y, Button: tea.MouseLeft}); cmd != nil {
+		t.Fatalf("chrome click produced %T, want no command", cmd())
+	}
+	if m.lastClickID != "T-1" {
+		t.Error("capturing an inert chrome click mutated pending-click state")
+	}
+
+	rect := m.frontier.layout.nodeAt["T-2"]
+	click := tea.MouseClickMsg{
+		X:      inner.X + rect.X - m.frontier.offsetX + 1,
+		Y:      headerHeight + inner.Y + rect.Y - m.frontier.offsetY + 1,
+		Button: tea.MouseLeft,
+	}
+	cmd := handler(click)
+	if cmd == nil {
+		t.Fatal("inner card click produced no domain message")
+	}
+	updated, _ := m.Update(cmd())
+	m = updated.(Model)
+	if m.frontier.focusID != "T-2" {
+		t.Errorf("inner translated click focused %q, want T-2", m.frontier.focusID)
+	}
+}
+
 func TestFrontierResizeDefersOnlyWidthAndInvalidatesMouseEpoch(t *testing.T) {
 	m, _ := noBlockingFrontierModel(t)
 	var layouts int
-	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
 		layouts++
-		return layoutFrontier(g, nodes, width)
+		return layoutFrontier(g, nodes, opts)
 	}
 	startEpoch := m.mouseEpoch
 	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 119, Height: 30})
@@ -3130,6 +3371,63 @@ func TestFrontierResizeDefersOnlyWidthAndInvalidatesMouseEpoch(t *testing.T) {
 	m = updated.(Model)
 	if layouts != 1 || cmd != nil || m.frontierRebuildTimerID != 0 || m.mouseEpoch == epoch {
 		t.Fatalf("height resize layouts=%d cmd=%v timer=%d epoch=%d, want no layout/timer and invalidated mouse", layouts, cmd, m.frontierRebuildTimerID, m.mouseEpoch)
+	}
+}
+
+func TestFrontierWidthBurstSettlesLatestInnerRectAndOneWinner(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo},
+		{ID: "T-2", Key: "T-2", Title: "two", Status: model.StatusTodo},
+	}
+	m := frontierMouseModel(t, tickets, map[model.TicketID][]model.Link{
+		"T-1": blockedBy("T-2"), "T-2": nil,
+	}, 120, 30)
+	if m.frontierRebuildTimerID != 0 {
+		updated, _ := m.Update(frontierRebuildMsg{timerID: m.frontierRebuildTimerID})
+		m = updated.(Model)
+	}
+
+	var layouts int
+	var settled frontierLayoutOptions
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+		layouts++
+		settled = opts
+		if opts.plan == nil {
+			t.Error("settled Model seam received no shared rank plan")
+		}
+		return layoutFrontier(g, nodes, opts)
+	}
+	updated, first := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	firstTimer := m.frontierRebuildTimerID
+	updated, second := m.Update(tea.WindowSizeMsg{Width: 28, Height: 30})
+	m = updated.(Model)
+	if first == nil || second != nil || firstTimer == 0 || m.frontierRebuildTimerID != firstTimer {
+		t.Fatalf("width burst commands=%v/%v timers=%d/%d, want one owned physical tick",
+			first, second, firstTimer, m.frontierRebuildTimerID)
+	}
+	if layouts != 0 {
+		t.Fatalf("width burst materialized %d layouts before settlement", layouts)
+	}
+
+	updated, _ = m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	inner := m.frontierCanvasRect()
+	if layouts != 1 || settled.innerWidth != inner.W || settled.direction != m.frontier.direction {
+		t.Fatalf("settled layouts=%d options=%+v inner=%+v direction=%v, want latest rect and one winner",
+			layouts, settled, inner, m.frontier.direction)
+	}
+	selected := m.frontier.layout.candidates[m.frontier.direction]
+	if m.frontier.layout.width != selected.width || m.frontier.layout.height != selected.height ||
+		len(m.frontier.layout.cells) != selected.height {
+		t.Errorf("installed grid = %dx%d/%d rows, selected metadata = %dx%d",
+			m.frontier.layout.width, m.frontier.layout.height, len(m.frontier.layout.cells),
+			selected.width, selected.height)
+	}
+	if got := frontierCardWidthFor(settled.innerWidth); got != 24 {
+		t.Errorf("latest inner width %d chose card width %d, want 24", settled.innerWidth, got)
 	}
 }
 
@@ -3153,9 +3451,9 @@ func TestFrontierBurstCoalescesOneHundredEvidenceUpdates(t *testing.T) {
 		}, planned: len(tickets)},
 	}
 	var layouts int
-	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
 		layouts++
-		return layoutFrontier(g, nodes, width)
+		return layoutFrontier(g, nodes, opts)
 	}
 	m = m.rebuildFrontier()
 	layouts = 0
@@ -3252,9 +3550,9 @@ func TestFrontierHiddenDetailEvidenceDoesNotScheduleOrLayout(t *testing.T) {
 		}, planned: 1},
 	}
 	var layouts int
-	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
 		layouts++
-		return layoutFrontier(g, nodes, width)
+		return layoutFrontier(g, nodes, opts)
 	}
 	updated, cmd := m.Update(frontierDetailMsg{
 		generation: 1, id: "T-1", detail: model.Detail{TicketID: "T-1"},

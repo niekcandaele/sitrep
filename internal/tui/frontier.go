@@ -63,6 +63,10 @@ type frontierState struct {
 	input  FrontierInput
 	graph  model.BlockingGraph
 	layout frontierLayout
+	// direction is seat-local. A fresh entry or Watchlist reseat leaves it unset;
+	// every other rebuild applies strict hysteresis and retains it.
+	direction    frontierRankDirection
+	directionSet bool
 	// focusID is the focused node and may name a Ghost Ticket.
 	focusID          model.TicketID
 	hasFocus         bool
@@ -130,11 +134,12 @@ type frontierRebuildMsg struct {
 
 // frontierLayoutForModel keeps layout observation instance-local. Nil is the
 // production default for model-literal tests.
-func (m Model) frontierLayoutForModel(g model.BlockingGraph, nodes []frontierNode, width int) frontierLayout {
+func (m Model) frontierLayoutForModel(g model.BlockingGraph, nodes []frontierNode,
+	opts frontierLayoutOptions) frontierLayout {
 	if m.layoutFrontierFn == nil {
-		return layoutFrontier(g, nodes, width)
+		return layoutFrontier(g, nodes, opts)
 	}
-	return m.layoutFrontierFn(g, nodes, width)
+	return m.layoutFrontierFn(g, nodes, opts)
 }
 
 // discardPendingFrontierRebuild invalidates deferred work but deliberately
@@ -385,17 +390,32 @@ func (m Model) adoptCachedLinks() Model {
 	return m
 }
 
-// rebuildFrontier recomputes everything derived from the seated input: the
-// blocking graph, the nodes, the canvas, and where focus and the window sit on
-// it.
+// rebuildFrontier recomputes everything derived from the seated input. It owns
+// the only production installation of a materialized canvas.
 func (m Model) rebuildFrontier() Model {
 	m = m.discardPendingFrontierRebuild()
 	previous := indexOfNode(m.frontier.layout.order, m.frontier.focusID)
 	g := model.BuildBlockingGraph(m.frontier.input.Tickets, m.frontier.input.Links,
 		m.frontier.input.Capabilities)
+	nodes := frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved())
+	inner := m.frontierCanvasRect()
+	plan := planFrontierRanks(g, nodes)
+	candidates := frontierCandidates(plan, inner.W)
+	direction := m.frontier.direction
+	if !m.frontier.directionSet {
+		direction = chooseFrontierDirection(candidates, inner.W, inner.H)
+	} else {
+		direction = frontierDirectionAfterResize(direction, candidates, inner.W, inner.H)
+	}
+
 	m.frontier.graph = g
-	m.frontier.layout = m.frontierLayoutForModel(g,
-		frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved()), m.width)
+	m.frontier.direction = direction
+	m.frontier.directionSet = true
+	m.frontier.layout = m.frontierLayoutForModel(g, nodes, frontierLayoutOptions{
+		innerWidth: inner.W,
+		direction:  direction,
+		plan:       &plan,
+	})
 	m.mouseEpoch++
 
 	l := m.frontier.layout
@@ -417,18 +437,31 @@ func (m Model) rebuildFrontier() Model {
 	return m.reconcileFrontier(true)
 }
 
+func (m Model) frontierCanvasRect() frontierRect {
+	return frontierInnerRect(m.width, m.frontierBodyHeight())
+}
+
+func (m Model) frontierResizeNeedsDirectionFlip() bool {
+	if !m.frontier.directionSet || !m.frontierShowsCanvas() {
+		return false
+	}
+	inner := m.frontierCanvasRect()
+	return frontierDirectionAfterResize(m.frontier.direction, m.frontier.layout.candidates,
+		inner.W, inner.H) != m.frontier.direction
+}
+
 // reconcileFrontier clamps the window into the canvas, optionally bringing the
 // focused card back into view first.
 func (m Model) reconcileFrontier(ensureFocus bool) Model {
-	width, height := m.width, m.frontierBodyHeight()
+	inner := m.frontierCanvasRect()
 	if ensureFocus && m.frontier.hasFocus {
 		if rect, ok := m.frontier.layout.nodeAt[m.frontier.focusID]; ok {
 			m.frontier.offsetX, m.frontier.offsetY = ensureNodeVisible(
-				rect, m.frontier.offsetX, m.frontier.offsetY, width, height)
+				rect, m.frontier.offsetX, m.frontier.offsetY, inner.W, inner.H)
 		}
 	}
-	m.frontier.offsetX = clampFrontierOffset(m.frontier.offsetX, m.frontier.layout.width, width)
-	m.frontier.offsetY = clampFrontierOffset(m.frontier.offsetY, m.frontier.layout.height, height)
+	m.frontier.offsetX = clampFrontierOffset(m.frontier.offsetX, m.frontier.layout.width, inner.W)
+	m.frontier.offsetY = clampFrontierOffset(m.frontier.offsetY, m.frontier.layout.height, inner.H)
 	return m
 }
 
@@ -583,9 +616,9 @@ func (m Model) moveFrontierFocus(dx, dy int) Model {
 	return m.reconcileFrontier(true)
 }
 
-// pageFrontier moves the canvas window by current visible body-height pages.
+// pageFrontier moves the canvas window by the current inner-canvas height.
 func (m Model) pageFrontier(pages int) Model {
-	m.frontier.offsetY += pages * m.frontierBodyHeight()
+	m.frontier.offsetY += pages * m.frontierCanvasRect().H
 	return m.reconcileFrontier(false)
 }
 
@@ -681,7 +714,7 @@ func (m Model) frontierBody(height int) []string {
 	}
 	// A graph with nodes but no edges is not an error state: every Todo node
 	// whose Links were readable is then Actionable, which is the truth.
-	return renderFrontierCanvas(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
+	return renderFrontierBody(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
 		m.frontier.offsetX, m.frontier.offsetY, m.width, height, m.styles)
 }
 
@@ -767,13 +800,13 @@ func (m Model) frontierScrollPosition() string {
 		return ""
 	}
 	l := m.frontier.layout
-	width, height := m.width, m.frontierBodyHeight()
+	inner := m.frontierCanvasRect()
 	var parts []string
-	if l.width > width {
-		parts = append(parts, fmt.Sprintf("x %d/%d", m.frontier.offsetX, l.width-width))
+	if l.width > inner.W {
+		parts = append(parts, fmt.Sprintf("x %d/%d", m.frontier.offsetX, l.width-inner.W))
 	}
-	if l.height > height {
-		parts = append(parts, fmt.Sprintf("y %d/%d", m.frontier.offsetY, l.height-height))
+	if l.height > inner.H {
+		parts = append(parts, fmt.Sprintf("y %d/%d", m.frontier.offsetY, l.height-inner.H))
 	}
 	return strings.Join(parts, separator)
 }

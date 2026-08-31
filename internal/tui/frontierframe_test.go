@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -35,7 +36,10 @@ func graphOf(tickets []model.Ticket, links map[model.TicketID][]model.Link) mode
 
 func layoutOf(tickets []model.Ticket, links map[model.TicketID][]model.Link) (model.BlockingGraph, frontierLayout) {
 	g := graphOf(tickets, links)
-	return g, layoutFrontier(g, frontierNodes(g, tickets, true), 120)
+	return g, layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+		innerWidth: 120,
+		direction:  frontierRanksHorizontal,
+	})
 }
 
 // Blockers sit left of their dependents: reading left to right is "this must
@@ -56,7 +60,7 @@ func TestFrontierLayoutPutsBlockersLeftOfDependents(t *testing.T) {
 		id     model.TicketID
 		column int
 	}{{"#3", 0}, {"#2", 1}, {"#1", 2}} {
-		if got := l.columnOf[want.id]; got != want.column {
+		if got := l.rankOf[want.id]; got != want.column {
 			t.Errorf("column of %s = %d, want %d", want.id, got, want.column)
 		}
 	}
@@ -68,11 +72,11 @@ func TestFrontierLayoutPutsAGhostInColumnZero(t *testing.T) {
 	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
 	_, l := layoutOf(tickets, map[model.TicketID][]model.Link{"#1": blockedBy("#ghost")})
 
-	if got, ok := l.columnOf["#ghost"]; !ok || got != 0 {
+	if got, ok := l.rankOf["#ghost"]; !ok || got != 0 {
 		t.Errorf("Ghost column = %d (present %v), want 0", got, ok)
 	}
-	if l.columnOf["#1"] != 1 {
-		t.Errorf("dependent column = %d, want 1", l.columnOf["#1"])
+	if l.rankOf["#1"] != 1 {
+		t.Errorf("dependent column = %d, want 1", l.rankOf["#1"])
 	}
 }
 
@@ -123,22 +127,27 @@ func TestFrontierLayoutTerminatesOnACycleAndASelfLoop(t *testing.T) {
 		blockingTicket("#2", model.StatusTodo),
 		blockingTicket("#3", model.StatusTodo),
 	}
-	g, l := layoutOf(tickets, map[model.TicketID][]model.Link{
+	links := map[model.TicketID][]model.Link{
 		"#1": blockedBy("#2"),
 		"#2": blockedBy("#1"),
 		"#3": blockedBy("#3"),
-	})
-
-	if l.columnOf["#1"] != l.columnOf["#2"] {
-		t.Errorf("cycle members are in columns %d and %d, want one column",
-			l.columnOf["#1"], l.columnOf["#2"])
 	}
+	g := graphOf(tickets, links)
 	if len(g.Cycles()) != 2 {
 		t.Fatalf("Cycles() = %v, want the two-cycle and the self-loop", g.Cycles())
 	}
-	for _, id := range []model.TicketID{"#1", "#2", "#3"} {
-		if _, ok := l.nodeAt[id]; !ok {
-			t.Errorf("%s was not drawn", id)
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		l := layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+			innerWidth: 120, direction: direction,
+		})
+		if l.rankOf["#1"] != l.rankOf["#2"] {
+			t.Errorf("direction %v cycle members are in ranks %d and %d, want one rank",
+				direction, l.rankOf["#1"], l.rankOf["#2"])
+		}
+		for _, id := range []model.TicketID{"#1", "#2", "#3"} {
+			if _, ok := l.nodeAt[id]; !ok {
+				t.Errorf("direction %v did not draw %s", direction, id)
+			}
 		}
 	}
 }
@@ -163,8 +172,8 @@ func TestFrontierLayoutSpansTwoColumnsWithOneWaypointAndNoEdgeOverACard(t *testi
 		borders[n.id] = n.emphasis.border
 	}
 
-	if l.columnOf["#1"] != 2 || l.columnOf["#2"] != 1 || l.columnOf["#3"] != 0 {
-		t.Fatalf("columns = %v, want #3 0, #2 1, #1 2", l.columnOf)
+	if l.rankOf["#1"] != 2 || l.rankOf["#2"] != 1 || l.rankOf["#3"] != 0 {
+		t.Fatalf("columns = %v, want #3 0, #2 1, #1 2", l.rankOf)
 	}
 
 	// Every card is intact after routing: the waypoint pass makes each segment
@@ -214,6 +223,8 @@ func TestMergeGlyph(t *testing.T) {
 		{0, '│', '│'},
 		{'─', '▶', '▶'},
 		{'▶', '─', '▶'},
+		{'│', '▼', '▼'},
+		{'▼', '│', '▼'},
 		{'─', '─', '─'},
 		{'│', '│', '│'},
 		{'─', '│', '┼'},
@@ -304,6 +315,301 @@ func TestFrontierFocusMovement(t *testing.T) {
 	}
 }
 
+func layoutOfDirection(tickets []model.Ticket, links map[model.TicketID][]model.Link,
+	direction frontierRankDirection, innerWidth int) (model.BlockingGraph, frontierLayout) {
+	g := graphOf(tickets, links)
+	return g, layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+		innerWidth: innerWidth,
+		direction:  direction,
+	})
+}
+
+func TestFrontierVerticalLayoutKeepsCardsUprightAndRoutesDown(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusDone),
+	}
+	links := map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"),
+		"#2": blockedBy("#3"),
+		"#3": nil,
+	}
+	g, layout := layoutOfDirection(tickets, links, frontierRanksVertical, 120)
+	if layout.direction != frontierRanksVertical {
+		t.Fatalf("direction = %v, want vertical", layout.direction)
+	}
+	if layout.nodeAt["#3"].Y >= layout.nodeAt["#2"].Y ||
+		layout.nodeAt["#2"].Y >= layout.nodeAt["#1"].Y {
+		t.Fatalf("vertical ranks = #3:%+v #2:%+v #1:%+v, want blockers above dependents",
+			layout.nodeAt["#3"], layout.nodeAt["#2"], layout.nodeAt["#1"])
+	}
+	for id, rect := range layout.nodeAt {
+		if rect.W != frontierCardWidth || rect.H != frontierCardHeight {
+			t.Errorf("%s rect = %+v, want an upright %dx%d card", id, rect, frontierCardWidth, frontierCardHeight)
+		}
+	}
+
+	arrows := 0
+	for y, row := range layout.cells {
+		for x, cell := range row {
+			if cell.r == '▶' {
+				t.Errorf("horizontal arrow at %d,%d in vertical layout", x, y)
+			}
+			if cell.r == '▼' {
+				arrows++
+			}
+		}
+	}
+	if arrows == 0 {
+		t.Fatal("vertical layout drew no downward arrow")
+	}
+
+	// The direct #3 -> #1 edge spans the real #2 rank. Its dummy must run
+	// vertically through that rank in a peer slot no card occupies.
+	middle := layout.nodeAt["#2"]
+	waypointColumn := -1
+	for x := range layout.width {
+		if !insideAnyCard(layout, x, middle.Y) && layout.cells[middle.Y][x].r == '│' {
+			waypointColumn = x
+			break
+		}
+	}
+	if waypointColumn < 0 {
+		t.Error("the vertical long-span edge inserted no dummy waypoint")
+	}
+
+	borders := make(map[model.TicketID]frontierBorder)
+	for _, node := range frontierNodes(g, tickets, true) {
+		borders[node.id] = node.emphasis.border
+	}
+	for id, rect := range layout.nodeAt {
+		border := borders[id]
+		for x := rect.X; x < rect.X+rect.W; x++ {
+			want := border.horizontal
+			switch x {
+			case rect.X:
+				want = border.topLeft
+			case rect.X + rect.W - 1:
+				want = border.topRight
+			}
+			if got := layout.cells[rect.Y][x].r; got != want {
+				t.Fatalf("vertical routing overwrote %s top border at %d with %q, want %q", id, x, got, want)
+			}
+		}
+	}
+}
+
+func TestFrontierVerticalLayoutPlacesGhostBlockersAboveDependents(t *testing.T) {
+	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
+	_, layout := layoutOfDirection(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#ghost"),
+	}, frontierRanksVertical, 120)
+
+	ghost, ghostDrawn := layout.nodeAt["#ghost"]
+	dependent, dependentDrawn := layout.nodeAt["#1"]
+	if !ghostDrawn || !dependentDrawn {
+		t.Fatalf("drawn nodes = %v, want dependent and Ghost", layout.nodeAt)
+	}
+	if layout.rankOf["#ghost"] != 0 || ghost.Y >= dependent.Y {
+		t.Errorf("Ghost rect/rank = %+v/%d, dependent = %+v; want rank-zero Ghost above",
+			ghost, layout.rankOf["#ghost"], dependent)
+	}
+	if ghost.W != frontierCardWidth || ghost.H != frontierCardHeight {
+		t.Errorf("Ghost rect = %+v, want upright %dx%d", ghost, frontierCardWidth, frontierCardHeight)
+	}
+}
+
+func TestFrontierVerticalPhysicalNavigationAndCanonicalTie(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusDone),
+	}
+	_, layout := layoutOfDirection(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#3"), "#2": blockedBy("#3"), "#3": nil,
+	}, frontierRanksVertical, 120)
+	for _, test := range []struct {
+		name   string
+		from   model.TicketID
+		dx, dy int
+		want   model.TicketID
+	}{
+		{"right moves among peers", "#1", 1, 0, "#2"},
+		{"left moves among peers", "#2", -1, 0, "#1"},
+		{"up crosses to blocker rank", "#1", 0, -1, "#3"},
+		{"down crosses to dependent rank", "#3", 0, 1, "#1"},
+		{"unavailable rank retains focus", "#3", 0, -1, "#3"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got, ok := layout.moveFocus(test.from, test.dx, test.dy); !ok || got != test.want {
+				t.Errorf("move = %q/%t, want %q/true", got, ok, test.want)
+			}
+		})
+	}
+
+	// Handcrafted geometry makes the equal-distance rule observable: canonical
+	// byRank order, not map order, breaks the tie.
+	tie := frontierLayout{
+		direction: frontierRanksVertical,
+		rankOf:    map[model.TicketID]int{"from": 0, "first": 1, "second": 1},
+		byRank:    [][]model.TicketID{{"from"}, {"first", "second"}},
+		nodeAt: map[model.TicketID]frontierRect{
+			"from": {X: 10}, "first": {X: 0}, "second": {X: 20},
+		},
+	}
+	if got, _ := tie.moveFocus("from", 0, 1); got != "first" {
+		t.Errorf("equal-distance tie focused %q, want first canonical peer", got)
+	}
+}
+
+func TestFrontierDirectionChoiceUsesFitPhysicalRowsAndHorizontalTies(t *testing.T) {
+	chain := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	g := graphOf(chain, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
+	})
+	plan := planFrontierRanks(g, frontierNodes(g, chain, true))
+	candidates := frontierCandidates(plan, 80)
+	if candidates[frontierRanksHorizontal].fullyFits(80, 24) ||
+		!candidates[frontierRanksVertical].fullyFits(80, 24) {
+		t.Fatalf("chain candidates = %+v, want only vertical to fit 80x24", candidates)
+	}
+	if got := chooseFrontierDirection(candidates, 80, 24); got != frontierRanksVertical {
+		t.Errorf("sole-fit direction = %v, want vertical", got)
+	}
+
+	probe := frontierLayoutCandidate{width: 3, height: 1}
+	if got, want := frontierAspectError(probe, 80, 24), absInt(3*48-80); got != want {
+		t.Errorf("80x24 aspect error = %d, want 80x48 cross-product %d", got, want)
+	}
+
+	// This metadata shape is the correction-sensitive boundary: both candidates
+	// overflow, raw 80x24 would prefer vertical, but physical 80x48 prefers horizontal.
+	boundary := [2]frontierLayoutCandidate{
+		{direction: frontierRanksHorizontal, width: 96, height: 24},
+		{direction: frontierRanksVertical, width: 112, height: 30},
+	}
+	if got := chooseFrontierDirection(boundary, 80, 24); got != frontierRanksHorizontal {
+		t.Errorf("corrected boundary direction = %v, want horizontal", got)
+	}
+	rawError := func(candidate frontierLayoutCandidate) int {
+		return absInt(candidate.width*24 - 80*candidate.height)
+	}
+	if rawError(boundary[frontierRanksVertical]) >= rawError(boundary[frontierRanksHorizontal]) {
+		t.Fatal("boundary fixture does not change without the physical-row correction")
+	}
+
+	tie := [2]frontierLayoutCandidate{
+		{direction: frontierRanksHorizontal, width: 10, height: 10},
+		{direction: frontierRanksVertical, width: 10, height: 10},
+	}
+	if got := chooseFrontierDirection(tie, 80, 24); got != frontierRanksHorizontal {
+		t.Errorf("exact tie direction = %v, want horizontal", got)
+	}
+}
+
+func TestFrontierDirectionHysteresisIsStrictAndSeatLocal(t *testing.T) {
+	bothFit := [2]frontierLayoutCandidate{{width: 20, height: 10}, {width: 10, height: 20}}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothFit, 30, 30); got != frontierRanksVertical {
+		t.Errorf("both-fit resize changed to %v", got)
+	}
+	bothOverflow := [2]frontierLayoutCandidate{{width: 40, height: 10}, {width: 10, height: 40}}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothOverflow, 20, 20); got != frontierRanksVertical {
+		t.Errorf("both-overflow resize changed to %v", got)
+	}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothFit, 25, 15); got != frontierRanksHorizontal {
+		t.Errorf("clear fit boundary retained %v, want horizontal", got)
+	}
+	if got := frontierDirectionAfterResize(frontierRanksHorizontal, bothFit, 30, 30); got != frontierRanksHorizontal {
+		t.Errorf("ordinary both-fit resize flipped back to %v", got)
+	}
+}
+
+func TestFrontierCandidateMeasurementAllocatesNoCellGrid(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"), "#2": blockedBy("#3"), "#3": nil,
+	})
+	plan := planFrontierRanks(g, frontierNodes(g, tickets, true))
+	if allocations := testing.AllocsPerRun(100, func() {
+		_ = frontierCandidates(plan, 80)
+	}); allocations != 0 {
+		t.Errorf("candidate measurement allocated %.0f objects, want metadata only", allocations)
+	}
+}
+
+func TestFrontierInnerRectDegradesPerAxisAndChromeStaysInRing(t *testing.T) {
+	for _, test := range []struct {
+		width, height int
+		want          frontierRect
+	}{
+		{1, 1, frontierRect{W: 1, H: 1}},
+		{2, 2, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+		{3, 3, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+		{4, 5, frontierRect{X: 1, Y: 1, W: 2, H: 3}},
+		{1, 3, frontierRect{X: 0, Y: 1, W: 1, H: 1}},
+		{3, 2, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+	} {
+		if got := frontierInnerRect(test.width, test.height); got != test.want {
+			t.Errorf("frontierInnerRect(%d,%d) = %+v, want %+v", test.width, test.height, got, test.want)
+		}
+	}
+
+	if got := frontierCardWidthFor(28); got != 26 {
+		t.Errorf("inner width 28 chose card width %d, want 26 (outer width must not leak into narrow input)", got)
+	}
+
+	layout := frontierLayout{
+		width: 20, height: 20,
+		styles: []frontierStyle{{Role: frontierRoleText}},
+		cells:  make([][]frontierCell, 20),
+	}
+	for y := range layout.cells {
+		layout.cells[y] = make([]frontierCell, 20)
+		for x := range layout.cells[y] {
+			layout.cells[y][x] = frontierCell{r: ' '}
+		}
+	}
+	for _, size := range []struct {
+		width, height int
+		want          map[[2]int]rune
+	}{
+		{1, 1, map[[2]int]rune{}},
+		{2, 2, map[[2]int]rune{{1, 0}: '▲', {0, 1}: '‹'}},
+		{3, 3, map[[2]int]rune{{1, 0}: '▲', {1, 2}: '▼', {0, 1}: '‹', {2, 1}: '›'}},
+		{8, 6, map[[2]int]rune{{4, 0}: '▲', {4, 5}: '▼', {0, 3}: '‹', {7, 3}: '›'}},
+	} {
+		inner := frontierInnerRect(size.width, size.height)
+		chrome := frontierChromeGlyphs(layout, inner, 1, 1, size.width, size.height)
+		if !reflect.DeepEqual(chrome, size.want) {
+			t.Errorf("%dx%d chrome = %v, want fixed ring cues %v", size.width, size.height, chrome, size.want)
+		}
+		for at := range chrome {
+			if at[0] >= inner.X && at[0] < inner.X+inner.W &&
+				at[1] >= inner.Y && at[1] < inner.Y+inner.H {
+				t.Errorf("%dx%d chrome %v overlaps inner %+v", size.width, size.height, at, inner)
+			}
+		}
+		lines := renderFrontierBody(layout, "", false, 1, 1, size.width, size.height, DefaultStyles(true))
+		if len(lines) != size.height {
+			t.Errorf("%dx%d body has %d lines, want %d", size.width, size.height, len(lines), size.height)
+		}
+		for _, line := range lines {
+			if got := lipgloss.Width(line); got != size.width {
+				t.Errorf("%dx%d body line width = %d, want exactly %d", size.width, size.height, got, size.width)
+			}
+		}
+	}
+}
+
 // Graph-derived emphasis is withheld until every Detail read has answered: a
 // half-loaded Frontier visibly says PENDING instead of giving a premature graph
 // conclusion.
@@ -382,7 +688,7 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 	if _, drawn := l.nodeAt[ghost]; !drawn {
 		t.Fatalf("%s is not on the canvas, so this test proves nothing", ghost)
 	}
-	if got := l.columnOf[ghost]; got != l.columnOf["acme/widgets#112"]+1 {
+	if got := l.rankOf[ghost]; got != l.rankOf["acme/widgets#112"]+1 {
 		t.Errorf("the Ghost sits in column %d, want the column right of the member that blocks it",
 			got)
 	}
@@ -399,19 +705,12 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 	t.Errorf("no edge joins %s to the member that blocks it: it is drawn floating", ghost)
 }
 
-// An overflow arrow must never land on the continuation cell of a double-width
-// rune. The cell holds no rune of its own, so it reads as blank, but writing
-// there defaces the glyph beside it and makes the assembled row one column too
-// wide — which the line's own truncation then pays for by dropping a column of
-// content off the right. No fixture Ticket has a double-width rune, so this
-// layout brings its own.
+// Overflow chrome never shares an inner-canvas cell, including a continuation
+// cell owned by a double-width rune.
 func TestFrontierOverflowGlyphsNeverLandOnADoubleWidthRune(t *testing.T) {
 	wide := func(id, title string) model.Ticket {
 		return model.Ticket{
-			ID:     model.TicketID(id),
-			Key:    id,
-			Title:  title,
-			Status: model.StatusTodo,
+			ID: model.TicketID(id), Key: id, Title: title, Status: model.StatusTodo,
 		}
 	}
 	tickets := []model.Ticket{
@@ -421,54 +720,38 @@ func TestFrontierOverflowGlyphsNeverLandOnADoubleWidthRune(t *testing.T) {
 		wide("#4", "シャードの安全な退避"),
 		wide("#5", "ロールアウト手順書の公開"),
 	}
-	g, l := layoutOf(tickets, map[model.TicketID][]model.Link{
-		"#1": blockedBy("#2"),
-		"#2": blockedBy("#3"),
-		"#3": nil,
-		"#4": blockedBy("#3"),
-		"#5": blockedBy("#3"),
+	_, l := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
+		"#4": blockedBy("#3"), "#5": blockedBy("#3"),
 	})
-	if len(g.Members()) != len(tickets) {
-		t.Fatalf("Members() = %d, want the %d the layout was built from",
-			len(g.Members()), len(tickets))
-	}
 
-	// A window smaller than the canvas in both axes, walked over every offset
-	// that has somewhere to overflow to, so every edge places an arrow on every
-	// row and column the cards occupy.
 	const width, height = 40, 9
-	if l.width <= width || l.height <= height {
-		t.Fatalf("canvas is %dx%d, which fits in the %dx%d window: no arrow is drawn",
-			l.width, l.height, width, height)
+	inner := frontierInnerRect(width, height)
+	if l.width <= inner.W || l.height <= inner.H {
+		t.Fatalf("canvas is %dx%d, which fits inner %dx%d: no chrome is drawn",
+			l.width, l.height, inner.W, inner.H)
 	}
 	placed := 0
-	for offsetY := 0; offsetY <= l.height-height; offsetY++ {
-		for offsetX := 0; offsetX <= l.width-width; offsetX++ {
-			glyphs := frontierOverflowGlyphs(l, map[[2]int]frontierCell{},
-				offsetX, offsetY, width, height)
-			for at := range glyphs {
+	for offsetY := 0; offsetY <= l.height-inner.H; offsetY++ {
+		for offsetX := 0; offsetX <= l.width-inner.W; offsetX++ {
+			for at := range frontierChromeGlyphs(l, inner, offsetX, offsetY, width, height) {
 				placed++
-				y, x := at[1]+offsetY, at[0]+offsetX
-				if y < 0 || y >= l.height || x < 0 || x >= l.width {
-					continue
-				}
-				if cell := l.cells[y][x]; cell.r != ' ' {
-					t.Fatalf("at offset %d,%d an arrow was placed on canvas cell %d,%d, "+
-						"which holds %q (continuation %v), not a blank",
-						offsetX, offsetY, x, y, cell.r, cell.continuation)
+				if at[0] >= inner.X && at[0] < inner.X+inner.W &&
+					at[1] >= inner.Y && at[1] < inner.Y+inner.H {
+					t.Fatalf("chrome %v landed inside inner rect %+v", at, inner)
 				}
 			}
-			for i, line := range renderFrontierCanvas(l, "", false,
+			for i, line := range renderFrontierBody(l, "", false,
 				offsetX, offsetY, width, height, DefaultStyles(true)) {
-				if got := lipgloss.Width(line); got > width {
-					t.Fatalf("at offset %d,%d line %d is %d columns wide, want at most %d: %q",
+				if got := lipgloss.Width(line); got != width {
+					t.Fatalf("at offset %d,%d line %d is %d columns wide, want exactly %d: %q",
 						offsetX, offsetY, i, got, width, line)
 				}
 			}
 		}
 	}
 	if placed == 0 {
-		t.Fatal("no arrow was placed anywhere, so this test asserts nothing")
+		t.Fatal("no ring chrome was placed anywhere, so this test asserts nothing")
 	}
 }
 
