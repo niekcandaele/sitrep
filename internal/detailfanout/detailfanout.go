@@ -50,7 +50,7 @@ func Plan(tickets []model.Ticket, have func(model.TicketID) bool) []model.Ticket
 	return ids
 }
 
-// Outcome is one resolved fetch.
+// Outcome is one requested Ticket's resolved Detail result.
 type Outcome struct {
 	ID     model.TicketID
 	Detail model.Detail
@@ -76,8 +76,8 @@ func UnreadableLinksNotice(failed int) string {
 }
 
 // Run calls f once for the complete planned slice and emits completed outcomes
-// in canonical input order. A cancellation is control flow: completed successes
-// are emitted, unissued IDs are left unknown, and no unreadable-Links failures
+// in canonical input order. Cancellation is control flow: completed successes
+// are emitted, incomplete IDs are left unknown, and no unreadable-Links failures
 // are manufactured for them.
 func Run(ctx context.Context, f Fetch, ids []model.TicketID, emit func(Outcome)) error {
 	if len(ids) == 0 {
