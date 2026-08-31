@@ -87,7 +87,12 @@ Following a Link pushes the current Ticket; Esc returns to the preceding Ticket.
 **Frontier**:
 The screen that renders a Watchlist as nodes and BlockedBy/Blocks edges to answer one
 question: which Tickets can be picked up right now. It is a second rendering of the same
-Watchlist, not another Selector kind.
+Watchlist, not another Selector kind. Canvas materialisation is all-or-nothing: after choosing
+one projected orientation, sitrep draws it only at 500,000 cells or fewer and refuses the whole
+canvas above that ceiling without clipping nodes, edges, routes, or evidence. On linux/amd64,
+500,000 `frontierCell` values have a 24,000,000-byte raw grid payload; row slices, layout
+metadata, routes, Go/runtime overhead, and total process memory are additional and
+architecture-dependent.
 _Avoid_: graph view, DAG, dependency tree, node view
 
 **Actionable**:

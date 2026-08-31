@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"os"
 	"runtime"
 	"strconv"
 	"testing"
@@ -11,18 +10,13 @@ import (
 
 const frontierBenchmarkWidth = 120
 
-// BenchmarkFrontierLayout measures the complete materialised layout. The hostile
-// grid grows quickly: N=100/200/500 are approximately 97 MB/392 MB/2.46 GB.
-// Those registrations require SITREP_BENCH_FRONTIER_HOSTILE_LARGE=1 before
-// fixture or layout materialisation; ordinary benchmark and CI invocations skip
-// them safely.
+// BenchmarkFrontierLayout measures admitted safe materialisation only. Hostile
+// fixtures belong to the bounded projection benchmark below and never reach the
+// private materialiser.
 func BenchmarkFrontierLayout(b *testing.B) {
-	for _, shape := range []string{"chain", "hub", "hostile"} {
+	for _, shape := range []string{"chain", "hub"} {
 		for _, n := range []int{50, 100, 200, 500} {
 			b.Run(shape+"/N="+strconv.Itoa(n), func(b *testing.B) {
-				if shape == "hostile" && n > 50 && os.Getenv("SITREP_BENCH_FRONTIER_HOSTILE_LARGE") != "1" {
-					b.Skip("set SITREP_BENCH_FRONTIER_HOSTILE_LARGE=1 on a suitably provisioned host")
-				}
 				tickets, links := benchmarkFrontierFixture(shape, n)
 				graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
 				nodes := frontierNodes(graph, tickets, true)
@@ -40,6 +34,40 @@ func BenchmarkFrontierLayout(b *testing.B) {
 				runtime.KeepAlive(layout)
 			})
 		}
+	}
+}
+
+// BenchmarkFrontierProjectionRefusal measures hostile production policy. N=50
+// already exceeds the hard ceiling; every larger fixture remains projection-only
+// and retains no grid, route, incident, or stroke metadata.
+func BenchmarkFrontierProjectionRefusal(b *testing.B) {
+	for _, n := range []int{50, 100, 200, 500, 1000} {
+		b.Run("hostile/N="+strconv.Itoa(n), func(b *testing.B) {
+			tickets, links := benchmarkFrontierFixture("hostile", n)
+			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+			nodes := frontierNodes(graph, tickets, true)
+			probe := projectFrontierRanks(graph, nodes, frontierBenchmarkWidth)
+			direction := chooseFrontierDirection(probe.candidates, frontierBenchmarkWidth, 30)
+			if refusal := refuseFrontierCandidate(probe.candidates[direction], len(nodes), len(graph.Ghosts())); refusal == nil {
+				b.Fatalf("hostile N=%d selected an admitted %dx%d candidate", n,
+					probe.candidates[direction].width, probe.candidates[direction].height)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			var projection frontierRankProjection
+			var refusal *frontierCanvasRefusal
+			for range b.N {
+				projection = projectFrontierRanks(graph, nodes, frontierBenchmarkWidth)
+				direction = chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30)
+				refusal = refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(graph.Ghosts()))
+			}
+			selected := projection.candidates[direction]
+			if cells, ok := selected.projectedCells(); ok {
+				b.ReportMetric(float64(cells), "projected_cells")
+			}
+			runtime.KeepAlive(projection)
+			runtime.KeepAlive(refusal)
+		})
 	}
 }
 

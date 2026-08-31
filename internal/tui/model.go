@@ -1043,8 +1043,8 @@ func (m Model) helpKeys() help.KeyMap {
 }
 
 // effectiveFrontierKeys is the Frontier's help and dispatch surface. Without
-// the BlockingLinks Capability, graph interactions are disabled in one place
-// so the advertised bindings and every input path cannot drift apart.
+// BlockingLinks, or when the selected canvas was refused, graph interactions
+// are disabled in one place so advertised bindings and every input path agree.
 func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 	keys := m.frontierKeys
 	if m.frontier.direction == frontierRanksVertical {
@@ -1053,7 +1053,7 @@ func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 		keys.Left.SetHelp(keys.Left.Help().Key, "previous node")
 		keys.Right.SetHelp(keys.Right.Help().Key, "next node")
 	}
-	if m.frontier.input.Capabilities.BlockingLinks {
+	if m.frontier.input.Capabilities.BlockingLinks && m.frontier.refusal == nil {
 		return keys
 	}
 	for _, binding := range []*key.Binding{&keys.Open, &keys.Refresh,

@@ -23,6 +23,13 @@ import (
 const (
 	frontierCardWidth  = 28
 	frontierCardHeight = 5
+
+	// frontierCanvasCellLimit is the hard materialisation ceiling. A selected
+	// projection at or below it is drawn whole; one above it is refused whole.
+	frontierCanvasCellLimit = 500_000
+	// frontierRawGridBytesLinuxAMD64 is only the measured payload of 500,000
+	// frontierCell values on linux/amd64. It is not a process-memory estimate.
+	frontierRawGridBytesLinuxAMD64 = 24_000_000
 	// frontierSlotHeight is a card plus the blank spacer under it.
 	frontierSlotHeight = frontierCardHeight + 1
 	// frontierNarrowTerminal is the width below which the fixed card no longer
@@ -422,8 +429,22 @@ type frontierSegment struct {
 	routeID                    frontierRouteID
 }
 
-// frontierRankPlan is the one deterministic, allocation-bearing graph plan.
-// Candidate measurement below reads it twice, but neither candidate owns cells.
+// frontierRankProjection is the bounded, immutable geometry needed to select a
+// physical direction. It retains canonical nodes/edges, SCC ranks, real-node
+// peers, and scalar dummy/channel counts, but no dummy slot, segment, route,
+// incident, stroke, hit-map, or grid allocation.
+type frontierRankProjection struct {
+	ranks         []int
+	edges         []frontierEdge
+	realPeerOf    []int
+	slotCounts    []int
+	channelCounts []int
+	peers         int
+	candidates    [2]frontierLayoutCandidate
+}
+
+// frontierRankPlan is the allocation-bearing graph plan built only after the
+// selected projection has passed the cell ceiling.
 type frontierRankPlan struct {
 	ranks    []int
 	slots    [][]frontierSlot
@@ -433,31 +454,59 @@ type frontierRankPlan struct {
 	peers    int
 }
 
-// frontierLayoutCandidate is allocation-free shape metadata for one direction.
+// frontierLayoutCandidate is the selected-direction-independent shape metadata.
+// overflow means checked dimension arithmetic could not represent the true
+// shape; such a candidate always fails closed at admission.
 type frontierLayoutCandidate struct {
 	direction     frontierRankDirection
 	width, height int
+	overflow      bool
 }
 
 func (c frontierLayoutCandidate) fullyFits(width, height int) bool {
-	return c.width <= width && c.height <= height
+	return !c.overflow && c.width <= width && c.height <= height
 }
 
-// frontierLayoutOptions is the private Model-owned layout seam. plan is set by
-// rebuildFrontier so selection and materialization share one rank plan; direct
-// pure callers may leave it nil.
+func (c frontierLayoutCandidate) withinCellLimit(limit int) bool {
+	if c.overflow || c.width < 0 || c.height < 0 || limit < 0 {
+		return false
+	}
+	if c.width == 0 || c.height == 0 {
+		return true
+	}
+	return c.width <= limit/c.height
+}
+
+func (c frontierLayoutCandidate) projectedCells() (int, bool) {
+	if c.overflow || c.width < 0 || c.height < 0 {
+		return 0, false
+	}
+	if c.width == 0 || c.height == 0 {
+		return 0, true
+	}
+	maxInt := int(^uint(0) >> 1)
+	if c.width > maxInt/c.height {
+		return 0, false
+	}
+	return c.width * c.height, true
+}
+
+// frontierLayoutOptions is the private Model-owned materialisation seam.
+// Production supplies one admitted projection so selection and materialisation
+// share geometry; direct pure callers may leave projection and plan nil.
 type frontierLayoutOptions struct {
 	innerWidth int
 	direction  frontierRankDirection
+	projection *frontierRankProjection
 	plan       *frontierRankPlan
 }
 
-// planFrontierRanks produces the sole deterministic rank plan. Real nodes are
-// inserted in canonical member-then-Ghost order, followed by each long edge's
-// dummy waypoints in canonical edge order.
-func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRankPlan {
+// projectFrontierRanks computes both candidate shapes without retaining any
+// per-waypoint or per-segment topology. Scalar slot/channel counts simulate the
+// canonical materialiser exactly, including each long edge's peer assignment.
+func projectFrontierRanks(g model.BlockingGraph, nodes []frontierNode, innerWidth int) frontierRankProjection {
 	if len(nodes) == 0 {
-		return frontierRankPlan{}
+		return frontierRankProjection{candidates: emptyFrontierCandidates()}
 	}
 	index := make(map[model.TicketID]int, len(nodes))
 	for i, node := range nodes {
@@ -472,20 +521,64 @@ func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRank
 		rankCount = max(rankCount, rank+1)
 	}
 
-	plan := frontierRankPlan{
-		ranks:    ranks,
-		slots:    make([][]frontierSlot, rankCount),
-		segments: make([][]frontierSegment, rankCount),
-		incident: make(map[model.TicketID][]frontierRouteID, len(nodes)),
+	projection := frontierRankProjection{
+		ranks:         ranks,
+		edges:         edges,
+		realPeerOf:    make([]int, len(nodes)),
+		slotCounts:    make([]int, rankCount),
+		channelCounts: make([]int, max(rankCount-1, 0)),
 	}
-	peerOf := make([]int, len(nodes))
 	for i := range nodes {
 		rank := ranks[i]
-		peerOf[i] = len(plan.slots[rank])
-		plan.slots[rank] = append(plan.slots[rank], frontierSlot{node: i})
+		projection.realPeerOf[i] = projection.slotCounts[rank]
+		projection.slotCounts[rank]++
 	}
 	for _, edge := range edges {
 		dependentRank, blockerRank := ranks[edge.dependent], ranks[edge.blocker]
+		if dependentRank <= blockerRank {
+			continue
+		}
+		blockerPeer := projection.realPeerOf[edge.blocker]
+		for rank := blockerRank; rank < dependentRank; rank++ {
+			dependentPeer := projection.realPeerOf[edge.dependent]
+			if rank+1 < dependentRank {
+				dependentPeer = projection.slotCounts[rank+1]
+				projection.slotCounts[rank+1]++
+			}
+			if blockerPeer != dependentPeer {
+				projection.channelCounts[rank]++
+			}
+			blockerPeer = dependentPeer
+		}
+	}
+	for _, count := range projection.slotCounts {
+		projection.peers = max(projection.peers, count)
+	}
+	projection.candidates = frontierCandidatesFromShape(
+		len(projection.slotCounts), projection.peers, projection.channelCounts, innerWidth)
+	return projection
+}
+
+// materializeFrontierRankPlan expands exactly one admitted projection into the
+// canonical dummy slots, local segments, semantic routes, and incident index.
+func materializeFrontierRankPlan(nodes []frontierNode, projection frontierRankProjection) frontierRankPlan {
+	if len(nodes) == 0 {
+		return frontierRankPlan{}
+	}
+	plan := frontierRankPlan{
+		ranks:    projection.ranks,
+		slots:    make([][]frontierSlot, len(projection.slotCounts)),
+		segments: make([][]frontierSegment, len(projection.slotCounts)),
+		incident: make(map[model.TicketID][]frontierRouteID, len(nodes)),
+		peers:    projection.peers,
+	}
+	for i := range nodes {
+		rank := projection.ranks[i]
+		plan.slots[rank] = append(plan.slots[rank], frontierSlot{node: i})
+	}
+	for _, edge := range projection.edges {
+		dependentRank := projection.ranks[edge.dependent]
+		blockerRank := projection.ranks[edge.blocker]
 		if dependentRank <= blockerRank {
 			// Both ends share an SCC rank. The CYCLE badge reports that relation;
 			// there is no acyclic rank direction left to route.
@@ -502,9 +595,9 @@ func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRank
 		plan.incident[blockerID] = append(plan.incident[blockerID], routeID)
 		plan.incident[dependentID] = append(plan.incident[dependentID], routeID)
 
-		blockerPeer := peerOf[edge.blocker]
+		blockerPeer := projection.realPeerOf[edge.blocker]
 		for rank := blockerRank; rank < dependentRank; rank++ {
-			dependentPeer := peerOf[edge.dependent]
+			dependentPeer := projection.realPeerOf[edge.dependent]
 			if rank+1 < dependentRank {
 				dependentPeer = len(plan.slots[rank+1])
 				plan.slots[rank+1] = append(plan.slots[rank+1], frontierSlot{
@@ -517,10 +610,14 @@ func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRank
 			blockerPeer = dependentPeer
 		}
 	}
-	for _, rank := range plan.slots {
-		plan.peers = max(plan.peers, len(rank))
-	}
 	return plan
+}
+
+// planFrontierRanks remains the pure, private convenience used by admitted
+// layout tests. Production projects and admits before calling the materialiser.
+func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRankPlan {
+	projection := projectFrontierRanks(g, nodes, 0)
+	return materializeFrontierRankPlan(nodes, projection)
 }
 
 func frontierCardWidthFor(innerWidth int) int {
@@ -531,61 +628,123 @@ func frontierCardWidthFor(innerWidth int) int {
 }
 
 func frontierGutterSize(segments []frontierSegment) int {
-	return frontierMinGutter + min(channelsNeeded(segments), maxGutterChannels)
+	return frontierGutterSizeForChannels(channelsNeeded(segments))
 }
 
-// frontierCandidates measures both physical shapes and their logical rank-plan
-// aspects without allocating either cell grid.
-func frontierCandidates(plan frontierRankPlan, innerWidth int) [2]frontierLayoutCandidate {
-	if len(plan.slots) == 0 {
-		return [2]frontierLayoutCandidate{
-			{direction: frontierRanksHorizontal},
-			{direction: frontierRanksVertical},
-		}
+func frontierGutterSizeForChannels(channels int) int {
+	return frontierMinGutter + min(channels, maxGutterChannels)
+}
+
+func emptyFrontierCandidates() [2]frontierLayoutCandidate {
+	return [2]frontierLayoutCandidate{
+		{direction: frontierRanksHorizontal},
+		{direction: frontierRanksVertical},
+	}
+}
+
+func checkedFrontierAdd(a, b int) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	if a < 0 || b < 0 || a > maxInt-b {
+		return maxInt, false
+	}
+	return a + b, true
+}
+
+func checkedFrontierMultiply(a, b int) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	if a < 0 || b < 0 || (a != 0 && b > maxInt/a) {
+		return maxInt, false
+	}
+	return a * b, true
+}
+
+// frontierCandidatesFromShape measures both physical shapes from scalar
+// projection metadata. Every dimension operation is checked and fails closed.
+func frontierCandidatesFromShape(rankCount, peers int, channelCounts []int,
+	innerWidth int) [2]frontierLayoutCandidate {
+	if rankCount == 0 {
+		return emptyFrontierCandidates()
 	}
 	cardWidth := frontierCardWidthFor(innerWidth)
-	gutterTotal := 0
-	for rank := 0; rank < len(plan.slots)-1; rank++ {
-		gutterTotal += frontierGutterSize(plan.segments[rank])
+	gutterTotal, dimensionsOK := 0, true
+	for _, channels := range channelCounts {
+		var ok bool
+		gutterTotal, ok = checkedFrontierAdd(gutterTotal, frontierGutterSizeForChannels(channels))
+		dimensionsOK = dimensionsOK && ok
 	}
-	ranks, peers := len(plan.slots), max(plan.peers, 1)
+	peers = max(peers, 1)
+	horizontalWidth, horizontalWidthOK := checkedFrontierMultiply(rankCount, cardWidth)
+	horizontalWidth, horizontalAddOK := checkedFrontierAdd(horizontalWidth, gutterTotal)
+	horizontalHeight, horizontalHeightOK := checkedFrontierMultiply(peers, frontierSlotHeight)
+	verticalWidth, verticalWidthOK := checkedFrontierMultiply(peers, cardWidth)
+	verticalHeight, verticalHeightOK := checkedFrontierMultiply(rankCount, frontierSlotHeight)
+	verticalHeight, verticalAddOK := checkedFrontierAdd(verticalHeight, gutterTotal)
 	return [2]frontierLayoutCandidate{
 		{
 			direction: frontierRanksHorizontal,
-			width:     ranks*cardWidth + gutterTotal,
-			height:    peers * frontierSlotHeight,
+			width:     horizontalWidth,
+			height:    horizontalHeight,
+			overflow:  !dimensionsOK || !horizontalWidthOK || !horizontalAddOK || !horizontalHeightOK,
 		},
 		{
 			direction: frontierRanksVertical,
-			width:     peers * cardWidth,
-			height:    ranks*frontierSlotHeight + gutterTotal,
+			width:     verticalWidth,
+			height:    verticalHeight,
+			overflow:  !dimensionsOK || !verticalWidthOK || !verticalHeightOK || !verticalAddOK,
 		},
 	}
 }
 
-// layoutFrontier materializes exactly one selected candidate from one rank plan.
+// frontierCandidates measures a materialised plan for direct admitted callers.
+// Production uses projectFrontierRanks and reaches no plan before admission.
+func frontierCandidates(plan frontierRankPlan, innerWidth int) [2]frontierLayoutCandidate {
+	if len(plan.slots) == 0 {
+		return emptyFrontierCandidates()
+	}
+	channels := make([]int, max(len(plan.slots)-1, 0))
+	for rank := range channels {
+		channels[rank] = channelsNeeded(plan.segments[rank])
+	}
+	return frontierCandidatesFromShape(len(plan.slots), plan.peers, channels, innerWidth)
+}
+
+// layoutFrontier materializes exactly one admitted candidate. Admission is
+// checked before even this private helper allocates focus, route, or grid state.
 func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
-	l := frontierLayout{
-		styles:    []frontierStyle{{Role: frontierRoleText}},
-		links:     []string{""},
-		nodeAt:    make(map[model.TicketID]frontierRect, len(nodes)),
-		rankOf:    make(map[model.TicketID]int, len(nodes)),
-		peerOf:    make(map[model.TicketID]int, len(nodes)),
-		incident:  make(map[model.TicketID][]frontierRouteID, len(nodes)),
-		direction: opts.direction,
+	newLayout := func() frontierLayout {
+		return frontierLayout{
+			styles:    []frontierStyle{{Role: frontierRoleText}},
+			links:     []string{""},
+			nodeAt:    make(map[model.TicketID]frontierRect, len(nodes)),
+			rankOf:    make(map[model.TicketID]int, len(nodes)),
+			peerOf:    make(map[model.TicketID]int, len(nodes)),
+			incident:  make(map[model.TicketID][]frontierRouteID, len(nodes)),
+			direction: opts.direction,
+		}
 	}
 	if len(nodes) == 0 {
-		return l
+		return newLayout()
 	}
 
+	plan := opts.plan
+	projection := opts.projection
+	if projection == nil {
+		ownedProjection := projectFrontierRanks(g, nodes, opts.innerWidth)
+		projection = &ownedProjection
+	}
+	selectedProjection := projection.candidates[opts.direction]
+	if !selectedProjection.withinCellLimit(frontierCanvasCellLimit) {
+		panic("frontier materialisation requires an admitted projection")
+	}
+	if plan == nil {
+		ownedPlan := materializeFrontierRankPlan(nodes, *projection)
+		plan = &ownedPlan
+	}
+
+	l := newLayout()
 	l.order = make([]model.TicketID, 0, len(nodes))
 	for _, node := range nodes {
 		l.order = append(l.order, node.id)
-	}
-	plan := opts.plan
-	if plan == nil {
-		owned := planFrontierRanks(g, nodes)
-		plan = &owned
 	}
 	l.routes = append(l.routes, plan.routes...)
 	strokeSlots := 0
@@ -596,7 +755,7 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 	}
 	l.strokes = make([]frontierStroke, strokeSlots)
 	l.incident = plan.incident
-	l.candidates = frontierCandidates(*plan, opts.innerWidth)
+	l.candidates = projection.candidates
 	selected := l.candidates[opts.direction]
 	l.width, l.height = selected.width, selected.height
 	l.cells = make([][]frontierCell, l.height)
@@ -673,11 +832,19 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 }
 
 func frontierAspectError(candidate frontierLayoutCandidate, width, height int) int {
-	// A terminal row is approximately twice as tall as a column is wide. Candidate
-	// dimensions are the logical canvas shape measured from rank metadata; no cell
-	// grid is needed for this integer cross-product comparison.
-	effectiveHeight := 2 * max(height, 1)
-	return absInt(candidate.width*effectiveHeight - max(width, 1)*candidate.height)
+	// A terminal row is approximately twice as tall as a column is wide. Checked
+	// cross-products preserve that contract without allowing overflow to select a
+	// candidate that should fail closed.
+	effectiveHeight, heightOK := checkedFrontierMultiply(2, max(height, 1))
+	candidateProduct, candidateOK := checkedFrontierMultiply(candidate.width, effectiveHeight)
+	viewportProduct, viewportOK := checkedFrontierMultiply(max(width, 1), candidate.height)
+	if candidate.overflow || !heightOK || !candidateOK || !viewportOK {
+		return int(^uint(0) >> 1)
+	}
+	if candidateProduct >= viewportProduct {
+		return candidateProduct - viewportProduct
+	}
+	return viewportProduct - candidateProduct
 }
 
 func absInt(value int) int {

@@ -3367,8 +3367,8 @@ func TestFrontierHeightOnlySchedulesExactlyOneLegitimateDirectionFlip(t *testing
 
 	var layouts int
 	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
-		if opts.plan == nil {
-			t.Error("Model layout seam received no shared rank plan")
+		if opts.projection == nil {
+			t.Error("Model layout seam received no admitted projection")
 		}
 		layouts++
 		return layoutFrontier(g, nodes, opts)
@@ -3622,8 +3622,8 @@ func TestFrontierWidthBurstSettlesLatestInnerRectAndOneWinner(t *testing.T) {
 	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
 		layouts++
 		settled = opts
-		if opts.plan == nil {
-			t.Error("settled Model seam received no shared rank plan")
+		if opts.projection == nil {
+			t.Error("settled Model seam received no admitted projection")
 		}
 		return layoutFrontier(g, nodes, opts)
 	}
@@ -3791,5 +3791,400 @@ func TestFrontierHiddenDetailEvidenceDoesNotScheduleOrLayout(t *testing.T) {
 	m = updated.(Model)
 	if layouts != 0 || cmd != nil || m.frontierRebuildTimerID != 0 || !m.frontier.isResolved() {
 		t.Fatalf("hidden answer layouts=%d cmd=%v timer=%d resolved=%t, want folded evidence only", layouts, cmd, m.frontierRebuildTimerID, m.frontier.isResolved())
+	}
+}
+
+func cachedFrontierModel(t *testing.T, tickets []model.Ticket,
+	links map[model.TicketID][]model.Link, width, height int,
+	observeLayout func(model.BlockingGraph, []frontierNode, frontierLayoutOptions) frontierLayout) Model {
+	t.Helper()
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	in := ListInput{
+		Header:       Header{Key: "#105", Title: "canvas ceiling"},
+		Tickets:      tickets,
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	m := New(t.Context(), Options{
+		Initial: &in,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			t.Fatalf("cached Frontier unexpectedly fetched Detail for %s", id)
+			return model.Detail{}, model.Capabilities{}, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	m = updated.(Model)
+	for _, ticket := range tickets {
+		m.details[ticket.ID] = detailEntry{detail: model.Detail{TicketID: ticket.ID, Links: links[ticket.ID]}}
+	}
+	if len(tickets) > 1 {
+		if row, ok := rowOf(m.rows, tickets[len(tickets)/2].ID); ok {
+			m = m.selectRow(row)
+		}
+	}
+	if observeLayout != nil {
+		m.layoutFrontierFn = observeLayout
+	}
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeFrontier || !m.frontier.isResolved() {
+		t.Fatalf("cached entry mode/resolved = %v/%t, want Frontier/true", m.mode, m.frontier.isResolved())
+	}
+	return m
+}
+
+func TestFrontierRebuildPreservesFocusedEmptyIDMember(t *testing.T) {
+	tickets := []model.Ticket{
+		{Key: "BROKEN-0", Title: "anonymous", Status: model.StatusTodo},
+		{ID: "T-1", Key: "#1", Title: "selected", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "last", Status: model.StatusTodo},
+	}
+	m := cachedFrontierModel(t, tickets, nil, 120, 40, nil)
+	if m.selectedID == "" {
+		t.Fatal("list selection does not distinguish the empty-ID focus")
+	}
+	if _, drawn := m.frontier.layout.nodeAt[""]; !drawn {
+		t.Fatal("empty-ID member is absent from the admitted Frontier")
+	}
+
+	m.frontier.focusID = ""
+	m.frontier.hasFocus = true
+	m = m.rebuildFrontier()
+	if m.frontier.focusID != "" || !m.frontier.hasFocus {
+		t.Fatalf("rebuild moved empty-ID focus to %q/%t", m.frontier.focusID, m.frontier.hasFocus)
+	}
+	if _, drawn := m.frontier.layout.nodeAt[""]; !drawn {
+		t.Fatal("rebuild dropped the focused empty-ID member")
+	}
+}
+
+func assertRefusedFrontierHasNoCanvasState(t *testing.T, m Model) {
+	t.Helper()
+	if m.frontier.refusal == nil {
+		t.Fatal("Frontier has no refusal metadata")
+	}
+	layout := m.frontier.layout
+	if !reflect.DeepEqual(layout, frontierLayout{}) {
+		t.Errorf("refused Frontier retained usable layout state: %#v", layout)
+	}
+	if m.frontier.hasFocus || m.frontier.focusID != "" || m.frontier.offsetX != 0 || m.frontier.offsetY != 0 {
+		t.Errorf("refused Frontier focus/offset = %q/%t %d,%d, want cleared",
+			m.frontier.focusID, m.frontier.hasFocus, m.frontier.offsetX, m.frontier.offsetY)
+	}
+}
+
+func TestFrontierCanvasRefusalFrameAndPreMaterializationGate(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	layouts := 0
+	m := cachedFrontierModel(t, tickets, links, 120, 40,
+		func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+			layouts++
+			return layoutFrontier(g, nodes, opts)
+		})
+	if layouts != 0 {
+		t.Fatalf("hostile N=50 invoked materialisation %d times before refusal", layouts)
+	}
+	assertRefusedFrontierHasNoCanvasState(t, m)
+	if got := len(m.frontier.graph.Members()); got != 50 {
+		t.Errorf("refusal discarded graph evidence: members=%d, want 50", got)
+	}
+
+	got := frame(m.View().Content)
+	checkGolden(t, "frontier_canvas_limit.golden.txt", got)
+	visible := strings.Join(strings.Fields(string(got)), " ")
+	for _, want := range []string{
+		"selected Frontier canvas projects to", "projected cells", "permitted 500,000 cells",
+		"refused the entire canvas without clipping", "no Frontier graph or subset was drawn",
+		"fetched Watchlist evidence remains intact", "linux/amd64", "raw frontierCell grid payload for 500,000 cells is 24,000,000 bytes only",
+		"Row slices", "metadata", "routes", "Go/runtime overhead", "total process memory",
+		"architecture-dependent", "v or esc",
+	} {
+		if !strings.Contains(visible, want) {
+			t.Errorf("refusal frame omitted %q:\n%s", want, visible)
+		}
+	}
+	for _, forbidden := range []string{"ACTIONABLE", "empty graph", "out of memory", "OOM", "retry failed"} {
+		if strings.Contains(visible, forbidden) {
+			t.Errorf("refusal frame contains misleading %q:\n%s", forbidden, visible)
+		}
+	}
+}
+
+func TestFrontierRefusalDisablesEveryGraphInputAndKeepsEscapeBindings(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	graphKeys := []tea.KeyPressMsg{
+		enterKey, keyPress("r"), keyPress("j"), keyPress("k"), keyPress("h"), keyPress("l"),
+		keyPress("g"), keyPress("G"), {Code: tea.KeyLeft}, {Code: tea.KeyRight},
+		{Code: tea.KeyUp}, {Code: tea.KeyDown}, {Code: tea.KeyPgUp}, {Code: tea.KeyPgDown},
+	}
+	for _, msg := range graphKeys {
+		m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+		before := frontierInteractionSnapshot(m)
+		updated, cmd := m.Update(msg)
+		got := updated.(Model)
+		if cmd != nil {
+			t.Fatalf("disabled %q returned command %T", msg.String(), cmd())
+		}
+		if after := frontierInteractionSnapshot(got); after != before {
+			t.Fatalf("disabled %q changed refusal\nbefore: %s\nafter:  %s", msg.String(), before, after)
+		}
+	}
+
+	m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	effective := m.effectiveFrontierKeys()
+	for name, binding := range map[string]key.Binding{
+		"open": effective.Open, "refresh": effective.Refresh,
+		"up": effective.Up, "down": effective.Down, "left": effective.Left, "right": effective.Right,
+		"page-up": effective.PageUp, "page-down": effective.PageDown, "home": effective.Home, "end": effective.End,
+		"mouse-select": effective.MouseSelect, "mouse-open": effective.MouseOpen, "mouse-wheel": effective.MouseWheel,
+	} {
+		if binding.Enabled() {
+			t.Errorf("refusal binding %s remains enabled", name)
+		}
+	}
+	for name, binding := range map[string]key.Binding{
+		"toggle": effective.Toggle, "mouse-toggle": effective.ToggleMouse, "help": effective.Help, "quit": effective.Quit,
+	} {
+		if !binding.Enabled() {
+			t.Errorf("refusal escape binding %s is disabled", name)
+		}
+	}
+
+	for _, msg := range []tea.KeyPressMsg{keyPress("v"), escKey} {
+		seat := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+		selected := seat.selectedID
+		updated, cmd := seat.Update(msg)
+		left := updated.(Model)
+		if left.mode != modeList || left.selectedID != selected || cmd == nil {
+			t.Errorf("%q returned mode/selection/cmd = %v/%q/%v, want list/%q/repaint",
+				msg.String(), left.mode, left.selectedID, cmd, selected)
+		}
+	}
+
+	updated, _ := m.Update(keyPress("?"))
+	m = updated.(Model)
+	if !m.help.ShowAll || strings.Contains(m.help.View(m.helpKeys()), "open Ticket") ||
+		strings.Contains(m.help.View(m.helpKeys()), "re-read Details") {
+		t.Errorf("refusal Help does not match effective dispatch: %q", m.help.View(m.helpKeys()))
+	}
+	mouseBefore := m.mouseEnabled
+	updated, _ = m.Update(keyPress("m"))
+	m = updated.(Model)
+	if m.mouseEnabled == mouseBefore {
+		t.Error("refusal disabled meaningful mouse capture toggle")
+	}
+	_, quit := m.Update(keyPress("q"))
+	if quit == nil {
+		t.Error("refusal disabled quit")
+	}
+}
+
+func TestFrontierRefusalRejectsCapturedAndQueuedMouseActions(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	m.mouseEnabled = true
+	handler := m.View().OnMouse
+	if handler == nil {
+		t.Fatal("enabled mouse capture has no refusal handler")
+	}
+	if cmd := handler(tea.MouseClickMsg{X: 2, Y: headerHeight + 2, Button: tea.MouseLeft}); cmd != nil {
+		t.Fatalf("refusal click translated to %T", cmd())
+	}
+	if cmd := handler(tea.MouseWheelMsg{X: 2, Y: headerHeight + 2, Button: tea.MouseWheelDown}); cmd != nil {
+		t.Fatalf("refusal wheel translated to %T", cmd())
+	}
+
+	for _, msg := range []tea.Msg{
+		frontierMouseClickMsg{epoch: m.mouseEpoch, id: tickets[0].ID},
+		frontierMouseClickMsg{epoch: m.mouseEpoch - 1, id: tickets[0].ID},
+		frontierMouseWheelMsg{epoch: m.mouseEpoch, delta: 3},
+		frontierMouseWheelMsg{epoch: m.mouseEpoch - 1, delta: 3},
+	} {
+		before := frontierInteractionSnapshot(m)
+		updated, cmd := m.Update(msg)
+		m = updated.(Model)
+		if cmd != nil || frontierInteractionSnapshot(m) != before {
+			t.Errorf("queued refusal mouse action %#v changed state or returned a command", msg)
+		}
+	}
+}
+
+func frontierLinksWithGhosts(base map[model.TicketID][]model.Link,
+	dependent model.TicketID, ghosts int) map[model.TicketID][]model.Link {
+	cloned := make(map[model.TicketID][]model.Link, len(base))
+	for id, ticketLinks := range base {
+		cloned[id] = slices.Clone(ticketLinks)
+	}
+	for i := range ghosts {
+		id := fmt.Sprintf("GHOST-%03d", i)
+		cloned[dependent] = append(cloned[dependent], model.Link{
+			Kind: model.LinkBlockedBy,
+			Target: model.LinkTarget{
+				ID: model.TicketID(id), Key: id, Title: "outside Watchlist", Status: model.StatusTodo,
+			},
+		})
+	}
+	return cloned
+}
+
+func TestFrontierGhostGrowthUsesCoalescedAndFinalAdmission(t *testing.T) {
+	const n = 35
+	tickets, baseLinks := benchmarkFrontierFixture("hostile", n)
+	m := cachedFrontierModel(t, tickets, baseLinks, 120, 40, nil)
+	if m.frontier.refusal != nil {
+		t.Fatalf("hostile N=%d base unexpectedly refused: %+v", n, m.frontier.refusal)
+	}
+	accepted := m.frontier.layout
+	dependent := tickets[n-1].ID
+	innerBefore := m.frontierCanvasRect()
+	staleRect := accepted.nodeAt[m.frontier.focusID]
+	staleClick := m.View().OnMouse(tea.MouseClickMsg{
+		X:      innerBefore.X + staleRect.X - m.frontier.offsetX + 1,
+		Y:      headerHeight + innerBefore.Y + staleRect.Y - m.frontier.offsetY + 1,
+		Button: tea.MouseLeft,
+	})
+	if staleClick == nil {
+		t.Fatal("accepted pre-refusal canvas produced no queued hit target")
+	}
+
+	ghosts := 0
+	var grownLinks map[model.TicketID][]model.Link
+	for ghosts = 1; ghosts <= 100; ghosts++ {
+		candidateLinks := frontierLinksWithGhosts(baseLinks, dependent, ghosts)
+		graph := model.BuildBlockingGraph(tickets, candidateLinks, m.frontier.input.Capabilities)
+		nodes := frontierNodes(graph, tickets, false)
+		inner := m.frontierCanvasRect()
+		projection := projectFrontierRanks(graph, nodes, inner.W)
+		direction := frontierDirectionAfterResize(m.frontier.direction, projection.candidates, inner.W, inner.H)
+		if refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(graph.Ghosts())) != nil {
+			grownLinks = candidateLinks
+			break
+		}
+	}
+	if grownLinks == nil {
+		t.Fatal("Ghost growth fixture found no refused projection")
+	}
+
+	// Keep one current member unresolved so the growth takes #101's deferred path.
+	missing := tickets[0].ID
+	delete(m.frontier.input.Links, missing)
+	m.frontier.input.Links[dependent] = grownLinks[dependent]
+	epoch := m.mouseEpoch
+	m, cmd := m.frontierEvidenceChanged()
+	if cmd == nil || m.frontierRebuildTimerID == 0 || m.frontier.refusal != nil ||
+		!reflect.DeepEqual(m.frontier.layout, accepted) {
+		t.Fatalf("partial Ghost growth replaced the accepted canvas before settlement: cmd=%v timer=%d refusal=%v",
+			cmd, m.frontierRebuildTimerID, m.frontier.refusal)
+	}
+	updated, _ := m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	assertRefusedFrontierHasNoCanvasState(t, m)
+	if m.mouseEpoch == epoch || m.frontier.isResolved() || len(m.frontier.graph.Ghosts()) != ghosts {
+		t.Errorf("coalesced refusal epoch/resolved/Ghosts = %d/%t/%d, want advanced/false/%d",
+			m.mouseEpoch, m.frontier.isResolved(), len(m.frontier.graph.Ghosts()), ghosts)
+	}
+	if got := string(frame(m.View().Content)); !strings.Contains(got, "Details pending") || strings.Contains(got, "ACTIONABLE") {
+		t.Errorf("partial refused evidence is not truthful:\n%s", got)
+	}
+	beforeStale := frontierInteractionSnapshot(m)
+	updated, staleCmd := m.Update(staleClick())
+	m = updated.(Model)
+	if staleCmd != nil || frontierInteractionSnapshot(m) != beforeStale {
+		t.Error("queued hit-map action from the replaced accepted canvas reached refusal state")
+	}
+
+	// The final member resolves synchronously through the same admission boundary.
+	m = m.seatFanoutLinks(missing, baseLinks[missing])
+	beforeVersion := m.frontierRebuildVersion
+	m, final := m.frontierEvidenceChanged()
+	if final == nil || !m.frontier.isResolved() || m.frontier.refusal == nil ||
+		m.frontierRebuildPendingVersion != 0 || m.frontierRebuildVersion <= beforeVersion {
+		t.Errorf("final refusal = cmd %v resolved %t refusal %v pending %d version %d/%d",
+			final, m.frontier.isResolved(), m.frontier.refusal, m.frontierRebuildPendingVersion,
+			m.frontierRebuildVersion, beforeVersion)
+	}
+	if got := string(frame(m.View().Content)); !strings.Contains(got, "Details complete") || strings.Contains(got, "ACTIONABLE") {
+		t.Errorf("fully seated refusal is not truthful:\n%s", got)
+	}
+}
+
+func TestFrontierRefusalCanAdmitAfterResizeAndSmallerReseat(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 40)
+	m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	assertRefusedFrontierHasNoCanvasState(t, m)
+
+	targetWidth := 0
+	for width := 3; width < m.width; width++ {
+		inner := frontierInnerRect(width, m.frontierBodyHeight())
+		projection := projectFrontierRanks(m.frontier.graph,
+			frontierNodes(m.frontier.graph, tickets, true), inner.W)
+		direction := frontierDirectionAfterResize(m.frontier.direction, projection.candidates, inner.W, inner.H)
+		if projection.candidates[direction].withinCellLimit(frontierCanvasCellLimit) {
+			targetWidth = width
+			break
+		}
+	}
+	if targetWidth == 0 {
+		t.Fatal("resize fixture found no narrower admitted projection")
+	}
+	oldEpoch := m.mouseEpoch
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: targetWidth, Height: m.height})
+	m = updated.(Model)
+	if cmd == nil || m.frontierRebuildTimerID == 0 || m.frontier.refusal == nil {
+		t.Fatalf("refused resize did not defer atomic re-projection: cmd=%v timer=%d refusal=%v",
+			cmd, m.frontierRebuildTimerID, m.frontier.refusal)
+	}
+	updated, _ = m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	if m.frontier.refusal != nil || !m.frontierShowsCanvas() || len(m.frontier.layout.cells) == 0 ||
+		!m.frontier.hasFocus || m.mouseEpoch == oldEpoch {
+		t.Fatalf("narrower admitted replacement = refusal %v canvas %t rows %d focus %t epoch %d/%d",
+			m.frontier.refusal, m.frontierShowsCanvas(), len(m.frontier.layout.cells),
+			m.frontier.hasFocus, m.mouseEpoch, oldEpoch)
+	}
+
+	// A fresh smaller Watchlist reseat also runs the one replacement boundary and
+	// restores normal focus/layout without consulting refused state.
+	refused := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	smallTickets, smallLinks := benchmarkFrontierFixture("chain", 10)
+	refused.input = ListInput{
+		Header:       Header{Key: "#105", Title: "smaller"},
+		Tickets:      smallTickets,
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    refused.now(),
+	}
+	for _, ticket := range smallTickets {
+		refused.details[ticket.ID] = detailEntry{detail: model.Detail{TicketID: ticket.ID, Links: smallLinks[ticket.ID]}}
+	}
+	refused, _ = refused.reseatFrontier()
+	if refused.frontier.refusal != nil || !refused.frontierShowsCanvas() ||
+		len(refused.frontier.layout.order) != len(smallTickets) || !refused.frontier.hasFocus {
+		t.Errorf("smaller reseat retained refusal or lost admitted geometry: refusal=%v order=%d focus=%t",
+			refused.frontier.refusal, len(refused.frontier.layout.order), refused.frontier.hasFocus)
+	}
+}
+
+func TestFrontierRefusalKeepsFailureEvidenceWithoutAdvertisingRefresh(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	failed := tickets[0].ID
+	delete(m.frontier.input.Links, failed)
+	m.frontier.failed = map[model.TicketID]struct{}{failed: {}}
+	m.frontier.lastErr = errors.New("Detail unavailable")
+	m = m.rebuildFrontier()
+	assertRefusedFrontierHasNoCanvasState(t, m)
+	visible := string(frame(m.View().Content))
+	if !strings.Contains(visible, "Ticket's Links could not be read") ||
+		!strings.Contains(visible, "read failed: Detail unavailable") ||
+		strings.Contains(visible, "press r to retry") || strings.Contains(visible, "ACTIONABLE") {
+		t.Errorf("refusal failure evidence/help is misleading:\n%s", visible)
+	}
+	if m.effectiveFrontierKeys().Refresh.Enabled() {
+		t.Error("refusal failure re-enabled Refresh")
 	}
 }
