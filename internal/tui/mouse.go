@@ -116,12 +116,16 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
 	bodyHeight := m.frontierBodyHeight()
+	inner := frontierInnerRect(width, bodyHeight)
 	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
 	epoch := m.mouseEpoch
 	layout := m.frontier.layout
 	keys := m.effectiveFrontierKeys()
 
 	return func(msg tea.MouseMsg) tea.Cmd {
+		if inner.W <= 0 || inner.H <= 0 {
+			return nil
+		}
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
 			// Modified primary clicks are reserved for terminal gestures such as
@@ -129,11 +133,14 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 			if !keys.MouseSelect.Enabled() || msg.Button != tea.MouseLeft || msg.Mod != 0 {
 				return nil
 			}
-			if msg.X < 0 || msg.X >= width ||
-				msg.Y < headerHeight || msg.Y >= headerHeight+bodyHeight {
+			bodyY := msg.Y - headerHeight
+			if msg.X < inner.X || msg.X >= inner.X+inner.W ||
+				bodyY < inner.Y || bodyY >= inner.Y+inner.H {
+				// Reserved chrome is inert: it does not even clear a pending click.
 				return nil
 			}
-			id, ok := layout.nodeAtPoint(msg.X+offsetX, msg.Y-headerHeight+offsetY)
+			id, ok := layout.nodeAtPoint(
+				msg.X-inner.X+offsetX, bodyY-inner.Y+offsetY)
 			if !ok {
 				return nil
 			}

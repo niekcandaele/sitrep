@@ -30,7 +30,10 @@ func BenchmarkFrontierLayout(b *testing.B) {
 				b.ResetTimer()
 				var layout frontierLayout
 				for range b.N {
-					layout = layoutFrontier(graph, nodes, frontierBenchmarkWidth)
+					layout = layoutFrontier(graph, nodes, frontierLayoutOptions{
+						innerWidth: frontierBenchmarkWidth,
+						direction:  frontierRanksHorizontal,
+					})
 				}
 				runtime.KeepAlive(layout)
 			})
