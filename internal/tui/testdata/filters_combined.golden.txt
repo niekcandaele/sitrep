@@ -2,11 +2,11 @@
 █████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33% · budget 4870 · resets 2030-01-02T03:04:05Z          just now
 
 IN PROGRESS (1)
-▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
+▸ #112       Draft the shard sync protocol
+             [In Review]  @mara-vos  #501 open ci ok changes req +3 more
 
 TODO (1)
-  #115     Reconcile widget IDs across shards
+  #115       Reconcile widget IDs across shards
 
 
 

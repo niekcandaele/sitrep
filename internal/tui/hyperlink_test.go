@@ -389,10 +389,10 @@ func TestListTicketKeyHyperlinkExcludesMarkerPaddingAndTitle(t *testing.T) {
 	raw := rowLines(rows, 0, 7, 40, true, model.Capabilities{}, listMarkers{}, Styles{})[0]
 	assertBalancedHyperlink(t, raw, url, 1)
 	scope := hyperlinkOpen(url) + "T-1" + ansi.ResetHyperlink()
-	if !strings.Contains(raw, selectedMarker+scope+"    A title") {
+	if !strings.Contains(raw, selectedMarker+scope+"      A title") {
 		t.Errorf("Ticket key scope includes marker, padding, or title: %q", raw)
 	}
-	if got := ansi.Strip(raw); got != "▸ T-1    A title" {
+	if got := ansi.Strip(raw); got != "▸ T-1      A title" {
 		t.Errorf("visible row = %q", got)
 	}
 }

@@ -454,11 +454,13 @@ func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 	entry, cached := m.details[msg.id]
 	protected := cached && entry.directDetailVersion > msg.detailEvidenceVersion
 	if msg.err == nil && !protected {
+		at := m.now()
 		entry.detail = msg.detail
 		entry.caps = msg.caps
-		entry.fetchedAt = m.now()
+		entry.fetchedAt = at
 		entry.frontierIneligible = false
 		entry.frontierDetail = msg.detail
+		entry.frontierFetchedAt = at
 		entry.frontierEvidence = true
 		m.details[msg.id] = entry
 	}

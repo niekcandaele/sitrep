@@ -1,13 +1,15 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
 // listMarkers is what the list knows about Actionability for the frame being
 // drawn. Its zero value is the honest default: nothing is known, so nothing is
-// claimed and no column is reserved.
+// claimed. Ticket rows reserve the marker gutter independently of this state.
 //
 // The list never fetches to fill this in. ADR-0003 keeps one batched Resolve
 // per refresh and Amendment 4 permits a Detail fan-out only in response to an
@@ -54,6 +56,44 @@ func actionableMarkers(tickets []model.Ticket, links map[model.TicketID][]model.
 		}
 	}
 	return listMarkers{active: true, actionable: marked, count: len(marked)}
+}
+
+// hasActionabilityMembers reports whether the current Watchlist has at least
+// one canonical member whose Detail the Frontier can read. An empty Watchlist
+// and rows without identity have no computation for expanded Help to promise.
+func hasActionabilityMembers(tickets []model.Ticket) bool {
+	return len(detailfanout.Plan(tickets, nil)) > 0
+}
+
+// actionableEvidenceSnapshot returns when the last required current member's
+// eligible Links evidence landed. It accepts only the same all-or-nothing marker
+// state and canonical member set; duplicate, empty, and non-member cache entries
+// cannot move the anchor.
+func actionableEvidenceSnapshot(tickets []model.Ticket, details map[model.TicketID]detailEntry,
+	markers listMarkers) (time.Time, bool) {
+	if !markers.active {
+		return time.Time{}, false
+	}
+	ids := detailfanout.Plan(tickets, nil)
+	if len(ids) == 0 {
+		return time.Time{}, false
+	}
+
+	var latest time.Time
+	for _, id := range ids {
+		entry, cached := details[id]
+		if !cached {
+			return time.Time{}, false
+		}
+		fetchedAt, eligible := entry.frontierEvidenceStamp()
+		if !eligible {
+			return time.Time{}, false
+		}
+		if fetchedAt.After(latest) {
+			latest = fetchedAt
+		}
+	}
+	return latest, true
 }
 
 // listMarkers derives the frame's markers from the session's Detail cache.
