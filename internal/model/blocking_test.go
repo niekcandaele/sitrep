@@ -785,10 +785,8 @@ func TestBlocksLinksTreatEmptyIDBlockerAsAnonymous(t *testing.T) {
 	}
 }
 
-// A member with no ID is not an identity. Before, it was indexed like any other
-// member, so every anonymous blocker Link in the Watchlist resolved to it and it
-// came back Actionable: fail-open on an unidentified blocker, which is the exact
-// inverse of the rule Actionable exists to enforce.
+// A member with no ID is not an identity and is not indexed. An anonymous
+// blocker remains unresolved, so its dependent is not Actionable.
 func TestAnEmptyIDMemberAbsorbsNoAnonymousBlockers(t *testing.T) {
 	anonymous := model.Link{
 		Kind:        model.LinkBlockedBy,

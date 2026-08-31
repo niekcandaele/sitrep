@@ -8,9 +8,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
 )
 
-// The sweep's promise is that a field added tomorrow is covered. A kind it has
-// no policy for used to fall through silently, which turns that promise into a
-// field nobody is checking; it now says so.
+// Fill panics on a field kind it has no policy for so the sweep cannot
+// silently leave that field unchecked.
 func TestFillPanicsOnAKindItHasNoPolicyFor(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

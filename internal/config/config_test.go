@@ -541,9 +541,8 @@ func TestParseAcceptsWhatTheTrackersAllow(t *testing.T) {
 			},
 		},
 		{
-			// A site whose labels are not written in the Latin alphabet has to
-			// be able to configure this at all: an ASCII-only usability rule
-			// rejected the whole Profile.
+			// A GitLab Profile may name labels in the site's writing system. GitLab
+			// normalization retains Unicode letters and digits.
 			name: "a gitlab profile whose won't-do labels are not Latin",
 			doc: "profiles:\n  x:\n    provider: gitlab\n    host: gitlab.acme.test\n" +
 				"    wont_do_labels: [\"見送り\", \"не будет\"]\n",

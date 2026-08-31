@@ -1064,9 +1064,8 @@ func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 	return keys
 }
 
-// compactMouseHelp is the next shorter spelling of the mouse toggle's help, for
-// either capture state. Both states need one: the item says what pressing m
-// does, and both verbs are longer than the terminal always has room for.
+// compactMouseHelp returns the next shorter spelling of enabled mouse help.
+// Capture is already one word and needs no shorter spelling.
 func compactMouseHelp(binding key.Binding) (string, bool) {
 	if binding.Help().Key != "m" {
 		return "", false
