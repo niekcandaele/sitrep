@@ -158,6 +158,69 @@ type detailResponse struct {
 	Errors []graphQLError `json:"errors"`
 }
 
+// detailBatchResponse is keyed by the generated detailN aliases. A map keeps
+// response-object order irrelevant while allowing missing and unexpected aliases
+// to be distinguished explicitly.
+type detailBatchResponse struct {
+	Data   map[string]*detailNode `json:"data"`
+	Errors []graphQLError         `json:"errors"`
+}
+
+// decode classifies a completed aliased response. An error attributable to one
+// alias invalidates that whole Detail while successful siblings survive. Any
+// error or data member that cannot be attributed makes the response malformed
+// for the entire chunk.
+func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
+	aliases := make(map[string]model.TicketID, len(ids))
+	for i, id := range ids {
+		aliases["detail"+strconv.Itoa(i)] = id
+	}
+	for alias := range r.Data {
+		if _, expected := aliases[alias]; !expected {
+			return nil, nil, provider.Errorf(provider.KindUnavailable,
+				"github: malformed Detail response from %s: unexpected data alias %q", endpoint, alias)
+		}
+	}
+
+	attributedErrors := make(map[string][]graphQLError)
+	for _, graphErr := range r.Errors {
+		if len(graphErr.Path) == 0 {
+			return nil, nil, graphQLErrors(r.Errors, detailNotFound(ids[0]), endpoint, header)
+		}
+		alias, ok := graphErr.Path[0].(string)
+		if !ok {
+			return nil, nil, graphQLErrors(r.Errors, detailNotFound(ids[0]), endpoint, header)
+		}
+		if _, expected := aliases[alias]; !expected {
+			return nil, nil, graphQLErrors(r.Errors, detailNotFound(ids[0]), endpoint, header)
+		}
+		attributedErrors[alias] = append(attributedErrors[alias], graphErr)
+	}
+
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	failures := make(map[model.TicketID]error)
+	for i, id := range ids {
+		alias := "detail" + strconv.Itoa(i)
+		if graphErrs := attributedErrors[alias]; len(graphErrs) != 0 {
+			failures[id] = graphQLErrors(graphErrs, detailNotFound(id), endpoint, header)
+			continue
+		}
+
+		node, present := r.Data[alias]
+		if !present || node == nil || node.ID == "" {
+			failures[id] = provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
+			continue
+		}
+		detail := newDetail(*node)
+		if detail.TicketID != id {
+			failures[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+			continue
+		}
+		details[id] = detail
+	}
+	return details, failures, nil
+}
+
 type detailNode struct {
 	ID         string        `json:"id"`
 	Number     int           `json:"number"`

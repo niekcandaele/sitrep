@@ -34,10 +34,10 @@ const defaultHost = "github.com"
 // an unbounded loop against a paging API is how a polling tool hangs.
 const maxPages = 50
 
-// maxRefListAliases bounds one dynamically aliased GraphQL document. Larger
-// explicit lists are finite, known membership and are read in consecutive
-// chunks without changing their Selector order.
-const maxRefListAliases = 100
+// maxQueryAliases bounds one dynamically aliased GraphQL document. Exact-Ref
+// and Detail reads both use it so GitHub's per-document alias budget has one
+// definition.
+const maxQueryAliases = 100
 
 // requestTimeout is the default per-request budget when the caller supplies no
 // HTTP client of its own.
@@ -398,8 +398,8 @@ func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.T
 	}
 
 	tickets := make([]model.Ticket, 0, len(refs))
-	for start := 0; start < len(refs); start += maxRefListAliases {
-		end := min(start+maxRefListAliases, len(refs))
+	for start := 0; start < len(refs); start += maxQueryAliases {
+		end := min(start+maxQueryAliases, len(refs))
 		chunk, err := p.readExactRefChunk(ctx, refs[start:end])
 		if err != nil {
 			return nil, err
@@ -474,9 +474,75 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return newDetail(*resp.Data.Node), nil
 }
 
-// FetchDetails delegates to the generic sequential fallback.
+// FetchDetails reads canonical Ticket IDs through bounded aliased Detail
+// documents. Chunks are sequential: ordinary failures stay attributable to the
+// IDs in that chunk while later chunks continue, and caller cancellation stops
+// before any further request.
 func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
-	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+	canonical := canonicalDetailIDs(ids)
+	details := make(map[model.TicketID]model.Detail, len(canonical))
+	if len(canonical) == 0 {
+		return details, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return details, err
+	}
+
+	failures := make(map[model.TicketID]error)
+	for start := 0; start < len(canonical); start += maxQueryAliases {
+		end := min(start+maxQueryAliases, len(canonical))
+		chunk := canonical[start:end]
+		chunkDetails, chunkFailures, err := p.fetchDetailChunk(ctx, chunk)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return details, ctxErr
+			}
+			for _, id := range chunk {
+				failures[id] = err
+			}
+		} else {
+			for id, detail := range chunkDetails {
+				details[id] = detail
+			}
+			for id, failure := range chunkFailures {
+				failures[id] = failure
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+	}
+	if len(failures) != 0 {
+		return details, &provider.DetailFailures{Failures: failures}
+	}
+	return details, nil
+}
+
+func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
+	variables := make(map[string]any, len(ids))
+	for i, id := range ids {
+		variables["id"+strconv.Itoa(i)] = string(id)
+	}
+
+	var resp detailBatchResponse
+	header, err := p.do(ctx, buildDetailBatchQuery(len(ids)), variables, &resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resp.decode(ids, p.endpoint, header)
+}
+
+func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
+	canonical := make([]model.TicketID, 0, len(ids))
+	seen := make(map[model.TicketID]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		canonical = append(canonical, id)
+	}
+	return canonical
 }
 
 // checkRef rejects a Ref this driver cannot serve before any network call.
