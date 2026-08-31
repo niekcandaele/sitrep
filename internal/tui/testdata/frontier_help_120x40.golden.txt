@@ -12,8 +12,8 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic ev
  206           Cancelled│─┘┌──▶│  #203                Todo│
  acy weight table       │  │   │Backfill shard weights    │
                         │  │   │blocked by 1              │
- ───────────────────────┘  │   └──────────────────────────┘
-‹                          │
+‹───────────────────────┘  │   └──────────────────────────┘
+                           │
  ═══════════════════════╗  │   ┌──────────────────────────┐
  208                Todo║  │┌─▶│  #204                Todo│
  it the rebalancer queue║  ││  │Drain a shard safely      │
@@ -23,7 +23,6 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic ev
  ═══════════════════════╗  ││  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
  209                Todo║  ││┌▶┃  #213                Todo┃
  ge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
- LE                     ║  │││ ┃ACTIONABLE                ┃
                                                             ▼
 
 1 Ticket's Links could not be read; anything it blocks is not Actionable
@@ -34,7 +33,8 @@ double-click open Ticket                            ←/h  blocker side
 wheel        scroll                                 →/l  dependent side
 enter        open Ticket                            pgup page up
 v/esc        list                                   pgdn page down
-r            re-read Details                        g    first node
-?            help                                   G    last node
+V            dense/full cards                       g    first node
+r            re-read Details                        G    last node
+?            help
 L            legend
-q            quit                                                                                         x 4/4 · y 0/38
+q            quit                                                                                         x 4/4 · y 0/39

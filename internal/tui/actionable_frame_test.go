@@ -485,7 +485,7 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 	m.help.ShowAll = true
 
 	cold := m.help.View(m.helpKeys())
-	requireHelpText(t, cold, "v compute actionability")
+	requireHelpText(t, cold, "v compute actionability", "V dense Frontier")
 	if strings.Contains(strings.Join(strings.Fields(cold), " "), "v frontier") {
 		t.Errorf("cold expanded help retained the generic Frontier description:\n%s", cold)
 	}
@@ -510,7 +510,7 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 	coldBodyHeight, coldFooterLines := m.bodyHeight(), len(m.footerLines())
 	cold = m.help.View(m.helpKeys())
 	requireHelpText(t, cold,
-		"m capture", "enter open", "v compute actionability", "r refresh", "? help", "L legend", "q quit",
+		"m capture", "enter open", "v compute actionability", "V dense", "r refresh", "? help", "L legend", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last", "d hide finished", "/ find")
 
 	m.details[ticket.ID] = entry
@@ -526,7 +526,7 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 
 	m.details = make(map[model.TicketID]detailEntry)
 	m.height = 16
-	requireHelpText(t, m.help.View(m.helpKeys()), "v compute actionability")
+	requireHelpText(t, m.help.View(m.helpKeys()), "v compute actionability", "V dense")
 
 	m.input.Capabilities.BlockingLinks = false
 	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {

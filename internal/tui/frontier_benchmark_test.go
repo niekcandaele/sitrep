@@ -37,6 +37,35 @@ func BenchmarkFrontierLayout(b *testing.B) {
 	}
 }
 
+func BenchmarkDenseFrontierLayout(b *testing.B) {
+	for _, shape := range []string{"chain", "hub"} {
+		b.Run(shape+"/N=50", func(b *testing.B) {
+			tickets, links := benchmarkFrontierFixture(shape, 50)
+			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+			nodes := frontierNodes(graph, tickets, true)
+			projection := projectFrontierRanks(graph, nodes, frontierBenchmarkWidth, frontierDensityDense)
+			candidate := projection.candidates[frontierRanksHorizontal]
+			if !candidate.withinCellLimit(frontierCanvasCellLimit) {
+				b.Fatalf("safe dense %s N=50 refused %+v", shape, candidate)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			var layout frontierLayout
+			for range b.N {
+				layout = layoutFrontier(graph, nodes, frontierLayoutOptions{
+					innerWidth: frontierBenchmarkWidth,
+					direction:  frontierRanksHorizontal,
+					density:    frontierDensityDense,
+					projection: &projection,
+				})
+			}
+			b.ReportMetric(float64(len(layout.routes)), "routes")
+			b.ReportMetric(float64(len(layout.strokes)), "stroke_slots")
+			runtime.KeepAlive(layout)
+		})
+	}
+}
+
 // BenchmarkFrontierProjectionRefusal measures hostile production policy. N=50
 // already exceeds the hard ceiling; every larger fixture remains projection-only
 // and retains no grid, route, incident, or stroke metadata.
@@ -46,7 +75,7 @@ func BenchmarkFrontierProjectionRefusal(b *testing.B) {
 			tickets, links := benchmarkFrontierFixture("hostile", n)
 			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
 			nodes := frontierNodes(graph, tickets, true)
-			probe := projectFrontierRanks(graph, nodes, frontierBenchmarkWidth)
+			probe := projectFrontierRanks(graph, nodes, frontierBenchmarkWidth, frontierDensityFull)
 			direction := chooseFrontierDirection(probe.candidates, frontierBenchmarkWidth, 30)
 			if refusal := refuseFrontierCandidate(probe.candidates[direction], len(nodes), len(graph.Ghosts())); refusal == nil {
 				b.Fatalf("hostile N=%d selected an admitted %dx%d candidate", n,
@@ -57,7 +86,7 @@ func BenchmarkFrontierProjectionRefusal(b *testing.B) {
 			var projection frontierRankProjection
 			var refusal *frontierCanvasRefusal
 			for range b.N {
-				projection = projectFrontierRanks(graph, nodes, frontierBenchmarkWidth)
+				projection = projectFrontierRanks(graph, nodes, frontierBenchmarkWidth, frontierDensityFull)
 				direction = chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30)
 				refusal = refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(graph.Ghosts()))
 			}

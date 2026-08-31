@@ -15,6 +15,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/niekcandaele/sitrep/internal/detailfanout"
@@ -116,6 +117,32 @@ func TestFrontierFrame(t *testing.T) {
 	}
 	if m.frontier.layout.rankOf["acme/widgets#212"] != 0 {
 		t.Error("a Relates Link was drawn as a blocking edge")
+	}
+}
+
+func TestDenseFrontierFrame(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	c := newClock()
+	s := frontierSessionAtSize(t, c, p, 300, termHeight)
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(keyPress("V"))
+	s.waitFor(t, "blocking cycles")
+	s.tm.Send(keyPress("g"))
+
+	m, got := s.finish(t)
+	checkGolden(t, "frontier_dense.golden.txt", got)
+	if m.mode != modeFrontier || m.frontierDensity != frontierDensityDense ||
+		m.frontier.layout.density != frontierDensityDense {
+		t.Fatalf("dense golden mode/density = %v/%v/%v", m.mode, m.frontierDensity, m.frontier.layout.density)
+	}
+	visible := string(got)
+	for _, want := range []string{"╬", "╳", "┫", "━", "┈", "ACTIONABLE"} {
+		if !strings.Contains(visible, want) {
+			t.Errorf("dense golden lacks %q:\n%s", want, visible)
+		}
+	}
+	if got := lipgloss.Height(m.View().Content); got != termHeight {
+		t.Errorf("dense frame height = %d, want %d", got, termHeight)
 	}
 }
 
@@ -918,6 +945,28 @@ func TestFrontierWithoutBlockingLinksKeepsEscapeBindingsLive(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("q command returned %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestFrontierWithoutBlockingLinksKeepsDensitySelectionLive(t *testing.T) {
+	m, calls := noBlockingFrontierModel(t)
+	beforeGeneration := m.frontierGeneration
+	beforeEpoch := m.mouseEpoch
+	updated, cmd := m.Update(keyPress("V"))
+	m = updated.(Model)
+	if cmd == nil || m.mode != modeFrontier || m.frontierDensity != frontierDensityDense ||
+		m.frontier.hasFocus || m.frontier.refusal != nil {
+		t.Fatalf("no-Capability density toggle = mode %v density %v focus %t refusal %v cmd %v",
+			m.mode, m.frontierDensity, m.frontier.hasFocus, m.frontier.refusal, cmd)
+	}
+	if m.frontierGeneration != beforeGeneration || m.mouseEpoch != beforeEpoch+1 || calls.Load() != 0 {
+		t.Errorf("no-Capability density changed generation/epoch/calls = %d/%d/%d, want %d/%d/0",
+			m.frontierGeneration, m.mouseEpoch, calls.Load(), beforeGeneration, beforeEpoch+1)
+	}
+	keys := m.effectiveFrontierKeys()
+	if !keys.Density.Enabled() || keys.Open.Enabled() || keys.Refresh.Enabled() || keys.MouseSelect.Enabled() {
+		t.Errorf("effective density/open/refresh/mouse = %t/%t/%t/%t",
+			keys.Density.Enabled(), keys.Open.Enabled(), keys.Refresh.Enabled(), keys.MouseSelect.Enabled())
 	}
 }
 
@@ -1890,6 +1939,54 @@ func TestFrontierClickFocusesAndDoubleClickOpens(t *testing.T) {
 	}
 }
 
+func TestDenseFrontierMouseUsesChipPlaneAndRejectsReplacedLayout(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second", Status: model.StatusTodo},
+	}
+	m := frontierMouseModel(t, tickets, nil, 120, 30)
+	oldInner := m.frontierCanvasRect()
+	oldRect := m.frontier.layout.nodeAt["T-2"]
+	oldHandler := m.View().OnMouse
+	staleCmd := oldHandler(tea.MouseClickMsg{
+		X: oldInner.X + oldRect.X + 1, Y: headerHeight + oldInner.Y + oldRect.Y + 1,
+		Button: tea.MouseLeft,
+	})
+	if staleCmd == nil {
+		t.Fatal("full layout produced no captured click")
+	}
+
+	updated, _ := m.Update(keyPress("V"))
+	m = updated.(Model)
+	before := frontierInteractionSnapshot(m)
+	updated, cmd := m.Update(staleCmd())
+	m = updated.(Model)
+	if cmd != nil || frontierInteractionSnapshot(m) != before {
+		t.Fatal("queued click from replaced full layout reached dense state")
+	}
+
+	inner := m.frontierCanvasRect()
+	rect := m.frontier.layout.nodeAt["T-2"]
+	click := tea.MouseClickMsg{
+		X: inner.X + rect.X + 2, Y: headerHeight + inner.Y + rect.Y,
+		Button: tea.MouseLeft,
+	}
+	updated, _ = m.Update(frontierMouse(t, m, click))
+	m = updated.(Model)
+	if m.frontier.focusID != "T-2" {
+		t.Fatalf("dense chip click focused %q, want T-2", m.frontier.focusID)
+	}
+
+	handler := m.View().OnMouse
+	inspectionY := headerHeight + m.frontierCanvasOuterHeight()
+	if mouseCmd := handler(tea.MouseClickMsg{X: 2, Y: inspectionY, Button: tea.MouseLeft}); mouseCmd != nil {
+		t.Fatalf("inspection padding translated click to %T", mouseCmd())
+	}
+	if mouseCmd := handler(tea.MouseWheelMsg{X: 2, Y: inspectionY, Button: tea.MouseWheelDown}); mouseCmd != nil {
+		t.Fatalf("inspection region translated wheel to %T", mouseCmd())
+	}
+}
+
 // A modified click is a terminal gesture, not a selection: shift-drag has to
 // keep selecting text.
 func TestFrontierModifiedClickIsTransparent(t *testing.T) {
@@ -2832,12 +2929,29 @@ func TestFrontierPageBindingsReuseListSurfaceAndExpandedHelpPlacement(t *testing
 		})
 	}
 
+	for _, binding := range list.ShortHelp() {
+		if binding.Help().Key == "V" {
+			t.Fatal("List ShortHelp unexpectedly advertises dense Frontier")
+		}
+	}
+	listDensity := false
+	for _, group := range list.FullHelp() {
+		for _, binding := range group {
+			if binding.Help().Key == "V" && binding.Help().Desc == "dense Frontier" {
+				listDensity = true
+			}
+		}
+	}
+	if !listDensity {
+		t.Error("List FullHelp omits V dense Frontier")
+	}
+
 	short := frontier.ShortHelp()
 	if len(short) != 10 {
 		t.Fatalf("ShortHelp has %d bindings, want unchanged 10", len(short))
 	}
 	for _, binding := range short {
-		if binding.Help().Key == "pgup" || binding.Help().Key == "pgdn" {
+		if binding.Help().Key == "pgup" || binding.Help().Key == "pgdn" || binding.Help().Key == "V" {
 			t.Fatalf("ShortHelp unexpectedly includes %q", binding.Help().Key)
 		}
 	}
@@ -2845,6 +2959,15 @@ func TestFrontierPageBindingsReuseListSurfaceAndExpandedHelpPlacement(t *testing
 	groups := frontier.FullHelp()
 	if got, want := len(groups), 2; got != want {
 		t.Fatalf("FullHelp groups = %d, want %d", got, want)
+	}
+	foundDensity := false
+	for _, binding := range groups[0] {
+		if binding.Help().Key == "V" && binding.Help().Desc == "dense/full cards" {
+			foundDensity = true
+		}
+	}
+	if !foundDensity {
+		t.Errorf("Frontier FullHelp omits V dense/full cards: %+v", groups[0])
 	}
 	movement := groups[1]
 	if got, want := []string{
@@ -3885,6 +4008,323 @@ func cachedFrontierModel(t *testing.T, tickets []model.Ticket,
 	return m
 }
 
+func TestFrontierDensityKeysAreManualPersistentAndPresentationOnly(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first title", URL: "https://example.test/1", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second title", URL: "https://example.test/2", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{"T-1": blockedBy("T-2"), "T-2": nil}
+	m := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	if m.frontierDensity != frontierDensityFull || m.frontier.layout.density != frontierDensityFull {
+		t.Fatalf("initial density = %v/%v, want full/full", m.frontierDensity, m.frontier.layout.density)
+	}
+	focus := m.frontier.focusID
+	generation, linksCount, detailsCount := m.frontierGeneration, len(m.frontier.input.Links), len(m.details)
+	epoch := m.mouseEpoch
+
+	updated, cmd := m.Update(keyPress("V"))
+	m = updated.(Model)
+	if cmd == nil || m.mode != modeFrontier || m.frontierDensity != frontierDensityDense ||
+		m.frontier.layout.density != frontierDensityDense {
+		t.Fatalf("dense toggle mode/density/cmd = %v/%v/%v/%v", m.mode, m.frontierDensity, m.frontier.layout.density, cmd)
+	}
+	if m.frontier.focusID != focus || m.frontierGeneration != generation ||
+		len(m.frontier.input.Links) != linksCount || len(m.details) != detailsCount ||
+		m.detailFanoutInflight != 0 || m.frontierContext != nil {
+		t.Fatalf("density toggle changed semantic state: %s", frontierInteractionSnapshot(m))
+	}
+	if m.mouseEpoch != epoch+1 {
+		t.Errorf("mouse epoch = %d, want %d after atomic layout replacement", m.mouseEpoch, epoch+1)
+	}
+	for id, rect := range m.frontier.layout.nodeAt {
+		if rect.H != 1 {
+			t.Errorf("dense %s rect height = %d, want 1", id, rect.H)
+		}
+	}
+	visible := ansi.Strip(m.View().Content)
+	if !strings.Contains(visible, "second title") || !strings.Contains(visible, "ACTIONABLE") {
+		t.Errorf("dense frame lost complete focused full-card inspection:\n%s", visible)
+	}
+
+	for _, toggle := range []tea.KeyPressMsg{keyPress("?"), keyPress("L")} {
+		updated, _ = m.Update(toggle)
+		m = updated.(Model)
+		if m.frontierDensity != frontierDensityDense || m.frontier.layout.density != frontierDensityDense {
+			t.Fatalf("%q lost dense preference", toggle.String())
+		}
+	}
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 121, Height: 40})
+	m = updated.(Model)
+	if m.frontierDensity != frontierDensityDense || m.frontierRebuildTimerID == 0 {
+		t.Fatalf("resize density/timer = %v/%d, want dense/deferred replacement", m.frontierDensity, m.frontierRebuildTimerID)
+	}
+	updated, _ = m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	if m.frontierDensity != frontierDensityDense || m.frontier.layout.density != frontierDensityDense {
+		t.Fatal("settled resize lost dense layout")
+	}
+	updated, detailCmd := m.Update(enterKey)
+	m = updated.(Model)
+	if detailCmd != nil || m.mode != modeDetail {
+		t.Fatalf("cached dense open = mode %v cmd %v, want Detail/no fetch", m.mode, detailCmd)
+	}
+	updated, _ = m.Update(escKey)
+	m = updated.(Model)
+	if m.mode != modeFrontier || m.frontierDensity != frontierDensityDense {
+		t.Fatalf("Detail return mode/density = %v/%v", m.mode, m.frontierDensity)
+	}
+	m, _ = m.reseatFrontier()
+	if m.frontierDensity != frontierDensityDense || m.frontier.layout.density != frontierDensityDense {
+		t.Fatal("Watchlist reseat lost dense preference")
+	}
+
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeList || m.frontierDensity != frontierDensityDense {
+		t.Fatalf("leave mode/density = %v/%v, want List/dense", m.mode, m.frontierDensity)
+	}
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeFrontier || m.frontierDensity != frontierDensityDense || m.frontier.layout.density != frontierDensityDense {
+		t.Fatalf("lowercase re-entry lost dense preference: %v/%v/%v", m.mode, m.frontierDensity, m.frontier.layout.density)
+	}
+
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	m.frontierDensity = frontierDensityFull
+	updated, _ = m.Update(keyPress("V"))
+	m = updated.(Model)
+	if m.mode != modeFrontier || m.frontierDensity != frontierDensityDense {
+		t.Fatalf("List V mode/density = %v/%v, want Frontier/dense", m.mode, m.frontierDensity)
+	}
+}
+
+func TestFrontierDensityRefusalPreservesLatentFocus(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	m := cachedFrontierModel(t, tickets, links, 120, 33, nil)
+	if m.frontier.refusal == nil || len(m.frontier.layout.cells) != 0 ||
+		m.frontier.focusID != "" || m.frontier.hasFocus || m.frontier.retainRefusedFocus {
+		t.Fatalf("initial full density = refusal %v/%d grid rows focus %q/%t/%t, want refused/no grid/no focus",
+			m.frontier.refusal, len(m.frontier.layout.cells), m.frontier.focusID,
+			m.frontier.hasFocus, m.frontier.retainRefusedFocus)
+	}
+
+	updated, _ := m.Update(keyPress("V"))
+	m = updated.(Model)
+	if m.frontierDensity != frontierDensityDense || m.frontier.refusal != nil || len(m.frontier.layout.cells) == 0 {
+		t.Fatalf("dense density = %v refusal %v/%d grid rows, want admitted",
+			m.frontierDensity, m.frontier.refusal, len(m.frontier.layout.cells))
+	}
+	focus := m.frontier.layout.order[0]
+	if focus == m.selectedID {
+		focus = m.frontier.layout.order[len(m.frontier.layout.order)-1]
+	}
+	m.frontier.focusID = focus
+	m.frontier.hasFocus = true
+	m = m.reconcileFrontier(true)
+	if !m.frontier.hasFocus || focus == "" || focus == m.selectedID {
+		t.Fatalf("dense focus = %q/%t with List selection %q, want a distinct focused node",
+			focus, m.frontier.hasFocus, m.selectedID)
+	}
+
+	updated, _ = m.Update(keyPress("V"))
+	m = updated.(Model)
+	if m.frontierDensity != frontierDensityFull || m.frontier.refusal == nil ||
+		len(m.frontier.layout.cells) != 0 || m.frontierShowsCanvas() || m.effectiveFrontierKeys().Open.Enabled() {
+		t.Fatalf("refused full state = density %v refusal %v grid %d canvas %t open %t",
+			m.frontierDensity, m.frontier.refusal, len(m.frontier.layout.cells),
+			m.frontierShowsCanvas(), m.effectiveFrontierKeys().Open.Enabled())
+	}
+	if m.frontier.focusID != focus || !m.frontier.hasFocus || !m.frontier.retainRefusedFocus {
+		t.Fatalf("refused full density lost latent focus = %q/%t/%t, want %q/true/true",
+			m.frontier.focusID, m.frontier.hasFocus, m.frontier.retainRefusedFocus, focus)
+	}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 121, Height: 33})
+	m = updated.(Model)
+	if m.frontierRebuildTimerID == 0 {
+		t.Fatal("refused full resize did not schedule a replacement rebuild")
+	}
+	updated, _ = m.Update(frontierRebuildMsg{
+		timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion,
+	})
+	m = updated.(Model)
+	if m.frontier.refusal == nil || m.frontier.focusID != focus ||
+		!m.frontier.hasFocus || !m.frontier.retainRefusedFocus {
+		t.Fatalf("settled refused resize lost latent focus = refusal %v focus %q/%t/%t",
+			m.frontier.refusal, m.frontier.focusID, m.frontier.hasFocus, m.frontier.retainRefusedFocus)
+	}
+	m = m.rebuildFrontier()
+	if m.frontier.refusal == nil || m.frontier.focusID != focus ||
+		!m.frontier.hasFocus || !m.frontier.retainRefusedFocus {
+		t.Fatalf("still-refused evidence rebuild lost latent focus = refusal %v focus %q/%t/%t",
+			m.frontier.refusal, m.frontier.focusID, m.frontier.hasFocus, m.frontier.retainRefusedFocus)
+	}
+
+	updated, _ = m.Update(keyPress("V"))
+	m = updated.(Model)
+	if m.frontierDensity != frontierDensityDense || m.frontier.refusal != nil ||
+		m.frontier.focusID != focus || !m.frontier.hasFocus || m.frontier.retainRefusedFocus {
+		t.Fatalf("dense restoration = density %v refusal %v focus %q/%t retained %t, want dense/nil/%q/true/false",
+			m.frontierDensity, m.frontier.refusal, m.frontier.focusID, m.frontier.hasFocus,
+			m.frontier.retainRefusedFocus, focus)
+	}
+	if _, drawn := m.frontier.layout.nodeAt[focus]; !drawn {
+		t.Fatalf("restored focus %q is not drawn", focus)
+	}
+	updated, cmd := m.Update(enterKey)
+	m = updated.(Model)
+	if cmd != nil || m.mode != modeDetail || m.detail.ticket.ID != focus {
+		t.Fatalf("restored focus open = mode %v ticket %q cmd %v, want Detail/%q/no command",
+			m.mode, m.detail.ticket.ID, cmd, focus)
+	}
+}
+
+func TestFrontierDensityKeyRemainsOwnedBySearchAndDetail(t *testing.T) {
+	m, _ := noBlockingFrontierModel(t)
+	updated, _ := m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeList {
+		t.Fatalf("mode = %v after leaving Frontier", m.mode)
+	}
+	updated, _ = m.Update(keyPress("/"))
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("V"))
+	m = updated.(Model)
+	if !m.searching || m.mode != modeList || m.search.Value() != "V" || m.frontierDensity != frontierDensityFull {
+		t.Fatalf("Search V state = searching %t mode %v query %q density %v",
+			m.searching, m.mode, m.search.Value(), m.frontierDensity)
+	}
+	m.searching = false
+	m.mode = modeDetail
+	updated, _ = m.Update(keyPress("V"))
+	m = updated.(Model)
+	if m.mode != modeDetail || m.frontierDensity != frontierDensityFull {
+		t.Fatalf("Detail V changed mode/density = %v/%v", m.mode, m.frontierDensity)
+	}
+}
+
+func TestDenseFrontierTinyBodyUsesWholeSummaryWithoutOverlay(t *testing.T) {
+	tickets := []model.Ticket{{ID: "T-1", Key: "#1", Title: "one", Status: model.StatusTodo}}
+	m := cachedFrontierModel(t, tickets, map[model.TicketID][]model.Link{"T-1": nil}, 13, 8, nil)
+	updated, _ := m.Update(keyPress("V"))
+	m = updated.(Model)
+	if got := frontierDenseSummaryText(m.frontier.layout.nodes["T-1"]); got != "#1 one" {
+		t.Fatalf("summary = %q", got)
+	}
+	visible := ansi.Strip(m.View().Content)
+	if !strings.Contains(visible, "#1 one") {
+		t.Errorf("tiny dense frame lost whole summary:\n%s", visible)
+	}
+	if strings.Contains(visible, "┌──────────┐") {
+		t.Errorf("tiny dense frame rendered a partial inspection card:\n%s", visible)
+	}
+	if got := lipgloss.Height(m.View().Content); got != m.height {
+		t.Errorf("frame height = %d, want %d", got, m.height)
+	}
+}
+
+func TestDenseFrontierFocusRemainsVisibleWithoutInspection(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "first title is too wide", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "second title is too wide", Status: model.StatusTodo},
+	}
+	m := cachedFrontierModel(t, tickets, map[model.TicketID][]model.Link{
+		"T-1": nil, "T-2": nil,
+	}, 10, 7, nil)
+	updated, _ := m.Update(keyPress("V"))
+	m = updated.(Model)
+	kind, _ := frontierDenseInspectionForLayout(
+		m.frontier.layout, m.frontier.focusID, m.width, m.frontierBodyHeight())
+	if kind != frontierDenseInspectionNone {
+		t.Fatalf("inspection = %v, want none at constrained geometry", kind)
+	}
+	beforeFocus := m.frontier.focusID
+	before := ansi.Strip(m.View().Content)
+	for _, chip := range []string{"━ #1", "━ #2", "◆"} {
+		if !strings.Contains(before, chip) {
+			t.Fatalf("constrained dense frame lacks %q:\n%s", chip, before)
+		}
+	}
+
+	move := keyPress("j")
+	if m.frontier.layout.direction == frontierRanksVertical {
+		move = keyPress("l")
+	}
+	if m.frontier.layout.peerOf[beforeFocus] > 0 {
+		move = keyPress("k")
+		if m.frontier.layout.direction == frontierRanksVertical {
+			move = keyPress("h")
+		}
+	}
+	updated, _ = m.Update(move)
+	m = updated.(Model)
+	after := ansi.Strip(m.View().Content)
+	if m.frontier.focusID == beforeFocus || !m.frontier.hasFocus {
+		t.Fatalf("navigation focus = %q/%t, want identity distinct from %q",
+			m.frontier.focusID, m.frontier.hasFocus, beforeFocus)
+	}
+	if before == after {
+		t.Fatalf("focus navigation produced a byte-identical constrained frame:\n%s", after)
+	}
+	for _, chip := range []string{"━ #1", "━ #2", "◆"} {
+		if !strings.Contains(after, chip) {
+			t.Errorf("navigated frame lacks status-preserving %q:\n%s", chip, after)
+		}
+	}
+	focus := m.frontier.focusID
+	updated, cmd := m.Update(enterKey)
+	m = updated.(Model)
+	if cmd != nil || m.mode != modeDetail || m.detail.ticket.ID != focus {
+		t.Fatalf("constrained focus open = mode %v ticket %q cmd %v, want Detail/%q/no command",
+			m.mode, m.detail.ticket.ID, cmd, focus)
+	}
+}
+
+func TestDenseFrontierLegendUsesOnlySlackBelowInspection(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "T-1", Key: "#1", Title: "dependent", Status: model.StatusTodo},
+		{ID: "T-2", Key: "#2", Title: "blocker", Status: model.StatusTodo},
+	}
+	m := cachedFrontierModel(t, tickets, map[model.TicketID][]model.Link{
+		"T-1": blockedBy("T-2"), "T-2": nil,
+	}, 120, 40, nil)
+	updated, _ := m.Update(keyPress("V"))
+	m = updated.(Model)
+	m.legendVisible = true
+	visible := ansi.Strip(m.View().Content)
+	inspection := strings.Index(visible, "ACTIONABLE")
+	legend := strings.Index(visible, "Legend · L hide")
+	if inspection < 0 || legend <= inspection {
+		t.Fatalf("dense legend is not strictly below complete inspection: inspection=%d legend=%d\n%s",
+			inspection, legend, visible)
+	}
+	for _, want := range []string{
+		"┫ — non-actionable — not Todo or has known unfinished blockers",
+		"━ — actionable — Todo with all known blockers satisfied",
+		"Key colour — Tracker Status Category; glyph shape is Frontier state",
+	} {
+		if !strings.Contains(visible, want) {
+			t.Errorf("dense legend lacks %q:\n%s", want, visible)
+		}
+	}
+	for _, fullCardOnly := range []string{"light border", "double border", "dashed border", "status border"} {
+		if strings.Contains(visible[legend:], fullCardOnly) {
+			t.Errorf("dense legend describes nonexistent %q:\n%s", fullCardOnly, visible)
+		}
+	}
+	if got := lipgloss.Height(m.View().Content); got != m.height {
+		t.Errorf("legend frame height = %d, want %d", got, m.height)
+	}
+
+	m.frontier.offsetX = 1
+	if strings.Contains(ansi.Strip(m.View().Content), "Legend · L hide") {
+		t.Error("dense legend rendered while chip plane was scrolled")
+	}
+}
+
 func TestFrontierRebuildPreservesFocusedEmptyIDMember(t *testing.T) {
 	tickets := []model.Ticket{
 		{Key: "BROKEN-0", Title: "anonymous", Status: model.StatusTodo},
@@ -3995,7 +4435,8 @@ func TestFrontierRefusalDisablesEveryGraphInputAndKeepsEscapeBindings(t *testing
 		}
 	}
 	for name, binding := range map[string]key.Binding{
-		"toggle": effective.Toggle, "mouse-toggle": effective.ToggleMouse, "help": effective.Help, "quit": effective.Quit,
+		"toggle": effective.Toggle, "density": effective.Density,
+		"mouse-toggle": effective.ToggleMouse, "help": effective.Help, "quit": effective.Quit,
 	} {
 		if !binding.Enabled() {
 			t.Errorf("refusal escape binding %s is disabled", name)
@@ -4013,7 +4454,28 @@ func TestFrontierRefusalDisablesEveryGraphInputAndKeepsEscapeBindings(t *testing
 		}
 	}
 
-	updated, _ := m.Update(keyPress("?"))
+	fullRefusal := cachedFrontierModel(t, tickets, links, 120, 40, nil)
+	beforeEpoch := fullRefusal.mouseEpoch
+	beforeLinks := len(fullRefusal.frontier.input.Links)
+	updated, cmd := fullRefusal.Update(keyPress("V"))
+	dense := updated.(Model)
+	if cmd == nil || dense.frontierDensity != frontierDensityDense || dense.frontier.refusal != nil ||
+		!dense.frontierShowsCanvas() || len(dense.frontier.layout.cells) == 0 {
+		t.Fatalf("explicit dense selection from full refusal = density %v refusal %v canvas %t rows %d cmd %v",
+			dense.frontierDensity, dense.frontier.refusal, dense.frontierShowsCanvas(), len(dense.frontier.layout.cells), cmd)
+	}
+	if dense.mouseEpoch != beforeEpoch+1 || len(dense.frontier.input.Links) != beforeLinks || dense.detailFanoutInflight != 0 {
+		t.Errorf("density admission changed epoch/evidence/fanout = %d/%d/%d, want %d/%d/0",
+			dense.mouseEpoch, len(dense.frontier.input.Links), dense.detailFanoutInflight, beforeEpoch+1, beforeLinks)
+	}
+	updated, _ = dense.Update(keyPress("V"))
+	fullAgain := updated.(Model)
+	if fullAgain.frontierDensity != frontierDensityFull || fullAgain.frontier.refusal == nil {
+		t.Errorf("full re-selection did not independently restore refusal: density %v refusal %v",
+			fullAgain.frontierDensity, fullAgain.frontier.refusal)
+	}
+
+	updated, _ = m.Update(keyPress("?"))
 	m = updated.(Model)
 	if !m.help.ShowAll || strings.Contains(m.help.View(m.helpKeys()), "open Ticket") ||
 		strings.Contains(m.help.View(m.helpKeys()), "re-read Details") {
@@ -4106,7 +4568,7 @@ func TestFrontierGhostGrowthUsesCoalescedAndFinalAdmission(t *testing.T) {
 		graph := model.BuildBlockingGraph(tickets, candidateLinks, m.frontier.input.Capabilities)
 		nodes := frontierNodes(graph, tickets, false)
 		inner := m.frontierCanvasRect()
-		projection := projectFrontierRanks(graph, nodes, inner.W)
+		projection := projectFrontierRanks(graph, nodes, inner.W, frontierDensityFull)
 		direction := frontierDirectionAfterResize(m.frontier.direction, projection.candidates, inner.W, inner.H)
 		if refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(graph.Ghosts())) != nil {
 			grownLinks = candidateLinks
@@ -4171,7 +4633,7 @@ func TestFrontierRefusalCanAdmitAfterResizeAndSmallerReseat(t *testing.T) {
 	for width := 3; width < m.width; width++ {
 		inner := frontierInnerRect(width, m.frontierBodyHeight())
 		projection := projectFrontierRanks(m.frontier.graph,
-			frontierNodes(m.frontier.graph, tickets, true), inner.W)
+			frontierNodes(m.frontier.graph, tickets, true), inner.W, frontierDensityFull)
 		direction := frontierDirectionAfterResize(m.frontier.direction, projection.candidates, inner.W, inner.H)
 		if projection.candidates[direction].withinCellLimit(frontierCanvasCellLimit) {
 			targetWidth = width

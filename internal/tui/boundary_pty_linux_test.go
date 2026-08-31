@@ -163,11 +163,42 @@ func TestFrontierCanvasLimitThroughRawPTY(t *testing.T) {
 	}
 }
 
+func TestDenseFrontierThroughRawPTY(t *testing.T) {
+	for _, size := range []struct {
+		name          string
+		width, height int
+	}{
+		{name: "ordinary", width: 120, height: 40},
+		{name: "narrow", width: 60, height: 20},
+		{name: "tiny", width: 42, height: 28},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			raw := runFrontierLimitPTYSession(t, size.width, size.height, "dense")
+			output := string(raw)
+			visible := ansi.Strip(output)
+			normalized := strings.Join(strings.Fields(visible), " ")
+			for _, want := range []string{
+				"━ S-1", "┈ SAFE-GHOST", frontierLimitSafeCardMarker,
+				"SAFE-RETURN", "frontier",
+			} {
+				if !strings.Contains(normalized, want) {
+					t.Errorf("%s dense PTY output lost %q:\n%s", size.name, want, visible)
+				}
+			}
+			if strings.Contains(visible, "canvas refused") {
+				t.Errorf("%s dense PTY unexpectedly refused its canvas:\n%s", size.name, visible)
+			}
+			assertFrontierPTYTerminalModes(t, output)
+		})
+	}
+}
+
 func assertFrontierPTYTerminalModes(t *testing.T, output string) {
 	t.Helper()
 	assertTerminalModePair(t, output, ansi.SetModeAltScreenSaveCursor, ansi.ResetModeAltScreenSaveCursor)
 	assertTerminalModePair(t, output, ansi.SetModeMouseButtonEvent, ansi.ResetModeMouseButtonEvent)
 	assertTerminalModePair(t, output, ansi.SetModeMouseExtSgr, ansi.ResetModeMouseExtSgr)
+	assertTerminalModePair(t, output, ansi.SetModeFocusEvent, ansi.ResetModeFocusEvent)
 }
 
 func TestFrontierCanvasLimitPTYHelper(t *testing.T) {
@@ -204,7 +235,7 @@ func frontierLimitPTYOptions(fixture string) Options {
 			}
 			details[id] = detail
 		}
-	case "safe":
+	case "safe", "dense":
 		tickets := []model.Ticket{
 			{ID: "S-0", Key: "S-0", Title: "safe root", Status: model.StatusDone},
 			{ID: "S-1", Key: "S-1", Title: "safe dependent", Status: model.StatusTodo},
@@ -600,7 +631,7 @@ func runFrontierLimitPTYSession(t *testing.T, width, height int, fixture string)
 			"r", "j", "k", "h", "l", "\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F", "g", "G", "\r",
 			"\x1b[<0;10;10M", "\x1b[<65;10;10M", "?")
 		output = waitForPTYScreenMarker(t, chunks, output, width, height,
-			"m release · shift-drag to select text v/esc list ? help L legend q quit")
+			"m release · shift-drag to select text v/esc list V dense/full cards ? help L legend q quit")
 		writeFrontierPTYInput(t, master, "?")
 		output = waitForPTYScreenMarker(t, chunks, output, width, height, "v/esc list •")
 		writeFrontierPTYInput(t, master, "m")
@@ -626,6 +657,23 @@ func runFrontierLimitPTYSession(t *testing.T, width, height int, fixture string)
 		output = waitForPTYRawMarkerCount(t, chunks, output, ansi.SetModeMouseButtonEvent, 2)
 		writeFrontierPTYInput(t, master, "v")
 		output = waitForPTYMarkerCount(t, chunks, output, "TODO (2)", 2)
+		writeFrontierPTYInput(t, master, "\r")
+		output = waitForFrontierPTYMarker(t, chunks, output, "SAFE-RETURN")
+	case "dense":
+		output = waitForFrontierPTYMarker(t, chunks, output, "SAFE-CARD")
+		writeFrontierPTYInput(t, master, "?")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "v compute actionability")
+		writeFrontierPTYInput(t, master, "?")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "•")
+		writeFrontierPTYInput(t, master, "V")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "━ S-1")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "┈ SAFE-GHOST")
+		writeFrontierPTYInput(t, master, "V")
+		output = waitForFrontierPTYMarker(t, chunks, output, frontierLimitSafeCardMarker)
+		writeFrontierPTYInput(t, master, "V")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "━ S-1")
+		writeFrontierPTYInput(t, master, "v")
+		output = waitForPTYScreenMarker(t, chunks, output, width, height, "SAFE-CARD")
 		writeFrontierPTYInput(t, master, "\r")
 		output = waitForFrontierPTYMarker(t, chunks, output, "SAFE-RETURN")
 	default:

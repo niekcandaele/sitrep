@@ -97,6 +97,9 @@ type Model struct {
 	// frontier is the Frontier screen's own state. Like detailState it is seated
 	// whole; the list's state is never consulted to draw it.
 	frontier frontierState
+	// frontierDensity is the session-local manual presentation preference. The
+	// zero value is full cards; reseating frontierState never resets it.
+	frontierDensity frontierDensity
 	// frontierGeneration rejects answers from a Frontier seat that has been
 	// left or replaced. Its generation-scoped context separately cancels the
 	// Provider work; the generation remains the correctness guard when a
@@ -719,10 +722,12 @@ func (m Model) reseatFrontier() (Model, tea.Cmd) {
 	m = m.retireFrontierFanout()
 	m.mouseEpoch++
 	m.frontier = frontierState{
-		input:   FrontierFromList(m.input, m.linksFromCache()),
-		focusID: previous.focusID,
-		offsetX: previous.offsetX,
-		offsetY: previous.offsetY,
+		input:              FrontierFromList(m.input, m.linksFromCache()),
+		focusID:            previous.focusID,
+		hasFocus:           previous.hasFocus,
+		retainRefusedFocus: previous.retainRefusedFocus,
+		offsetX:            previous.offsetX,
+		offsetY:            previous.offsetY,
 	}
 	// A read that failed is still failed, so the footer keeps saying so and
 	// keeps pointing at r. Dropping the record because the Watchlist was read
@@ -871,6 +876,7 @@ func (m Model) rebuildRows() Model {
 	m.keys.ClearFilter.SetEnabled(m.filter.Active())
 	// The Frontier is offered only when there is a Watchlist to draw.
 	m.keys.Frontier.SetEnabled(m.hasData)
+	m.keys.DenseFrontier.SetEnabled(m.hasData)
 
 	m.rows = BuildRows(m.visibleTickets())
 
@@ -973,6 +979,10 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Open):
 		return m.openDetail()
+
+	case key.Matches(msg, m.keys.DenseFrontier):
+		m.frontierDensity = frontierDensityDense
+		return m.enterFrontier()
 
 	case key.Matches(msg, m.keys.Frontier):
 		return m.enterFrontier()

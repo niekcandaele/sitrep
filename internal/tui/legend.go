@@ -44,12 +44,20 @@ var legendCatalog = map[legendFact]legendDefinition{
 }
 
 func legendLines(facts []legendFact, cycles [][]model.TicketID, keys map[model.TicketID]string, width int) []string {
-	if width <= 0 || len(facts) == 0 {
+	definitions := make([]legendDefinition, 0, len(facts))
+	for _, fact := range facts {
+		definitions = append(definitions, legendCatalog[fact])
+	}
+	return legendDefinitionLines(definitions, cycles, keys, width)
+}
+
+func legendDefinitionLines(definitions []legendDefinition, cycles [][]model.TicketID,
+	keys map[model.TicketID]string, width int) []string {
+	if width <= 0 || len(definitions) == 0 {
 		return nil
 	}
 	lines := []string{"Legend · L hide"}
-	for _, fact := range facts {
-		definition := legendCatalog[fact]
+	for _, definition := range definitions {
 		lines = append(lines, definition.name+" — "+definition.description)
 	}
 	for i, cycle := range cycles {
@@ -84,6 +92,18 @@ func frontierLegendKeysForNodes(nodes []frontierNode) map[model.TicketID]string 
 	for _, node := range nodes {
 		if _, exists := keys[node.id]; !exists || node.member {
 			keys[node.id] = node.key
+		}
+	}
+	return keys
+}
+
+func frontierLegendKeysForLayout(layout frontierLayout) map[model.TicketID]string {
+	keys := make(map[model.TicketID]string, len(layout.order))
+	for _, id := range layout.order {
+		if node, ok := layout.nodes[id]; ok {
+			if _, exists := keys[node.id]; !exists || node.member {
+				keys[node.id] = node.key
+			}
 		}
 	}
 	return keys
@@ -187,6 +207,63 @@ func allFrontierLegendFacts(f frontierState) []legendFact {
 		}
 	}
 	return facts
+}
+
+func frontierDenseLegendDefinition(state frontierDenseState) legendDefinition {
+	name := string(state.glyph())
+	switch state {
+	case frontierDensePending:
+		return legendDefinition{name, "pending — waiting for complete Links evidence"}
+	case frontierDenseCycle:
+		return legendDefinition{name, "cycle — cyclic blocking evidence"}
+	case frontierDenseLinksFailed:
+		return legendDefinition{name, "Links failed — retryable Links read failure"}
+	case frontierDenseUnknown:
+		return legendDefinition{name, "unknown — unresolved or anonymous blocker evidence"}
+	case frontierDenseNonActionable:
+		return legendDefinition{name, "non-actionable — not Todo or has known unfinished blockers"}
+	case frontierDenseActionable:
+		return legendDefinition{name, "actionable — Todo with all known blockers satisfied"}
+	default:
+		return legendDefinition{name, "outside Watchlist — linked Ticket outside this Watchlist"}
+	}
+}
+
+func frontierDenseLegendLinesForLayout(layout frontierLayout, cycles [][]model.TicketID,
+	keys map[model.TicketID]string, width int) []string {
+	if len(layout.order) == 0 {
+		return nil
+	}
+	seen := [frontierDenseStateCount]bool{}
+	for _, id := range layout.order {
+		if node, ok := layout.nodes[id]; ok {
+			seen[frontierDenseStateFor(node)] = true
+		}
+	}
+	return frontierDenseLegendLinesForStates(seen, cycles, keys, width)
+}
+
+func frontierDenseLegendLinesForStates(seen [frontierDenseStateCount]bool,
+	cycles [][]model.TicketID, keys map[model.TicketID]string, width int) []string {
+	order := [...]frontierDenseState{
+		frontierDensePending,
+		frontierDenseCycle,
+		frontierDenseLinksFailed,
+		frontierDenseUnknown,
+		frontierDenseNonActionable,
+		frontierDenseActionable,
+		frontierDenseOutsideWatchlist,
+	}
+	definitions := make([]legendDefinition, 0, len(order)+1)
+	for _, state := range order {
+		if seen[state] {
+			definitions = append(definitions, frontierDenseLegendDefinition(state))
+		}
+	}
+	definitions = append(definitions, legendDefinition{
+		name: "Key colour", description: "Tracker Status Category; glyph shape is Frontier state",
+	})
+	return legendDefinitionLines(definitions, cycles, keys, width)
 }
 
 func frontierCyclesForLegend(f frontierState) [][]model.TicketID {
