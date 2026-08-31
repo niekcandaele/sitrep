@@ -6,12 +6,14 @@
 //
 // The interface is split by view, not by entity (ADR-0003). Resolve is the
 // cheap batched hot path: one logical read returning a Watchlist's lightweight
-// Tickets, re-run on every refresh. FetchDetail is the lazy per-ticket call made
-// only when a human opens a Ticket. Detail data — descriptions, comments, links
-// — must never migrate into Resolve's result, however convenient it looks: a
-// list refresh that drags full descriptions along turns one request into N and
-// is exactly what this split exists to prevent. If a view seems to need Detail
-// while listing, that is a FetchDetail call, not a wider Ticket.
+// Tickets, re-run on every refresh. Detail data is lazy: FetchDetail reads one
+// Ticket for drill-in, while FetchDetails serves an explicit whole-Watchlist
+// request and may use FetchDetail as its generic fallback. Descriptions,
+// comments, and links must never migrate into Resolve's result, however
+// convenient it looks: a list refresh that drags full descriptions along turns
+// one request into N and is exactly what this split exists to prevent. If a view
+// seems to need Detail while listing, use the explicit Detail methods rather
+// than widening Ticket.
 //
 // A Resolve answers what the Selector points at, whatever that turns out to be.
 // A Ref naming a plain Ticket comes back as a snapshot with no Tickets, carrying
@@ -136,13 +138,15 @@ type Provider interface {
 	// selector. A REST Provider may make multiple HTTP requests inside that one
 	// invocation. Selectors are constructed after Ref resolution and reused on
 	// every poll, so implementations must not repeat cwd git or Profile work.
-	// Every returned Ticket is thin list data; FetchDetail remains the only Detail
-	// path. Implementations return Tickets in stable Selector order and leave the
-	// snapshot's FetchedAt zero for the caller to stamp.
+	// Every returned Ticket is thin list data; Detail reads remain exclusive
+	// to FetchDetail and FetchDetails. Implementations return Tickets in stable
+	// Selector order and leave the snapshot's FetchedAt zero for the caller to
+	// stamp.
 	Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error)
 
-	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
-	// called only on drill-in, never during a list refresh.
+	// FetchDetail returns the expensive per-ticket data for one Ticket. Drill-in
+	// calls it directly, and the generic FetchDetails fallback calls it for each
+	// canonical ID. Neither path runs during a list refresh.
 	FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error)
 
 	// FetchDetails returns expensive Detail data for requested Tickets. It may

@@ -151,6 +151,26 @@ func TestFetchDetailSendsThreeRequestsAndDiscoversLinkTypesOnce(t *testing.T) {
 	}
 }
 
+func TestFetchDetailsUsesTheSingularFallback(t *testing.T) {
+	s := fullDetail(t)
+	details, err := newProvider(s).FetchDetails(t.Context(), []model.TicketID{"", "ABC-12", "ABC-12"})
+	if err != nil {
+		t.Fatalf("FetchDetails: %v", err)
+	}
+	if len(details) != 1 || details["ABC-12"].TicketID != "ABC-12" {
+		t.Errorf("Details = %+v, want one canonical ABC-12 result", details)
+	}
+	if got := len(s.requestsTo(ticketPath)); got != 1 {
+		t.Errorf("issue reads = %d, want one singular Detail read", got)
+	}
+	if got := len(s.requestsTo(commentsPath)); got != 1 {
+		t.Errorf("comment reads = %d, want one singular Detail read", got)
+	}
+	if got := len(s.requestsTo(linkTypePath)); got != 1 {
+		t.Errorf("link type discoveries = %d, want one", got)
+	}
+}
+
 func TestFetchDetailFailures(t *testing.T) {
 	tests := []struct {
 		name string

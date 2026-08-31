@@ -162,6 +162,25 @@ func TestRunCancellationEmitsCompletedSuccessesOnly(t *testing.T) {
 	}
 }
 
+func TestRunCancellationRejectsContradictoryResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	boom := errors.New("failed after producing a Detail")
+	var outcomes []detailfanout.Outcome
+	err := detailfanout.Run(ctx, func(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		cancel()
+		return map[model.TicketID]model.Detail{"a": {TicketID: "a"}}, model.Capabilities{}, &provider.DetailFailures{
+			Failures: map[model.TicketID]error{"a": boom},
+		}
+	}, []model.TicketID{"a"}, func(o detailfanout.Outcome) { outcomes = append(outcomes, o) })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if len(outcomes) != 0 {
+		t.Errorf("outcomes = %+v, want contradictory Detail omitted during cancellation", outcomes)
+	}
+}
+
 func TestFromProviderPassesCompleteSliceOnce(t *testing.T) {
 	p := &pluralSpy{}
 	f := detailfanout.FromProvider(p)

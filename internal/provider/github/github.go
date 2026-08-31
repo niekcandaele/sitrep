@@ -474,8 +474,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return newDetail(*resp.Data.Node), nil
 }
 
-// FetchDetails delegates to the generic sequential fallback. #112 owns a
-// GitHub-native batch implementation.
+// FetchDetails delegates to the generic sequential fallback.
 func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
 	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
 }

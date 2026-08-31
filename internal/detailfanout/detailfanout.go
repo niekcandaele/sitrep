@@ -58,8 +58,8 @@ type Outcome struct {
 	Err    error
 }
 
-// Parallelism remains the Frontier scheduler's shared-slot budget. Run no
-// longer owns singular workers; the TUI consumes this constant independently.
+// Parallelism is the Frontier scheduler's shared-slot budget. Run uses plural
+// Provider transport and does not consume this constant.
 const Parallelism = 4
 
 // UnreadableLinksNotice describes how unreadable member Links constrain the
@@ -92,7 +92,11 @@ func Run(ctx context.Context, f Fetch, ids []model.TicketID, emit func(Outcome))
 		details = map[model.TicketID]model.Detail{}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		failures, _ := detailFailures(err)
 		for _, id := range ids {
+			if _, failed := failures[id]; failed {
+				continue
+			}
 			if detail, ok := details[id]; ok && detail.TicketID == id {
 				emit(Outcome{ID: id, Detail: detail, Caps: caps})
 			}
