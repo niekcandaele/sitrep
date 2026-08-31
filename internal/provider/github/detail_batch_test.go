@@ -320,6 +320,7 @@ func TestFetchDetailsFailsClosedOnMalformedOrMismatchedData(t *testing.T) {
 	validB := detailNodeJSON(string(ids[1]), "success")
 	tests := []struct {
 		name            string
+		body            string
 		data            map[string]any
 		wantSuccess     bool
 		wantKind        provider.Kind
@@ -327,7 +328,9 @@ func TestFetchDetailsFailsClosedOnMalformedOrMismatchedData(t *testing.T) {
 		wantAllFailures bool
 		forbiddenMapKey model.TicketID
 	}{
-		{name: "missing alias", data: map[string]any{"detail0": validA}, wantSuccess: true, wantKind: provider.KindBadRef, wantFailureText: "no ticket found"},
+		{name: "missing data envelope", body: `{}`, wantKind: provider.KindUnavailable, wantFailureText: "missing data alias", wantAllFailures: true},
+		{name: "null data envelope", data: nil, wantKind: provider.KindUnavailable, wantFailureText: "missing data alias", wantAllFailures: true},
+		{name: "missing alias", data: map[string]any{"detail0": validA}, wantSuccess: true, wantKind: provider.KindUnavailable, wantFailureText: "missing data alias"},
 		{name: "null node", data: map[string]any{"detail0": validA, "detail1": nil}, wantSuccess: true, wantKind: provider.KindBadRef, wantFailureText: "no ticket found"},
 		{name: "non-Issue node", data: map[string]any{"detail0": validA, "detail1": map[string]any{"__typename": "PullRequest"}}, wantSuccess: true, wantKind: provider.KindBadRef, wantFailureText: "no ticket found"},
 		{
@@ -344,7 +347,11 @@ func TestFetchDetailsFailsClosedOnMalformedOrMismatchedData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newReplayServer(t, response{body: detailBatchBody(t, tt.data, nil)})
+			body := tt.body
+			if body == "" {
+				body = detailBatchBody(t, tt.data, nil)
+			}
+			s := newReplayServer(t, response{body: body})
 			details, err := newProvider(s).FetchDetails(t.Context(), ids)
 			failedIDs := ids[1:]
 			if tt.wantAllFailures {
@@ -391,6 +398,7 @@ func TestFetchDetailsResponseWideFailuresCoverEveryChunkID(t *testing.T) {
 		response response
 		kind     provider.Kind
 		contains string
+		wantID   bool
 	}{
 		{name: "auth status", response: response{status: http.StatusUnauthorized, body: `{}`}, kind: provider.KindAuth, contains: "authentication failed"},
 		{
@@ -403,6 +411,24 @@ func TestFetchDetailsResponseWideFailuresCoverEveryChunkID(t *testing.T) {
 			name:     "pathless GraphQL error",
 			response: response{body: detailBatchBody(t, valid, []map[string]any{{"type": "FORBIDDEN", "message": "pathless refusal"}})},
 			kind:     provider.KindAuth, contains: "pathless refusal",
+		},
+		{
+			name: "alias NOT_FOUND cannot mask pathless rate limit",
+			response: response{
+				body: detailBatchBody(t, valid, []map[string]any{
+					{"type": "NOT_FOUND", "message": "local miss", "path": []any{"detail0"}},
+					{"type": "RATE_LIMITED", "message": "global rate limit"},
+				}),
+				headers: map[string]string{"x-ratelimit-reset": "1767225600"},
+			},
+			kind: provider.KindRateLimit, contains: "rate limit exceeded",
+		},
+		{
+			name: "unknown alias NOT_FOUND is malformed",
+			response: response{body: detailBatchBody(t, valid, []map[string]any{{
+				"type": "NOT_FOUND", "message": "unattributable miss", "path": []any{"detail99"},
+			}})},
+			kind: provider.KindUnavailable, contains: "unattributable NOT_FOUND", wantID: true,
 		},
 		{
 			name:     "malformed GraphQL path",
@@ -431,6 +457,9 @@ func TestFetchDetailsResponseWideFailuresCoverEveryChunkID(t *testing.T) {
 				}
 				if !strings.Contains(failure.Error(), tt.contains) {
 					t.Errorf("failure[%q] = %q, want %q", id, failure, tt.contains)
+				}
+				if tt.wantID && !strings.Contains(failure.Error(), string(id)) {
+					t.Errorf("failure[%q] = %q, want requested ID in malformed-response diagnostic", id, failure)
 				}
 			}
 			if got := len(s.recorded()); got != 1 {
