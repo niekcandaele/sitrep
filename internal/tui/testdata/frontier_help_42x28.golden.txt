@@ -3,7 +3,7 @@ frontier · 16 nodes · 3 ghosts ·… just now
 
 
  ─────────┐  ┌──────────────────────────┐
-‹     Todo│─▶│▸ #207         In Progress│
+‹     Todo│━▶│▸ #207         In Progress│
  er into …│  │Rewrite the placement heu…│
                      ▼
                           x 82/82 · y 0/57

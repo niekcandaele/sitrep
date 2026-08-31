@@ -3,13 +3,13 @@ frontier · 16 nodes · 3 ghosts · 3 actionable                                
 
 
  ┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌───────────────────────
- │  #205                Done│─┼───▶┃▸ #201                Todo┃─▶│  #202                Todo│─▶│  #207         In Progr
- │Compute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement h
- │                          │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by
- └──────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └───────────────────────
-                              │
- ┌──────────────────────────┐ │    ┌──────────────────────────┐
- │  #206           Cancelled│─┘┌──▶│  #203                Todo│
+ │  #205                Done│━╋━━━▶┃▸ #201                Todo┃━▶│  #202                Todo│─▶│  #207         In Progr
+ │Compute shard weights     │ ┃    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement h
+ │                          │ ┃    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by
+ └──────────────────────────┘ ┃    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └───────────────────────
+                              ┃
+ ┌──────────────────────────┐ ┃    ┌──────────────────────────┐
+ │  #206           Cancelled│━┛┌──▶│  #203                Todo│
  │Legacy weight table       │  │   │Backfill shard weights    │
  │                          │  │   │blocked by 1              │
  └──────────────────────────┘  │   └──────────────────────────┘

@@ -71,9 +71,14 @@ type frontierStyle struct {
 // cell outside the canvas has a valid style without a special case.
 const frontierBlankStyle = 0
 
-// frontierMarkerStyle is the render-time sentinel for the focus marker, which
-// the layout does not own.
-const frontierMarkerStyle = -1
+const (
+	// frontierMarkerStyle is the render-time sentinel for the focus marker, which
+	// the layout does not own.
+	frontierMarkerStyle = -1
+	// frontierFocusedEdgeStyle is the render-time sentinel for incident edge
+	// geometry. Its heavy glyph substitution survives monochrome and ANSI stripping.
+	frontierFocusedEdgeStyle = -2
+)
 
 // frontierCell is one canvas cell: what to draw, which style-table entry to
 // draw it with, and which of the layout's URLs it hyperlinks to.
@@ -120,6 +125,12 @@ type frontierLayout struct {
 	// occupy columns or rows.
 	rankOf map[model.TicketID]int
 	peerOf map[model.TicketID]int
+	// routes retain compact endpoint identity and ranges into the selected
+	// candidate's single stroke arena. The incident index preserves canonical
+	// route order for render-only focus.
+	routes   []frontierRoute
+	strokes  []frontierStroke
+	incident map[model.TicketID][]frontierRouteID
 	// candidates retain the two allocation-free measurements used by resize
 	// hysteresis. Only the direction below has cells materialized.
 	candidates    [2]frontierLayoutCandidate
@@ -293,17 +304,19 @@ func anonymousBlockers(a model.Actionability) int {
 	return n
 }
 
-// frontierEdge is one drawn blocking relation over node indices: from is
-// BlockedBy to. BuildBlockingGraph already deduplicated on (blocked, blocker)
-// and already folded Blocks Links into this direction, so nothing here dedupes
-// again and nothing here reads Detail.Links.
+// frontierEdge is one drawn blocking relation over displayed node indices.
+// BuildBlockingGraph deduplicates graph-node pairs before duplicate Ticket IDs
+// collapse onto their first displayed node, so frontierEdges deduplicates again
+// after that mapping. Blocks Links are already folded into this direction, and
+// nothing here reads Detail.Links.
 type frontierEdge struct {
-	from, to int
+	dependent, blocker int
 }
 
 // frontierEdges collects the drawable edges in canonical order — members in
 // Watchlist order then Ghosts in theirs, each node's Blockers in order — which
-// is the only tie-break the layout below uses.
+// is the only tie-break the layout below uses. The first occurrence of a
+// displayed semantic relation wins when duplicate members collapse together.
 //
 // Ghosts are walked because a Ghost reached as a dependent — a member's Blocks
 // Link pointing out of the Watchlist — carries its edge on the Ghost's own
@@ -311,8 +324,9 @@ type frontierEdge struct {
 // what the Watchlist read.
 func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []frontierEdge {
 	var edges []frontierEdge
+	seen := make(map[frontierEdge]struct{})
 	collect := func(id model.TicketID, blockers []model.Blocker) {
-		from, ok := index[id]
+		dependent, ok := index[id]
 		if !ok {
 			return
 		}
@@ -323,13 +337,18 @@ func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []fronti
 			if b.Target.ID == "" {
 				continue
 			}
-			to, ok := index[b.Target.ID]
-			if !ok || to == from {
+			blocker, ok := index[b.Target.ID]
+			if !ok || blocker == dependent {
 				// A self-blocking Ticket routes nothing: it is a cycle of one and
 				// carries the CYCLE badge.
 				continue
 			}
-			edges = append(edges, frontierEdge{from: from, to: to})
+			edge := frontierEdge{dependent: dependent, blocker: blocker}
+			if _, duplicate := seen[edge]; duplicate {
+				continue
+			}
+			seen[edge] = struct{}{}
+			edges = append(edges, edge)
 		}
 	}
 	for _, a := range g.Members() {
@@ -357,11 +376,40 @@ func (d frontierRankDirection) other() frontierRankDirection {
 	return frontierRanksHorizontal
 }
 
+// frontierRouteID is one-based so a zero-valued segment or dummy cannot
+// accidentally claim the first canonical route.
+type frontierRouteID uint32
+
+// frontierPoint and frontierStroke retain ordered, axis-aligned physical
+// geometry without attaching ownership to canvas cells.
+type frontierPoint struct {
+	x, y int
+}
+
+type frontierStroke struct {
+	from, to frontierPoint
+}
+
+// frontierRoute is one canonical blocker-to-dependent relation. Its geometry is
+// an owned range in frontierLayout.strokes; strokeCapacity reserves the proven
+// 7*rankSpan-1 routing bound without a per-route backing allocation.
+type frontierRoute struct {
+	blocker, dependent                       model.TicketID
+	strokeStart, strokeCount, strokeCapacity int
+}
+
+// A local gutter segment emits at most six strokes. Each intermediate dummy
+// adds one, so a route spanning k ranks needs at most 6k+(k-1) slots.
+func frontierRouteStrokeCapacity(rankSpan int) int {
+	return 7*rankSpan - 1
+}
+
 // frontierSlot is one peer slot in a rank: a real node, or a pass-through
 // waypoint carrying an edge across a rank it does not stop in.
 type frontierSlot struct {
-	node  int
-	dummy bool
+	node    int
+	dummy   bool
+	routeID frontierRouteID
 }
 
 // frontierSegment is one edge segment between adjacent ranks, resolved to the
@@ -371,6 +419,7 @@ type frontierSegment struct {
 	// blockerPeer is in the earlier rank and dependentPeer in the rank
 	// immediately after it. Direction maps that relation onto a physical axis.
 	blockerPeer, dependentPeer int
+	routeID                    frontierRouteID
 }
 
 // frontierRankPlan is the one deterministic, allocation-bearing graph plan.
@@ -379,6 +428,8 @@ type frontierRankPlan struct {
 	ranks    []int
 	slots    [][]frontierSlot
 	segments [][]frontierSegment
+	routes   []frontierRoute
+	incident map[model.TicketID][]frontierRouteID
 	peers    int
 }
 
@@ -425,6 +476,7 @@ func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRank
 		ranks:    ranks,
 		slots:    make([][]frontierSlot, rankCount),
 		segments: make([][]frontierSegment, rankCount),
+		incident: make(map[model.TicketID][]frontierRouteID, len(nodes)),
 	}
 	peerOf := make([]int, len(nodes))
 	for i := range nodes {
@@ -433,24 +485,37 @@ func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRank
 		plan.slots[rank] = append(plan.slots[rank], frontierSlot{node: i})
 	}
 	for _, edge := range edges {
-		dependentRank, blockerRank := ranks[edge.from], ranks[edge.to]
+		dependentRank, blockerRank := ranks[edge.dependent], ranks[edge.blocker]
 		if dependentRank <= blockerRank {
 			// Both ends share an SCC rank. The CYCLE badge reports that relation;
 			// there is no acyclic rank direction left to route.
 			continue
 		}
-		peer := peerOf[edge.from]
-		for rank := dependentRank - 1; rank > blockerRank; rank-- {
-			next := len(plan.slots[rank])
-			plan.slots[rank] = append(plan.slots[rank], frontierSlot{dummy: true})
-			plan.segments[rank] = append(plan.segments[rank], frontierSegment{
-				blockerPeer: next, dependentPeer: peer,
-			})
-			peer = next
-		}
-		plan.segments[blockerRank] = append(plan.segments[blockerRank], frontierSegment{
-			blockerPeer: peerOf[edge.to], dependentPeer: peer,
+
+		routeID := frontierRouteID(len(plan.routes) + 1)
+		blockerID, dependentID := nodes[edge.blocker].id, nodes[edge.dependent].id
+		plan.routes = append(plan.routes, frontierRoute{
+			blocker:        blockerID,
+			dependent:      dependentID,
+			strokeCapacity: frontierRouteStrokeCapacity(dependentRank - blockerRank),
 		})
+		plan.incident[blockerID] = append(plan.incident[blockerID], routeID)
+		plan.incident[dependentID] = append(plan.incident[dependentID], routeID)
+
+		blockerPeer := peerOf[edge.blocker]
+		for rank := blockerRank; rank < dependentRank; rank++ {
+			dependentPeer := peerOf[edge.dependent]
+			if rank+1 < dependentRank {
+				dependentPeer = len(plan.slots[rank+1])
+				plan.slots[rank+1] = append(plan.slots[rank+1], frontierSlot{
+					dummy: true, routeID: routeID,
+				})
+			}
+			plan.segments[rank] = append(plan.segments[rank], frontierSegment{
+				blockerPeer: blockerPeer, dependentPeer: dependentPeer, routeID: routeID,
+			})
+			blockerPeer = dependentPeer
+		}
 	}
 	for _, rank := range plan.slots {
 		plan.peers = max(plan.peers, len(rank))
@@ -506,6 +571,7 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 		nodeAt:    make(map[model.TicketID]frontierRect, len(nodes)),
 		rankOf:    make(map[model.TicketID]int, len(nodes)),
 		peerOf:    make(map[model.TicketID]int, len(nodes)),
+		incident:  make(map[model.TicketID][]frontierRouteID, len(nodes)),
 		direction: opts.direction,
 	}
 	if len(nodes) == 0 {
@@ -521,6 +587,15 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 		owned := planFrontierRanks(g, nodes)
 		plan = &owned
 	}
+	l.routes = append(l.routes, plan.routes...)
+	strokeSlots := 0
+	for i := range l.routes {
+		l.routes[i].strokeStart = strokeSlots
+		l.routes[i].strokeCount = 0
+		strokeSlots += l.routes[i].strokeCapacity
+	}
+	l.strokes = make([]frontierStroke, strokeSlots)
+	l.incident = plan.incident
 	l.candidates = frontierCandidates(*plan, opts.innerWidth)
 	selected := l.candidates[opts.direction]
 	l.width, l.height = selected.width, selected.height
@@ -548,17 +623,6 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 	for rank, slots := range plan.slots {
 		for peer, slot := range slots {
 			if slot.dummy {
-				if opts.direction == frontierRanksHorizontal {
-					y := peer*frontierSlotHeight + 1
-					for x := range cardWidth {
-						l.merge(rankOrigin[rank]+x, y, '─', edgeStyle)
-					}
-				} else {
-					x := peer*cardWidth + cardWidth/2
-					for y := range frontierCardHeight {
-						l.merge(x, rankOrigin[rank]+y, '│', edgeStyle)
-					}
-				}
 				continue
 			}
 
@@ -584,6 +648,25 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 		} else {
 			l.routeVerticalGutter(plan.segments[rank], rankOrigin[rank]+frontierCardHeight-1,
 				rankOrigin[rank+1], cardWidth, edgeStyle)
+		}
+		// A long route crosses the next rank after entering its dummy slot. Drawing
+		// it here retains blocker-to-dependent stroke order without another route
+		// pass or any canvas-cell ownership.
+		for peer, slot := range plan.slots[rank+1] {
+			if !slot.dummy {
+				continue
+			}
+			if opts.direction == frontierRanksHorizontal {
+				y := peer*frontierSlotHeight + 1
+				l.mergeRouteStroke(slot.routeID,
+					frontierPoint{x: rankOrigin[rank+1], y: y},
+					frontierPoint{x: rankOrigin[rank+1] + cardWidth - 1, y: y}, '─', edgeStyle)
+			} else {
+				x := peer*cardWidth + cardWidth/2
+				l.mergeRouteStroke(slot.routeID,
+					frontierPoint{x: x, y: rankOrigin[rank+1]},
+					frontierPoint{x: x, y: rankOrigin[rank+1] + frontierCardHeight - 1}, '│', edgeStyle)
+			}
 		}
 	}
 	return l
@@ -666,10 +749,10 @@ func frontierRanks(g model.BlockingGraph, nodes []frontierNode,
 	// revisit a component. That is why layout terminates on cyclic input — not
 	// a guard someone has to remember to keep.
 	succ := make(map[int][]int, len(nodes))
-	for _, e := range edges {
-		from, to := component[e.from], component[e.to]
-		if from != to {
-			succ[from] = append(succ[from], to)
+	for _, edge := range edges {
+		dependent, blocker := component[edge.dependent], component[edge.blocker]
+		if dependent != blocker {
+			succ[dependent] = append(succ[dependent], blocker)
 		}
 	}
 
@@ -729,32 +812,44 @@ func (l *frontierLayout) routeHorizontalGutter(segments []frontierSegment, bx, d
 		by := segment.blockerPeer*frontierSlotHeight + 1
 		dy := segment.dependentPeer*frontierSlotHeight + 1
 		if by == dy {
-			for x := bx + 1; x <= dx-2; x++ {
-				l.merge(x, by, '─', style)
+			if bx+1 <= dx-2 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx + 1, y: by},
+					frontierPoint{x: dx - 2, y: by}, '─', style)
 			}
-			l.merge(dx-1, by, '▶', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx - 1, y: by},
+				frontierPoint{x: dx - 1, y: by}, '▶', style)
 			continue
 		}
 
 		cx := bx + 2 + next%channels
 		next++
-		for x := bx + 1; x <= cx-1; x++ {
-			l.merge(x, by, '─', style)
-		}
+		l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx + 1, y: by},
+			frontierPoint{x: cx - 1, y: by}, '─', style)
 		if dy > by {
-			l.merge(cx, by, '┐', style)
-			l.merge(cx, dy, '└', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: by},
+				frontierPoint{x: cx, y: by}, '┐', style)
+			if by+1 <= dy-1 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: by + 1},
+					frontierPoint{x: cx, y: dy - 1}, '│', style)
+			}
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: dy},
+				frontierPoint{x: cx, y: dy}, '└', style)
 		} else {
-			l.merge(cx, by, '┘', style)
-			l.merge(cx, dy, '┌', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: by},
+				frontierPoint{x: cx, y: by}, '┘', style)
+			if by-1 >= dy+1 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: by - 1},
+					frontierPoint{x: cx, y: dy + 1}, '│', style)
+			}
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: dy},
+				frontierPoint{x: cx, y: dy}, '┌', style)
 		}
-		for y := min(by, dy) + 1; y < max(by, dy); y++ {
-			l.merge(cx, y, '│', style)
+		if cx+1 <= dx-2 {
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx + 1, y: dy},
+				frontierPoint{x: dx - 2, y: dy}, '─', style)
 		}
-		for x := cx + 1; x <= dx-2; x++ {
-			l.merge(x, dy, '─', style)
-		}
-		l.merge(dx-1, dy, '▶', style)
+		l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx - 1, y: dy},
+			frontierPoint{x: dx - 1, y: dy}, '▶', style)
 	}
 }
 
@@ -767,32 +862,91 @@ func (l *frontierLayout) routeVerticalGutter(segments []frontierSegment, by, dy,
 		bx := segment.blockerPeer*cardWidth + cardWidth/2
 		dx := segment.dependentPeer*cardWidth + cardWidth/2
 		if bx == dx {
-			for y := by + 1; y <= dy-2; y++ {
-				l.merge(bx, y, '│', style)
+			if by+1 <= dy-2 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: by + 1},
+					frontierPoint{x: bx, y: dy - 2}, '│', style)
 			}
-			l.merge(bx, dy-1, '▼', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: dy - 1},
+				frontierPoint{x: bx, y: dy - 1}, '▼', style)
 			continue
 		}
 
 		cy := by + 2 + next%channels
 		next++
-		for y := by + 1; y <= cy-1; y++ {
-			l.merge(bx, y, '│', style)
-		}
+		l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: by + 1},
+			frontierPoint{x: bx, y: cy - 1}, '│', style)
 		if dx > bx {
-			l.merge(bx, cy, '└', style)
-			l.merge(dx, cy, '┐', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: cy},
+				frontierPoint{x: bx, y: cy}, '└', style)
+			if bx+1 <= dx-1 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx + 1, y: cy},
+					frontierPoint{x: dx - 1, y: cy}, '─', style)
+			}
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx, y: cy},
+				frontierPoint{x: dx, y: cy}, '┐', style)
 		} else {
-			l.merge(bx, cy, '┘', style)
-			l.merge(dx, cy, '┌', style)
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: cy},
+				frontierPoint{x: bx, y: cy}, '┘', style)
+			if bx-1 >= dx+1 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx - 1, y: cy},
+					frontierPoint{x: dx + 1, y: cy}, '─', style)
+			}
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx, y: cy},
+				frontierPoint{x: dx, y: cy}, '┌', style)
 		}
-		for x := min(bx, dx) + 1; x < max(bx, dx); x++ {
-			l.merge(x, cy, '─', style)
+		if cy+1 <= dy-2 {
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx, y: cy + 1},
+				frontierPoint{x: dx, y: dy - 2}, '│', style)
 		}
-		for y := cy + 1; y <= dy-2; y++ {
-			l.merge(dx, y, '│', style)
+		l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx, y: dy - 1},
+			frontierPoint{x: dx, y: dy - 1}, '▼', style)
+	}
+}
+
+func (l frontierLayout) routeStrokes(route frontierRoute) []frontierStroke {
+	end := route.strokeStart + route.strokeCount
+	limit := route.strokeStart + route.strokeCapacity
+	if route.strokeStart < 0 || route.strokeCount < 0 || route.strokeCount > route.strokeCapacity || limit > len(l.strokes) {
+		panic(fmt.Sprintf("frontier route has invalid stroke range [%d:%d] with limit %d in arena %d",
+			route.strokeStart, end, limit, len(l.strokes)))
+	}
+	return l.strokes[route.strokeStart:end]
+}
+
+// mergeRouteStroke stores one ordered, axis-aligned piece in a canonical
+// route's arena range while materializing its normal-weight cells through
+// mergeGlyph.
+func (l *frontierLayout) mergeRouteStroke(routeID frontierRouteID, from, to frontierPoint, r rune, style int) {
+	index := int(routeID) - 1
+	if index < 0 || index >= len(l.routes) {
+		panic(fmt.Sprintf("frontier route ID %d is out of range", routeID))
+	}
+	if from.x != to.x && from.y != to.y {
+		panic(fmt.Sprintf("frontier route %d has diagonal stroke %+v -> %+v", routeID, from, to))
+	}
+	route := &l.routes[index]
+	if route.strokeCount >= route.strokeCapacity {
+		panic(fmt.Sprintf("frontier route %d exceeded its %d-stroke arena range", routeID, route.strokeCapacity))
+	}
+	l.strokes[route.strokeStart+route.strokeCount] = frontierStroke{from: from, to: to}
+	route.strokeCount++
+
+	dx, dy := 0, 0
+	if from.x < to.x {
+		dx = 1
+	} else if from.x > to.x {
+		dx = -1
+	}
+	if from.y < to.y {
+		dy = 1
+	} else if from.y > to.y {
+		dy = -1
+	}
+	for at := from; ; at.x, at.y = at.x+dx, at.y+dy {
+		l.merge(at.x, at.y, r, style)
+		if at == to {
+			break
 		}
-		l.merge(dx, dy-1, '▼', style)
 	}
 }
 
@@ -1024,6 +1178,199 @@ func axisVisible(start, size, offset, window int) int {
 	return offset
 }
 
+func heavyFrontierEdgeGlyph(r rune) rune {
+	switch r {
+	case '─':
+		return '━'
+	case '│':
+		return '┃'
+	case '┌':
+		return '┏'
+	case '┐':
+		return '┓'
+	case '└':
+		return '┗'
+	case '┘':
+		return '┛'
+	case '┼':
+		return '╋'
+	default:
+		// Arrowheads retain their physical direction; the adjoining heavy stroke
+		// supplies the usual monochrome focus distinction. Isolated clipped
+		// terminals receive a directional focus glyph before rendering.
+		return r
+	}
+}
+
+func heavyFrontierEdgeText(text string) string {
+	return strings.Map(heavyFrontierEdgeGlyph, text)
+}
+
+func clipFrontierStroke(stroke frontierStroke, clip frontierRect) (frontierStroke, bool) {
+	if clip.W <= 0 || clip.H <= 0 || (stroke.from.x != stroke.to.x && stroke.from.y != stroke.to.y) {
+		return frontierStroke{}, false
+	}
+	right, bottom := clip.X+clip.W-1, clip.Y+clip.H-1
+	switch {
+	case stroke.from.y == stroke.to.y:
+		if stroke.from.y < clip.Y || stroke.from.y > bottom {
+			return frontierStroke{}, false
+		}
+		low := max(min(stroke.from.x, stroke.to.x), clip.X)
+		high := min(max(stroke.from.x, stroke.to.x), right)
+		if low > high {
+			return frontierStroke{}, false
+		}
+		if stroke.from.x <= stroke.to.x {
+			stroke.from.x, stroke.to.x = low, high
+		} else {
+			stroke.from.x, stroke.to.x = high, low
+		}
+	case stroke.from.x == stroke.to.x:
+		if stroke.from.x < clip.X || stroke.from.x > right {
+			return frontierStroke{}, false
+		}
+		low := max(min(stroke.from.y, stroke.to.y), clip.Y)
+		high := min(max(stroke.from.y, stroke.to.y), bottom)
+		if low > high {
+			return frontierStroke{}, false
+		}
+		if stroke.from.y <= stroke.to.y {
+			stroke.from.y, stroke.to.y = low, high
+		} else {
+			stroke.from.y, stroke.to.y = high, low
+		}
+	}
+	return stroke, true
+}
+
+func frontierRectContains(rect frontierRect, x, y int) bool {
+	return x >= rect.X && x < rect.X+rect.W && y >= rect.Y && y < rect.Y+rect.H
+}
+
+func frontierRectsIntersect(a, b frontierRect) bool {
+	return a.W > 0 && a.H > 0 && b.W > 0 && b.H > 0 &&
+		a.X < b.X+b.W && b.X < a.X+a.W &&
+		a.Y < b.Y+b.H && b.Y < a.Y+a.H
+}
+
+// visibleFrontierCardRects retains defensive card rejection without scanning
+// every laid-out node for every expanded incident cell.
+func visibleFrontierCardRects(l frontierLayout, clip frontierRect) []frontierRect {
+	var visible []frontierRect
+	for _, id := range l.order {
+		rect, ok := l.nodeAt[id]
+		if ok && frontierRectsIntersect(rect, clip) {
+			visible = append(visible, rect)
+		}
+	}
+	return visible
+}
+
+func insideFrontierCardRects(rects []frontierRect, x, y int) bool {
+	for _, rect := range rects {
+		if frontierRectContains(rect, x, y) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l frontierLayout) insideCard(x, y int) bool {
+	for _, id := range l.order {
+		rect, ok := l.nodeAt[id]
+		if ok && frontierRectContains(rect, x, y) {
+			return true
+		}
+	}
+	return false
+}
+
+// distinguishClippedFrontierArrows gives an isolated focused terminal a
+// monochrome-visible identity. Ordinarily the adjoining heavy stroke carries
+// focus, so the established arrow remains unchanged.
+func distinguishClippedFrontierArrows(overlay map[[2]int]frontierCell) {
+	for at, cell := range overlay {
+		predecessor := at
+		var focusedArrow rune
+		switch cell.r {
+		case '▶':
+			predecessor[0]--
+			focusedArrow = '▸'
+		case '▼':
+			predecessor[1]--
+			focusedArrow = '▾'
+		default:
+			continue
+		}
+		if prior, visible := overlay[predecessor]; visible && heavyFrontierEdgeGlyph(prior.r) != prior.r {
+			continue
+		}
+		cell.r = focusedArrow
+		overlay[at] = cell
+	}
+}
+
+// focusedFrontierOverlay expands only the focused node's indexed routes. Each
+// stroke is clipped before expansion, and output preserves the selected
+// canvas's already-merged glyph so a shared crossing is highlighted for any
+// incident owner. Only an isolated clipped terminal receives a directional
+// monochrome focus glyph.
+func focusedFrontierOverlay(l frontierLayout, focus model.TicketID,
+	offsetX, offsetY, width, height int) map[[2]int]frontierCell {
+	left, top := max(offsetX, 0), max(offsetY, 0)
+	right, bottom := min(offsetX+width, l.width), min(offsetY+height, l.height)
+	clip := frontierRect{X: left, Y: top, W: max(right-left, 0), H: max(bottom-top, 0)}
+	if clip.W == 0 || clip.H == 0 {
+		return nil
+	}
+	visibleCards := visibleFrontierCardRects(l, clip)
+
+	var overlay map[[2]int]frontierCell
+	for _, routeID := range l.incident[focus] {
+		index := int(routeID) - 1
+		if index < 0 || index >= len(l.routes) {
+			continue
+		}
+		route := l.routes[index]
+		if route.blocker != focus && route.dependent != focus {
+			continue
+		}
+		for _, stroke := range l.routeStrokes(route) {
+			stroke, visible := clipFrontierStroke(stroke, clip)
+			if !visible {
+				continue
+			}
+			dx, dy := 0, 0
+			if stroke.from.x < stroke.to.x {
+				dx = 1
+			} else if stroke.from.x > stroke.to.x {
+				dx = -1
+			}
+			if stroke.from.y < stroke.to.y {
+				dy = 1
+			} else if stroke.from.y > stroke.to.y {
+				dy = -1
+			}
+			for at := stroke.from; ; at.x, at.y = at.x+dx, at.y+dy {
+				cell := l.cells[at.y][at.x]
+				if !insideFrontierCardRects(visibleCards, at.x, at.y) && !cell.continuation && cell.link == 0 {
+					if overlay == nil {
+						overlay = make(map[[2]int]frontierCell)
+					}
+					cell.style = frontierFocusedEdgeStyle
+					overlay[[2]int{at.x - offsetX, at.y - offsetY}] = cell
+				}
+				if at == stroke.to {
+					break
+				}
+			}
+		}
+	}
+	distinguishClippedFrontierArrows(overlay)
+	return overlay
+}
+
 // renderFrontierCanvas draws only the inner window of the canvas at the given
 // offsets. Focus is an inner-canvas overlay; overflow chrome is composed later
 // in the reserved outer ring.
@@ -1033,10 +1380,18 @@ func axisVisible(start, size, offset, window int) int {
 // stays cheap.
 func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 	offsetX, offsetY, width, height int, s Styles) []string {
-	overlay := make(map[[2]int]frontierCell, 1)
-	if rect, ok := l.nodeAt[focus]; ok && hasFocus {
-		overlay[[2]int{rect.X + 1 - offsetX, rect.Y + 1 - offsetY}] =
-			frontierCell{r: '▸', style: frontierMarkerStyle}
+	var overlay map[[2]int]frontierCell
+	if hasFocus {
+		overlay = focusedFrontierOverlay(l, focus, offsetX, offsetY, width, height)
+		if rect, ok := l.nodeAt[focus]; ok {
+			if overlay == nil {
+				overlay = make(map[[2]int]frontierCell, 1)
+			}
+			// The focused-card marker wins even if malformed route geometry ever
+			// reaches its card.
+			overlay[[2]int{rect.X + 1 - offsetX, rect.Y + 1 - offsetY}] =
+				frontierCell{r: '▸', style: frontierMarkerStyle}
+		}
 	}
 
 	lines := make([]string, 0, height)
@@ -1050,6 +1405,8 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 			text := run.String()
 			run.Reset()
 			switch {
+			case runStyle == frontierFocusedEdgeStyle:
+				line.WriteString(s.FrontierBold.Render(heavyFrontierEdgeText(text)))
 			case runStyle == frontierMarkerStyle:
 				line.WriteString(s.FrontierBold.Render(text))
 			case runLink > 0:

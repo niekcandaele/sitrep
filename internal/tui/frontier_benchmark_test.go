@@ -35,9 +35,76 @@ func BenchmarkFrontierLayout(b *testing.B) {
 						direction:  frontierRanksHorizontal,
 					})
 				}
+				b.ReportMetric(float64(len(layout.routes)), "routes")
+				b.ReportMetric(float64(len(layout.strokes)), "stroke_slots")
 				runtime.KeepAlive(layout)
 			})
 		}
+	}
+}
+
+func BenchmarkFrontierFocusedRender(b *testing.B) {
+	for _, n := range []int{50, 100, 200, 500} {
+		b.Run("chain-two-incident/N="+strconv.Itoa(n), func(b *testing.B) {
+			tickets, links := benchmarkFrontierFixture("chain", n)
+			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+			layout := layoutFrontier(graph, frontierNodes(graph, tickets, true), frontierLayoutOptions{
+				innerWidth: frontierBenchmarkWidth,
+				direction:  frontierRanksHorizontal,
+			})
+			focus := model.TicketID("B-" + strconv.Itoa(n/2))
+			if got := len(layout.incident[focus]); got != 2 {
+				b.Fatalf("focused route count = %d, want 2", got)
+			}
+			const height = 30
+			rect := layout.nodeAt[focus]
+			offsetX, offsetY := ensureNodeVisible(rect, 0, 0, frontierBenchmarkWidth, height)
+			offsetX = clampFrontierOffset(offsetX, layout.width, frontierBenchmarkWidth)
+			offsetY = clampFrontierOffset(offsetY, layout.height, height)
+			styles := DefaultStyles(true)
+			b.ReportAllocs()
+			b.ResetTimer()
+			var lines []string
+			for range b.N {
+				lines = renderFrontierCanvas(layout, focus, true, offsetX, offsetY,
+					frontierBenchmarkWidth, height, styles)
+			}
+			runtime.KeepAlive(lines)
+		})
+	}
+}
+
+func BenchmarkFrontierFocusedHubOverlay(b *testing.B) {
+	for _, n := range []int{50, 100, 200, 500} {
+		b.Run("high-degree/N="+strconv.Itoa(n), func(b *testing.B) {
+			tickets, links := benchmarkFrontierFixture("hub", n)
+			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+			layout := layoutFrontier(graph, frontierNodes(graph, tickets, true), frontierLayoutOptions{
+				innerWidth: frontierBenchmarkWidth,
+				direction:  frontierRanksHorizontal,
+			})
+			focus := model.TicketID("B-0")
+			if got := len(layout.incident[focus]); got != n-1 {
+				b.Fatalf("hub incident route count = %d, want %d", got, n-1)
+			}
+			const height = 30
+			rect := layout.nodeAt[focus]
+			offsetX, offsetY := ensureNodeVisible(rect, 0, 0, frontierBenchmarkWidth, height)
+			offsetX = clampFrontierOffset(offsetX, layout.width, frontierBenchmarkWidth)
+			offsetY = clampFrontierOffset(offsetY, layout.height, height)
+			clip := frontierRect{X: offsetX, Y: offsetY, W: frontierBenchmarkWidth, H: height}
+			visibleCards := len(visibleFrontierCardRects(layout, clip))
+			b.ReportAllocs()
+			b.ResetTimer()
+			var overlay map[[2]int]frontierCell
+			for range b.N {
+				overlay = focusedFrontierOverlay(layout, focus, offsetX, offsetY,
+					frontierBenchmarkWidth, height)
+			}
+			b.ReportMetric(float64(len(layout.incident[focus])), "incident_routes")
+			b.ReportMetric(float64(visibleCards), "visible_cards")
+			runtime.KeepAlive(overlay)
+		})
 	}
 }
 
