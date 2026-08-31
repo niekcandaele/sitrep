@@ -10,6 +10,7 @@ import (
 )
 
 const noBlockingLinksCapabilityNotice = "--links: blocking keys are absent because this Provider does not declare the blocking_links Capability"
+const invalidDetailsResponseNotice = "--links: Provider returned an invalid Details response; unrequested data was ignored"
 
 type linksStatus struct {
 	writer      io.Writer
@@ -45,6 +46,10 @@ func (s *linksStatus) record(outcome detailfanout.Outcome) {
 
 func newMissingBlockingLinksStatus(writer io.Writer) *linksStatus {
 	return &linksStatus{writer: writer, notice: noBlockingLinksCapabilityNotice}
+}
+
+func (s *linksStatus) recordBatchFailure() {
+	s.notice = invalidDetailsResponseNotice
 }
 
 func (s *linksStatus) complete() {

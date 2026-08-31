@@ -88,6 +88,10 @@ func (*hostileProvider) FetchDetail(context.Context, model.TicketID) (model.Deta
 	}, nil
 }
 
+func (p *hostileProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // Every string a Provider hands back is walked, so a field added later without
 // sanitizing fails here.
 func TestSanitizedCleansEveryField(t *testing.T) {
@@ -118,6 +122,58 @@ func TestSanitizedCleansEveryField(t *testing.T) {
 	}
 }
 
+func TestSanitizedFetchDetailsCleansSuccessesAndPreservesPartialFailures(t *testing.T) {
+	boom := errors.New("boom")
+	p := provider.Sanitized(&pluralHostileProvider{err: boom})
+	details, err := p.FetchDetails(context.Background(), []model.TicketID{"t1", "t2"})
+	if !errors.Is(err, boom) {
+		t.Fatalf("FetchDetails error = %v, want to wrap boom", err)
+	}
+	var failures *provider.DetailFailures
+	if !errors.As(err, &failures) || !errors.Is(failures.Failures["t2"], boom) {
+		t.Fatalf("FetchDetails failures = %+v, want t2 wrapping boom", failures)
+	}
+	checkClean(t, "detail", reflect.ValueOf(details["t1"]), true)
+}
+
+type pluralHostileProvider struct {
+	hostileProvider
+	err error
+}
+
+func (p pluralHostileProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	detail, err := p.FetchDetail(ctx, "t1")
+	if err != nil {
+		return nil, err
+	}
+	return map[model.TicketID]model.Detail{"t1": detail}, &provider.DetailFailures{Failures: map[model.TicketID]error{"t2": p.err}}
+}
+
+func TestSanitizedFetchDetailsDoesNotMutateProviderResults(t *testing.T) {
+	inner := &sharedPluralProvider{details: map[model.TicketID]model.Detail{
+		"t1": {TicketID: "t1", Description: hostile},
+	}}
+	got, err := provider.Sanitized(inner).FetchDetails(context.Background(), []model.TicketID{"t1"})
+	if err != nil {
+		t.Fatalf("FetchDetails: %v", err)
+	}
+	if inner.details["t1"].Description != hostile {
+		t.Errorf("underlying Detail = %q, want unsanitized shared value", inner.details["t1"].Description)
+	}
+	if got["t1"].Description == hostile {
+		t.Errorf("sanitized Detail = %q, want terminal-safe copy", got["t1"].Description)
+	}
+}
+
+type sharedPluralProvider struct {
+	hostileProvider
+	details map[model.TicketID]model.Detail
+}
+
+func (p *sharedPluralProvider) FetchDetails(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return p.details, nil
+}
+
 func TestStampSnapshotPreservesLimitReached(t *testing.T) {
 	p := &hostileProvider{}
 	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
@@ -138,6 +194,9 @@ func (*selectorRecorder) Name() string                     { return "recorder" }
 func (*selectorRecorder) Capabilities() model.Capabilities { return model.Capabilities{} }
 func (*selectorRecorder) FetchDetail(context.Context, model.TicketID) (model.Detail, error) {
 	return model.Detail{}, nil
+}
+func (p *selectorRecorder) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
 }
 func (p *selectorRecorder) Resolve(_ context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
 	p.selector = selector

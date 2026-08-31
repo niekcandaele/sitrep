@@ -467,6 +467,11 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return newDetail(issue, comments.Comments, types, p.host), nil
 }
 
+// FetchDetails delegates to the generic sequential fallback.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // checkRef rejects a Ref this driver cannot serve before any network call, and
 // returns the issue key it names.
 func checkRef(r ref.Ref) (string, error) {

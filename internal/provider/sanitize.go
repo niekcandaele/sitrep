@@ -45,3 +45,12 @@ func (s sanitized) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	detail, err := s.Provider.FetchDetail(ctx, id)
 	return termtext.Detail(detail), err
 }
+
+func (s sanitized) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	details, err := s.Provider.FetchDetails(ctx, ids)
+	sanitizedDetails := make(map[model.TicketID]model.Detail, len(details))
+	for id, detail := range details {
+		sanitizedDetails[id] = termtext.Detail(detail)
+	}
+	return sanitizedDetails, err
+}

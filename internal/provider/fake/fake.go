@@ -296,6 +296,12 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return d, nil
 }
 
+// FetchDetails delegates to the generic sequential fallback so DetailCalls
+// remains accounting for the existing singular seam.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // ResolveCalls returns how many times Resolve has been called, including calls
 // that returned an injected error.
 func (p *Provider) ResolveCalls() int {

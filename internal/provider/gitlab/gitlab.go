@@ -1100,6 +1100,11 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	}, nil
 }
 
+// FetchDetails delegates to the generic sequential fallback.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // fetchEpicDetail reads a group epic's Detail, which a Ref naming an epic with
 // no children decodes to.
 //

@@ -484,13 +484,13 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 // did not request Links or the Provider does not declare blocking support.
 //
 // nil is what makes --json's default free: ADR-0003 still forbids a render from
-// fanning FetchDetail out, and Amendment 4 permits it here only because --links
+// fanning Detail reads out, and Amendment 4 permits it here only because --links
 // is an explicit user action. An undeclared BlockingLinks Capability leaves the
 // keys absent and is explained on stderr; emitting actionable: false everywhere
 // would read as a computed negative when BuildBlockingGraph in fact claims
 // nothing.
 //
-// A failed FetchDetail is non-fatal and produces one aggregate stderr notice.
+// A failed Detail read is non-fatal and produces one aggregate stderr notice.
 // The Ticket remains absent from the links map, which is exactly the
 // unreadable-Links tri-state, and the document carries links_known: false.
 func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.WatchlistSnapshot,
@@ -508,15 +508,15 @@ func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.Watch
 	ids := detailfanout.Plan(snap.Tickets, nil)
 	status := newLinksStatus(stderr, len(ids))
 	details := make(map[model.TicketID]model.Detail, len(ids))
-	//nolint:errcheck // Run's only error is ctx.Err(), which RunWith reads back
-	// through interrupted(ctx) so that an interrupt stays an interrupt rather
-	// than becoming a rendering failure.
-	_ = detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
+	runErr := detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
 		if o.Err == nil {
 			details[o.ID] = o.Detail
 		}
 		status.record(o)
 	})
+	if runErr != nil && ctx.Err() == nil {
+		status.recordBatchFailure()
+	}
 	status.complete()
 
 	graph := model.BuildBlockingGraph(snap.Tickets, detailfanout.Links(details), snap.Capabilities)

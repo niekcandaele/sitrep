@@ -534,6 +534,20 @@ func TestFetchDetailServesTheFixture(t *testing.T) {
 	}
 }
 
+func TestFetchDetailsUsesTheSingularFixtureSeam(t *testing.T) {
+	p := fake.New()
+	details, err := p.FetchDetails(context.Background(), []model.TicketID{richTicket, "", richTicket})
+	if err != nil {
+		t.Fatalf("FetchDetails: %v", err)
+	}
+	if len(details) != 1 || details[richTicket].TicketID != richTicket {
+		t.Errorf("details = %v, want one %q Detail", details, richTicket)
+	}
+	if got := p.DetailCalls(); got != 1 {
+		t.Errorf("DetailCalls() = %d, want one canonical singular read", got)
+	}
+}
+
 func TestWithSnapshotsAdvancesAndRepeatsTheLast(t *testing.T) {
 	first := model.WatchlistSnapshot{Epic: model.Epic{Key: "#1"}}
 	second := model.WatchlistSnapshot{Epic: model.Epic{Key: "#2"}}

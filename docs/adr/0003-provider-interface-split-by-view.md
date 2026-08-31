@@ -64,3 +64,13 @@ when the cache does not cover the whole Watchlist.
 The rejected alternative is promoting Links onto the thin `Ticket`, which makes every refresh
 slower forever to serve a screen that may never be opened. Do not "fix" the fan-out that way;
 it is the thing this ADR exists to prevent.
+
+## Amendment 5: plural Detail transport
+
+The explicit bulk fan-out of Amendment 4 may call `FetchDetails` once with its canonical
+missing Ticket IDs. The fan-out remains an explicit user action only; refresh, polling, and
+rendering never initiate it. Canonical ordering, cache skipping, bounded cost, cancellation,
+tri-state Links, and the rule that only successful Details are recorded remain fan-out policy.
+A Provider may implement the plural transport with singular reads or a Tracker-native batch,
+but no Detail field moves onto thin Tickets and no list-refresh path gains Detail reads.
+Per-Ticket successes and failures retain the same fail-closed meaning.

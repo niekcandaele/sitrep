@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
-	"sync/atomic"
+	"reflect"
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
-	"github.com/niekcandaele/sitrep/internal/provider/fake"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 func tickets(ids ...model.TicketID) []model.Ticket {
@@ -21,51 +20,27 @@ func tickets(ids ...model.TicketID) []model.Ticket {
 	return out
 }
 
-// Plan is the canonical order every progress count and golden frame derives
-// from: the Watchlist's own order, with nothing to fetch twice.
 func TestPlanReturnsCanonicalOrder(t *testing.T) {
 	got := detailfanout.Plan(tickets("c", "a", "b"), nil)
-
 	want := []model.TicketID{"c", "a", "b"}
-	if len(got) != len(want) {
-		t.Fatalf("Plan = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Plan[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
-		}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Plan = %v, want %v", got, want)
 	}
 }
 
 func TestPlanSkipsEmptyIDsDuplicatesAndWhatTheCallerHolds(t *testing.T) {
-	held := map[model.TicketID]bool{"b": true}
-
-	got := detailfanout.Plan(tickets("a", "", "b", "a", "c"), func(id model.TicketID) bool {
-		return held[id]
-	})
-
+	got := detailfanout.Plan(tickets("a", "", "b", "a", "c"), func(id model.TicketID) bool { return id == "b" })
 	want := []model.TicketID{"a", "c"}
-	if len(got) != len(want) {
-		t.Fatalf("Plan = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Plan[%d] = %q, want %q", i, got[i], want[i])
-		}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Plan = %v, want %v", got, want)
 	}
 }
 
-// Key presence is the tri-state BuildBlockingGraph reads: a Detail that was
-// read and genuinely has no Links is a present key with no entries, and a
-// Ticket whose read failed is absent altogether.
 func TestLinksWritesAKeyOnlyForAReadDetail(t *testing.T) {
-	details := map[model.TicketID]model.Detail{
+	links := detailfanout.Links(map[model.TicketID]model.Detail{
 		"read-with-links": {Links: []model.Link{{Kind: model.LinkBlockedBy}}},
 		"read-empty":      {},
-	}
-
-	links := detailfanout.Links(details)
-
+	})
 	if got, ok := links["read-with-links"]; !ok || len(got) != 1 {
 		t.Errorf("links[read-with-links] = %v (present %v), want one Link", got, ok)
 	}
@@ -82,9 +57,9 @@ func TestUnreadableLinksNotice(t *testing.T) {
 		failed int
 		want   string
 	}{
-		{failed: 0, want: ""},
-		{failed: 1, want: "1 Ticket's Links could not be read; anything it blocks is not Actionable"},
-		{failed: 2, want: "2 Tickets' Links could not be read; anything they block is not Actionable"},
+		{0, ""},
+		{1, "1 Ticket's Links could not be read; anything it blocks is not Actionable"},
+		{2, "2 Tickets' Links could not be read; anything they block is not Actionable"},
 	} {
 		t.Run(fmt.Sprintf("failed_%d", tc.failed), func(t *testing.T) {
 			if got := detailfanout.UnreadableLinksNotice(tc.failed); got != tc.want {
@@ -94,147 +69,132 @@ func TestUnreadableLinksNotice(t *testing.T) {
 	}
 }
 
-// Run fetches one outcome per canonical member and surfaces individual failures.
-func TestRunEmitsOneOutcomePerIDAndSurfacesPerIDErrors(t *testing.T) {
+func TestRunCallsFetchOnceWithCompleteSliceAndEmitsCanonicalPartialOutcomes(t *testing.T) {
 	boom := errors.New("boom")
-	f := func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-		if id == "b" {
-			return model.Detail{}, model.Capabilities{}, boom
-		}
-		return model.Detail{TicketID: id}, model.Capabilities{BlockingLinks: true}, nil
+	var calls int
+	var gotIDs []model.TicketID
+	f := func(_ context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		calls++
+		gotIDs = append([]model.TicketID(nil), ids...)
+		return map[model.TicketID]model.Detail{
+			"c": {TicketID: "c"},
+			"a": {TicketID: "a"},
+		}, model.Capabilities{BlockingLinks: true}, &provider.DetailFailures{Failures: map[model.TicketID]error{"b": boom}}
 	}
-
-	got := make(map[model.TicketID]error)
-	if err := detailfanout.Run(t.Context(), f, []model.TicketID{"a", "b", "c"}, func(o detailfanout.Outcome) {
-		got[o.ID] = o.Err
-	}); err != nil {
-		t.Fatalf("Run = %v, want nil", err)
-	}
-
-	if len(got) != 3 {
-		t.Fatalf("outcomes = %v, want one per id", got)
-	}
-	if !errors.Is(got["b"], boom) {
-		t.Errorf("outcome for b = %v, want %v", got["b"], boom)
-	}
-	if got["a"] != nil || got["c"] != nil {
-		t.Errorf("outcomes = %v, want only b to fail", got)
-	}
-}
-
-// The bound is exact in both directions: Run holds Parallelism reads in flight,
-// never more and -- given enough work -- never fewer.
-//
-// Every worker is held at a gate until Parallelism of them have arrived, so
-// peak measures the semaphore rather than how quickly goroutines happened to be
-// scheduled; releasing the gate straight after launch measured the scheduler,
-// and the capacity could be raised to a million with the package still green.
-// Waiting for those arrivals is also the only assertion that Run is concurrent
-// at all: a sequential implementation never reaches the count and fails here by
-// timeout rather than by assertion.
-//
-// Workers are then released one at a time, and each release may admit exactly
-// one more. A capacity larger than Parallelism admits the whole backlog at once
-// and breaks that bound on the first release.
-func TestRunNeverExceedsParallelism(t *testing.T) {
-	var inflight, peak, arrivals atomic.Int64
-	var admitted sync.WaitGroup
-	admitted.Add(detailfanout.Parallelism)
-	release := make(chan struct{})
-	f := func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-		n := inflight.Add(1)
-		for {
-			was := peak.Load()
-			if n <= was || peak.CompareAndSwap(was, n) {
-				break
-			}
-		}
-		if arrivals.Add(1) <= detailfanout.Parallelism {
-			admitted.Done()
-		}
-		<-release
-		inflight.Add(-1)
-		return model.Detail{TicketID: id}, model.Capabilities{}, nil
-	}
-
-	const ids = 4 * detailfanout.Parallelism
-	work := make([]model.TicketID, 0, ids)
-	for i := range ids {
-		work = append(work, model.TicketID(fmt.Sprintf("t-%d", i)))
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- detailfanout.Run(t.Context(), f, work, func(detailfanout.Outcome) {})
-	}()
-
-	admitted.Wait()
-	if got := peak.Load(); got != detailfanout.Parallelism {
-		t.Fatalf("peak in flight = %d with %d ids queued, want exactly %d",
-			got, ids, detailfanout.Parallelism)
-	}
-	for released := 1; released <= ids; released++ {
-		release <- struct{}{}
-		if got, limit := arrivals.Load(), int64(detailfanout.Parallelism+released); got > limit {
-			t.Fatalf("%d reads had started after %d releases, want at most %d: "+
-				"the semaphore admitted more than it holds", got, released, limit)
-		}
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("Run = %v, want nil", err)
-	}
-
-	if got := peak.Load(); got != detailfanout.Parallelism {
-		t.Errorf("peak in flight = %d, want exactly %d", got, detailfanout.Parallelism)
-	}
-}
-
-// An interrupted fan-out simply stops issuing: the ids it never reached are
-// un-emitted, which is what leaves their Links unknown and their dependents
-// not Actionable.
-func TestRunReturnsPromptlyOnACancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	var calls atomic.Int64
-	f := func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-		if calls.Add(1) == 1 {
-			cancel()
-		}
-		return model.Detail{TicketID: id}, model.Capabilities{}, nil
-	}
-
-	ids := make([]model.TicketID, 0, 200)
-	for i := range 200 {
-		ids = append(ids, model.TicketID(rune('a'+i%26))+model.TicketID(rune('0'+i/26)))
-	}
-	var emitted int
-	err := detailfanout.Run(ctx, f, ids, func(detailfanout.Outcome) { emitted++ })
-
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Run = %v, want context.Canceled", err)
-	}
-	if emitted >= len(ids) {
-		t.Errorf("emitted %d of %d, want the cancellation to stop the fan-out short", emitted, len(ids))
-	}
-}
-
-// FromProvider is the seam a one-shot renderer already holds: one call is
-// exactly one FetchDetail, with the Provider's Capabilities attached.
-func TestFromProviderReadsOneDetailPerCall(t *testing.T) {
-	p := fake.New(fake.WithBlockingFixture())
-	snap := fake.FixtureBlockingSnapshot()
-	f := detailfanout.FromProvider(p)
-
-	d, caps, err := f(t.Context(), snap.Tickets[0].ID)
-
+	var outcomes []detailfanout.Outcome
+	err := detailfanout.Run(t.Context(), f, []model.TicketID{"a", "b", "c"}, func(o detailfanout.Outcome) {
+		outcomes = append(outcomes, o)
+	})
 	if err != nil {
-		t.Fatalf("Fetch = %v, want a Detail", err)
+		t.Fatalf("Run = %v, want nil", err)
 	}
-	if d.TicketID != snap.Tickets[0].ID {
-		t.Errorf("Detail.TicketID = %q, want %q", d.TicketID, snap.Tickets[0].ID)
+	if calls != 1 || !reflect.DeepEqual(gotIDs, []model.TicketID{"a", "b", "c"}) {
+		t.Errorf("Fetch calls/ids = %d/%v, want 1/[a b c]", calls, gotIDs)
 	}
-	if !caps.BlockingLinks {
-		t.Error("Capabilities did not come from the Provider")
+	if got := []model.TicketID{outcomes[0].ID, outcomes[1].ID, outcomes[2].ID}; !reflect.DeepEqual(got, gotIDs) {
+		t.Errorf("outcome order = %v, want %v", got, gotIDs)
 	}
-	if p.DetailCalls() != 1 {
-		t.Errorf("DetailCalls = %d, want exactly 1", p.DetailCalls())
+	if !errors.Is(outcomes[1].Err, boom) || outcomes[0].Err != nil || outcomes[2].Err != nil {
+		t.Errorf("outcomes = %+v, want only b to fail", outcomes)
 	}
+}
+
+func TestRunTurnsResponseWideFailureIntoPerTicketOutcomes(t *testing.T) {
+	boom := errors.New("request failed")
+	var outcomes []detailfanout.Outcome
+	err := detailfanout.Run(t.Context(), func(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		return map[model.TicketID]model.Detail{"a": {TicketID: "a"}}, model.Capabilities{}, boom
+	}, []model.TicketID{"a", "b", "c"}, func(o detailfanout.Outcome) { outcomes = append(outcomes, o) })
+	if err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if len(outcomes) != 3 || outcomes[0].Err != nil || !errors.Is(outcomes[1].Err, boom) || !errors.Is(outcomes[2].Err, boom) {
+		t.Errorf("outcomes = %+v, want success then two response-wide failures", outcomes)
+	}
+}
+
+func TestRunRejectsMalformedNativeResultsFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		details map[model.TicketID]model.Detail
+	}{
+		{"missing", map[model.TicketID]model.Detail{"a": {TicketID: "a"}}},
+		{"identity mismatch", map[model.TicketID]model.Detail{"a": {TicketID: "wrong"}, "b": {TicketID: "b"}}},
+		{"unexpected", map[model.TicketID]model.Detail{"a": {TicketID: "a"}, "b": {TicketID: "b"}, "other": {TicketID: "other"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var outcomes []detailfanout.Outcome
+			err := detailfanout.Run(t.Context(), func(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+				return tc.details, model.Capabilities{}, nil
+			}, []model.TicketID{"a", "b"}, func(o detailfanout.Outcome) { outcomes = append(outcomes, o) })
+			if tc.name == "unexpected" {
+				if err == nil || len(outcomes) != 2 || outcomes[0].Err != nil || outcomes[1].Err != nil {
+					t.Errorf("Run/outcomes = %v/%+v, want batch error and two valid successes", err, outcomes)
+				}
+				return
+			}
+			failed := 0
+			for _, outcome := range outcomes {
+				if outcome.Err != nil {
+					failed++
+				}
+			}
+			if err != nil || failed == 0 {
+				t.Errorf("Run/outcomes = %v/%+v, want malformed output to be a per-ID failure", err, outcomes)
+			}
+		})
+	}
+}
+
+func TestRunCancellationEmitsCompletedSuccessesOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var outcomes []detailfanout.Outcome
+	err := detailfanout.Run(ctx, func(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		cancel()
+		return map[model.TicketID]model.Detail{"a": {TicketID: "a"}}, model.Capabilities{}, context.Canceled
+	}, []model.TicketID{"a", "b"}, func(o detailfanout.Outcome) { outcomes = append(outcomes, o) })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].ID != "a" || outcomes[0].Err != nil {
+		t.Errorf("outcomes = %+v, want completed a success only", outcomes)
+	}
+}
+
+func TestFromProviderPassesCompleteSliceOnce(t *testing.T) {
+	p := &pluralSpy{}
+	f := detailfanout.FromProvider(p)
+	ids := []model.TicketID{"a", "b"}
+	details, _, err := f(t.Context(), ids)
+	if err != nil {
+		t.Fatalf("Fetch = %v, want Details", err)
+	}
+	if p.pluralCalls != 1 || p.singularCalls != 0 || !reflect.DeepEqual(p.ids, ids) {
+		t.Errorf("plural/singular/ids = %d/%d/%v, want 1/0/%v", p.pluralCalls, p.singularCalls, p.ids, ids)
+	}
+	if len(details) != 2 {
+		t.Errorf("details = %v, want two entries", details)
+	}
+}
+
+type pluralSpy struct {
+	pluralCalls   int
+	singularCalls int
+	ids           []model.TicketID
+}
+
+func (*pluralSpy) Name() string                     { return "spy" }
+func (*pluralSpy) Capabilities() model.Capabilities { return model.Capabilities{} }
+func (*pluralSpy) Resolve(context.Context, provider.Selector) (model.WatchlistSnapshot, error) {
+	return model.WatchlistSnapshot{}, nil
+}
+func (p *pluralSpy) FetchDetail(context.Context, model.TicketID) (model.Detail, error) {
+	p.singularCalls++
+	return model.Detail{}, errors.New("singular call")
+}
+func (p *pluralSpy) FetchDetails(_ context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	p.pluralCalls++
+	p.ids = append([]model.TicketID(nil), ids...)
+	return map[model.TicketID]model.Detail{"a": {TicketID: "a"}, "b": {TicketID: "b"}}, nil
 }
