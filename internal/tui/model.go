@@ -42,6 +42,10 @@ type Model struct {
 	// heartbeatCmd is injectable so scheduler tests advance only their controlled
 	// clock and deliver heartbeatMsg themselves.
 	heartbeatCmd tea.Cmd
+	// terminalFocused is optimistic for terminals that do not emit focus reports.
+	// It is session-local because focus is a property of this terminal session,
+	// not of the Watchlist or its refresh policy.
+	terminalFocused bool
 	// listArmed reports whether the list holds a reading or has a fetch in
 	// flight. It starts false in decoder mode — a session opened straight on one
 	// Ticket's Detail — so the heartbeat never fetches a Watchlist the user has
@@ -234,15 +238,16 @@ func New(ctx context.Context, opts Options) Model {
 		interval:     opts.Interval,
 		heartbeatCmd: heartbeatCmd,
 		// The first refresh is already on its way out of Init.
-		generation:    1,
-		refreshing:    true,
-		lastAttempt:   now(),
-		listArmed:     true,
-		hasSource:     src != nil,
-		legendVisible: true,
-		search:        search,
-		fetchDetail:   fetchDetail,
-		cancelSession: cancelSession,
+		generation:      1,
+		refreshing:      true,
+		lastAttempt:     now(),
+		terminalFocused: true,
+		listArmed:       true,
+		hasSource:       src != nil,
+		legendVisible:   true,
+		search:          search,
+		fetchDetail:     fetchDetail,
+		cancelSession:   cancelSession,
 		newReadContext: func() (context.Context, context.CancelFunc) {
 			return context.WithCancel(sessionCtx)
 		},
@@ -386,6 +391,21 @@ func (m Model) Init() tea.Cmd {
 // Update folds one message into the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.FocusMsg:
+		if m.terminalFocused {
+			return m, nil
+		}
+		m.terminalFocused = true
+		next, allowed, _ := m.automaticRefreshAdmission()
+		if !allowed {
+			return next, nil
+		}
+		return next.startRefresh()
+
+	case tea.BlurMsg:
+		m.terminalFocused = false
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		widthChanged := msg.Width != m.width
 		heightChanged := msg.Height != m.height
@@ -508,6 +528,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // list, and a footer carrying the help line and any refresh error.
 func (m Model) View() tea.View {
 	v := tea.NewView("")
+	v.ReportFocus = true
 	v.AltScreen = true
 	if m.mouseEnabled {
 		v.MouseMode = tea.MouseModeCellMotion
@@ -598,7 +619,7 @@ func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
 	now := m.now()
 	holdExpired := !m.rateHold.manual && !m.rateHold.resetAt.IsZero() && !now.Before(m.rateHold.resetAt)
 	m = m.expireRatePolicy(now)
-	if !m.listArmed || m.refreshing || m.rateHold.active(now) {
+	if !m.listArmed || m.refreshing || !m.terminalFocused || m.rateHold.active(now) {
 		return m, false, time.Time{}
 	}
 	due := m.effectiveAutomaticDue(now)
@@ -1128,6 +1149,12 @@ func (m Model) renderBody(markers listMarkers) string {
 
 func (m Model) retryBodyHint() string {
 	now := m.now()
+	if !m.terminalFocused {
+		if m.rateHold.active(now) && !m.rateHold.manual {
+			return "Automatic refresh is paused while terminal is unfocused; r is held. Press q to quit."
+		}
+		return "Automatic refresh is paused while terminal is unfocused. Press r to try again, q to quit."
+	}
 	if m.rateHold.active(now) && !m.rateHold.manual {
 		return "Automatic refresh resumes at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + "; r is held. Press q to quit."
 	}
@@ -1150,13 +1177,21 @@ func (m Model) footerLines() []string {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			plain.LimitNotice(len(m.input.Tickets)), m.width)))
 	}
-	if m.lastErr != nil && m.hasData && provider.KindOf(m.lastErr) != provider.KindRateLimit {
-		remaining := m.effectiveAutomaticDue(now).Sub(now)
-		lines = append(lines, m.styles.Error.Render(truncateLine(
-			fmt.Sprintf("refresh failed: %v%sretrying in %s", m.lastErr, separator, countdown(remaining)), m.width)))
+	if m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+		if !m.terminalFocused {
+			lines = append(lines, m.styles.Error.Render(truncateLine(
+				fmt.Sprintf("refresh failed: %v%sautomatic refresh paused: terminal unfocused", m.lastErr, separator), m.width)))
+		} else {
+			remaining := m.effectiveAutomaticDue(now).Sub(now)
+			lines = append(lines, m.styles.Error.Render(truncateLine(
+				fmt.Sprintf("refresh failed: %v%sretrying in %s", m.lastErr, separator, countdown(remaining)), m.width)))
+		}
 	}
 	if policy := m.ratePolicyFooter(); policy != "" {
 		lines = append(lines, m.styles.Error.Render(truncateLine(policy, m.width)))
+	}
+	if pause := m.focusPauseFooter(); pause != "" {
+		lines = append(lines, m.styles.Muted.Render(truncateLine(pause, m.width)))
 	}
 	if filter := m.renderFilterLine(); filter != "" {
 		lines = append(lines, filter)
@@ -1166,20 +1201,43 @@ func (m Model) footerLines() []string {
 }
 
 func (m Model) ratePolicyFooter() string {
+	if m.refreshing && !m.terminalFocused {
+		return ""
+	}
 	now := m.now()
+	prefix := ""
+	if !m.terminalFocused {
+		prefix = "paused: terminal unfocused; "
+	}
 	if m.rateHold.active(now) {
 		if m.rateHold.exhausted {
+			if prefix != "" {
+				return prefix + "refresh held: rate limit budget exhausted · r held"
+			}
 			return "refresh held: rate limit budget exhausted · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
 		}
 		if m.rateHold.manual {
-			return "refresh held: " + m.rateHold.err.Error() + " · press r to try again"
+			return prefix + "refresh held: " + m.rateHold.err.Error() + " · press r to try again"
+		}
+		if prefix != "" {
+			return prefix + "refresh held: " + m.rateHold.err.Error() + " · r held"
 		}
 		return "refresh held: " + m.rateHold.err.Error() + " · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
 	}
 	if m.lowBudget.active(now) {
+		if prefix != "" {
+			return prefix + "refresh slowed: low rate limit budget"
+		}
 		return "refresh slowed: low rate limit budget · next automatic refresh in " + countdown(m.lowBudget.nextAt.Sub(now))
 	}
 	return ""
+}
+
+func (m Model) focusPauseFooter() string {
+	if m.terminalFocused || m.refreshing {
+		return ""
+	}
+	return "paused: terminal unfocused · " + m.staleness()
 }
 
 // renderFilterLine draws the footer's filter line: the find box while it is
@@ -1242,10 +1300,13 @@ func (m Model) filterLineIndex() int {
 	if m.hasData && m.input.LimitReached {
 		index++
 	}
-	if m.lastErr != nil && m.hasData && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+	if m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) && provider.KindOf(m.lastErr) != provider.KindRateLimit {
 		index++
 	}
 	if m.ratePolicyFooter() != "" {
+		index++
+	}
+	if m.focusPauseFooter() != "" {
 		index++
 	}
 	return index
