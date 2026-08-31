@@ -1,50 +1,39 @@
 // Package detailfanout is the shared policy for reading a whole Watchlist's
 // Details at once.
 //
-// ADR-0003's split by view still holds: a list refresh never calls
-// FetchDetail, and no Detail field migrates onto the thin Ticket. What this
-// package permits is narrower — a caller may fan FetchDetail out across every
-// member of a Watchlist in response to an explicit user action, never from a
-// refresh, a poll or a render. The Frontier is the first such caller; a
-// one-shot renderer asked for blocking data is the second.
-//
-// The policy lives here rather than in any one caller so that every consumer
-// pays the same price and fails the same way: canonical order, cache skipping,
-// a small parallelism budget, and the rule that only a successful fetch is ever
-// recorded.
+// ADR-0003's split by view still holds: a list refresh never calls FetchDetail,
+// and no Detail field migrates onto the thin Ticket. What this package permits
+// is narrower — a caller may read Details for every member of a Watchlist only
+// in response to an explicit user action, never from a refresh, poll or render.
 package detailfanout
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
+	"sort"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
-// Fetch reads one Ticket's Detail. It is the same shape as tui.DetailSource and
-// as a provider.Provider's FetchDetail with Capabilities attached, so both the
-// monitor and a one-shot renderer hand this package the seam they already hold.
-type Fetch func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error)
+// Fetch reads Details for a complete planned slice. Its result map is folded by
+// Run in input order, so a Provider's map iteration can never affect progress or
+// rendered output.
+type Fetch func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error)
 
-// FromProvider adapts a Provider to Fetch.
+// FromProvider adapts a Provider to Fetch with its declared Capabilities.
 func FromProvider(p provider.Provider) Fetch {
-	return func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-		d, err := p.FetchDetail(ctx, id)
-		if err != nil {
-			return model.Detail{}, model.Capabilities{}, err
-		}
-		return d, p.Capabilities(), nil
+	return func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		details, err := p.FetchDetails(ctx, ids)
+		return details, p.Capabilities(), err
 	}
 }
 
 // Plan returns the Ticket IDs a caller still has to fetch, in canonical order:
-// the Watchlist's own order, skipping empty IDs, skipping duplicates, and
-// skipping anything the have predicate already reports holding. Determinism
-// matters — it is what makes a progress count and a golden frame reproducible.
-//
-// A nil have is a caller holding nothing.
+// the Watchlist's own order, skipping empty IDs, duplicates, and anything the
+// have predicate already reports holding. A nil have means the caller holds
+// nothing.
 func Plan(tickets []model.Ticket, have func(model.TicketID) bool) []model.TicketID {
 	var ids []model.TicketID
 	planned := make(map[model.TicketID]bool, len(tickets))
@@ -61,23 +50,16 @@ func Plan(tickets []model.Ticket, have func(model.TicketID) bool) []model.Ticket
 	return ids
 }
 
-// Outcome is one resolved fetch.
+// Outcome is one requested Ticket's successful Detail or per-Ticket failure.
 type Outcome struct {
-	// ID is the Ticket the fetch was issued for.
-	ID model.TicketID
-	// Detail is what the Provider returned; the zero value on failure.
+	ID     model.TicketID
 	Detail model.Detail
-	// Caps are the serving Provider's Capabilities; the zero value on failure.
-	Caps model.Capabilities
-	// Err is the read's failure, if any. A failed read is recorded nowhere:
-	// see Links.
-	Err error
+	Caps   model.Capabilities
+	Err    error
 }
 
-// Parallelism is how many FetchDetail calls this package will have in flight at
-// once. It is deliberately small: the whole point of ADR-0003 is not to
-// multiply rate-limit pressure, and a fan-out the user asked for is still a
-// fan-out.
+// Parallelism is the Frontier scheduler's shared-slot budget. Run uses plural
+// Provider transport and does not consume this constant.
 const Parallelism = 4
 
 // UnreadableLinksNotice describes how unreadable member Links constrain the
@@ -93,58 +75,113 @@ func UnreadableLinksNotice(failed int) string {
 	}
 }
 
-// Run fetches every id with bounded concurrency, calling emit once per Outcome
-// as it resolves, and returns when every id has resolved or ctx is done. It is
-// for one-shot callers; an event-loop caller schedules its own commands and
-// uses Plan and Links instead.
-//
-// emit is called from Run's own goroutine, one Outcome at a time, so a caller
-// needs no lock of its own.
+// Run returns before dispatch when the planned slice is empty or ctx.Err() is
+// non-nil at the pre-dispatch check. Otherwise, it calls f once with the full
+// slice and emits outcomes in canonical input order. DetailFailures supply
+// per-Ticket failures; an ordinary response-wide error preserves completed
+// Details and fails each incomplete ID. Cancellation is control flow: completed
+// successes are emitted, incomplete IDs are left unknown, and no unreadable-Links
+// failures are manufactured for them.
 func Run(ctx context.Context, f Fetch, ids []model.TicketID, emit func(Outcome)) error {
 	if len(ids) == 0 {
 		return ctx.Err()
 	}
-
-	outcomes := make(chan Outcome, len(ids))
-	var wg sync.WaitGroup
-	slots := make(chan struct{}, Parallelism)
-
-	go func() {
-		defer close(outcomes)
-		for _, id := range ids {
-			select {
-			case <-ctx.Done():
-				// The remaining ids are simply un-emitted: an interrupted
-				// fan-out records nothing for them, which is exactly the
-				// fail-closed answer BuildBlockingGraph wants.
-				wg.Wait()
-				return
-			case slots <- struct{}{}:
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-slots }()
-				d, caps, err := f(ctx, id)
-				outcomes <- Outcome{ID: id, Detail: d, Caps: caps, Err: err}
-			}()
-		}
-		wg.Wait()
-	}()
-
-	for o := range outcomes {
-		emit(o)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return ctx.Err()
+
+	details, caps, err := f(ctx, ids)
+	if details == nil {
+		details = map[model.TicketID]model.Detail{}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		failures, _ := detailFailures(err)
+		for _, id := range ids {
+			if _, failed := failures[id]; failed {
+				continue
+			}
+			if detail, ok := details[id]; ok && detail.TicketID == id {
+				emit(Outcome{ID: id, Detail: detail, Caps: caps})
+			}
+		}
+		return ctxErr
+	}
+
+	failures, ordinary := detailFailures(err)
+	invalid, batchErr := invalidResults(ids, details, failures)
+	for _, id := range ids {
+		if failure, ok := invalid[id]; ok {
+			emit(Outcome{ID: id, Err: failure})
+			continue
+		}
+		if failure, ok := failures[id]; ok {
+			emit(Outcome{ID: id, Err: failure})
+			continue
+		}
+		if detail, ok := details[id]; ok {
+			emit(Outcome{ID: id, Detail: detail, Caps: caps})
+			continue
+		}
+		if ordinary != nil {
+			emit(Outcome{ID: id, Err: ordinary})
+			continue
+		}
+		emit(Outcome{ID: id, Err: fmt.Errorf("provider: FetchDetails omitted detail for %q", id)})
+	}
+	return batchErr
+}
+
+func detailFailures(err error) (map[model.TicketID]error, error) {
+	var typed *provider.DetailFailures
+	if errors.As(err, &typed) {
+		if typed == nil {
+			return nil, errors.New("provider: FetchDetails returned a typed-nil DetailFailures error")
+		}
+		return typed.Failures, nil
+	}
+	return nil, err
+}
+
+// invalidResults turns malformed native-batch output into per-ID failures or a
+// deterministic batch error without letting an unrequested key poison a valid ID.
+func invalidResults(ids []model.TicketID, details map[model.TicketID]model.Detail, failures map[model.TicketID]error) (map[model.TicketID]error, error) {
+	invalid := make(map[model.TicketID]error)
+	requested := make(map[model.TicketID]bool, len(ids))
+	for _, id := range ids {
+		requested[id] = true
+		if detail, ok := details[id]; ok && detail.TicketID != id {
+			invalid[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+		}
+		if failure, ok := failures[id]; ok && failure == nil {
+			invalid[id] = fmt.Errorf("provider: FetchDetails returned nil failure for %q", id)
+		}
+		if _, hasDetail := details[id]; hasDetail {
+			if _, hasFailure := failures[id]; hasFailure {
+				invalid[id] = fmt.Errorf("provider: FetchDetails returned both detail and failure for %q", id)
+			}
+		}
+	}
+	keys := make([]string, 0)
+	for id := range details {
+		if !requested[id] {
+			keys = append(keys, string(id))
+		}
+	}
+	for id := range failures {
+		if !requested[id] {
+			keys = append(keys, string(id))
+		}
+	}
+	if len(keys) != 0 {
+		sort.Strings(keys)
+		return invalid, fmt.Errorf("provider: FetchDetails returned unrequested TicketID %q", keys[0])
+	}
+	return invalid, nil
 }
 
 // Links folds resolved Details into the map model.BuildBlockingGraph consumes.
-// Only a successful fetch writes a key: key presence is the tri-state that
-// makes fail-closed Actionable real, so an id that failed, was interrupted, or
-// was never issued is simply absent. Never write an empty slice for a failure.
-//
-// It takes the caller's own cache map, so the monitor passes what it has cached
-// this session and a one-shot caller passes what Run collected.
+// Only a successful fetch writes a key: key presence is the tri-state that makes
+// fail-closed Actionable real.
 func Links(details map[model.TicketID]model.Detail) map[model.TicketID][]model.Link {
 	links := make(map[model.TicketID][]model.Link, len(details))
 	for id, d := range details {

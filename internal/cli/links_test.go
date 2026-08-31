@@ -435,6 +435,10 @@ func (p failingDetailProvider) FetchDetail(ctx context.Context, id model.TicketI
 	return p.Provider.FetchDetail(ctx, id)
 }
 
+func (p failingDetailProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 func TestJSONLinksAggregatesMultipleDetailFailures(t *testing.T) {
 	p := fake.New(fake.WithBlockingFixture())
 	var stdout, stderr bytes.Buffer
@@ -460,6 +464,47 @@ func TestJSONLinksAggregatesMultipleDetailFailures(t *testing.T) {
 		if ticket.Actionable == nil || *ticket.Actionable {
 			t.Errorf("%s actionable = %v, want false", key, ticket.Actionable)
 		}
+	}
+}
+
+type unexpectedDetailsProvider struct {
+	*fake.Provider
+}
+
+func (p unexpectedDetailsProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	details, err := p.Provider.FetchDetails(ctx, ids)
+	details["unrequested"] = model.Detail{TicketID: "unrequested"}
+	return details, err
+}
+
+func TestJSONLinksReportsInvalidBatchWithoutPoisoningValidDetails(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, &stderr, cli.Deps{
+		Provider: unexpectedDetailsProvider{Provider: p},
+		Now:      fixedClock,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+	if got, want := stderr.String(), "sitrep: --links: Provider returned an invalid Details response; unrequested data was ignored\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	tickets := decodeLinks(t, stdout.String())
+	if _, present := tickets["unrequested"]; present {
+		t.Error("JSON emitted the unrequested native Detail")
+	}
+	if len(tickets) != len(fake.FixtureBlockingSnapshot().Tickets) {
+		t.Errorf("tickets = %d, want only %d requested Watchlist members", len(tickets), len(fake.FixtureBlockingSnapshot().Tickets))
+	}
+	if got := tickets["#201"].LinksKnown; got == nil || !*got {
+		t.Errorf("#201 links_known = %v, want true for its valid Detail", got)
+	}
+	if got := tickets["#211"].LinksKnown; got == nil || *got {
+		t.Errorf("#211 links_known = %v, want false for its actual failed Detail", got)
+	}
+	if tickets["#211"].UnmetBlockers != nil {
+		t.Errorf("#211 unmet_blockers = %+v, want absent because no Links were read", tickets["#211"].UnmetBlockers)
 	}
 }
 
@@ -517,6 +562,10 @@ func (p interruptingDetailProvider) FetchDetail(ctx context.Context, id model.Ti
 	}
 	<-ctx.Done()
 	return model.Detail{}, provider.Errorf(provider.KindUnavailable, "fake: reading Detail: %w", ctx.Err())
+}
+
+func (p interruptingDetailProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
 }
 
 // A half-fetched fan-out must never be emitted as if it were complete: a

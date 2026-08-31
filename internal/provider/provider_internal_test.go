@@ -1,6 +1,10 @@
 package provider
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -76,5 +80,100 @@ func TestSelectorCapabilitiesRemainComparable(t *testing.T) {
 	got := want
 	if got != want {
 		t.Fatalf("SelectorCapabilities = %+v, want %+v", got, want)
+	}
+}
+
+func TestFetchDetailsDefaultCanonicalizesAndPreservesIdentity(t *testing.T) {
+	var calls []model.TicketID
+	details, err := FetchDetailsDefault(t.Context(), []model.TicketID{"", "a", "b", "a", "", "c"}, func(_ context.Context, id model.TicketID) (model.Detail, error) {
+		calls = append(calls, id)
+		return model.Detail{TicketID: id}, nil
+	})
+	if err != nil {
+		t.Fatalf("FetchDetailsDefault = %v, want nil", err)
+	}
+	if want := []model.TicketID{"a", "b", "c"}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+	if len(details) != 3 {
+		t.Fatalf("details = %v, want three canonical entries", details)
+	}
+	for id, detail := range details {
+		if detail.TicketID != id {
+			t.Errorf("details[%q].TicketID = %q, want %q", id, detail.TicketID, id)
+		}
+	}
+}
+
+func TestFetchDetailsDefaultEmptyInputDoesNoIO(t *testing.T) {
+	called := false
+	details, err := FetchDetailsDefault(t.Context(), []model.TicketID{"", ""}, func(context.Context, model.TicketID) (model.Detail, error) {
+		called = true
+		return model.Detail{}, nil
+	})
+	if err != nil || called || details == nil || len(details) != 0 {
+		t.Errorf("details/err/called = %v/%v/%v, want non-nil empty/nil/false", details, err, called)
+	}
+}
+
+func TestFetchDetailsDefaultReturnsPartialResultsAndTypedFailures(t *testing.T) {
+	boom := errors.New("boom")
+	details, err := FetchDetailsDefault(t.Context(), []model.TicketID{"a", "b", "c"}, func(_ context.Context, id model.TicketID) (model.Detail, error) {
+		if id == "b" {
+			return model.Detail{}, boom
+		}
+		return model.Detail{TicketID: id}, nil
+	})
+	if len(details) != 2 || details["a"].TicketID != "a" || details["c"].TicketID != "c" {
+		t.Errorf("details = %v, want a and c successes", details)
+	}
+	var failures *DetailFailures
+	if !errors.As(err, &failures) {
+		t.Fatalf("error = %v, want *DetailFailures", err)
+	}
+	if len(failures.Failures) != 1 || !errors.Is(err, boom) || !errors.Is(failures.Failures["b"], boom) {
+		t.Errorf("failures = %+v, want b wrapping boom", failures.Failures)
+	}
+}
+
+func TestFetchDetailsDefaultReturnsCancellationAfterFinalCompletedSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	details, err := FetchDetailsDefault(ctx, []model.TicketID{"a"}, func(_ context.Context, id model.TicketID) (model.Detail, error) {
+		cancel()
+		return model.Detail{TicketID: id}, nil
+	})
+	if !errors.Is(err, context.Canceled) || details["a"].TicketID != "a" {
+		t.Errorf("details/error = %v/%v, want completed a and context.Canceled", details, err)
+	}
+}
+
+func TestFetchDetailsDefaultTreatsProviderLocalCancellationAsTicketFailure(t *testing.T) {
+	details, err := FetchDetailsDefault(t.Context(), []model.TicketID{"a"}, func(context.Context, model.TicketID) (model.Detail, error) {
+		return model.Detail{}, fmt.Errorf("provider child: %w", context.Canceled)
+	})
+	var failures *DetailFailures
+	if len(details) != 0 || !errors.As(err, &failures) || !errors.Is(failures.Failures["a"], context.Canceled) {
+		t.Errorf("details/error = %v/%v, want a typed local cancellation failure", details, err)
+	}
+}
+
+func TestFetchDetailsDefaultStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var calls []model.TicketID
+	details, err := FetchDetailsDefault(ctx, []model.TicketID{"a", "b", "c"}, func(_ context.Context, id model.TicketID) (model.Detail, error) {
+		calls = append(calls, id)
+		cancel()
+		return model.Detail{TicketID: id}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if want := []model.TicketID{"a"}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+	if len(details) != 1 || details["a"].TicketID != "a" {
+		t.Errorf("details = %v, want completed a only", details)
 	}
 }

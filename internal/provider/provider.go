@@ -6,12 +6,14 @@
 //
 // The interface is split by view, not by entity (ADR-0003). Resolve is the
 // cheap batched hot path: one logical read returning a Watchlist's lightweight
-// Tickets, re-run on every refresh. FetchDetail is the lazy per-ticket call made
-// only when a human opens a Ticket. Detail data — descriptions, comments, links
-// — must never migrate into Resolve's result, however convenient it looks: a
-// list refresh that drags full descriptions along turns one request into N and
-// is exactly what this split exists to prevent. If a view seems to need Detail
-// while listing, that is a FetchDetail call, not a wider Ticket.
+// Tickets, re-run on every refresh. Detail data is lazy: FetchDetail reads one
+// Ticket for drill-in, while FetchDetails serves an explicit whole-Watchlist
+// request and may use FetchDetail as its generic fallback. Descriptions,
+// comments, and links must never migrate into Resolve's result, however
+// convenient it looks: a list refresh that drags full descriptions along turns
+// one request into N and is exactly what this split exists to prevent. If a view
+// seems to need Detail while listing, use the explicit Detail methods rather
+// than widening Ticket.
 //
 // A Resolve answers what the Selector points at, whatever that turns out to be.
 // A Ref naming a plain Ticket comes back as a snapshot with no Tickets, carrying
@@ -33,6 +35,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
@@ -134,14 +138,109 @@ type Provider interface {
 	// selector. A REST Provider may make multiple HTTP requests inside that one
 	// invocation. Selectors are constructed after Ref resolution and reused on
 	// every poll, so implementations must not repeat cwd git or Profile work.
-	// Every returned Ticket is thin list data; FetchDetail remains the only Detail
-	// path. Implementations return Tickets in stable Selector order and leave the
-	// snapshot's FetchedAt zero for the caller to stamp.
+	// Every returned Ticket is thin list data; Detail reads remain exclusive
+	// to FetchDetail and FetchDetails. Implementations return Tickets in stable
+	// Selector order and leave the snapshot's FetchedAt zero for the caller to
+	// stamp.
 	Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error)
 
-	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
-	// called only on drill-in, never during a list refresh.
+	// FetchDetail returns the expensive per-ticket data for one Ticket. Drill-in
+	// calls it directly, and the generic FetchDetails fallback calls it for each
+	// canonical ID. Neither path runs during a list refresh.
 	FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error)
+
+	// FetchDetails returns expensive Detail data for requested Tickets. It may
+	// use singular reads or a Tracker-native batch, but it never widens a list
+	// refresh path. Implementations canonicalize first-seen, non-empty IDs;
+	// empty input performs no I/O and returns a non-nil empty map. Successful
+	// entries retain their requested TicketID. A partial result is reported with
+	// a *DetailFailures error. Cancellation returns completed successes with the
+	// context error and does not invent per-Ticket failures for incomplete IDs.
+	FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error)
+}
+
+// DetailFailures reports failures for individual Tickets in a plural Detail
+// read. Successful siblings remain in the result map. Consumers inspect
+// Failures rather than parsing Error; errors.Is reaches each contained error.
+type DetailFailures struct {
+	Failures map[model.TicketID]error
+}
+
+func (e *DetailFailures) Error() string {
+	ids := make([]string, 0, len(e.Failures))
+	for id := range e.Failures {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("details could not be read for %s", strings.Join(ids, ", "))
+}
+
+// Unwrap exposes every per-Ticket error to errors.Is and errors.As.
+func (e *DetailFailures) Unwrap() []error {
+	ids := make([]string, 0, len(e.Failures))
+	for id := range e.Failures {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	errs := make([]error, 0, len(ids))
+	for _, id := range ids {
+		if err := e.Failures[model.TicketID(id)]; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+// FetchDetailsDefault supplies the generic plural implementation for Providers
+// without a Tracker-native batch. It canonicalizes first-seen non-empty IDs and
+// invokes fetch sequentially in canonical order. An empty input performs no I/O
+// and returns a non-nil empty map. Singular failures are accumulated as
+// DetailFailures; cancellation is returned directly with completed successes.
+func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(context.Context, model.TicketID) (model.Detail, error)) (map[model.TicketID]model.Detail, error) {
+	canonical := canonicalDetailIDs(ids)
+	details := make(map[model.TicketID]model.Detail, len(canonical))
+	failures := make(map[model.TicketID]error)
+	for _, id := range canonical {
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+		detail, err := fetch(ctx, id)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return details, ctxErr
+			}
+			failures[id] = err
+			continue
+		}
+		if detail.TicketID != id {
+			failures[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+			if err := ctx.Err(); err != nil {
+				return details, err
+			}
+			continue
+		}
+		details[id] = detail
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+	}
+	if len(failures) != 0 {
+		return details, &DetailFailures{Failures: failures}
+	}
+	return details, nil
+}
+
+func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
+	canonical := make([]model.TicketID, 0, len(ids))
+	seen := make(map[model.TicketID]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		canonical = append(canonical, id)
+	}
+	return canonical
 }
 
 // StampSnapshot completes a snapshot a Provider just returned, so it is ready

@@ -54,6 +54,10 @@ func (*bidiProvider) FetchDetail(context.Context, model.TicketID) (model.Detail,
 	return model.Detail{}, nil
 }
 
+func (p *bidiProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 func (p *bidiProvider) Resolve(context.Context, provider.Selector) (model.WatchlistSnapshot, error) {
 	return model.WatchlistSnapshot{
 		Header:  model.WatchlistHeader{Key: "EPIC-1", Title: "Watchlist"},
