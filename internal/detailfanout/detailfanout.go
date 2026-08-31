@@ -50,7 +50,7 @@ func Plan(tickets []model.Ticket, have func(model.TicketID) bool) []model.Ticket
 	return ids
 }
 
-// Outcome is one requested Ticket's resolved Detail result.
+// Outcome is one requested Ticket's successful Detail or per-Ticket failure.
 type Outcome struct {
 	ID     model.TicketID
 	Detail model.Detail
@@ -75,10 +75,13 @@ func UnreadableLinksNotice(failed int) string {
 	}
 }
 
-// Run calls f once for the complete planned slice and emits completed outcomes
-// in canonical input order. Cancellation is control flow: completed successes
-// are emitted, incomplete IDs are left unknown, and no unreadable-Links failures
-// are manufactured for them.
+// Run returns before dispatch when the planned slice is empty or ctx.Err() is
+// non-nil at the pre-dispatch check. Otherwise, it calls f once with the full
+// slice and emits outcomes in canonical input order. DetailFailures supply
+// per-Ticket failures; an ordinary response-wide error preserves completed
+// Details and fails each incomplete ID. Cancellation is control flow: completed
+// successes are emitted, incomplete IDs are left unknown, and no unreadable-Links
+// failures are manufactured for them.
 func Run(ctx context.Context, f Fetch, ids []model.TicketID, emit func(Outcome)) error {
 	if len(ids) == 0 {
 		return ctx.Err()
