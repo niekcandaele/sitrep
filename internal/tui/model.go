@@ -253,6 +253,15 @@ func New(ctx context.Context, opts Options) Model {
 	}
 	m = m.syncMouseKeys()
 
+	if opts.InitialError != nil && provider.KindOf(opts.InitialError) == provider.KindRateLimit {
+		m.lastErr = safeErr(opts.InitialError)
+		m.rateHold = m.rateLimitHold(m.lastErr)
+		if m.rateHold.manual || !m.rateHold.resetAt.IsZero() {
+			m.refreshing = false
+			m.generation = 0
+		}
+	}
+
 	if opts.Initial != nil {
 		// A reading the caller already took is folded in exactly the way a
 		// successful refresh is folded in, and nothing is in flight: the refresh
@@ -522,15 +531,17 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	// Recomputed per frame rather than stored on the Model: a cached field
-	// would be a third thing to keep in step with the Detail cache, the
-	// reading and the filter, and this cannot drift.
-	markers := m.listMarkers()
-	header := renderHeader(m.input, m.staleness(), m.hasData, m.width, markers, m.styles)
-	v.SetContent(strings.Join(append([]string{header, m.renderBody(markers)}, m.footerLines()...), "\n"))
-	v.Cursor = m.cursor()
+	// Keep timing-derived status and geometry internally consistent when a reset
+	// boundary falls during one render.
+	now := m.now()
+	frame := m
+	frame.now = func() time.Time { return now }
+	markers := frame.listMarkers()
+	header := renderHeader(frame.input, frame.staleness(), frame.hasData, frame.width, markers, frame.styles)
+	v.SetContent(strings.Join(append([]string{header, frame.renderBody(markers)}, frame.footerLines()...), "\n"))
+	v.Cursor = frame.cursor()
 	if m.mouseEnabled {
-		v.OnMouse = m.listMouseHandler()
+		v.OnMouse = frame.listMouseHandler()
 	}
 	return v
 }
@@ -578,11 +589,15 @@ func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
 // scheduler policy extends it rather than copying its rate-limit decisions.
 func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
 	now := m.now()
+	holdExpired := !m.rateHold.manual && !m.rateHold.resetAt.IsZero() && !now.Before(m.rateHold.resetAt)
 	m = m.expireRatePolicy(now)
 	if !m.listArmed || m.refreshing || m.rateHold.active(now) {
 		return m, false, time.Time{}
 	}
 	due := m.effectiveAutomaticDue(now)
+	if holdExpired {
+		due = now
+	}
 	return m, !now.Before(due), due
 }
 
@@ -743,8 +758,9 @@ func (m Model) rateLimitHold(err error) rateHold {
 	if !ok {
 		return rateHold{err: err, manual: true}
 	}
-	resetAt, hasDeadline := metadata.Deadline(m.now())
-	if !hasDeadline || !m.now().Before(resetAt) {
+	now := m.now()
+	resetAt, hasDeadline := metadata.Deadline(now)
+	if !hasDeadline || !now.Before(resetAt) {
 		return rateHold{}
 	}
 	return rateHold{err: err, resetAt: resetAt}
@@ -1075,11 +1091,19 @@ func (m Model) renderBody(markers listMarkers) string {
 		return pad(strings.Join([]string{
 			m.styles.Error.Render(truncateLine("Could not read the Watchlist: "+m.lastErr.Error(), m.width)),
 			"",
-			m.styles.Muted.Render("Press r to try again, q to quit."),
+			m.styles.Muted.Render(m.retryBodyHint()),
 		}, "\n"), height)
 	default:
 		return pad(m.styles.Muted.Render("Reading…"), height)
 	}
+}
+
+func (m Model) retryBodyHint() string {
+	now := m.now()
+	if m.rateHold.active(now) && !m.rateHold.manual {
+		return "Automatic refresh resumes at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + "; r is held. Press q to quit."
+	}
+	return "Press r to try again, q to quit."
 }
 
 // footerLines is the always-visible bottom block, line by line: a blank
@@ -1092,13 +1116,14 @@ func (m Model) renderBody(markers listMarkers) string {
 // what the body is measured against, and because the find box needs to know
 // which row it was drawn on to put the cursor there.
 func (m Model) footerLines() []string {
+	now := m.now()
 	lines := []string{""}
 	if m.hasData && m.input.LimitReached {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			plain.LimitNotice(len(m.input.Tickets)), m.width)))
 	}
 	if m.lastErr != nil && m.hasData && provider.KindOf(m.lastErr) != provider.KindRateLimit {
-		remaining := m.effectiveAutomaticDue(m.now()).Sub(m.now())
+		remaining := m.effectiveAutomaticDue(now).Sub(now)
 		lines = append(lines, m.styles.Error.Render(truncateLine(
 			fmt.Sprintf("refresh failed: %v%sretrying in %s", m.lastErr, separator, countdown(remaining)), m.width)))
 	}

@@ -124,6 +124,19 @@ func TestKnownRateLimitHoldBlocksAutomaticAndManualUntilDeadline(t *testing.T) {
 	}
 }
 
+func TestKnownRateLimitDeadlineBeatsLongerConfiguredInterval(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m := policyModel(t, c, time.Minute)
+	reset := c.now().Add(10 * time.Second)
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, err: provider.RateLimitErrorf(
+		provider.RateLimitMetadata{ResetAt: reset}, "github: rate limited")})
+	c.advance(10 * time.Second)
+	next, allowed, due := m.automaticRefreshAdmission()
+	if !allowed || !due.Equal(c.now()) || next.rateHold != (rateHold{}) {
+		t.Fatalf("automatic admission at known reset = allowed:%t due:%s hold:%+v", allowed, due, next.rateHold)
+	}
+}
+
 func TestUnknownRateLimitRequiresManualSuccess(t *testing.T) {
 	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
 	m := policyModel(t, c, time.Minute)
@@ -192,6 +205,130 @@ func TestExhaustedBudgetBlocksBothAdmissions(t *testing.T) {
 	}
 	if got := m.ratePolicyFooter(); got == "" || !strings.Contains(got, "budget exhausted") {
 		t.Errorf("exhausted footer = %q", got)
+	}
+}
+
+func TestInitialKnownRateLimitHoldAvoidsDuplicateStartupFetch(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := New(t.Context(), Options{
+		Interval: time.Minute,
+		Now:      c.now,
+		Heartbeat: func() tea.Msg {
+			return nil
+		},
+		Source: func(context.Context) (ListInput, error) {
+			calls.Add(1)
+			return ListInput{}, nil
+		},
+		InitialError: provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: c.now().Add(time.Hour)}, "github: rate limited"),
+	})
+	if m.refreshing || m.generation != 0 || !m.rateHold.active(c.now()) {
+		t.Fatalf("initial rate-limit state = refreshing:%t generation:%d hold:%+v", m.refreshing, m.generation, m.rateHold)
+	}
+	m.Init()()
+	if calls.Load() != 0 {
+		t.Fatalf("initial known hold started %d source calls", calls.Load())
+	}
+	next, _ := m.onHeartbeat()
+	if next.(Model).refreshing || calls.Load() != 0 {
+		t.Fatal("known startup hold admitted a duplicate fetch before reset")
+	}
+}
+
+func TestElapsedInitialRateLimitDeadlineStartsTheNormalInitialFetch(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := New(t.Context(), Options{
+		Interval:  time.Minute,
+		Now:       c.now,
+		Heartbeat: func() tea.Msg { return nil },
+		Source: func(context.Context) (ListInput, error) {
+			calls.Add(1)
+			return ListInput{}, nil
+		},
+		InitialError: provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: c.now()}, "github: rate limited"),
+	})
+	if !m.refreshing || m.generation != 1 || m.rateHold != (rateHold{}) {
+		t.Fatalf("elapsed initial rate-limit state = refreshing:%t generation:%d hold:%+v", m.refreshing, m.generation, m.rateHold)
+	}
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("initial refresh command was not batched")
+	}
+	for _, cmd := range batch {
+		if _, ok := cmd().(refreshedMsg); ok {
+			break
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("elapsed initial deadline started %d source calls, want one", calls.Load())
+	}
+}
+
+func TestUnseededRateLimitBodyExplainsManualAvailability(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	for _, test := range []struct {
+		name     string
+		hold     rateHold
+		contains string
+		excludes string
+	}{
+		{"known", rateHold{resetAt: c.now().Add(time.Hour)}, "r is held", "Press r to try again"},
+		{"exhausted", rateHold{resetAt: c.now().Add(time.Hour), exhausted: true}, "r is held", "Press r to try again"},
+		{"unknown", rateHold{manual: true}, "Press r to try again", "r is held"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := policyModel(t, c, time.Minute)
+			m.width, m.height = 120, 20
+			m.refreshing = false
+			m.lastErr = provider.Errorf(provider.KindRateLimit, "github: rate limited")
+			m.rateHold = test.hold
+			m.rateHold.err = m.lastErr
+			body := m.renderBody(listMarkers{})
+			if !strings.Contains(body, test.contains) || strings.Contains(body, test.excludes) {
+				t.Fatalf("%s unseeded rate-limit body = %q", test.name, body)
+			}
+		})
+	}
+}
+
+func TestRatePolicyFrameUsesOneClockSnapshot(t *testing.T) {
+	before := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	after := before.Add(2 * time.Minute)
+	m := policyModel(t, &policyClock{value: before}, time.Minute)
+	m.ready = true
+	m.hasData = true
+	m.width, m.height = 80, 24
+	m.searching = true
+	m.search.Focus()
+	m.rateHold = rateHold{
+		err:     provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: before.Add(time.Minute)}, "github: rate limited"),
+		resetAt: before.Add(time.Minute),
+	}
+	calls := 0
+	m.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return before
+		}
+		return after
+	}
+	view := m.View()
+	if calls != 1 {
+		t.Fatalf("View read clock %d times, want one frame snapshot", calls)
+	}
+	if !strings.Contains(view.Content, "refresh held") {
+		t.Fatalf("clock-boundary frame lost active hold: %q", view.Content)
+	}
+	if view.Cursor == nil {
+		t.Fatal("clock-boundary frame lost filter cursor")
+	}
+	frame := m
+	frame.now = func() time.Time { return before }
+	wantCursor := frame.cursor()
+	if wantCursor == nil || view.Cursor.Y != wantCursor.Y || view.Cursor.X != wantCursor.X {
+		t.Fatalf("clock-boundary cursor = %+v, want %+v", view.Cursor, wantCursor)
 	}
 }
 

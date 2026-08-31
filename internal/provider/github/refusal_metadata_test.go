@@ -27,4 +27,13 @@ func TestRateLimitRefusalsCarryHeaderMetadata(t *testing.T) {
 	if !ok || !metadata.ResetAt.Equal(time.Unix(1893553445, 0)) {
 		t.Fatalf("graphql metadata = %+v, %t", metadata, ok)
 	}
+
+	// A primary refusal is intentionally timed only by X-RateLimit-Reset. The
+	// secondary Retry-After contract does not cross over when remaining=0.
+	primaryWithoutReset := p.checkStatus(&http.Response{StatusCode: http.StatusForbidden, Header: http.Header{
+		"X-Ratelimit-Remaining": {"0"}, "Retry-After": {"30"},
+	}})
+	if metadata, ok := provider.RateLimitMetadataOf(primaryWithoutReset); ok {
+		t.Fatalf("primary refusal fell back to Retry-After metadata = %+v", metadata)
+	}
 }
