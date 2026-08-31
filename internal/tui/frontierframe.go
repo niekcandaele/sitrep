@@ -302,9 +302,10 @@ func anonymousBlockers(a model.Actionability) int {
 	return n
 }
 
-// frontierEdge is one drawn blocking relation over node indices.
-// BuildBlockingGraph already deduplicated on (dependent, blocker) and already
-// folded Blocks Links into this direction, so nothing here dedupes again and
+// frontierEdge is one drawn blocking relation over displayed node indices.
+// BuildBlockingGraph deduplicates graph-node pairs before duplicate Ticket IDs
+// collapse onto their first displayed node, so frontierEdges deduplicates again
+// after that mapping. Blocks Links are already folded into this direction, and
 // nothing here reads Detail.Links.
 type frontierEdge struct {
 	dependent, blocker int
@@ -312,7 +313,8 @@ type frontierEdge struct {
 
 // frontierEdges collects the drawable edges in canonical order — members in
 // Watchlist order then Ghosts in theirs, each node's Blockers in order — which
-// is the only tie-break the layout below uses.
+// is the only tie-break the layout below uses. The first occurrence of a
+// displayed semantic relation wins when duplicate members collapse together.
 //
 // Ghosts are walked because a Ghost reached as a dependent — a member's Blocks
 // Link pointing out of the Watchlist — carries its edge on the Ghost's own
@@ -320,6 +322,7 @@ type frontierEdge struct {
 // what the Watchlist read.
 func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []frontierEdge {
 	var edges []frontierEdge
+	seen := make(map[frontierEdge]struct{})
 	collect := func(id model.TicketID, blockers []model.Blocker) {
 		dependent, ok := index[id]
 		if !ok {
@@ -338,7 +341,12 @@ func frontierEdges(g model.BlockingGraph, index map[model.TicketID]int) []fronti
 				// carries the CYCLE badge.
 				continue
 			}
-			edges = append(edges, frontierEdge{dependent: dependent, blocker: blocker})
+			edge := frontierEdge{dependent: dependent, blocker: blocker}
+			if _, duplicate := seen[edge]; duplicate {
+				continue
+			}
+			seen[edge] = struct{}{}
+			edges = append(edges, edge)
 		}
 	}
 	for _, a := range g.Members() {

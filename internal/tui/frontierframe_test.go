@@ -172,6 +172,31 @@ func TestFrontierDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
 	t.Fatal("c has no Frontier node")
 }
 
+func TestFrontierDeduplicatesBlockedByFromDuplicateDependentMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("c", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"a": blockedBy("c"),
+		"c": nil,
+	})
+
+	plan := planFrontierRanks(g, frontierNodes(g, tickets, true))
+	if len(plan.routes) != 1 {
+		t.Fatalf("routes = %+v, want one canonical c -> a route", plan.routes)
+	}
+	if got := plan.routes[0]; got.blocker != "c" || got.dependent != "a" {
+		t.Errorf("route = %+v, want blocker c and dependent a", got)
+	}
+	for _, id := range []model.TicketID{"a", "c"} {
+		if got, want := plan.incident[id], []frontierRouteID{1}; !reflect.DeepEqual(got, want) {
+			t.Errorf("incident[%s] = %v, want %v", id, got, want)
+		}
+	}
+}
+
 // Cycle members share a component and therefore a column. The test is also the
 // termination case: a layout that recursed through the cycle would hang, and
 // the test would fail by timeout rather than by assertion.
