@@ -198,10 +198,18 @@ func TestFetchDetailsBatches100AliasesInOneRequest(t *testing.T) {
 func TestFetchDetailsChunksAtSharedAliasBound(t *testing.T) {
 	ids := batchIDs(101)
 	var (
-		mu        sync.Mutex
-		chunkIDs  [][]model.TicketID
-		requestNo int
+		mu          sync.Mutex
+		chunkIDs    [][]model.TicketID
+		requestNo   int
+		firstOnce   sync.Once
+		secondOnce  sync.Once
+		releaseOnce sync.Once
 	)
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		request := decodeDetailBatchRequest(t, r)
 		requested := make([]model.TicketID, len(request.Variables))
@@ -210,18 +218,56 @@ func TestFetchDetailsChunksAtSharedAliasBound(t *testing.T) {
 		}
 		mu.Lock()
 		requestNo++
+		n := requestNo
 		chunkIDs = append(chunkIDs, requested)
 		mu.Unlock()
+
+		switch n {
+		case 1:
+			firstOnce.Do(func() { close(firstStarted) })
+			<-releaseFirst
+		case 2:
+			secondOnce.Do(func() { close(secondStarted) })
+		}
 		writeDetailBatchResponse(t, w, generatedDetailData(t, request.Variables))
 	}))
 	t.Cleanup(s.Close)
+	t.Cleanup(release)
 
-	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
-	if err != nil {
-		t.Fatalf("FetchDetails: %v", err)
+	type fetchResult struct {
+		details map[model.TicketID]model.Detail
+		err     error
 	}
-	if len(details) != len(ids) {
-		t.Fatalf("details = %d, want %d", len(details), len(ids))
+	done := make(chan fetchResult, 1)
+	go func() {
+		details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+		done <- fetchResult{details: details, err: err}
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Detail chunk did not start")
+	}
+	select {
+	case <-secondStarted:
+		release()
+		t.Fatal("second Detail chunk started before the first completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+
+	var result fetchResult
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FetchDetails did not finish after releasing the first chunk")
+	}
+	if result.err != nil {
+		t.Fatalf("FetchDetails: %v", result.err)
+	}
+	if len(result.details) != len(ids) {
+		t.Fatalf("details = %d, want %d", len(result.details), len(ids))
 	}
 	mu.Lock()
 	gotChunks := append([][]model.TicketID(nil), chunkIDs...)

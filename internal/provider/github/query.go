@@ -163,7 +163,7 @@ const refListTicketFragment = `fragment RefListTicketFields on Issue {
   ...IssuePullRequestRelationships
 }`
 
-// detailQuery is the second GraphQL document this driver sends, and it is
+// detailQuery is the singular Detail document, and it is
 // deliberately separate from epicQuery rather than an addition to it: the epic
 // document is polled every interval, this one is sent once, when a human opens a
 // Ticket (ADR-0003). Merging them would put a body, a hundred comments and two
