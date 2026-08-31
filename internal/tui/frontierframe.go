@@ -1273,9 +1273,9 @@ func frontierEvidenceLabels(a model.Actionability) []string {
 		full, compact := fmt.Sprintf("blocked by %d", known), fmt.Sprintf("BLOCKED %d", known)
 		switch {
 		case linksFailed && blockerUnknown:
-			return []string{full + " LINKS FAILED BLOCKER?", compact + " LINK FAIL BLOCKER?", full + " LINKS FAILED", full + " BLOCKER?", compact + " LINKS FAIL", compact + " BLOCKER?", full, compact}
+			return []string{full + " LINKS FAILED BLOCKER?", compact + " LINK FAIL BLOCKER?", full + " LINKS FAILED", full + " LINK FAIL", compact + " LINK FAIL", full, compact}
 		case linksFailed:
-			return []string{full + " LINKS FAILED", compact + " LINKS FAIL", full, compact}
+			return []string{full + " LINKS FAILED", full + " LINK FAIL", compact + " LINK FAIL", full, compact}
 		case blockerUnknown:
 			return []string{full + " BLOCKER?", compact + " BLOCKER?", full, compact}
 		default:

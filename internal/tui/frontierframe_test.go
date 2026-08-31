@@ -1319,6 +1319,57 @@ func TestFrontierEvidenceLabelsSeparateCausesAndPreserveKnownBlockers(t *testing
 	}
 }
 
+func TestFrontierEvidenceLabelsPreferKnownCountAndLocalFailureAtCompactWidths(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusUnknown),
+	}
+	cases := []struct {
+		name  string
+		links map[model.TicketID][]model.Link
+	}{
+		{
+			name: "local failure",
+			links: map[model.TicketID][]model.Link{
+				"#2": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}}},
+				"#3": nil,
+			},
+		},
+		{
+			name: "local failure and blocker unknown",
+			links: map[model.TicketID][]model.Link{
+				"#2": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}}},
+				"#3": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusUnknown}}},
+			},
+		},
+	}
+	want := map[int]string{
+		16: "blocked by 1", 17: "blocked by 1", 18: "blocked by 1",
+		19: "BLOCKED 1 LINK FAIL", 20: "BLOCKED 1 LINK FAIL", 21: "BLOCKED 1 LINK FAIL",
+		22: "blocked by 1 LINK FAIL", 23: "blocked by 1 LINK FAIL", 24: "blocked by 1 LINK FAIL",
+		25: "blocked by 1 LINKS FAILED",
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := graphOf(tickets, tc.links)
+			nodes := frontierNodes(g, tickets, true)
+			for _, n := range nodes {
+				if n.id != "#1" {
+					continue
+				}
+				for width, expected := range want {
+					if got := frontierBadgeLine(n, g, width); got != expected {
+						t.Errorf("width %d = %q, want %q", width, got, expected)
+					}
+				}
+				return
+			}
+			t.Fatal("missing #1 Frontier node")
+		})
+	}
+}
+
 func TestFrontierEvidenceLabelsNameOutsideWatchlistAndNeverClipWords(t *testing.T) {
 	ticket := blockingTicket("#1", model.StatusTodo)
 	outside := model.LinkTarget{ID: "OUT-1", Key: "OUT-1", Title: "outside", Status: model.StatusUnknown}
