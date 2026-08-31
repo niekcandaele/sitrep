@@ -166,6 +166,12 @@ try once more. A valid exhausted budget is the same hard hold. A remaining budge
 only automatic refreshes to spread calls across its reset window, while `r` remains available.
 These decisions are local to the monitor session; Providers only report the headers they receive.
 
+When a supporting terminal reports that it has lost focus, sitrep pauses only future automatic
+Watchlist refreshes and keeps the displayed age advancing. Existing requests are allowed to finish.
+On focus regain, an already-due refresh starts only when the normal cadence and rate policy permit
+it. List `r` remains available while unfocused subject to that same rate policy. Terminals and
+multiplexers that do not report focus keep the existing automatic-refresh behavior.
+
 Mouse capture is on by default. Click a Ticket row to select it, double-click one to open its
 Detail, and use the wheel to move one Ticket at a time in the list or three lines at a time in
 Detail. Press `m` to turn capture off or on. Shift-drag is the common terminal escape hatch

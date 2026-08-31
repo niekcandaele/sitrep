@@ -109,6 +109,7 @@ func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 	assertTerminalModePair(t, output, ansi.SetModeAltScreenSaveCursor, ansi.ResetModeAltScreenSaveCursor)
 	assertTerminalModePair(t, output, ansi.SetModeMouseButtonEvent, ansi.ResetModeMouseButtonEvent)
 	assertTerminalModePair(t, output, ansi.SetModeMouseExtSgr, ansi.ResetModeMouseExtSgr)
+	assertTerminalModePair(t, output, ansi.SetModeFocusEvent, ansi.ResetModeFocusEvent)
 	assertTerminalModePair(t, output, ansi.HideCursor, ansi.ShowCursor)
 }
 
@@ -811,7 +812,7 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 		waitFor string
 		send    string
 	}{
-		{waitFor: boundaryPTYDetailMarker, send: "\t\r"},
+		{waitFor: boundaryPTYDetailMarker, send: "\x1b[O\x1b[I\t\r"},
 		{waitFor: boundaryPTYChildMarker, send: "u"},
 		{waitFor: boundaryPTYListMarker, send: "\r"},
 		{waitFor: boundaryPTYDrillMarker, send: "uv"},

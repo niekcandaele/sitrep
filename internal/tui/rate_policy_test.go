@@ -496,3 +496,203 @@ func TestRatePolicyIgnoresStaleResultsAndDoesNotCallSourceWhenHeld(t *testing.T)
 		t.Fatal("held heartbeat launched Source work")
 	}
 }
+
+func TestTerminalFocusDefaultsToFocused(t *testing.T) {
+	m := policyModel(t, &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}, time.Minute)
+	if !m.terminalFocused {
+		t.Fatal("new monitor is not optimistically focused")
+	}
+}
+
+func TestTerminalFocusExtendsOnlyAutomaticAdmission(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := New(t.Context(), Options{
+		Interval: time.Minute, Now: c.now, Heartbeat: func() tea.Msg { return nil },
+		Source: func(context.Context) (ListInput, error) {
+			calls.Add(1)
+			return ListInput{}, nil
+		},
+	})
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
+	c.advance(time.Minute)
+
+	blurred, cmd := m.Update(tea.BlurMsg{})
+	m = blurred.(Model)
+	if cmd != nil || m.terminalFocused {
+		t.Fatal("blur did not only record unfocused state")
+	}
+	generation := m.generation
+	if next, cmd := m.onHeartbeat(); cmd == nil || next.(Model).refreshing || next.(Model).generation != generation || calls.Load() != 0 {
+		t.Fatal("blurred heartbeat started automatic work")
+	}
+
+	manual, cmd := m.Update(tea.KeyPressMsg{Code: 'r'})
+	m = manual.(Model)
+	if cmd == nil || !m.refreshing || m.terminalFocused {
+		t.Fatal("blurred List r was not admitted by the existing manual policy")
+	}
+	if got := cmd(); got == nil || calls.Load() != 1 {
+		t.Fatal("blurred manual refresh did not call Source exactly once")
+	}
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
+	c.advance(time.Minute)
+
+	focused, cmd := m.Update(tea.FocusMsg{})
+	m = focused.(Model)
+	if cmd == nil || !m.refreshing || !m.terminalFocused || m.generation != generation+2 {
+		t.Fatalf("due focus regain = focused:%t refreshing:%t generation:%d", m.terminalFocused, m.refreshing, m.generation)
+	}
+	if duplicate, duplicateCmd := m.Update(tea.FocusMsg{}); duplicateCmd != nil || duplicate.(Model).generation != m.generation {
+		t.Fatal("duplicate focus started additional work")
+	}
+	m.refreshing = false
+	m.lastAttempt = c.now().Add(-time.Minute)
+	if duplicate, duplicateCmd := m.Update(tea.FocusMsg{}); duplicateCmd != nil || duplicate.(Model).generation != m.generation {
+		t.Fatal("duplicate focused report rechecked automatic admission")
+	}
+}
+
+func TestFocusRegainRespectsDueAndRatePolicy(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	for _, test := range []struct {
+		name    string
+		advance time.Duration
+		hold    rateHold
+		low     lowBudgetSchedule
+	}{
+		{name: "before due", advance: 30 * time.Second},
+		{name: "known hold", advance: time.Minute, hold: rateHold{resetAt: c.now().Add(time.Hour)}},
+		{name: "unknown hold", advance: time.Minute, hold: rateHold{manual: true}},
+		{name: "low budget", advance: time.Minute, low: lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(2 * time.Hour)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := policyModel(t, c, time.Minute)
+			m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
+			m.rateHold, m.lowBudget = test.hold, test.low
+			blurred, _ := m.Update(tea.BlurMsg{})
+			m = blurred.(Model)
+			c.advance(test.advance)
+			focused, cmd := m.Update(tea.FocusMsg{})
+			if cmd != nil || focused.(Model).refreshing {
+				t.Fatalf("focus regain bypassed %s policy", test.name)
+			}
+			c.advance(-test.advance)
+		})
+	}
+}
+
+func TestBlurredStatusIsTruthfulAndStalenessAdvances(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m := policyModel(t, c, time.Minute)
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
+	m.hasData = true
+	m.width, m.height, m.ready = 120, 24, true
+	blurred, _ := m.Update(tea.BlurMsg{})
+	m = blurred.(Model)
+	m.lastErr = provider.Errorf(provider.KindUnavailable, "network")
+	footer := strings.Join(m.footerLines(), "\n")
+	if !strings.Contains(footer, "automatic refresh paused: terminal unfocused") || strings.Contains(footer, "retrying in") {
+		t.Fatalf("blurred generic failure = %q", footer)
+	}
+	m.refreshing = true
+	if footer = strings.Join(m.footerLines(), "\n"); strings.Contains(footer, "refresh failed:") || strings.Contains(footer, "paused: terminal unfocused") || m.staleness() != "refreshing…" {
+		t.Fatalf("blurred in-flight generic status did not defer to refreshing: %q", footer)
+	}
+	m.refreshing = false
+	c.advance(2 * time.Minute)
+	if got := m.focusPauseFooter(); !strings.Contains(got, "updated 2m ago") {
+		t.Fatalf("blurred pause status does not advance staleness: %q", got)
+	}
+	noData := policyModel(t, c, time.Minute)
+	noData.refreshing = false
+	noData.lastErr = provider.Errorf(provider.KindUnavailable, "network")
+	blurredNoData, _ := noData.Update(tea.BlurMsg{})
+	if got := blurredNoData.(Model).retryBodyHint(); !strings.Contains(got, "paused while terminal is unfocused") || strings.Contains(got, "resumes at") {
+		t.Fatalf("blurred no-data hint = %q", got)
+	}
+	for _, test := range []struct {
+		name string
+		hold rateHold
+		low  lowBudgetSchedule
+		want string
+	}{
+		{"known", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(time.Hour)}, lowBudgetSchedule{}, "r held"},
+		{"unknown", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}, lowBudgetSchedule{}, "press r to try again"},
+		{"exhausted", rateHold{exhausted: true, resetAt: c.now().Add(time.Hour)}, lowBudgetSchedule{}, "budget exhausted"},
+		{"low", rateHold{}, lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(30 * time.Minute)}, "refresh slowed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m.rateHold, m.lowBudget = test.hold, test.low
+			got := m.ratePolicyFooter()
+			if !strings.Contains(got, "paused: terminal unfocused") || !strings.Contains(got, test.want) || strings.Contains(got, "retrying at") || strings.Contains(got, "next automatic refresh") {
+				t.Fatalf("blurred %s policy = %q", test.name, got)
+			}
+			m.refreshing = true
+			if got = m.ratePolicyFooter(); got != "" {
+				t.Fatalf("blurred in-flight %s policy rendered beside refreshing state: %q", test.name, got)
+			}
+			m.refreshing = false
+		})
+	}
+}
+
+func TestBlurredUnknownManualRefreshDefersPolicyFooter(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m := policyModel(t, c, time.Minute)
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
+	m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}
+	blurred, _ := m.Update(tea.BlurMsg{})
+	m = blurred.(Model)
+	manual, cmd := m.onKey(tea.KeyPressMsg{Code: 'r'})
+	m = manual.(Model)
+	if cmd == nil || !m.refreshing || m.ratePolicyFooter() != "" || m.focusPauseFooter() != "" || m.staleness() != "refreshing…" {
+		t.Fatal("blurred unknown-hold manual refresh did not defer policy output to refreshing")
+	}
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, err: provider.Errorf(provider.KindUnavailable, "network")})
+	if got := m.ratePolicyFooter(); !strings.Contains(got, "paused: terminal unfocused") || !strings.Contains(got, "press r to try again") {
+		t.Fatalf("settled unknown-hold manual refresh lost paused policy: %q", got)
+	}
+}
+
+func TestFocusMessagesPreserveScreenState(t *testing.T) {
+	m := policyModel(t, &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}, time.Minute)
+	m.mode, m.searching, m.mouseEpoch = modeFrontier, true, 9
+	m.frontierGeneration, m.detailGeneration = 7, 11
+	m.refreshing, m.generation = true, 13
+	m.legendVisible = false
+	blurred, _ := m.Update(tea.BlurMsg{})
+	next := blurred.(Model)
+	if !next.refreshing || next.generation != 13 {
+		t.Fatal("blur cancelled or resequenced in-flight Watchlist work")
+	}
+	if next.mode != m.mode || next.searching != m.searching || next.mouseEpoch != m.mouseEpoch || next.frontierGeneration != m.frontierGeneration || next.detailGeneration != m.detailGeneration || next.legendVisible != m.legendVisible {
+		t.Fatal("blur routed into screen navigation, cancellation, or legend state")
+	}
+	focused, _ := next.Update(tea.FocusMsg{})
+	next = focused.(Model)
+	if next.mode != m.mode || next.searching != m.searching || next.mouseEpoch != m.mouseEpoch || next.frontierGeneration != m.frontierGeneration || next.detailGeneration != m.detailGeneration || next.legendVisible != m.legendVisible {
+		t.Fatal("focus routed into screen navigation, cancellation, or legend state")
+	}
+}
+
+func TestViewAlwaysReportsFocus(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		ready bool
+		mode  mode
+	}{
+		{name: "not ready"},
+		{name: "list", ready: true, mode: modeList},
+		{name: "detail", ready: true, mode: modeDetail},
+		{name: "frontier", ready: true, mode: modeFrontier},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := policyModel(t, &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}, time.Minute)
+			m.ready, m.mode, m.width, m.height = test.ready, test.mode, 80, 24
+			if !m.View().ReportFocus {
+				t.Fatal("View did not request terminal focus reports")
+			}
+		})
+	}
+}
