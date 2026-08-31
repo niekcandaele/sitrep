@@ -3,8 +3,10 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
@@ -99,11 +101,12 @@ type frontierCell struct {
 	// rather than an r == 0 test so the writer and renderer read one spelling of
 	// the same fact.
 	continuation bool
-	// trailing holds the zero-width runes that belong to r — combining marks,
-	// variation selectors, ZWJ joiners. They occupy no column of their own, so
-	// they ride along with the cell they modify rather than claiming one or
-	// being dropped: "café" on a card must be the same bytes as "café" on a
-	// list row.
+	// trailing holds the remainder of the grapheme-bearing cell. Usually that is
+	// combining marks, variation selectors, or ZWJ joiners after r. When a field
+	// begins with a zero-width bidi/control cluster, r retains its first rune and
+	// trailing carries the remaining prefix plus the first visible cluster, so the
+	// original sanitized byte order survives without adding another pointer to
+	// every grid cell.
 	trailing string
 }
 
@@ -117,8 +120,14 @@ type frontierRect struct {
 type frontierLayout struct {
 	cells  [][]frontierCell
 	styles []frontierStyle
-	// links is the layout's URL table; index 0 is "no hyperlink".
-	links []string
+	// links is the layout's URL table; index 0 is "no hyperlink". linkByURL
+	// preserves deterministic draw-order indices while keeping interning O(1).
+	links     []string
+	linkByURL map[string]int
+	// nodes retains the admitted presentation facts used by dense focus
+	// inspection. It is built with the hit map after admission, never during
+	// projection.
+	nodes map[model.TicketID]frontierNode
 	// nodeAt is every drawn node's card rect, for focus, hit-testing and
 	// ensureNodeVisible. Pass-through waypoints are deliberately absent: they
 	// are not focusable and not clickable.
@@ -142,6 +151,7 @@ type frontierLayout struct {
 	// hysteresis. Only the direction below has cells materialized.
 	candidates    [2]frontierLayoutCandidate
 	direction     frontierRankDirection
+	density       frontierDensity
 	width, height int
 }
 
@@ -175,14 +185,16 @@ type frontierEmphasis struct {
 // The node's TicketID is its identity and is never drawn (ADR-0006); the card
 // shows the Key.
 type frontierNode struct {
-	id       model.TicketID
-	member   bool
-	key      string
-	title    string
-	url      string
-	status   model.StatusCategory
-	native   string
-	emphasis frontierEmphasis
+	id            model.TicketID
+	member        bool
+	key           string
+	title         string
+	url           string
+	status        model.StatusCategory
+	native        string
+	linksFailed   bool
+	actionability model.Actionability
+	emphasis      frontierEmphasis
 }
 
 // frontierNodes derives every drawable node from the graph and the Watchlist
@@ -192,7 +204,12 @@ type frontierNode struct {
 // Links or a recorded Detail failure. Until then, every member is visibly
 // PENDING: fail-closed plus a progressive fetch means a partial Frontier gives
 // wrong answers to anyone glancing at it, so the screen waits and says why.
-func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool) []frontierNode {
+func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool,
+	failures ...map[model.TicketID]struct{}) []frontierNode {
+	var failed map[model.TicketID]struct{}
+	if len(failures) > 0 {
+		failed = failures[0]
+	}
 	byID := make(map[model.TicketID]model.Ticket, len(tickets))
 	for _, t := range tickets {
 		if _, dup := byID[t.ID]; !dup {
@@ -215,15 +232,18 @@ func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool)
 		}
 		drawn[a.TicketID] = true
 		t := byID[a.TicketID]
+		_, linksFailed := failed[a.TicketID]
 		nodes = append(nodes, frontierNode{
-			id:       a.TicketID,
-			member:   true,
-			key:      t.Key,
-			title:    t.Title,
-			url:      t.URL,
-			status:   a.Status,
-			native:   nativeStatusFor(t),
-			emphasis: memberEmphasis(a, resolved),
+			id:            a.TicketID,
+			member:        true,
+			key:           t.Key,
+			title:         t.Title,
+			url:           t.URL,
+			status:        a.Status,
+			native:        nativeStatusFor(t),
+			linksFailed:   linksFailed,
+			actionability: a,
+			emphasis:      memberEmphasis(a, resolved),
 		})
 	}
 	for _, ghost := range ghosts {
@@ -399,6 +419,62 @@ func (d frontierRankDirection) other() frontierRankDirection {
 	return frontierRanksHorizontal
 }
 
+// frontierDensity is a manual presentation choice. Its zero value preserves the
+// original full-card layout for model literals and pure tests.
+type frontierDensity uint8
+
+const (
+	frontierDensityFull frontierDensity = iota
+	frontierDensityDense
+)
+
+func (d frontierDensity) validate() {
+	switch d {
+	case frontierDensityFull, frontierDensityDense:
+		return
+	default:
+		panic("unsupported Frontier density")
+	}
+}
+
+func (d frontierDensity) toggled() frontierDensity {
+	d.validate()
+	if d == frontierDensityDense {
+		return frontierDensityFull
+	}
+	return frontierDensityDense
+}
+
+// frontierGeometry contains every density-dependent scalar consumed by both
+// projection and materialization. Keeping one value on the projection makes it
+// impossible to admit full geometry and accidentally allocate dense geometry,
+// or vice versa.
+type frontierGeometry struct {
+	density          frontierDensity
+	slotWidth        int
+	cardHeight       int
+	slotHeight       int
+	horizontalAnchor int
+}
+
+func frontierGeometryFor(nodes []frontierNode, innerWidth int, density frontierDensity) frontierGeometry {
+	density.validate()
+	if density == frontierDensityDense {
+		width := 2
+		for _, node := range nodes {
+			width = max(width, 2+lipgloss.Width(node.key))
+		}
+		return frontierGeometry{
+			density: density, slotWidth: width, cardHeight: 1, slotHeight: 2,
+		}
+	}
+	return frontierGeometry{
+		density:   density,
+		slotWidth: frontierCardWidthFor(innerWidth), cardHeight: frontierCardHeight,
+		slotHeight: frontierSlotHeight, horizontalAnchor: 1,
+	}
+}
+
 // frontierRouteID is one-based so a zero-valued segment or dummy cannot
 // accidentally claim the first canonical route.
 type frontierRouteID uint32
@@ -456,6 +532,7 @@ type frontierRankProjection struct {
 	slotCounts    []int
 	channelCounts []int
 	peers         int
+	geometry      frontierGeometry
 	candidates    [2]frontierLayoutCandidate
 }
 
@@ -513,6 +590,7 @@ func (c frontierLayoutCandidate) projectedCells() (int, bool) {
 type frontierLayoutOptions struct {
 	innerWidth int
 	direction  frontierRankDirection
+	density    frontierDensity
 	projection *frontierRankProjection
 	plan       *frontierRankPlan
 }
@@ -520,9 +598,11 @@ type frontierLayoutOptions struct {
 // projectFrontierRanks computes both candidate shapes without retaining any
 // per-waypoint or per-segment topology. Scalar slot/channel counts simulate the
 // canonical materialiser exactly, including each long edge's peer assignment.
-func projectFrontierRanks(g model.BlockingGraph, nodes []frontierNode, innerWidth int) frontierRankProjection {
+func projectFrontierRanks(g model.BlockingGraph, nodes []frontierNode, innerWidth int,
+	density frontierDensity) frontierRankProjection {
+	geometry := frontierGeometryFor(nodes, innerWidth, density)
 	if len(nodes) == 0 {
-		return frontierRankProjection{candidates: emptyFrontierCandidates()}
+		return frontierRankProjection{geometry: geometry, candidates: emptyFrontierCandidates()}
 	}
 	index := make(map[model.TicketID]int, len(nodes))
 	for i, node := range nodes {
@@ -543,6 +623,7 @@ func projectFrontierRanks(g model.BlockingGraph, nodes []frontierNode, innerWidt
 		realPeerOf:    make([]int, len(nodes)),
 		slotCounts:    make([]int, rankCount),
 		channelCounts: make([]int, max(rankCount-1, 0)),
+		geometry:      geometry,
 	}
 	for i := range nodes {
 		rank := ranks[i]
@@ -570,8 +651,8 @@ func projectFrontierRanks(g model.BlockingGraph, nodes []frontierNode, innerWidt
 	for _, count := range projection.slotCounts {
 		projection.peers = max(projection.peers, count)
 	}
-	projection.candidates = frontierCandidatesFromShape(
-		len(projection.slotCounts), projection.peers, projection.channelCounts, innerWidth)
+	projection.candidates = frontierCandidatesFromShapeForGeometry(
+		len(projection.slotCounts), projection.peers, projection.channelCounts, geometry)
 	return projection
 }
 
@@ -632,7 +713,7 @@ func materializeFrontierRankPlan(nodes []frontierNode, projection frontierRankPr
 // planFrontierRanks remains the pure, private convenience used by admitted
 // layout tests. Production projects and admits before calling the materialiser.
 func planFrontierRanks(g model.BlockingGraph, nodes []frontierNode) frontierRankPlan {
-	projection := projectFrontierRanks(g, nodes, 0)
+	projection := projectFrontierRanks(g, nodes, 0, frontierDensityFull)
 	return materializeFrontierRankPlan(nodes, projection)
 }
 
@@ -678,10 +759,15 @@ func checkedFrontierMultiply(a, b int) (int, bool) {
 // projection metadata. Every dimension operation is checked and fails closed.
 func frontierCandidatesFromShape(rankCount, peers int, channelCounts []int,
 	innerWidth int) [2]frontierLayoutCandidate {
+	return frontierCandidatesFromShapeForGeometry(rankCount, peers, channelCounts,
+		frontierGeometryFor(nil, innerWidth, frontierDensityFull))
+}
+
+func frontierCandidatesFromShapeForGeometry(rankCount, peers int, channelCounts []int,
+	geometry frontierGeometry) [2]frontierLayoutCandidate {
 	if rankCount == 0 {
 		return emptyFrontierCandidates()
 	}
-	cardWidth := frontierCardWidthFor(innerWidth)
 	gutterTotal, dimensionsOK := 0, true
 	for _, channels := range channelCounts {
 		var ok bool
@@ -689,11 +775,11 @@ func frontierCandidatesFromShape(rankCount, peers int, channelCounts []int,
 		dimensionsOK = dimensionsOK && ok
 	}
 	peers = max(peers, 1)
-	horizontalWidth, horizontalWidthOK := checkedFrontierMultiply(rankCount, cardWidth)
+	horizontalWidth, horizontalWidthOK := checkedFrontierMultiply(rankCount, geometry.slotWidth)
 	horizontalWidth, horizontalAddOK := checkedFrontierAdd(horizontalWidth, gutterTotal)
-	horizontalHeight, horizontalHeightOK := checkedFrontierMultiply(peers, frontierSlotHeight)
-	verticalWidth, verticalWidthOK := checkedFrontierMultiply(peers, cardWidth)
-	verticalHeight, verticalHeightOK := checkedFrontierMultiply(rankCount, frontierSlotHeight)
+	horizontalHeight, horizontalHeightOK := checkedFrontierMultiply(peers, geometry.slotHeight)
+	verticalWidth, verticalWidthOK := checkedFrontierMultiply(peers, geometry.slotWidth)
+	verticalHeight, verticalHeightOK := checkedFrontierMultiply(rankCount, geometry.slotHeight)
 	verticalHeight, verticalAddOK := checkedFrontierAdd(verticalHeight, gutterTotal)
 	return [2]frontierLayoutCandidate{
 		{
@@ -714,6 +800,12 @@ func frontierCandidatesFromShape(rankCount, peers int, channelCounts []int,
 // frontierCandidates measures a materialised plan for direct admitted callers.
 // Production uses projectFrontierRanks and reaches no plan before admission.
 func frontierCandidates(plan frontierRankPlan, innerWidth int) [2]frontierLayoutCandidate {
+	return frontierCandidatesForGeometry(plan,
+		frontierGeometryFor(nil, innerWidth, frontierDensityFull))
+}
+
+func frontierCandidatesForGeometry(plan frontierRankPlan,
+	geometry frontierGeometry) [2]frontierLayoutCandidate {
 	if len(plan.slots) == 0 {
 		return emptyFrontierCandidates()
 	}
@@ -721,21 +813,24 @@ func frontierCandidates(plan frontierRankPlan, innerWidth int) [2]frontierLayout
 	for rank := range channels {
 		channels[rank] = channelsNeeded(plan.segments[rank])
 	}
-	return frontierCandidatesFromShape(len(plan.slots), plan.peers, channels, innerWidth)
+	return frontierCandidatesFromShapeForGeometry(len(plan.slots), plan.peers, channels, geometry)
 }
 
 // layoutFrontier materializes exactly one admitted candidate. Admission is
 // checked before even this private helper allocates focus, route, or grid state.
 func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+	opts.density.validate()
 	newLayout := func() frontierLayout {
 		return frontierLayout{
 			styles:    []frontierStyle{{Role: frontierRoleText}},
 			links:     []string{""},
+			nodes:     make(map[model.TicketID]frontierNode, len(nodes)),
 			nodeAt:    make(map[model.TicketID]frontierRect, len(nodes)),
 			rankOf:    make(map[model.TicketID]int, len(nodes)),
 			peerOf:    make(map[model.TicketID]int, len(nodes)),
 			incident:  make(map[model.TicketID][]frontierRouteID, len(nodes)),
 			direction: opts.direction,
+			density:   opts.density,
 		}
 	}
 	if len(nodes) == 0 {
@@ -745,8 +840,11 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 	plan := opts.plan
 	projection := opts.projection
 	if projection == nil {
-		ownedProjection := projectFrontierRanks(g, nodes, opts.innerWidth)
+		ownedProjection := projectFrontierRanks(g, nodes, opts.innerWidth, opts.density)
 		projection = &ownedProjection
+	}
+	if projection.geometry.density != opts.density {
+		panic("frontier materialisation density does not match admitted projection")
 	}
 	selectedProjection := projection.candidates[opts.direction]
 	if !selectedProjection.withinCellLimit(frontierCanvasCellLimit) {
@@ -782,14 +880,14 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 		}
 	}
 
-	cardWidth := frontierCardWidthFor(opts.innerWidth)
+	geometry := projection.geometry
 	rankOrigin := make([]int, len(plan.slots))
 	for rank := 1; rank < len(rankOrigin); rank++ {
 		previous := rank - 1
 		if opts.direction == frontierRanksHorizontal {
-			rankOrigin[rank] = rankOrigin[previous] + cardWidth + frontierGutterSize(plan.segments[previous])
+			rankOrigin[rank] = rankOrigin[previous] + geometry.slotWidth + frontierGutterSize(plan.segments[previous])
 		} else {
-			rankOrigin[rank] = rankOrigin[previous] + frontierSlotHeight + frontierGutterSize(plan.segments[previous])
+			rankOrigin[rank] = rankOrigin[previous] + geometry.slotHeight + frontierGutterSize(plan.segments[previous])
 		}
 	}
 
@@ -802,13 +900,18 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 			}
 
 			node := nodes[slot.node]
-			rect := frontierRect{W: cardWidth, H: frontierCardHeight}
-			if opts.direction == frontierRanksHorizontal {
-				rect.X, rect.Y = rankOrigin[rank], peer*frontierSlotHeight
-			} else {
-				rect.X, rect.Y = peer*cardWidth, rankOrigin[rank]
+			cardWidth := geometry.slotWidth
+			if geometry.density == frontierDensityDense {
+				cardWidth = 2 + lipgloss.Width(node.key)
 			}
-			l.drawCard(node, g, rect)
+			rect := frontierRect{W: cardWidth, H: geometry.cardHeight}
+			if opts.direction == frontierRanksHorizontal {
+				rect.X, rect.Y = rankOrigin[rank], peer*geometry.slotHeight
+			} else {
+				rect.X, rect.Y = peer*geometry.slotWidth, rankOrigin[rank]
+			}
+			l.drawNode(node, g, rect, geometry.density)
+			l.nodes[node.id] = node
 			l.nodeAt[node.id] = rect
 			l.rankOf[node.id] = rank
 			l.peerOf[node.id] = peer
@@ -818,11 +921,11 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 
 	for rank := 0; rank < len(plan.slots)-1; rank++ {
 		if opts.direction == frontierRanksHorizontal {
-			l.routeHorizontalGutter(plan.segments[rank], rankOrigin[rank]+cardWidth-1,
-				rankOrigin[rank+1], edgeStyle)
+			l.routeHorizontalGutter(plan.segments[rank], rankOrigin[rank]+geometry.slotWidth-1,
+				rankOrigin[rank+1], edgeStyle, geometry, plan.slots[rank], nodes)
 		} else {
-			l.routeVerticalGutter(plan.segments[rank], rankOrigin[rank]+frontierCardHeight-1,
-				rankOrigin[rank+1], cardWidth, edgeStyle)
+			l.routeVerticalGutter(plan.segments[rank], rankOrigin[rank]+geometry.cardHeight-1,
+				rankOrigin[rank+1], geometry, plan.slots[rank], plan.slots[rank+1], nodes, edgeStyle)
 		}
 		// A long route crosses the next rank after entering its dummy slot. Drawing
 		// it here retains blocker-to-dependent stroke order without another route
@@ -832,15 +935,15 @@ func layoutFrontier(g model.BlockingGraph, nodes []frontierNode, opts frontierLa
 				continue
 			}
 			if opts.direction == frontierRanksHorizontal {
-				y := peer*frontierSlotHeight + 1
+				y := peer*geometry.slotHeight + geometry.horizontalAnchor
 				l.mergeRouteStroke(slot.routeID,
 					frontierPoint{x: rankOrigin[rank+1], y: y},
-					frontierPoint{x: rankOrigin[rank+1] + cardWidth - 1, y: y}, '─', edgeStyle)
+					frontierPoint{x: rankOrigin[rank+1] + geometry.slotWidth - 1, y: y}, '─', edgeStyle)
 			} else {
-				x := peer*cardWidth + cardWidth/2
+				x := peer*geometry.slotWidth + geometry.slotWidth/2
 				l.mergeRouteStroke(slot.routeID,
 					frontierPoint{x: x, y: rankOrigin[rank+1]},
-					frontierPoint{x: x, y: rankOrigin[rank+1] + frontierCardHeight - 1}, '│', edgeStyle)
+					frontierPoint{x: x, y: rankOrigin[rank+1] + geometry.cardHeight - 1}, '│', edgeStyle)
 			}
 		}
 	}
@@ -986,17 +1089,29 @@ func channelsNeeded(segments []frontierSegment) int {
 	return n
 }
 
+func frontierSlotNode(slots []frontierSlot, peer int, nodes []frontierNode) (frontierNode, bool) {
+	if peer < 0 || peer >= len(slots) || slots[peer].dummy {
+		return frontierNode{}, false
+	}
+	return nodes[slots[peer].node], true
+}
+
 // routeHorizontalGutter preserves the original left-to-right routing: blockers
 // are on the left and arrowheads point into dependents on the right.
-func (l *frontierLayout) routeHorizontalGutter(segments []frontierSegment, bx, dx, style int) {
+func (l *frontierLayout) routeHorizontalGutter(segments []frontierSegment, bx, dx, style int,
+	geometry frontierGeometry, blockerSlots []frontierSlot, nodes []frontierNode) {
 	channels := max(min(channelsNeeded(segments), maxGutterChannels), 1)
 	next := 0
 	for _, segment := range segments {
-		by := segment.blockerPeer*frontierSlotHeight + 1
-		dy := segment.dependentPeer*frontierSlotHeight + 1
+		by := segment.blockerPeer*geometry.slotHeight + geometry.horizontalAnchor
+		dy := segment.dependentPeer*geometry.slotHeight + geometry.horizontalAnchor
+		startX := bx + 1
+		if blocker, ok := frontierSlotNode(blockerSlots, segment.blockerPeer, nodes); ok {
+			startX = l.nodeAt[blocker.id].X + l.nodeAt[blocker.id].W
+		}
 		if by == dy {
-			if bx+1 <= dx-2 {
-				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx + 1, y: by},
+			if startX <= dx-2 {
+				l.mergeRouteStroke(segment.routeID, frontierPoint{x: startX, y: by},
 					frontierPoint{x: dx - 2, y: by}, '─', style)
 			}
 			l.mergeRouteStroke(segment.routeID, frontierPoint{x: dx - 1, y: by},
@@ -1006,8 +1121,10 @@ func (l *frontierLayout) routeHorizontalGutter(segments []frontierSegment, bx, d
 
 		cx := bx + 2 + next%channels
 		next++
-		l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx + 1, y: by},
-			frontierPoint{x: cx - 1, y: by}, '─', style)
+		if startX <= cx-1 {
+			l.mergeRouteStroke(segment.routeID, frontierPoint{x: startX, y: by},
+				frontierPoint{x: cx - 1, y: by}, '─', style)
+		}
 		if dy > by {
 			l.mergeRouteStroke(segment.routeID, frontierPoint{x: cx, y: by},
 				frontierPoint{x: cx, y: by}, '┐', style)
@@ -1038,12 +1155,21 @@ func (l *frontierLayout) routeHorizontalGutter(segments []frontierSegment, bx, d
 
 // routeVerticalGutter maps the same bounded, canonical channel allocation onto
 // rows. Blockers are above and arrowheads point down into dependents.
-func (l *frontierLayout) routeVerticalGutter(segments []frontierSegment, by, dy, cardWidth, style int) {
+func (l *frontierLayout) routeVerticalGutter(segments []frontierSegment, by, dy int,
+	geometry frontierGeometry, blockerSlots, dependentSlots []frontierSlot, nodes []frontierNode, style int) {
 	channels := max(min(channelsNeeded(segments), maxGutterChannels), 1)
 	next := 0
 	for _, segment := range segments {
-		bx := segment.blockerPeer*cardWidth + cardWidth/2
-		dx := segment.dependentPeer*cardWidth + cardWidth/2
+		bx := segment.blockerPeer*geometry.slotWidth + geometry.slotWidth/2
+		if blocker, ok := frontierSlotNode(blockerSlots, segment.blockerPeer, nodes); ok {
+			rect := l.nodeAt[blocker.id]
+			bx = rect.X + rect.W/2
+		}
+		dx := segment.dependentPeer*geometry.slotWidth + geometry.slotWidth/2
+		if dependent, ok := frontierSlotNode(dependentSlots, segment.dependentPeer, nodes); ok {
+			rect := l.nodeAt[dependent.id]
+			dx = rect.X + rect.W/2
+		}
 		if bx == dx {
 			if by+1 <= dy-2 {
 				l.mergeRouteStroke(segment.routeID, frontierPoint{x: bx, y: by + 1},
@@ -1172,18 +1298,98 @@ func (l *frontierLayout) styleIndex(s frontierStyle) int {
 	return len(l.styles) - 1
 }
 
-// linkIndex interns one URL. Index 0 is "no hyperlink".
+// linkIndex interns one URL. Index 0 is "no hyperlink"; new indices follow
+// deterministic draw order while duplicate lookup stays constant-time.
 func (l *frontierLayout) linkIndex(url string) int {
 	if url == "" {
 		return 0
 	}
-	for i, existing := range l.links {
-		if existing == url {
-			return i
-		}
+	if index, exists := l.linkByURL[url]; exists {
+		return index
+	}
+	if l.linkByURL == nil {
+		l.linkByURL = make(map[string]int)
 	}
 	l.links = append(l.links, url)
-	return len(l.links) - 1
+	index := len(l.links) - 1
+	l.linkByURL[url] = index
+	return index
+}
+
+type frontierDenseState uint8
+
+const (
+	frontierDenseOutsideWatchlist frontierDenseState = iota
+	frontierDensePending
+	frontierDenseCycle
+	frontierDenseLinksFailed
+	frontierDenseUnknown
+	frontierDenseNonActionable
+	frontierDenseActionable
+	frontierDenseStateCount
+)
+
+func frontierDenseStateFor(n frontierNode) frontierDenseState {
+	if !n.member {
+		return frontierDenseOutsideWatchlist
+	}
+	a := n.actionability
+	switch {
+	case n.emphasis.badge == "PENDING":
+		return frontierDensePending
+	case a.InCycle:
+		return frontierDenseCycle
+	case n.linksFailed:
+		return frontierDenseLinksFailed
+	case !a.LinksKnown || hasUnknownBlocker(a) || anonymousBlockers(a) > 0:
+		return frontierDenseUnknown
+	case knownUnmetBlockers(a) > 0 || !a.Actionable:
+		return frontierDenseNonActionable
+	default:
+		return frontierDenseActionable
+	}
+}
+
+func (s frontierDenseState) glyph() rune {
+	switch s {
+	case frontierDensePending:
+		return '┄'
+	case frontierDenseCycle:
+		return '╬'
+	case frontierDenseLinksFailed:
+		return '╳'
+	case frontierDenseUnknown:
+		return '┆'
+	case frontierDenseNonActionable:
+		return '┫'
+	case frontierDenseActionable:
+		return '━'
+	default:
+		return '┈'
+	}
+}
+
+// frontierDenseGlyph is the monochrome state channel. Every rune is a
+// one-column box-drawing glyph; Status Category remains the independent colour
+// channel applied by drawDenseChip.
+func frontierDenseGlyph(n frontierNode) rune {
+	return frontierDenseStateFor(n).glyph()
+}
+
+func (l *frontierLayout) drawNode(n frontierNode, g model.BlockingGraph, rect frontierRect,
+	density frontierDensity) {
+	if density == frontierDensityDense {
+		l.drawDenseChip(n, rect)
+		return
+	}
+	l.drawCard(n, g, rect)
+}
+
+func (l *frontierLayout) drawDenseChip(n frontierNode, rect frontierRect) {
+	category := l.styleIndex(frontierStyle{Role: frontierRoleCategory, Category: n.status})
+	link := l.linkIndex(n.url)
+	l.write(rect.X, rect.Y, string(frontierDenseGlyph(n))+" ", category, 0, rect.X+rect.W)
+	l.write(rect.X+2, rect.Y, n.key, category, link, rect.X+rect.W)
 }
 
 // drawCard blits one node's card. Line 2 carries the Key and the Status
@@ -1222,6 +1428,30 @@ func (l *frontierLayout) drawCard(n frontierNode, g model.BlockingGraph, rect fr
 
 	l.write(rect.X+1, rect.Y+2, balancedTruncate(n.title, inner, "…"), title, link, rect.X+rect.W-1)
 	l.write(rect.X+1, rect.Y+3, frontierBadgeLine(n, g, inner), badge, 0, rect.X+rect.W-1)
+}
+
+func renderFrontierInspection(n frontierNode, g model.BlockingGraph, width int, s Styles) []string {
+	cardWidth := frontierCardWidthFor(width)
+	l := frontierLayout{
+		cells:     make([][]frontierCell, frontierCardHeight),
+		styles:    []frontierStyle{{Role: frontierRoleText}},
+		links:     []string{""},
+		nodes:     map[model.TicketID]frontierNode{n.id: n},
+		nodeAt:    map[model.TicketID]frontierRect{n.id: {W: cardWidth, H: frontierCardHeight}},
+		order:     []model.TicketID{n.id},
+		incident:  make(map[model.TicketID][]frontierRouteID),
+		direction: frontierRanksHorizontal,
+		width:     cardWidth,
+		height:    frontierCardHeight,
+	}
+	for y := range l.cells {
+		l.cells[y] = make([]frontierCell, cardWidth)
+		for x := range l.cells[y] {
+			l.cells[y][x] = frontierCell{r: ' ', style: frontierBlankStyle}
+		}
+	}
+	l.drawCard(n, g, l.nodeAt[n.id])
+	return renderFrontierCanvas(l, n.id, true, 0, 0, cardWidth, frontierCardHeight, s)
 }
 
 // frontierBadgeLine selects complete semantic facts before Native Status. Native
@@ -1306,35 +1536,43 @@ func firstFittingFrontierLabel(width int, labels ...string) string {
 
 // write blits a string onto the canvas from x, stopping at limit. Card text
 // overwrites rather than merging: a card is drawn once, onto cells no edge can
-// reach. A double-width rune takes two cells so the card's right border stays
-// in its column whatever the Tracker put in a title.
+// reach. Each grapheme cluster occupies the same number of cells used by the
+// geometry projection, so joined emoji and combining sequences stay whole.
 func (l *frontierLayout) write(x, y int, s string, style, link, limit int) {
 	if y < 0 || y >= len(l.cells) {
 		return
 	}
 	limit = min(limit, l.width)
 	last := -1
-	for _, r := range s {
-		w := lipgloss.Width(string(r))
-		if w <= 0 {
-			// A zero-width rune modifies the cell before it. A leading one
-			// modifies nothing, so it is dropped.
+	leading := ""
+	for len(s) > 0 {
+		cluster, width := ansi.FirstGraphemeCluster(s, ansi.GraphemeWidth)
+		if len(cluster) == 0 {
+			return
+		}
+		s = s[len(cluster):]
+		if width <= 0 {
 			if last >= 0 {
-				l.cells[y][last].trailing += string(r)
+				l.cells[y][last].trailing += cluster
+			} else {
+				leading += cluster
 			}
 			continue
 		}
-		if x+w > limit {
+		if x+width > limit {
 			return
 		}
+		text := leading + cluster
+		leading = ""
 		if x >= 0 {
-			l.cells[y][x] = frontierCell{r: r, style: style, link: link}
-			for i := 1; i < w; i++ {
+			r, size := utf8.DecodeRuneInString(text)
+			l.cells[y][x] = frontierCell{r: r, trailing: text[size:], style: style, link: link}
+			for i := 1; i < width; i++ {
 				l.cells[y][x+i] = frontierCell{style: style, link: link, continuation: true}
 			}
 			last = x
 		}
-		x += w
+		x += width
 	}
 }
 
@@ -1606,12 +1844,13 @@ func renderFrontierCanvas(l frontierLayout, focus model.TicketID, hasFocus bool,
 	var overlay map[[2]int]frontierCell
 	if hasFocus {
 		overlay = focusedFrontierOverlay(l, focus, offsetX, offsetY, width, height)
-		if rect, ok := l.nodeAt[focus]; ok {
+		if rect, ok := l.nodeAt[focus]; ok && l.density == frontierDensityFull {
 			if overlay == nil {
 				overlay = make(map[[2]int]frontierCell, 1)
 			}
-			// The focused-card marker wins even if malformed route geometry ever
-			// reaches its card.
+			// Full cards reserve the marker on their Key row. Dense chips keep
+			// their exact state-glyph, ASCII-space, Key contract; their inspection
+			// or summary identifies focus without changing chip content.
 			overlay[[2]int{rect.X + 1 - offsetX, rect.Y + 1 - offsetY}] =
 				frontierCell{r: '▸', style: frontierMarkerStyle}
 		}
@@ -1703,6 +1942,21 @@ func renderFrontierBody(l frontierLayout, focus model.TicketID, hasFocus bool,
 	inner := frontierInnerRect(outerWidth, outerHeight)
 	canvas := renderFrontierCanvas(l, focus, hasFocus, offsetX, offsetY, inner.W, inner.H, s)
 	chrome := frontierChromeGlyphs(l, inner, offsetX, offsetY, outerWidth, outerHeight)
+	if hasFocus && l.density == frontierDensityDense {
+		if rect, ok := l.nodeAt[focus]; ok {
+			// Dense chips keep their state glyph unchanged. Two ring markers encode
+			// the focused chip's canvas column and row, so focus remains visible even
+			// when neither an inspection card nor a whole summary fits.
+			if inner.Y > 0 && rect.X+rect.W > offsetX && rect.X < offsetX+inner.W {
+				x := min(max(rect.X+rect.W/2-offsetX, 0), inner.W-1)
+				chrome[[2]int{inner.X + x, inner.Y - 1}] = '◆'
+			}
+			if inner.X > 0 && rect.Y+rect.H > offsetY && rect.Y < offsetY+inner.H {
+				y := min(max(rect.Y-offsetY, 0), inner.H-1)
+				chrome[[2]int{inner.X - 1, inner.Y + y}] = '◆'
+			}
+		}
+	}
 
 	renderRing := func(y, from, to int) string {
 		var line strings.Builder

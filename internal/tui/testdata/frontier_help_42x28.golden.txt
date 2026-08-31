@@ -2,10 +2,9 @@
 frontier · 2 blocking cycles      just now
 
 
- ─────────┐  ┌──────────────────────────┐
-‹     Todo│━▶│▸ #207         In Progress│
+‹─────────┐  ┌──────────────────────────┐
                      ▼
-                          x 82/82 · y 0/58
+                          x 82/82 · y 0/59
 1 Ticket's Links could not be read; anyth…
 read failed for #211: fake: no detail for…
 m            release, shift-drag
@@ -14,6 +13,7 @@ double-click open Ticket
 wheel        scroll
 enter        open Ticket
 v/esc        list
+V            dense/full cards
 r            re-read Details
 ?            help
 L            legend

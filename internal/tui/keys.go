@@ -30,9 +30,11 @@ type KeyMap struct {
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
-	// Frontier opens the Frontier: the same Watchlist drawn as blocking-graph
-	// nodes. It is offered only when there is a Watchlist to draw.
+	// Frontier opens the Frontier with the current manual density preference.
 	Frontier key.Binding
+	// DenseFrontier opens the Frontier with dense chips selected. It is omitted
+	// from ShortHelp so the established List footer priority stays unchanged.
+	DenseFrontier key.Binding
 	// Find opens the fuzzy find over Ticket keys and titles.
 	Find key.Binding
 	// ClearFilter drops both filter criteria. It is enabled only while a
@@ -99,6 +101,11 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("v", "frontier"),
 			key.WithDisabled(),
 		),
+		DenseFrontier: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "dense Frontier"),
+			key.WithDisabled(),
+		),
 		Find: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "find"),
@@ -146,7 +153,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.Refresh, k.Help, k.Legend, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.DenseFrontier, k.Refresh, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
@@ -156,8 +163,10 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 // fallback only: callers retain the ordinary groups whenever those already fit,
 // and stack if this arrangement still does not.
 func actionabilityListFullHelp(k KeyMap) [][]key.Binding {
+	dense := k.DenseFrontier
+	dense.SetHelp("V", "dense")
 	return [][]key.Binding{
-		{k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Help, k.Legend, k.Quit, k.Up, k.Down, k.Home},
+		{k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, dense, k.Help, k.Legend, k.Quit, k.Up, k.Down, k.Home},
 		{k.ToggleMouse, k.Frontier, k.Refresh, k.PageUp, k.PageDown, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
@@ -179,8 +188,16 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("d /", "hide finished/find"),
 		helpOnlyBinding("L/?/q", "legend/help/quit"),
 	}
-	if k.Frontier.Enabled() {
+	switch {
+	case k.Frontier.Enabled() && k.DenseFrontier.Enabled() &&
+		k.Frontier.Help().Desc == "compute actionability":
+		bindings = append(bindings, helpOnlyBinding("v", "compute actionability · V dense"))
+	case k.Frontier.Enabled() && k.DenseFrontier.Enabled():
+		bindings = append(bindings, helpOnlyBinding("v/V", "frontier/dense Frontier"))
+	case k.Frontier.Enabled():
 		bindings = append(bindings, k.Frontier)
+	case k.DenseFrontier.Enabled():
+		bindings = append(bindings, k.DenseFrontier)
 	}
 	if k.ClearFilter.Enabled() {
 		bindings = append(bindings, k.ClearFilter)
@@ -324,6 +341,8 @@ type FrontierKeyMap struct {
 	Open key.Binding
 	// Toggle returns to the list, dropping every outstanding Detail read.
 	Toggle key.Binding
+	// Density toggles dense chips and full cards without leaving the Frontier.
+	Density key.Binding
 	// Refresh re-issues the Detail reads that never succeeded.
 	Refresh key.Binding
 	// ToggleMouse enables or disables terminal mouse capture.
@@ -386,6 +405,10 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 			// ? panel alike.
 			key.WithHelp("v/esc", "list"),
 		),
+		Density: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "dense/full cards"),
+		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "re-read Details"),
@@ -425,7 +448,7 @@ func (k FrontierKeyMap) ShortHelp() []key.Binding {
 // when the terminal cannot show them side by side.
 func (k FrontierKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Legend, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Density, k.Refresh, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.Left, k.Right, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }

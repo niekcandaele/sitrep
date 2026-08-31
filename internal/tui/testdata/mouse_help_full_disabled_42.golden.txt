@@ -31,10 +31,10 @@ CANCELLED (1)
 
 
 enter open      m    capture
-?     help      v    compute actionability
-L     legend    r    refresh
-q     quit      pgup page up
-↑/k   up        pgdn page down
-↓/j   down      G    last
-g     first     d    hide finished
-                /    find
+V     dense     v    compute actionability
+?     help      r    refresh
+L     legend    pgup page up
+q     quit      pgdn page down
+↑/k   up        G    last
+↓/j   down      d    hide finished
+g     first     /    find

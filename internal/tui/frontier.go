@@ -105,9 +105,13 @@ type frontierState struct {
 	direction    frontierRankDirection
 	directionSet bool
 	// focusID is the focused node and may name a Ghost Ticket.
-	focusID          model.TicketID
-	hasFocus         bool
-	offsetX, offsetY int
+	focusID  model.TicketID
+	hasFocus bool
+	// retainRefusedFocus keeps a density-toggle focus latent while the selected
+	// density remains refused across resize, evidence, and coalesced rebuilds.
+	// Initial #105 refusal leaves it false and exposes no focus geometry.
+	retainRefusedFocus bool
+	offsetX, offsetY   int
 	// queued are the Ticket IDs not yet issued. The in-flight count lives on
 	// Model, not here: re-seating frontierState on every entry would reset it
 	// to zero while the previous entry's fetches are still running, and N
@@ -533,7 +537,16 @@ func (m Model) adoptCachedLinks() Model {
 // the only production installation of a materialized canvas, and admission at
 // this boundary precedes every dummy, route, stroke, hit-map, and grid allocation.
 func (m Model) rebuildFrontier() Model {
+	return m.rebuildFrontierWithRefusalFocus(false)
+}
+
+func (m Model) rebuildFrontierPreservingRefusalFocus() Model {
+	return m.rebuildFrontierWithRefusalFocus(true)
+}
+
+func (m Model) rebuildFrontierWithRefusalFocus(preserveRefusalFocus bool) Model {
 	m = m.discardPendingFrontierRebuild()
+	preserveRefusalFocus = preserveRefusalFocus || m.frontier.retainRefusedFocus
 	preferredFocus := m.frontier.focusID
 	previous := indexOfNode(m.frontier.layout.order, preferredFocus)
 	if preferredFocus == "" && !m.frontier.hasFocus {
@@ -541,9 +554,9 @@ func (m Model) rebuildFrontier() Model {
 	}
 	g := model.BuildBlockingGraph(m.frontier.input.Tickets, m.frontier.input.Links,
 		m.frontier.input.Capabilities)
-	nodes := frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved())
-	inner := m.frontierCanvasRect()
-	projection := projectFrontierRanks(g, nodes, inner.W)
+	nodes := frontierNodes(g, m.frontier.input.Tickets, m.frontier.isResolved(), m.frontier.failed)
+	inner := m.frontierCanvasRectForNodes(nodes, preferredFocus)
+	projection := projectFrontierRanks(g, nodes, inner.W, m.frontierDensity)
 	candidates := projection.candidates
 	direction := m.frontier.direction
 	if !m.frontier.directionSet {
@@ -560,17 +573,22 @@ func (m Model) rebuildFrontier() Model {
 		m = m.clearPendingClick()
 		m.frontier.layout = frontierLayout{}
 		m.frontier.refusal = refusal
-		m.frontier.focusID = ""
-		m.frontier.hasFocus = false
+		m.frontier.retainRefusedFocus = preserveRefusalFocus
+		if !preserveRefusalFocus {
+			m.frontier.focusID = ""
+			m.frontier.hasFocus = false
+		}
 		m.frontier.offsetX = 0
 		m.frontier.offsetY = 0
 		return m
 	}
 
 	m.frontier.refusal = nil
+	m.frontier.retainRefusedFocus = false
 	m.frontier.layout = m.frontierLayoutForModel(g, nodes, frontierLayoutOptions{
 		innerWidth: inner.W,
 		direction:  direction,
+		density:    m.frontierDensity,
 		projection: &projection,
 	})
 
@@ -594,8 +612,107 @@ func (m Model) rebuildFrontier() Model {
 	return m.reconcileFrontier(true)
 }
 
+type frontierDenseInspection uint8
+
+const (
+	frontierDenseInspectionNone frontierDenseInspection = iota
+	frontierDenseInspectionSummary
+	frontierDenseInspectionCard
+)
+
+func frontierNodeForInspection(nodes []frontierNode, focus model.TicketID) (frontierNode, bool) {
+	for _, node := range nodes {
+		if node.id == focus {
+			return node, true
+		}
+	}
+	if len(nodes) == 0 {
+		return frontierNode{}, false
+	}
+	return nodes[0], true
+}
+
+func frontierDenseSummaryText(node frontierNode) string {
+	switch {
+	case node.key == "":
+		return node.title
+	case node.title == "":
+		return node.key
+	default:
+		return node.key + " " + node.title
+	}
+}
+
+func selectFrontierDenseInspection(node frontierNode, ok bool,
+	width, height int) (frontierDenseInspection, frontierNode) {
+	if !ok {
+		return frontierDenseInspectionNone, frontierNode{}
+	}
+	if height >= frontierCardHeight+1 && frontierCardWidthFor(width)+2 <= width {
+		return frontierDenseInspectionCard, node
+	}
+	summary := frontierDenseSummaryText(node)
+	if height >= 2 && summary != "" && lipgloss.Width(summary) <= width {
+		return frontierDenseInspectionSummary, node
+	}
+	return frontierDenseInspectionNone, node
+}
+
+func frontierDenseInspectionFor(nodes []frontierNode, focus model.TicketID,
+	width, height int) (frontierDenseInspection, frontierNode) {
+	node, ok := frontierNodeForInspection(nodes, focus)
+	return selectFrontierDenseInspection(node, ok, width, height)
+}
+
+func frontierDenseInspectionForLayout(layout frontierLayout, focus model.TicketID,
+	width, height int) (frontierDenseInspection, frontierNode) {
+	node, ok := layout.nodes[focus]
+	if !ok && len(layout.order) > 0 {
+		node, ok = layout.nodes[layout.order[0]]
+	}
+	return selectFrontierDenseInspection(node, ok, width, height)
+}
+
+func frontierDenseInspectionHeight(kind frontierDenseInspection) int {
+	switch kind {
+	case frontierDenseInspectionCard:
+		return frontierCardHeight
+	case frontierDenseInspectionSummary:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m Model) frontierCanvasRectForNodes(nodes []frontierNode, focus model.TicketID) frontierRect {
+	height := m.frontierBodyHeight()
+	if m.frontierDensity == frontierDensityDense {
+		kind, _ := frontierDenseInspectionFor(nodes, focus, m.width, height)
+		height -= frontierDenseInspectionHeight(kind)
+	}
+	return frontierInnerRect(m.width, max(height, 0))
+}
+
+func (m Model) frontierCanvasOuterHeight() int {
+	height := m.frontierBodyHeight()
+	if m.frontierDensity != frontierDensityDense {
+		return height
+	}
+	kind, _ := frontierDenseInspectionForLayout(
+		m.frontier.layout, m.frontier.focusID, m.width, height)
+	available := max(height-frontierDenseInspectionHeight(kind), 0)
+	if available == 0 || m.frontier.layout.height == 0 {
+		return available
+	}
+	maxInner := frontierInnerRect(m.width, available)
+	if m.frontier.layout.height <= maxInner.H {
+		return min(available, m.frontier.layout.height+2)
+	}
+	return available
+}
+
 func (m Model) frontierCanvasRect() frontierRect {
-	return frontierInnerRect(m.width, m.frontierBodyHeight())
+	return frontierInnerRect(m.width, m.frontierCanvasOuterHeight())
 }
 
 func (m Model) frontierResizeNeedsDirectionFlip() bool {
@@ -747,6 +864,11 @@ func (m Model) onFrontierKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Toggle):
 		return m.leaveFrontier()
+
+	case key.Matches(msg, keys.Density):
+		m.frontierDensity = m.frontierDensity.toggled()
+		m.frontier.directionSet = false
+		return m.rebuildFrontierPreservingRefusalFocus(), repaint
 
 	case key.Matches(msg, keys.Open):
 		return m.openFrontierNode()
@@ -938,9 +1060,75 @@ func (m Model) frontierBodyWithCycles(height int, cycles [][]model.TicketID) []s
 	}
 	// A graph with nodes but no edges is not an error state: every Todo node
 	// whose Links were readable is then Actionable, which is the truth.
+	if m.frontierDensity == frontierDensityDense {
+		return m.frontierDenseBody(height, cycles)
+	}
 	body := renderFrontierBody(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
 		m.frontier.offsetX, m.frontier.offsetY, m.width, height, m.styles)
 	return m.frontierLegendBody(body, height, cycles)
+}
+
+func (m Model) frontierDenseBody(height int, cycles [][]model.TicketID) []string {
+	canvasHeight := m.frontierCanvasOuterHeight()
+	body := renderFrontierBody(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
+		m.frontier.offsetX, m.frontier.offsetY, m.width, canvasHeight, m.styles)
+
+	kind, node := frontierDenseInspectionForLayout(
+		m.frontier.layout, m.frontier.focusID, m.width, height)
+	switch kind {
+	case frontierDenseInspectionCard:
+		indent := frontierInnerRect(m.width, height).X
+		for _, line := range renderFrontierInspection(node, m.frontier.graph, m.width, m.styles) {
+			body = append(body, strings.Repeat(" ", indent)+line)
+		}
+	case frontierDenseInspectionSummary:
+		var summary strings.Builder
+		category := m.styles.frontierStyle(frontierStyle{Role: frontierRoleCategory, Category: node.status})
+		if node.key != "" {
+			summary.WriteString(renderHyperlink(category, node.key, node.url))
+		}
+		if node.key != "" && node.title != "" {
+			summary.WriteByte(' ')
+		}
+		if node.title != "" {
+			summary.WriteString(renderHyperlink(
+				m.styles.frontierStyle(frontierStyle{Role: node.emphasis.titleRole}), node.title, node.url))
+		}
+		body = append(body, summary.String())
+	}
+	primaryEnd := len(body)
+	body = padLines(body, height)
+	return m.frontierDenseLegendBody(body, height, canvasHeight, primaryEnd, kind, cycles)
+}
+
+func (m Model) frontierDenseLegendBody(lines []string, height, canvasHeight, primaryEnd int,
+	kind frontierDenseInspection, cycles [][]model.TicketID) []string {
+	if !m.legendVisible || kind == frontierDenseInspectionNone ||
+		m.frontier.offsetX != 0 || m.frontier.offsetY != 0 {
+		return lines
+	}
+	inner := frontierInnerRect(m.width, canvasHeight)
+	layout := m.frontier.layout
+	if layout.width > inner.W || layout.height > inner.H {
+		return lines
+	}
+	legendCycles := cycles
+	if !m.frontier.isResolved() {
+		legendCycles = nil
+	}
+	var legendKeys map[model.TicketID]string
+	if len(legendCycles) > 0 {
+		legendKeys = frontierLegendKeysForLayout(layout)
+	}
+	legend := frontierDenseLegendLinesForLayout(layout, legendCycles, legendKeys, inner.W)
+	startY := primaryEnd + 1
+	if len(legend) == 0 || startY+len(legend) > height {
+		return lines
+	}
+	for i, line := range legend {
+		lines[startY+i] = strings.Repeat(" ", inner.X) + m.styles.Muted.Render(line)
+	}
+	return lines
 }
 
 func (m Model) wrappedMuted(text string) []string {

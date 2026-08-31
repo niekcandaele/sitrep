@@ -18,7 +18,6 @@ TODO (3)
 DONE (3)
   #118       Cache shard lookups
              @mara-vos  #504 merged
-  #119       Emit sync telemetry
 
 m            release, shift-drag
 click        select Ticket
@@ -26,6 +25,7 @@ double-click open Ticket
 wheel        move selection
 enter        open
 v            compute actionability
+V            dense Frontier
 r            refresh
 ?            help
 L            legend

@@ -115,12 +115,13 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 // ignored when its epoch is stale.
 func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
-	bodyHeight := m.frontierBodyHeight()
-	inner := frontierInnerRect(width, bodyHeight)
+	canvasHeight := m.frontierCanvasOuterHeight()
+	inner := frontierInnerRect(width, canvasHeight)
 	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
 	epoch := m.mouseEpoch
 	layout := m.frontier.layout
 	keys := m.effectiveFrontierKeys()
+	density := m.frontierDensity
 
 	return func(msg tea.MouseMsg) tea.Cmd {
 		if inner.W <= 0 || inner.H <= 0 {
@@ -147,8 +148,10 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 			return mouseCmd(frontierMouseClickMsg{epoch: epoch, id: id})
 
 		case tea.MouseWheelMsg:
+			bodyY := msg.Y - headerHeight
 			if !keys.MouseWheel.Enabled() ||
-				msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
+				msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height ||
+				(density == frontierDensityDense && (bodyY < 0 || bodyY >= canvasHeight)) {
 				return nil
 			}
 			switch msg.Button {
