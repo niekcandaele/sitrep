@@ -62,6 +62,9 @@ type Model struct {
 	filter Filter
 	// searching is true while the find box owns the keyboard.
 	searching bool
+	// legendVisible is session-local display state. It deliberately has no
+	// relationship to Help and never participates in primary layout.
+	legendVisible bool
 	// search holds the draft query; filter.Query holds what the list is
 	// actually narrowed by. They are kept in step on every keystroke, and are
 	// separate so that esc can drop both in one move.
@@ -84,6 +87,9 @@ type Model struct {
 	// onto a Ticket (ADR-0003). The cache is per-session and never persisted.
 	details          map[model.TicketID]detailEntry
 	detailGeneration int
+	// detailEvidenceVersion orders accepted singular Detail reads against Frontier
+	// fan-out commands, which capture its value when issued.
+	detailEvidenceVersion int
 	// frontier is the Frontier screen's own state. Like detailState it is seated
 	// whole; the list's state is never consulted to draw it.
 	frontier frontierState
@@ -233,6 +239,7 @@ func New(ctx context.Context, opts Options) Model {
 		lastAttempt:   now(),
 		listArmed:     true,
 		hasSource:     src != nil,
+		legendVisible: true,
 		search:        search,
 		fetchDetail:   fetchDetail,
 		cancelSession: cancelSession,
@@ -285,7 +292,7 @@ func New(ctx context.Context, opts Options) Model {
 			m.listArmed = false
 		}
 		entry := safeOpen(*opts.Open)
-		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities)
+		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities, false)
 		m = next.(Model)
 	}
 	return m
@@ -447,7 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyRefresh(msg)
 
 	case detailFetchedMsg:
-		return m.onDetailFetched(msg), nil
+		return m.onDetailFetchedWithFrontierEvidence(msg)
 
 	case listMouseClickMsg:
 		if m.mode != modeList || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
@@ -694,7 +701,9 @@ func (m Model) reseatFrontier() (Model, tea.Cmd) {
 	// A read that failed is still failed, so the footer keeps saying so and
 	// keeps pointing at r. Dropping the record because the Watchlist was read
 	// again would leave cards marked UNVERIFIED with nothing on screen saying
-	// why or what to press. Members the refresh removed leave the set with them.
+	// why or what to press. Members the refresh removed leave the set and their
+	// error provenance with them, while retained members keep their matching
+	// error so the footer never attributes a removed failure to one still shown.
 	for id := range previous.failed {
 		if _, seated := m.frontier.input.Links[id]; seated {
 			continue
@@ -706,9 +715,16 @@ func (m Model) reseatFrontier() (Model, tea.Cmd) {
 			m.frontier.failed = make(map[model.TicketID]struct{}, len(previous.failed))
 		}
 		m.frontier.failed[id] = struct{}{}
+		if err := previous.failureErrors[id]; err != nil {
+			if m.frontier.failureErrors == nil {
+				m.frontier.failureErrors = make(map[model.TicketID]error, len(previous.failureErrors))
+			}
+			m.frontier.failureErrors[id] = err
+		}
 	}
 	if len(m.frontier.failed) > 0 {
 		m.frontier.lastErr = previous.lastErr
+		m = m.reconcileFrontierFailureNotice()
 	}
 	return m.rebuildFrontier(), repaint
 }
@@ -910,6 +926,10 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ToggleMouse):
 		return m.toggleMouse(), nil
 
+	case key.Matches(msg, m.keys.Legend):
+		m.legendVisible = !m.legendVisible
+		return m, repaint
+
 	case key.Matches(msg, m.keys.Help):
 		// The expanded listing eats body height, so the window has to be
 		// re-measured before the next frame.
@@ -1074,8 +1094,16 @@ func (m Model) renderBody(markers listMarkers) string {
 
 	switch {
 	case m.hasData && len(m.rows) > 0:
-		return renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities,
+		body := renderRows(m.rows, m.selected, m.offset, height, m.width, m.input.Capabilities,
 			markers, m.styles)
+		if !m.legendVisible || m.offset != 0 || m.filter.Active() {
+			return body
+		}
+		used := 0
+		for _, rowHeight := range rowHeights(m.rows, m.input.Capabilities) {
+			used += rowHeight
+		}
+		return replaceTrailingBodyLines(body, used, listLegendLines(markers, m.width), m.styles.Muted.Render)
 	case m.hasData && m.filter.Active() && len(m.input.Tickets) > 0:
 		// Distinct from the empty Watchlist below on purpose: "there is
 		// nothing here" and "you are hiding everything" look identical on

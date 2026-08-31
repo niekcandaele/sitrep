@@ -21,10 +21,10 @@ frontier · 7 nodes · 2 actionable                                             
 
 
 
-
-
-
-
+ Legend · L hide
+ ● — actionable — all known blockers are satisfied
+ blocked by N — light border — known named unfinished canonical blockers
+ status border — colour reflects Tracker status, not blockedness
 
 
 v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text • ↑/k previous node • ↓/j next node …

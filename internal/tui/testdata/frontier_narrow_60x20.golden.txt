@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout
-frontier · 16 nodes · 3 ghosts · 3 actionable       just now
+frontier · 2 blocking cycles · budget 4870          just now
 
 
  ┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━
@@ -16,5 +16,5 @@ frontier · 16 nodes · 3 ghosts · 3 actionable       just now
                               ▼
                                              x 0/64 · y 0/49
 1 Ticket's Links could not be read; anything it blocks is n…
-read failed: fake: no detail for ticket "acme/widgets#211" …
+read failed for #211: fake: no detail for ticket "acme/widg…
 v/esc list • r re-read Details • ? help • q quit …

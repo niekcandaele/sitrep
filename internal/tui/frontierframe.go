@@ -176,6 +176,7 @@ type frontierEmphasis struct {
 // shows the Key.
 type frontierNode struct {
 	id       model.TicketID
+	member   bool
 	key      string
 	title    string
 	url      string
@@ -216,6 +217,7 @@ func frontierNodes(g model.BlockingGraph, tickets []model.Ticket, resolved bool)
 		t := byID[a.TicketID]
 		nodes = append(nodes, frontierNode{
 			id:       a.TicketID,
+			member:   true,
 			key:      t.Key,
 			title:    t.Title,
 			url:      t.URL,

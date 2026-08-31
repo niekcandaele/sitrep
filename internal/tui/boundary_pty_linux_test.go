@@ -599,7 +599,7 @@ func runFrontierLimitPTYSession(t *testing.T, width, height int, fixture string)
 			"r", "j", "k", "h", "l", "\x1b[5~", "\x1b[6~", "\x1b[H", "\x1b[F", "g", "G", "\r",
 			"\x1b[<0;10;10M", "\x1b[<65;10;10M", "?")
 		output = waitForPTYScreenMarker(t, chunks, output, width, height,
-			"m release · shift-drag to select text v/esc list ? help q quit")
+			"m release · shift-drag to select text v/esc list ? help L legend q quit")
 		writeFrontierPTYInput(t, master, "?")
 		output = waitForPTYScreenMarker(t, chunks, output, width, height, "v/esc list •")
 		writeFrontierPTYInput(t, master, "m")

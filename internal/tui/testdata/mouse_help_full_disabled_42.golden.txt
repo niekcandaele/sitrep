@@ -35,6 +35,6 @@ enter open        ↓/j  down
 v     frontier    pgup page up
 r     refresh     pgdn page down
 ?     help        g    first
-q     quit        G    last
-                  d    hide finished
+L     legend      G    last
+q     quit        d    hide finished
                   /    find

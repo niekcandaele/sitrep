@@ -28,7 +28,6 @@ DESCRIPTION
 COMMENTS (3)
 
 @mara-vos · 2026-01-12 09:14 UTC
-    Sketched the state machine; the
 
 m    capture          ↑/k  up
 esc  back             ↓/j  down
@@ -37,4 +36,5 @@ tab  next link        pgup page up
 u    watchlist        g    first
 r    refresh          G    last
 ?    help
+L    legend
 q    quit                               0%

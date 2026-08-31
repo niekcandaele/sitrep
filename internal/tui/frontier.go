@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -120,8 +121,9 @@ type frontierState struct {
 	// seated: a count cannot tell which Ticket it is clearing, so adopting a
 	// still-queued Ticket's Detail would silently absolve one that really did
 	// fail while its card still says UNVERIFIED.
-	failed  map[model.TicketID]struct{}
-	lastErr error
+	failed        map[model.TicketID]struct{}
+	failureErrors map[model.TicketID]error
+	lastErr       error
 }
 
 // isResolved reports whether the current Watchlist seat is complete enough to
@@ -152,11 +154,12 @@ func (f frontierState) isResolved() bool {
 // Provider work when a seat ends; the generation guard separately prevents a
 // raced or cancellation-ignoring answer from mutating its replacement.
 type frontierDetailMsg struct {
-	generation int
-	id         model.TicketID
-	detail     model.Detail
-	caps       model.Capabilities
-	err        error
+	generation            int
+	detailEvidenceVersion int
+	id                    model.TicketID
+	detail                model.Detail
+	caps                  model.Capabilities
+	err                   error
 }
 
 const frontierRebuildDelay = time.Second / 60
@@ -238,6 +241,11 @@ func (m Model) onFrontierRebuild(msg frontierRebuildMsg) (tea.Model, tea.Cmd) {
 // the expensive stored canvas is replaced now or at a quiet frame boundary.
 func (m Model) frontierEvidenceChanged() (Model, tea.Cmd) {
 	if m.mode != modeFrontier {
+		if m.mode == modeDetail && m.detailReturn == modeFrontier && m.frontier.isResolved() {
+			m.frontier.graph = model.BuildBlockingGraph(m.frontier.input.Tickets, m.frontier.input.Links,
+				m.frontier.input.Capabilities)
+			return m, repaint
+		}
 		return m, nil
 	}
 	if m.frontier.isResolved() {
@@ -246,13 +254,18 @@ func (m Model) frontierEvidenceChanged() (Model, tea.Cmd) {
 	return m.requestFrontierRebuild()
 }
 
-// linksFromCache builds the Links map from the Details read this session. It
-// delegates the key-presence contract to detailfanout rather than open-coding
-// it: only a Ticket whose Detail was actually read gets a key.
+// linksFromCache builds the Links map from session Details eligible to be
+// Watchlist evidence. It delegates the key-presence contract to detailfanout
+// rather than open-coding it: only a Ticket whose Detail was actually read gets
+// a key.
 func (m Model) linksFromCache() map[model.TicketID][]model.Link {
 	details := make(map[model.TicketID]model.Detail, len(m.details))
 	for id, entry := range m.details {
-		details[id] = entry.detail
+		detail, eligible := entry.frontierLinks()
+		if !eligible {
+			continue
+		}
+		details[id] = detail
 	}
 	return detailfanout.Links(details)
 }
@@ -288,8 +301,12 @@ func (m Model) enterFrontier() (tea.Model, tea.Cmd) {
 // haveDetail reports whether this session already read one Ticket's Detail. A
 // Ticket opened earlier costs the Tracker nothing here.
 func (m Model) haveDetail(id model.TicketID) bool {
-	_, hit := m.details[id]
-	return hit
+	entry, hit := m.details[id]
+	if !hit {
+		return false
+	}
+	_, eligible := entry.frontierLinks()
+	return eligible
 }
 
 // issueFrontierFetches keeps up to detailfanout.Parallelism commands in flight.
@@ -312,13 +329,15 @@ func (m Model) issueFrontierFetches() (tea.Model, tea.Cmd) {
 		// and paying twice is exactly what this screen's cost discipline is
 		// about.
 		if entry, cached := m.details[id]; cached {
-			m = m.seatFanoutLinks(id, entry.detail.Links)
-			m.frontier.done++
-			adopted = true
-			continue
+			if detail, eligible := entry.frontierLinks(); eligible {
+				m = m.seatFanoutLinks(id, detail.Links)
+				m.frontier.done++
+				adopted = true
+				continue
+			}
 		}
 		m.detailFanoutInflight++
-		cmds = append(cmds, m.frontierFetchCmd(m.frontierGeneration, id))
+		cmds = append(cmds, m.frontierFetchCmd(m.frontierGeneration, m.detailEvidenceVersion, id))
 	}
 	if adopted {
 		m = m.settleFrontier()
@@ -340,6 +359,60 @@ func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
 	return m
 }
 
+// refreshFrontierDetailEvidence folds a successful reread of a native Frontier
+// member into the hidden Frontier seat. A followed Ghost or anonymous Detail is
+// never evidence for a Watchlist member, and anonymous members are non-fetchable.
+func (m Model) refreshFrontierDetailEvidence(links []model.Link) (Model, tea.Cmd) {
+	if m.mode != modeDetail || m.detailReturn != modeFrontier || !m.detail.frontierMember || m.detail.ticket.ID == "" {
+		return m, nil
+	}
+	id := m.detail.ticket.ID
+	m = m.seatFanoutLinks(id, links)
+	delete(m.frontier.failed, id)
+	delete(m.frontier.failureErrors, id)
+	m = m.reconcileFrontierFailureNotice()
+	return m.frontierEvidenceChanged()
+}
+
+// reconcileFrontierFailureNotice keeps the detail line in the footer tied to a
+// currently failed Ticket whenever per-Ticket error provenance is available.
+func (m Model) reconcileFrontierFailureNotice() Model {
+	if len(m.frontier.failed) == 0 {
+		m.frontier.lastErr = nil
+		return m
+	}
+	if _, err := m.frontierFailure(); err != nil {
+		m.frontier.lastErr = err
+	}
+	return m
+}
+
+// frontierFailure returns one deterministic failed member and its error. The
+// identity is kept separate from the error so the footer cannot imply that an
+// arbitrary last error belongs to every failed Ticket.
+func (m Model) frontierFailure() (model.TicketID, error) {
+	ids := make([]model.TicketID, 0, len(m.frontier.failed))
+	for id := range m.frontier.failed {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		if err := m.frontier.failureErrors[id]; err != nil {
+			return id, err
+		}
+	}
+	return "", nil
+}
+
+func (m Model) frontierFailureKey(id model.TicketID) string {
+	for _, ticket := range m.frontier.input.Tickets {
+		if ticket.ID == id && ticket.Key != "" {
+			return ticket.Key
+		}
+	}
+	return "a Watchlist ticket"
+}
+
 // settleFrontier releases the child context once this seat's own plan has been
 // answered in full, from the Tracker or session cache. Plan completion is not
 // resolution: the latter is derived from full Watchlist Links-or-failure
@@ -353,27 +426,41 @@ func (m Model) settleFrontier() Model {
 }
 
 // frontierFetchCmd reads one Ticket's Detail with the child context owned by
-// this Frontier generation. The command captures both values so replacing the
-// Model cannot redirect an issued read.
-func (m Model) frontierFetchCmd(generation int, id model.TicketID) tea.Cmd {
+// this Frontier generation. It captures both generation and singular-read
+// evidence version, so replacing the Model cannot redirect an issued read or
+// let it overwrite a newer direct Detail.
+func (m Model) frontierFetchCmd(generation, detailEvidenceVersion int, id model.TicketID) tea.Cmd {
 	fetch := m.fetchDetail
 	ctx := m.frontierContext
 	return func() tea.Msg {
 		d, caps, err := fetch(ctx, id)
-		return frontierDetailMsg{generation: generation, id: id, detail: d, caps: caps, err: err}
+		return frontierDetailMsg{
+			generation: generation, detailEvidenceVersion: detailEvidenceVersion,
+			id: id, detail: d, caps: caps, err: err,
+		}
 	}
 }
 
 // onFrontierDetail folds one fan-out answer in. Every issued command frees its
 // shared slot, and every success warms the session cache before the generation
-// guard: a Provider may complete just before cancellation and that paid-for
-// answer should prevent a duplicate read. Only the current seat's answer changes
-// progress or rendering. A failure writes no Links key, preserving fail-closed
-// Actionable; local cancellation is control flow and never a Ticket failure.
+// guard unless a newer successful singular Detail read owns that member's
+// evidence. A Provider may complete just before cancellation and that paid-for
+// answer should otherwise prevent a duplicate read. Only the current seat's
+// answer changes progress or rendering. A failure writes no Links key, preserving
+// fail-closed Actionable; local cancellation is control flow and never a Ticket
+// failure.
 func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 	m.detailFanoutInflight--
-	if msg.err == nil {
-		m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: m.now()}
+	entry, cached := m.details[msg.id]
+	protected := cached && entry.directDetailVersion > msg.detailEvidenceVersion
+	if msg.err == nil && !protected {
+		entry.detail = msg.detail
+		entry.caps = msg.caps
+		entry.fetchedAt = m.now()
+		entry.frontierIneligible = false
+		entry.frontierDetail = msg.detail
+		entry.frontierEvidence = true
+		m.details[msg.id] = entry
 	}
 	if msg.generation != m.frontierGeneration {
 		// An abandoned command has released a shared slot. A re-entered current
@@ -381,6 +468,14 @@ func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 		return m.issueFrontierFetches()
 	}
 	m.frontier.done++
+	if protected {
+		// A newer singular Detail owns every visible and semantic outcome of this
+		// reply. It still completes its fan-out bookkeeping and frees a slot, but
+		// never rewrites cache, Links, failures, graph, or layout.
+		m = m.settleFrontier()
+		next, fetchCmd := m.issueFrontierFetches()
+		return next, tea.Batch(repaint, fetchCmd)
+	}
 
 	switch {
 	case errors.Is(msg.err, context.Canceled):
@@ -391,7 +486,11 @@ func (m Model) onFrontierDetail(msg frontierDetailMsg) (tea.Model, tea.Cmd) {
 		if m.frontier.failed == nil {
 			m.frontier.failed = make(map[model.TicketID]struct{})
 		}
+		if m.frontier.failureErrors == nil {
+			m.frontier.failureErrors = make(map[model.TicketID]error)
+		}
 		m.frontier.failed[msg.id] = struct{}{}
+		m.frontier.failureErrors[msg.id] = msg.err
 		m.frontier.lastErr = msg.err
 	default:
 		m = m.seatFanoutLinks(msg.id, msg.detail.Links)
@@ -417,13 +516,15 @@ func (m Model) adoptCachedLinks() Model {
 		if !cached {
 			continue
 		}
-		m = m.seatFanoutLinks(t.ID, entry.detail.Links)
+		detail, eligible := entry.frontierLinks()
+		if !eligible {
+			continue
+		}
+		m = m.seatFanoutLinks(t.ID, detail.Links)
 		delete(m.frontier.failed, t.ID)
+		delete(m.frontier.failureErrors, t.ID)
 	}
-	if len(m.frontier.failed) == 0 {
-		m.frontier.lastErr = nil
-	}
-	return m
+	return m.reconcileFrontierFailureNotice()
 }
 
 // rebuildFrontier recomputes everything derived from the seated input. It owns
@@ -576,7 +677,17 @@ func (m Model) openFrontierNode() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
 	m.trail = nil
 	m.detailReturn = modeFrontier
-	return m.seatDetail(t, m.frontier.input.Header, m.frontier.input.Capabilities)
+	member := false
+	for _, candidate := range m.frontier.input.Tickets {
+		if candidate.ID == m.frontier.focusID {
+			member = true
+			break
+		}
+	}
+	updated, cmd := m.seatDetail(t, m.frontier.input.Header, m.frontier.input.Capabilities, member)
+	next := updated.(Model)
+	next.detail.frontierMember = member
+	return next, cmd
 }
 
 // frontierTicket resolves a node to the Ticket its Detail is seated from.
@@ -617,6 +728,7 @@ func (m Model) refreshFrontier() (tea.Model, tea.Cmd) {
 	m.frontier.planned = len(outstanding)
 	m.frontier.done = 0
 	m.frontier.failed = nil
+	m.frontier.failureErrors = nil
 	m.frontier.lastErr = nil
 	m = m.startFrontierFanout()
 	m = m.rebuildFrontier()
@@ -642,6 +754,10 @@ func (m Model) onFrontierKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.ToggleMouse):
 		return m.toggleMouse(), nil
+
+	case key.Matches(msg, keys.Legend):
+		m.legendVisible = !m.legendVisible
+		return m, repaint
 
 	case key.Matches(msg, keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -697,14 +813,29 @@ func (m Model) focusFrontierNodeAt(i int) Model {
 // frontierFrame renders the whole screen: a header that never scrolls, the
 // canvas window, and a footer that says what this screen is not showing.
 func (m Model) frontierFrame() string {
+	return m.frontierFrameWithCycles(m.frontierCyclesForFrame())
+}
+
+func (m Model) frontierFrameWithCycles(cycles [][]model.TicketID) string {
 	footer := m.frontierFooterLines()
-	body := m.frontierBody(m.frontierBodyHeight())
-	return strings.Join(append([]string{m.frontierHeader()}, append(body, footer...)...), "\n")
+	body := m.frontierBodyWithCycles(m.frontierBodyHeight(), cycles)
+	return strings.Join(append([]string{m.frontierHeaderWithCycles(cycles)}, append(body, footer...)...), "\n")
+}
+
+func (m Model) frontierCyclesForFrame() [][]model.TicketID {
+	if !m.frontierShowsCanvas() {
+		return nil
+	}
+	return m.frontier.graph.Cycles()
 }
 
 // frontierHeader is the same three lines the list's header occupies, so the
 // body arithmetic is shared: identity, the graph's counts, and a blank.
 func (m Model) frontierHeader() string {
+	return m.frontierHeaderWithCycles(m.frontierCyclesForFrame())
+}
+
+func (m Model) frontierHeaderWithCycles(cycles [][]model.TicketID) string {
 	f := m.frontier
 	nodes := len(f.layout.order)
 	ghosts := len(f.graph.Ghosts())
@@ -751,15 +882,7 @@ func (m Model) frontierHeader() string {
 				actionable++
 			}
 		}
-		tally := fmt.Sprintf("%d actionable", actionable)
-		if known == 0 {
-			tally = "actionable unknown"
-		}
-		counts = "frontier" + separator + plural(nodes, "node", "nodes")
-		if ghosts > 0 {
-			counts += separator + plural(ghosts, "ghost", "ghosts")
-		}
-		counts += separator + tally
+		counts = m.frontierCycleHeaderCountsWithCycles(nodes, ghosts, actionable, known, cycles)
 	case m.frontierContext != nil:
 		counts = fmt.Sprintf("frontier%s%s%sreading Detail %d/%d",
 			separator, plural(nodes, "node", "nodes"), separator, f.done, f.planned)
@@ -785,6 +908,10 @@ func (m Model) frontierHeader() string {
 
 // frontierBody draws the canvas window, or the state that stands in for it.
 func (m Model) frontierBody(height int) []string {
+	return m.frontierBodyWithCycles(height, m.frontierCyclesForFrame())
+}
+
+func (m Model) frontierBodyWithCycles(height int, cycles [][]model.TicketID) []string {
 	switch {
 	case !m.frontier.input.Capabilities.BlockingLinks:
 		// No fetch was issued at all: a screen that cannot draw a graph must not
@@ -809,8 +936,9 @@ func (m Model) frontierBody(height int) []string {
 	}
 	// A graph with nodes but no edges is not an error state: every Todo node
 	// whose Links were readable is then Actionable, which is the truth.
-	return renderFrontierBody(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
+	body := renderFrontierBody(m.frontier.layout, m.frontier.focusID, m.frontier.hasFocus,
 		m.frontier.offsetX, m.frontier.offsetY, m.width, height, m.styles)
+	return m.frontierLegendBody(body, height, cycles)
 }
 
 func (m Model) wrappedMuted(text string) []string {
@@ -868,10 +996,18 @@ func (m Model) frontierFooterBlock() []string {
 		notice := detailfanout.UnreadableLinksNotice(failed)
 		lines = append(lines, m.styles.Error.Render(balancedTruncate(notice, m.width, "…")))
 	}
-	if m.frontier.lastErr != nil {
-		// Whichever parallel read failed last, labelled as one failure rather than
-		// the cause of everything on screen. A refused canvas disables Refresh, so
-		// its footer reports evidence without advertising an inert remedy.
+	if failedID, failedErr := m.frontierFailure(); failedErr != nil {
+		// One currently failed Ticket is named as an example, rather than as the
+		// cause of everything on screen. A refused canvas disables Refresh, so its
+		// footer reports evidence without advertising an inert remedy.
+		message := fmt.Sprintf("read failed for %s: %s — press r to retry the Tickets that failed",
+			m.frontierFailureKey(failedID), failedErr.Error())
+		if m.frontier.refusal != nil {
+			message = fmt.Sprintf("read failed for %s: %s — the fetched evidence remains recorded",
+				m.frontierFailureKey(failedID), failedErr.Error())
+		}
+		lines = append(lines, m.styles.Error.Render(balancedTruncate(message, m.width, "…")))
+	} else if m.frontier.lastErr != nil {
 		message := fmt.Sprintf("read failed: %s — press r to retry the Tickets that failed",
 			m.frontier.lastErr.Error())
 		if m.frontier.refusal != nil {

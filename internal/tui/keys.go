@@ -49,6 +49,8 @@ type KeyMap struct {
 	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -117,6 +119,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
 		),
+		Legend: key.NewBinding(
+			key.WithKeys("L"),
+			key.WithHelp("L", "legend"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c", "esc"),
 			key.WithHelp("q", "quit"),
@@ -140,7 +146,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.Refresh, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
@@ -160,7 +166,7 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("g/G", "first/last"),
 		helpOnlyBinding("enter/r", "open/refresh"),
 		helpOnlyBinding("d /", "hide finished/find"),
-		helpOnlyBinding("?/q", "help/quit"),
+		helpOnlyBinding("L/?/q", "legend/help/quit"),
 	}
 	if k.Frontier.Enabled() {
 		bindings = append(bindings, k.Frontier)
@@ -215,6 +221,8 @@ type DetailKeyMap struct {
 	MouseFollow key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -258,6 +266,7 @@ func DefaultDetailKeyMap() DetailKeyMap {
 		MouseWheel:  helpOnlyBinding("wheel", "scroll body"),
 		MouseFollow: helpOnlyBinding("click Link", "follow"),
 		Help:        list.Help,
+		Legend:      list.Legend,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -316,6 +325,8 @@ type FrontierKeyMap struct {
 	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -373,6 +384,7 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 		MouseOpen:   helpOnlyBinding("double-click", "open Ticket"),
 		MouseWheel:  helpOnlyBinding("wheel", "scroll"),
 		Help:        list.Help,
+		Legend:      list.Legend,
 		// esc belongs to Toggle here, so Quit is q and ctrl+c only — the same
 		// separation the Detail screen makes.
 		Quit: key.NewBinding(
@@ -402,7 +414,7 @@ func (k FrontierKeyMap) ShortHelp() []key.Binding {
 // when the terminal cannot show them side by side.
 func (k FrontierKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.Left, k.Right, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }

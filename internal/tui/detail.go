@@ -145,6 +145,26 @@ type detailEntry struct {
 	detail    model.Detail
 	caps      model.Capabilities
 	fetchedAt time.Time
+	// frontierIneligible marks the display Detail as followed or Ghost data. It
+	// cannot replace a prior eligible evidence snapshot merely because its Ticket
+	// ID aliases a Watchlist member.
+	frontierIneligible bool
+	frontierDetail     model.Detail
+	frontierEvidence   bool
+	// directDetailVersion orders every successful singular Detail completion
+	// against captured Frontier fan-out reads. It is session-local and never
+	// persisted, regardless of whether this Detail is Frontier evidence.
+	directDetailVersion int
+}
+
+// frontierLinks returns the Detail that may supply Watchlist graph evidence.
+// The fallback preserves the meaning of legacy zero-value test fixtures: unless
+// explicitly display-only, their Detail is eligible evidence.
+func (entry detailEntry) frontierLinks() (model.Detail, bool) {
+	if entry.frontierEvidence {
+		return entry.frontierDetail, true
+	}
+	return entry.detail, !entry.frontierIneligible
 }
 
 // detailState is the Detail screen's own state, kept in one struct so that it
@@ -172,6 +192,14 @@ type detailState struct {
 	linkFocus        detailLinkIdentity
 	hasLinkFocus     bool
 	markdownSections detailMarkdownSections
+	// frontierMember records whether a Frontier-origin Detail was opened from a
+	// Watchlist member. It disambiguates the empty TicketID, which is not itself
+	// a usable identity.
+	frontierMember bool
+	// watchlistMember records a Detail seated directly from a Watchlist member,
+	// whether it came from List or Frontier. Followed, Ghost, and decoder seats
+	// remain display-only even when their IDs alias a Watchlist member.
+	watchlistMember bool
 }
 
 // detailTrailEntry is a stable snapshot of one prior Detail seat. In-flight
@@ -180,15 +208,17 @@ type detailState struct {
 // Width and body height distinguish an exact round trip from a seat reflowed
 // while a child was open.
 type detailTrailEntry struct {
-	ticket       model.Ticket
-	input        DetailInput
-	loaded       bool
-	lastErr      error
-	offset       int
-	linkFocus    detailLinkIdentity
-	hasLinkFocus bool
-	width        int
-	bodyHeight   int
+	ticket          model.Ticket
+	input           DetailInput
+	loaded          bool
+	lastErr         error
+	offset          int
+	linkFocus       detailLinkIdentity
+	hasLinkFocus    bool
+	frontierMember  bool
+	watchlistMember bool
+	width           int
+	bodyHeight      int
 }
 
 // detailFetchedMsg carries the outcome of one DetailSource call. It is guarded
@@ -243,20 +273,20 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 	m = m.clearPendingClick()
 	m.trail = nil
 	m.detailReturn = modeList
-	return m.seatDetail(t, m.input.Header, m.input.Capabilities)
+	return m.seatDetail(t, m.input.Header, m.input.Capabilities, true)
 }
 
-// seatDetail is the shared transition for a rich list Ticket and a thin Link
-// target. Every seat retires the previous read and advances the generation,
-// including cache hits and cycles. Only a cache miss receives a new child
-// context and Provider command.
-func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities) (tea.Model, tea.Cmd) {
+// seatDetail creates a Detail seat from a list Ticket or thin Link target. A
+// direct Watchlist seat carries evidence provenance; followed targets never do.
+func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities, watchlistMember bool) (tea.Model, tea.Cmd) {
+	member := watchlistMember
 	m = m.retireDetailRead()
 	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
-		ticket: t,
-		input:  DetailFromTicket(t, model.Detail{}, caps, parent, time.Time{}),
+		ticket:          t,
+		input:           DetailFromTicket(t, model.Detail{}, caps, parent, time.Time{}),
+		watchlistMember: member,
 	}
 
 	if t.ID == "" {
@@ -266,7 +296,15 @@ func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities
 	if cached, hit := m.details[t.ID]; hit {
 		m.detail.input = DetailFromTicket(t, cached.detail, cached.caps, parent, cached.fetchedAt)
 		m.detail.loaded = true
-		return m.reconcileDetail(true), nil
+		if _, eligible := cached.frontierLinks(); !member || eligible || m.detailReturn != modeFrontier {
+			return m.reconcileDetail(true), nil
+		}
+		// A followed alias may have display data for this ID, but a native Frontier
+		// seat still needs its own read before it can become graph evidence.
+		m.detail.loading = true
+		m = m.startDetailRead()
+		m = m.reconcileDetail(true)
+		return m, m.detailFetchCmd(m.detailGeneration, t.ID)
 	}
 
 	m.detail.loading = true
@@ -399,15 +437,17 @@ func (m Model) focusedDetailLink(doc detailDocument) (detailLinkRow, bool) {
 
 func (m Model) detailTrailSnapshot() detailTrailEntry {
 	return detailTrailEntry{
-		ticket:       m.detail.ticket,
-		input:        m.detail.input,
-		loaded:       m.detail.loaded,
-		lastErr:      m.detail.lastErr,
-		offset:       m.detail.offset,
-		linkFocus:    m.detail.linkFocus,
-		hasLinkFocus: m.detail.hasLinkFocus,
-		width:        m.width,
-		bodyHeight:   m.detailBodyHeight(),
+		ticket:          m.detail.ticket,
+		input:           m.detail.input,
+		loaded:          m.detail.loaded,
+		lastErr:         m.detail.lastErr,
+		offset:          m.detail.offset,
+		linkFocus:       m.detail.linkFocus,
+		hasLinkFocus:    m.detail.hasLinkFocus,
+		frontierMember:  m.detail.frontierMember,
+		watchlistMember: m.detail.watchlistMember,
+		width:           m.width,
+		bodyHeight:      m.detailBodyHeight(),
 	}
 }
 
@@ -424,7 +464,7 @@ func (m Model) followDetailLink(identity detailLinkIdentity) (tea.Model, tea.Cmd
 	m.detail.hasLinkFocus = true
 	m = m.syncDetailKeysFor(doc)
 	m.trail = append(m.trail, m.detailTrailSnapshot())
-	return m.seatDetail(ticketFromLinkTarget(row.Link.Target), m.detail.input.Parent, m.detail.input.Capabilities)
+	return m.seatDetail(ticketFromLinkTarget(row.Link.Target), m.detail.input.Parent, m.detail.input.Capabilities, false)
 }
 
 func (m Model) followFocusedDetailLink() (tea.Model, tea.Cmd) {
@@ -443,13 +483,15 @@ func (m Model) popDetailTrail() Model {
 	m.mouseEpoch++
 	m.mode = modeDetail
 	m.detail = detailState{
-		ticket:       entry.ticket,
-		input:        entry.input,
-		loaded:       entry.loaded,
-		lastErr:      entry.lastErr,
-		offset:       entry.offset,
-		linkFocus:    entry.linkFocus,
-		hasLinkFocus: entry.hasLinkFocus,
+		ticket:          entry.ticket,
+		input:           entry.input,
+		loaded:          entry.loaded,
+		lastErr:         entry.lastErr,
+		offset:          entry.offset,
+		linkFocus:       entry.linkFocus,
+		hasLinkFocus:    entry.hasLinkFocus,
+		frontierMember:  entry.frontierMember,
+		watchlistMember: entry.watchlistMember,
 	}
 	m = m.reconcileDetail(false)
 	if m.width != entry.width || m.detailBodyHeight() != entry.bodyHeight {
@@ -540,7 +582,18 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	m = m.invalidateDetailMarkdownSections()
 
 	at := m.now()
-	m.details[msg.id] = detailEntry{detail: msg.detail, caps: msg.caps, fetchedAt: at}
+	m.detailEvidenceVersion++
+	entry := m.details[msg.id]
+	entry.detail = msg.detail
+	entry.caps = msg.caps
+	entry.fetchedAt = at
+	entry.frontierIneligible = !m.detailCacheFrontierEligible()
+	entry.directDetailVersion = m.detailEvidenceVersion
+	if !entry.frontierIneligible {
+		entry.frontierDetail = msg.detail
+		entry.frontierEvidence = true
+	}
+	m.details[msg.id] = entry
 	m.detail.input.Detail = msg.detail
 	m.detail.input.Capabilities = msg.caps
 	m.detail.input.FetchedAt = at
@@ -548,7 +601,26 @@ func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
 	return m.reconcileDetail(true)
 }
 
-// onDetailKey dispatches a key press while a Ticket's Detail is open. Esc pops
+// detailCacheFrontierEligible reports whether the current Detail seat was opened
+// directly from a Watchlist member. Followed, Ghost, and decoder seats remain
+// display-only even when their IDs alias a member.
+func (m Model) detailCacheFrontierEligible() bool {
+	return m.detail.watchlistMember
+}
+
+// onDetailFetchedWithFrontierEvidence keeps a Frontier-origin member's hidden
+// graph input in sync with a successful one-Ticket Detail reread. The stable
+// seat identity owns the update: provider payload identity is presentation data
+// and is not allowed to redirect graph evidence.
+func (m Model) onDetailFetchedWithFrontierEvidence(msg detailFetchedMsg) (Model, tea.Cmd) {
+	accepted := msg.generation == m.detailGeneration && msg.id == m.detail.ticket.ID && msg.err == nil
+	m = m.onDetailFetched(msg)
+	if !accepted {
+		return m, nil
+	}
+	return m.refreshFrontierDetailEvidence(msg.detail.Links)
+}
+
 // one Trail entry, returns an untrailed root to the armed list, or quits a
 // decoded root with no list. q and ctrl+c always quit. u clears the Trail and
 // jumps to the root Watchlist, fetching it first in a decoder session.
@@ -604,6 +676,10 @@ func (m Model) onDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.detailKeys.ToggleMouse):
 		return m.toggleMouse(), nil
+
+	case key.Matches(msg, m.detailKeys.Legend):
+		m.legendVisible = !m.legendVisible
+		return m, repaint
 
 	case key.Matches(msg, m.detailKeys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -697,6 +773,7 @@ func (m Model) detailFrame(doc detailDocument) string {
 		"current · "+detailStaleness(m.detail.input.FetchedAt, m.now(), m.detail.loading),
 		m.width, m.styles, m.trail)
 	body := renderDetailBody(doc.Lines, m.detail.offset, m.detailBodyHeight(), m.width)
+	body = replaceTrailingBodyLines(body, len(doc.Lines), m.detailLegendLines(doc), m.styles.Muted.Render)
 
 	return strings.Join(append([]string{header, body}, footer...), "\n")
 }

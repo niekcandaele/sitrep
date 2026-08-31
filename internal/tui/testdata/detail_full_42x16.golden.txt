@@ -10,7 +10,7 @@ click Link follow
 esc/u      back/watchlist
 tab/⇧tab   links
 enter      follow
-r/?/q      refresh/help/quit
+r/L/?/q    refresh/legend/help/quit
 ↑/↓/k/j    scroll
 pgup/pgdn  page
 g/G        first/last                  95%

@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                                                                                                                                                                                                                 https://tracker.example.test/acme/widgets/200
-frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-01-02T03:04:05Z                                                                                                                                                                                                           just now
+frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic evidence) · budget 4870 · resets 2030-01-02T03:04:05Z                                                                                                                                                                     just now
 
 
  ┌──────────────────────────┐┌──────────────────────────┐╔══════════════════════════╗╔══════════════════════════╗╔══════════════════════════╗┌──────────────────────────┐┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮
@@ -41,5 +41,5 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
 
 
 1 Ticket's Links could not be read; anything it blocks is not Actionable
-read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
+read failed for #211: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
 v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text • ↑/k blocker side • ↓/j dependent side • ←/h previous node • →/l next node

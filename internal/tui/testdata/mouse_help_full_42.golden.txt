@@ -19,7 +19,6 @@ DONE (3)
   #118     Cache shard lookups
            @mara-vos  #504 merged
   #119     Emit sync telemetry
-           @tobias
 
 m            release, shift-drag
 click        select Ticket
@@ -29,6 +28,7 @@ enter        open
 v            frontier
 r            refresh
 ?            help
+L            legend
 q            quit
 ↑/k          up
 ↓/j          down
