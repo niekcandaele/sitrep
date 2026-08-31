@@ -3544,6 +3544,166 @@ func TestFrontierRefreshKeepsTheFailureNotice(t *testing.T) {
 	}
 }
 
+// A cached Detail can arrive after a failed Frontier read but before the next
+// Watchlist refresh. The refresh re-seats from the session cache, so it must
+// retire that failure rather than preserve a retry remedy for already-known Links.
+func TestFrontierRefreshDropsFailureWhoseLinksLandedInCache(t *testing.T) {
+	const target = model.TicketID("T-1")
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	before := ListInput{
+		Header:       Header{Key: "#107", Title: "cached failure"},
+		Tickets:      []model.Ticket{{ID: target, Key: "#1", Title: "first", Status: model.StatusTodo}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	var sourceCalls, detailCalls atomic.Int64
+	m := New(t.Context(), Options{
+		Initial: &before,
+		Source: func(context.Context) (ListInput, error) {
+			sourceCalls.Add(1)
+			return ListInput{}, errors.New("refresh source must not run")
+		},
+		DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+			detailCalls.Add(1)
+			return model.Detail{}, model.Capabilities{}, errors.New("Detail source must not run")
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	m.mode = modeFrontier
+	m.frontier = frontierState{
+		input:   FrontierFromList(before, nil),
+		failed:  map[model.TicketID]struct{}{target: {}},
+		lastErr: errors.New("stale frontier failure"),
+	}
+	m = m.rebuildFrontier()
+	m.details[target] = detailEntry{
+		detail:    model.Detail{TicketID: target},
+		caps:      before.Capabilities,
+		fetchedAt: now,
+	}
+	generation := m.generation
+
+	updated, cmd := m.Update(refreshedMsg{generation: generation, input: before})
+	m = updated.(Model)
+	if !carriesClearScreen(cmd) {
+		t.Fatal("successful Frontier refresh did not return the re-seat repaint")
+	}
+	if m.generation != generation || m.refreshing {
+		t.Errorf("refresh scheduler state = generation %d refreshing %t, want %d/false", m.generation, m.refreshing, generation)
+	}
+	if got := sourceCalls.Load(); got != 0 {
+		t.Errorf("refresh re-seat called Source %d times, want 0", got)
+	}
+	if got := detailCalls.Load(); got != 0 {
+		t.Errorf("refresh re-seat called DetailSource %d times, want 0", got)
+	}
+	if _, seated := m.frontier.input.Links[target]; !seated {
+		t.Fatal("replacement seat did not include the Links that landed in cache")
+	}
+	if _, failed := m.frontier.failed[target]; failed || len(m.frontier.failed) != 0 {
+		t.Errorf("failed = %v, want the cached Ticket removed", m.frontier.failed)
+	}
+	if m.frontier.lastErr != nil {
+		t.Errorf("lastErr = %v, want none after the sole failure was resolved", m.frontier.lastErr)
+	}
+	if !m.frontier.isResolved() {
+		t.Fatal("cache-complete replacement seat is unresolved")
+	}
+	frame := m.View().Content
+	for _, stale := range []string{"Ticket's Links could not be read", "read failed:", "press r to retry", "stale frontier failure"} {
+		if strings.Contains(frame, stale) {
+			t.Errorf("resolved Frontier retained %q:\n%s", stale, frame)
+		}
+	}
+}
+
+// A departed Ticket is no longer part of a Watchlist seat. Its old failed
+// Detail cannot survive the refresh or make the new, fully covered seat lie
+// about an unreadable Ticket.
+func TestFrontierRefreshDropsFailureForRemovedMember(t *testing.T) {
+	const (
+		departed  = model.TicketID("T-1")
+		remaining = model.TicketID("T-2")
+	)
+	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
+	before := ListInput{
+		Header:       Header{Key: "#107", Title: "departed failure"},
+		Tickets:      []model.Ticket{{ID: departed, Key: "#1", Title: "departed", Status: model.StatusTodo}, {ID: remaining, Key: "#2", Title: "remaining", Status: model.StatusTodo}},
+		Capabilities: model.Capabilities{BlockingLinks: true},
+		FetchedAt:    now,
+	}
+	refreshed := before
+	refreshed.Tickets = []model.Ticket{{ID: remaining, Key: "#2", Title: "remaining", Status: model.StatusTodo}}
+	var sourceCalls, detailCalls atomic.Int64
+	m := New(t.Context(), Options{
+		Initial: &before,
+		Source: func(context.Context) (ListInput, error) {
+			sourceCalls.Add(1)
+			return ListInput{}, errors.New("refresh source must not run")
+		},
+		DetailSource: func(context.Context, model.TicketID) (model.Detail, model.Capabilities, error) {
+			detailCalls.Add(1)
+			return model.Detail{}, model.Capabilities{}, errors.New("Detail source must not run")
+		},
+		Now: func() time.Time { return now },
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(Model)
+	m.mode = modeFrontier
+	m.frontier = frontierState{
+		input:   FrontierFromList(before, nil),
+		failed:  map[model.TicketID]struct{}{departed: {}},
+		lastErr: errors.New("departed frontier failure"),
+	}
+	m = m.rebuildFrontier()
+	m.details[remaining] = detailEntry{
+		detail:    model.Detail{TicketID: remaining},
+		caps:      refreshed.Capabilities,
+		fetchedAt: now,
+	}
+	generation := m.generation
+
+	updated, cmd := m.Update(refreshedMsg{generation: generation, input: refreshed})
+	m = updated.(Model)
+	if !carriesClearScreen(cmd) {
+		t.Fatal("successful Frontier refresh did not return the re-seat repaint")
+	}
+	if m.generation != generation || m.refreshing {
+		t.Errorf("refresh scheduler state = generation %d refreshing %t, want %d/false", m.generation, m.refreshing, generation)
+	}
+	if got := sourceCalls.Load(); got != 0 {
+		t.Errorf("refresh re-seat called Source %d times, want 0", got)
+	}
+	if got := detailCalls.Load(); got != 0 {
+		t.Errorf("refresh re-seat called DetailSource %d times, want 0", got)
+	}
+	for _, ticket := range m.frontier.input.Tickets {
+		if ticket.ID == departed {
+			t.Errorf("replacement input retained departed Ticket %q", departed)
+		}
+	}
+	if _, drawn := m.frontier.layout.nodeAt[departed]; drawn {
+		t.Errorf("replacement layout retained departed Ticket %q", departed)
+	}
+	if _, failed := m.frontier.failed[departed]; failed || len(m.frontier.failed) != 0 {
+		t.Errorf("failed = %v, want the departed Ticket removed", m.frontier.failed)
+	}
+	if m.frontier.lastErr != nil {
+		t.Errorf("lastErr = %v, want none after the sole failure departed", m.frontier.lastErr)
+	}
+	if !m.frontier.isResolved() {
+		t.Fatal("fully covered replacement seat is unresolved")
+	}
+	frame := m.View().Content
+	for _, stale := range []string{"Ticket's Links could not be read", "read failed:", "press r to retry", "departed frontier failure"} {
+		if strings.Contains(frame, stale) {
+			t.Errorf("resolved Frontier retained %q:\n%s", stale, frame)
+		}
+	}
+}
+
 func TestFrontierRebuildTrailingEdgeAndModelLayoutSeam(t *testing.T) {
 	tickets := []model.Ticket{
 		{ID: "T-0", Key: "T-0", Title: "zero", Status: model.StatusTodo},
