@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -468,11 +467,6 @@ func TestJSONLinksAggregatesMultipleDetailFailures(t *testing.T) {
 // "give me blocking data". Neither --plain nor the monitor produces any, so
 // both are a usage error rather than a silently dropped request.
 func TestLinksRequiresJSON(t *testing.T) {
-	help, err := os.ReadFile("testdata/help.golden.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, args := range [][]string{
 		{"200", "--links"},
 		{"200", "--links", "--plain"},
@@ -483,17 +477,7 @@ func TestLinksRequiresJSON(t *testing.T) {
 				Provider: fake.New(fake.WithBlockingFixture()),
 				Now:      fixedClock,
 			})
-
-			if code != 2 {
-				t.Errorf("exit code = %d, want 2", code)
-			}
-			if stdout.Len() != 0 {
-				t.Errorf("stdout = %q, want empty", stdout.String())
-			}
-			want := "sitrep: --links requires --json\n\n" + string(help)
-			if got := stderr.String(); got != want {
-				t.Errorf("stderr does not append exact help\n--- got ---\n%s\n--- want ---\n%s", got, want)
-			}
+			checkUsageError(t, code, &stdout, &stderr, "--links requires --json")
 		})
 	}
 }
@@ -515,8 +499,9 @@ func TestLinksFailsOnADecodedTicket(t *testing.T) {
 	if got.stdout != "" {
 		t.Errorf("stdout = %q, want no document at all", got.stdout)
 	}
-	if !strings.HasPrefix(got.stderr, "sitrep: --links needs a Watchlist: #112 names a single Ticket\n") {
-		t.Errorf("stderr = %q, want it to name --links and the Ticket", got.stderr)
+	want := "sitrep: --links needs a Watchlist: #112 names a single Ticket\n" + usagePointer
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
 	}
 }
 

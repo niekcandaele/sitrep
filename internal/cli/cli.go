@@ -1206,8 +1206,7 @@ func flagErrorMessage(fs *flag.FlagSet, err error) string {
 }
 
 func usageError(stderr io.Writer, msg string) int {
-	fmt.Fprintf(stderr, "%s: %s\n\n", buildinfo.Name, msg)
-	fmt.Fprint(stderr, usage)
+	fmt.Fprintf(stderr, "%s: %s\nRun \"%s --help\" for usage.\n", buildinfo.Name, msg, buildinfo.Name)
 	return exitUsage
 }
 

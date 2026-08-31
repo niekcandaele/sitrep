@@ -679,7 +679,9 @@ not `--links` was given.
 ## When something fails
 
 Every runtime failure is one sanitized line on stderr prefixed `sitrep:` and, for Tracker
-failures, the Provider name. sitrep exits `1`. CLI usage failures print help and exit `2`.
+failures, the Provider name. sitrep exits `1`. CLI usage failures write a concise stderr
+diagnostic followed by `Run "sitrep --help" for usage.` and exit `2`; `sitrep --help` and
+`-h` instead write the full help to stdout and exit `0`.
 
 - **Bad Ref or membership**: check the quoted Ref, exact-list member, or native Query. A bare
   number uses the current clone's origin; use an owner/repository Ref or full URL elsewhere.
