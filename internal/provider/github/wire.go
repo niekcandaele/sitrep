@@ -167,9 +167,9 @@ type detailBatchResponse struct {
 }
 
 // decode classifies a completed aliased response. An error attributable to one
-// alias invalidates that whole Detail while successful siblings survive. Any
-// error or data member that cannot be attributed makes the response malformed
-// for the entire chunk.
+// alias invalidates that whole Detail while successful siblings survive. An
+// error or data member that cannot be attributed invalidates the entire chunk;
+// request-wide errors retain their native classification.
 func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
 	aliases := make(map[string]struct{}, len(ids))
 	for i := range ids {
