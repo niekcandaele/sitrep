@@ -1529,6 +1529,82 @@ func TestFrontierSeatIsSanitized(t *testing.T) {
 	assertNoInjectedControls(t, "frontier frame", m.View().Content)
 }
 
+// Continuation cells own the second column of a double-width rune. Their zero
+// rune must not cross the renderer's terminal-text boundary as a NUL byte.
+func TestFrontierCanvasSkipsContinuationCells(t *testing.T) {
+	wide := func(id, title string) model.Ticket {
+		return model.Ticket{
+			ID: model.TicketID(id), Key: id, Title: title, Status: model.StatusTodo,
+		}
+	}
+	tickets := []model.Ticket{
+		wide("#1", "分散シャード再調整の計画"),
+		wide("#2", "重み付けテーブルの移行"),
+		wide("#3", "配置ヒューリスティクス"),
+		wide("#4", "シャードの安全な退避"),
+		wide("#5", "ロールアウト手順書の公開"),
+	}
+	_, layout := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
+		"#4": blockedBy("#3"), "#5": blockedBy("#3"),
+	})
+
+	continuations := 0
+	for _, row := range layout.cells {
+		for _, cell := range row {
+			if cell.continuation {
+				continuations++
+			}
+		}
+	}
+	if continuations == 0 {
+		t.Fatal("CJK layout has no continuation cells, so this test proves nothing")
+	}
+
+	const (
+		width            = 40
+		height           = 9
+		wideTitleWitness = "分散"
+	)
+	inner := frontierInnerRect(width, height)
+	if layout.width <= inner.W || layout.height <= inner.H {
+		t.Fatalf("canvas is %dx%d, which fits inner %dx%d: offsets would not exercise clipping",
+			layout.width, layout.height, inner.W, inner.H)
+	}
+	witnessSeen := false
+	for offsetY := 0; offsetY <= layout.height-inner.H; offsetY++ {
+		for offsetX := 0; offsetX <= layout.width-inner.W; offsetX++ {
+			unstyled := renderFrontierCanvas(layout, "", false,
+				offsetX, offsetY, inner.W, inner.H, Styles{})
+			styled := renderFrontierCanvas(layout, "", false,
+				offsetX, offsetY, inner.W, inner.H, DefaultStyles(true))
+			if len(styled) != len(unstyled) {
+				t.Fatalf("rendered canvas at offset %d,%d has %d styled lines, want %d",
+					offsetX, offsetY, len(styled), len(unstyled))
+			}
+			for line := range unstyled {
+				visible := unstyled[line]
+				if strings.ContainsRune(visible, '\x00') {
+					t.Fatalf("rendered canvas at offset %d,%d line %d contains NUL: %q",
+						offsetX, offsetY, line, visible)
+				}
+				termtexttest.AssertClean(t,
+					fmt.Sprintf("rendered Frontier canvas at offset %d,%d line %d", offsetX, offsetY, line),
+					visible)
+				styledVisible := ansi.Strip(styled[line])
+				if strings.TrimRight(styledVisible, " ") != strings.TrimRight(visible, " ") {
+					t.Fatalf("rendered canvas at offset %d,%d line %d differs with styles:\nunstyled: %q\nstyled:   %q",
+						offsetX, offsetY, line, visible, styledVisible)
+				}
+				witnessSeen = witnessSeen || strings.Contains(visible, wideTitleWitness)
+			}
+		}
+	}
+	if !witnessSeen {
+		t.Fatalf("wide-title witness %q never appeared in any rendered viewport", wideTitleWitness)
+	}
+}
+
 // Links arriving through the fan-out never crossed a seat funnel: they are
 // written straight into frontier.input.Links from a DetailSource answer. The
 // boundary has to hold on that path too, or the one screen that fetches in bulk
