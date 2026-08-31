@@ -197,10 +197,13 @@ because root `esc` returns to that same seat; `u` abandons and cancels both.
 Colour carries the Status Category, exactly as it does on the list, while border weight and
 a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
 is also blocked shows both.
-A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
-never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
-whose Links could not be read is marked unverified, which leaves anything it blocks not
-Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
+A Ticket blocked by something outside the Watchlist is drawn as a **Ticket outside the
+Watchlist** (`NOT IN WATCHLIST`, or `NOT LISTED` on compact cards), so it never looks
+Actionable; cycles of BlockedBy Links are shown rather than hidden. `LINKS FAILED` means
+that Ticket's own Links could not be read and corresponds to the Frontier's existing `r`
+retry remedy. `BLOCKER UNKNOWN` instead means a blocker-side Status could not be resolved;
+it does not claim that this Ticket's Detail read failed. Both facts leave affected Tickets
+not Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
 could make a blocked Ticket look Actionable — so it always renders the whole Watchlist and
 says so in the footer. A Provider that does not report blocking links opens a screen that
 explains why there is no graph to draw.
@@ -282,7 +285,7 @@ rather than quitting.
 | click | focus a node |
 | double-click | open a node's Ticket |
 | wheel | scroll the canvas |
-| `enter` | open the focused Ticket, Ghost Tickets included |
+| `enter` | open the focused Ticket, including Tickets outside the Watchlist |
 | `v`, `esc` | return to the list, cancelling Detail reads still in flight |
 | `r` | re-read the Details that never succeeded |
 | `m` | turn mouse capture off or on |
@@ -378,7 +381,7 @@ sitrep --provider fake --fake-fixture blocking --fake-delay 750ms --json --links
 sitrep --provider fake --fake-fixture no-blocking-links --json --links 200
 ```
 
-The `blocking` fixture includes member blockers, Ghost Tickets, an unknown blocker status, an
+The `blocking` fixture includes member blockers, Tickets outside the Watchlist, an unknown blocker status, an
 unreadable Detail, a two-Ticket cycle, and a self-cycle. The delayed `--json --links` command
 shows its one-shot stderr progress at human speed. `no-blocking-links` serves the same
 Watchlist without declaring that Capability: the Frontier explains that no graph is available,
@@ -616,8 +619,8 @@ be incomplete; it never means a listed blocker was guessed at.
 and the document gains `blocking.cycles`: each cycle's Ticket IDs, always an array.
 
 Each unmet blocker is a Ticket object — `id`, `key`, `title`, `url`, `status`, optional
-`native_status` — plus `member` (`false` for a **Ghost Ticket**, a Link target that is not
-a Watchlist member) and `status_known`. Satisfied blockers are not listed; the question is
+`native_status` — plus `member` (`false` for a **Ticket outside the Watchlist**, a Link target that is not
+in this Watchlist) and `status_known`. Satisfied blockers are not listed; the question is
 what is holding the Ticket. A blocker with no identity at all is still emitted, with empty
 identity fields, because dropping it would make a blocked Ticket look actionable.
 

@@ -7,7 +7,7 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
  ┌──────────────────────────┐  ││┃
  │  #211                Todo│  ││┃
  │Publish the rollout runbo…│  ││┃
- │UNVERIFIED                │  ││┃
+ │LINKS FAILED              │  ││┃
  └──────────────────────────┘  ││┃
                                ││┃
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ││┃
@@ -19,19 +19,19 @@ frontier · 16 nodes · 3 ghosts · 3 actionable · budget 4870 · resets 2030-0
  ╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮  ││┃
  ╎  #401                Todo╎──┘│┃                                                                                     ›
  ╎Approve the rebalancing R…╎   │┃
- ╎GHOST                     ╎   │┃
+ ╎NOT IN WATCHLIST          ╎   │┃
  ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯   │┃
                                 │┃
  ╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮   │┃
  ╎  #402             Unknown╎───┘┃
  ╎Vendor capacity sign-off  ╎    ┃
- ╎GHOST                     ╎    ┃
+ ╎NOT IN WATCHLIST          ╎    ┃
  ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯    ┃
                                  ┃
  ╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮    ┃
  ╎▸ #403                Done╎━━━━┛
  ╎Ops capacity ticket       ╎
- ╎GHOST                     ╎
+ ╎NOT IN WATCHLIST          ╎
  ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
                                                             ▼
                                                                                                          x 0/4 · y 28/29

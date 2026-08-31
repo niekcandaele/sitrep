@@ -53,7 +53,7 @@ func TestDocumentationContract(t *testing.T) {
 		"session-local **Trail**",
 		"Press `v` to open the **Frontier**",
 		"**Filters do not apply on the Frontier**",
-		"**Ghost Ticket**",
+		"**Ticket outside the Watchlist**",
 		"OSC 8 terminal hyperlinks",
 		"Watchlist documents use schema version 3",
 		"Decoded Ticket/Detail documents remain schema version 1",
