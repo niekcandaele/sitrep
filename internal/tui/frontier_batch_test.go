@@ -421,12 +421,14 @@ func TestFrontierProtectedFailureKeepsProtocolWarningDismissible(t *testing.T) {
 	m := New(t.Context(), Options{
 		Initial: &in,
 		DetailFanout: func(context.Context, []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
-			return map[model.TicketID]model.Detail{
-					"A":     {TicketID: "A"},
-					"EXTRA": {TicketID: "EXTRA"},
-				}, caps, &provider.DetailFailures{Failures: map[model.TicketID]error{
-					"B": errors.New("older B failure"),
-				}}
+			details := map[model.TicketID]model.Detail{
+				"A":     {TicketID: "A"},
+				"EXTRA": {TicketID: "EXTRA"},
+			}
+			failures := &provider.DetailFailures{Failures: map[model.TicketID]error{
+				"B": errors.New("older B failure"),
+			}}
+			return details, caps, failures
 		},
 		Now: func() time.Time { return at },
 	})
