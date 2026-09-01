@@ -26,7 +26,6 @@ CANCELLED (1)
   #121       Mirror shards to the legacy feed
 
 
-
 m            release · shift-drag to select text    ↑/k  up
 click        select Ticket                          ↓/j  down
 double-click open Ticket                            pgup page up
@@ -35,6 +34,7 @@ enter        open                                   g    first
 v            compute actionability                  G    last
 V            dense Frontier                         d    hide finished
 r            refresh                                /    find
+p            hold refresh
 ?            help
 L            legend
 q            quit

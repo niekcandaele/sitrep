@@ -88,6 +88,7 @@ func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 	for _, want := range []string{
 		boundaryPTYDetailMarker, boundaryPTYChildMarker, boundaryPTYDrillMarker,
 		boundaryPTYListMarker, boundaryPTYFrontierMarker, boundaryPTYFrontierCardMarker,
+		"monitor held", "MANUAL-REFRESH", "p resume refresh",
 		"café", "東京",
 	} {
 		if !strings.Contains(visible, want) {
@@ -752,16 +753,20 @@ func hostilePTYTicket(id model.TicketID, marker string) model.Ticket {
 // a Source and a DetailSource, none of them a Provider.
 func boundaryPTYOptions() Options {
 	now := time.Unix(1_700_000_000, 0)
-	list := ListInput{
-		Header: Header{
-			Key:   hostilePTYLine("PTY"),
-			Title: hostilePTYLine(boundaryPTYListMarker),
-			URL:   hostilePTYLine("https://tracker.example/watchlist"),
-		},
-		Tickets:      []model.Ticket{hostilePTYTicket("T-3", "PTY-ROW")},
-		Capabilities: model.Capabilities{Comments: true, BlockingLinks: true, PullRequests: true},
-		FetchedAt:    now,
+	capabilities := model.Capabilities{Comments: true, BlockingLinks: true, PullRequests: true}
+	freshList := func(titleMarker string) ListInput {
+		return ListInput{
+			Header: Header{
+				Key:   hostilePTYLine("PTY"),
+				Title: hostilePTYLine(titleMarker),
+				URL:   hostilePTYLine("https://tracker.example/watchlist"),
+			},
+			Tickets:      []model.Ticket{hostilePTYTicket("T-3", "PTY-ROW")},
+			Capabilities: capabilities,
+			FetchedAt:    now,
+		}
 	}
+	list := freshList(boundaryPTYListMarker)
 	// One Detail per seat, so every wait in the script below is for something
 	// the screen has not drawn yet rather than for a marker already in the
 	// buffer: the decoded root, the Link target, and the list drill-in.
@@ -801,7 +806,9 @@ func boundaryPTYOptions() Options {
 			Capabilities: list.Capabilities,
 		},
 		Initial: &list,
-		Source:  func(context.Context) (ListInput, error) { return list, nil },
+		Source: func(context.Context) (ListInput, error) {
+			return freshList("MANUAL-REFRESH"), nil
+		},
 		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
 			return detailFor(id), list.Capabilities, nil
 		},
@@ -852,27 +859,46 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 	}()
 
 	output := make([]byte, 0, 16*1024)
-	// tab focuses the Link and enter follows it into a second Detail seat; u
-	// walks up into the list, and enter drills back in from a row. The last
-	// step walks up again and opens the Frontier, whose canvas draws the same
-	// hostile fields through a third render path.
-	script := []struct {
-		waitFor string
-		send    string
-	}{
-		{waitFor: boundaryPTYDetailMarker, send: "\x1b[O\x1b[I\t\r"},
-		{waitFor: boundaryPTYChildMarker, send: "u"},
-		{waitFor: boundaryPTYListMarker, send: "\r"},
-		{waitFor: boundaryPTYDrillMarker, send: "uv"},
-		{waitFor: boundaryPTYFrontierMarker, send: ""},
-		{waitFor: boundaryPTYFrontierCardMarker, send: "q"},
-	}
-	for _, step := range script {
-		output = waitForPTYMarker(t, chunks, output, step.waitFor)
-		if _, err := io.WriteString(master, step.send); err != nil {
-			t.Fatalf("write %q to the PTY: %v", step.send, err)
+	send := func(input string) {
+		t.Helper()
+		if _, err := io.WriteString(master, input); err != nil {
+			t.Fatalf("write %q to the PTY: %v", input, err)
 		}
 	}
+
+	// Follow the decoded root's Link, walk up to the List, hold refresh, and
+	// cross Detail and Frontier boundaries. The Frontier card proves explicit
+	// fan-out still runs while held. List r then lands the marked fake Source
+	// reading without releasing hold; the final p exposes the resumed Help action.
+	output = waitForPTYMarker(t, chunks, output, boundaryPTYDetailMarker)
+	send("\x1b[O\x1b[I\t\r")
+	output = waitForPTYMarker(t, chunks, output, boundaryPTYChildMarker)
+	send("u")
+	output = waitForPTYMarker(t, chunks, output, boundaryPTYListMarker)
+	send("p")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "monitor held")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "p resume refresh")
+	send("\r")
+	output = waitForPTYMarker(t, chunks, output, boundaryPTYDrillMarker)
+	send("u")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "monitor held")
+	send("v")
+	output = waitForPTYMarker(t, chunks, output, boundaryPTYFrontierMarker)
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, boundaryPTYFrontierCardMarker)
+	send("v")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "TODO (1)")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "monitor held")
+	send("r")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "MANUAL-REFRESH")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "p resume refresh")
+	screen := newFrontierPTYScreen(240, 40)
+	screen.write(output)
+	if visible := screen.normalized(); !strings.Contains(visible, "monitor held") || !strings.Contains(visible, "p resume refresh") {
+		t.Fatalf("manual List r released the PTY hold:\n%s", visible)
+	}
+	send("p")
+	output = waitForPTYScreenMarker(t, chunks, output, 240, 40, "p hold refresh")
+	send("q")
 
 	waited := make(chan error, 1)
 	go func() { waited <- command.Wait() }()

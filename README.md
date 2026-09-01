@@ -172,6 +172,12 @@ On focus regain, an already-due refresh starts only when the normal cadence and 
 it. List `r` remains available while unfocused subject to that same rate policy. Terminals and
 multiplexers that do not report focus keep the existing automatic-refresh behavior.
 
+Press List `p` to hold automatic Watchlist refresh for this session without losing the current
+filter, selection, Trail, or Frontier. The heartbeat and displayed age keep advancing, and work
+already in flight is allowed to finish. List `r` still performs one refresh without releasing the
+hold, subject to the same rate policy. Press `p` again to release the hold; an overdue refresh starts
+promptly when focus and rate policy permit it. The hold is not saved to a Profile.
+
 Mouse capture is on by default. Click a Ticket row to select it, double-click one to open its
 Detail, and use the wheel to move one Ticket at a time in the list or three lines at a time in
 Detail. Press `m` to turn capture off or on. Shift-drag is the common terminal escape hatch
@@ -251,6 +257,7 @@ The footer shows currently applicable keys, and `?` expands it.
 | `/` | open fuzzy find |
 | `esc` | clear filters, or quit when none are active |
 | `r` | refresh now |
+| `p` | hold or resume automatic refresh for this session |
 | `m` | turn mouse capture off or on |
 | `?` | expand help |
 | `q`, `ctrl+c` | quit |

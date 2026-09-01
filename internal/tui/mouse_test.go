@@ -147,7 +147,7 @@ func TestMouseHelpLayoutContracts(t *testing.T) {
 	)
 	listHelp := []string{
 		enabledMouseHelp, "click select Ticket", "double-click open Ticket", "wheel move selection",
-		"enter open", "r refresh", "? help", "q quit",
+		"enter open", "r refresh", "p hold refresh", "? help", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down",
 		"g first", "G last", "d hide finished", "/ find", "esc clear filter",
 	}
@@ -292,8 +292,10 @@ func requireListDiscoveryFooter(t *testing.T, m Model) {
 		"d hide finished":                       5,
 		"/ find":                                6,
 		"esc clear filter":                      7,
-		"? help":                                8,
-		"v frontier":                            9,
+		"p hold refresh":                        8,
+		"p resume refresh":                      8,
+		"? help":                                9,
+		"v frontier":                            10,
 	}
 	previous := -1
 	for _, segment := range segments {
@@ -320,7 +322,7 @@ func TestListShortHelpSourceOrder(t *testing.T) {
 	for _, binding := range keys.ShortHelp() {
 		got = append(got, binding.Help().Key)
 	}
-	want := []string{"m", "enter", "q", "↑/k", "↓/j", "d", "/", "esc", "?", "v"}
+	want := []string{"m", "enter", "q", "↑/k", "↓/j", "d", "/", "esc", "p", "?", "v"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ShortHelp source order = %v, want %v", got, want)
 	}
@@ -361,7 +363,7 @@ func TestListResponsiveShortHelpKeepsDiscoveryWithAndWithoutFilter(t *testing.T)
 					t.Fatalf("? did not open expanded help: ShowAll=%t cmd=%v", m.help.ShowAll, cmd)
 				}
 				requireHelpText(t, m.help.View(m.helpKeys()), "esc clear filter", "v frontier",
-					"pgup page up", "pgdn page down", "g first", "G last", "r refresh")
+					"pgup page up", "pgdn page down", "g first", "G last", "r refresh", "p hold refresh")
 
 				next, _ = m.Update(keyPress("?"))
 				m = next.(Model)
@@ -382,6 +384,66 @@ func TestListResponsiveShortHelpKeepsDiscoveryWithAndWithoutFilter(t *testing.T)
 				}
 				if got := m.keys.ToggleMouse.Help().Desc; got != wantMouseDesc {
 					t.Errorf("responsive rendering mutated source mouse help to %q, want %q", got, wantMouseDesc)
+				}
+			})
+		}
+	}
+}
+
+func TestRefreshHoldHelpRemeasuresAtProtectedWidths(t *testing.T) {
+	for _, width := range []int{42, 60, 80, 100, 115, 120} {
+		for _, noMouse := range []bool{false, true} {
+			name := fmt.Sprintf("%d/captured", width)
+			if noMouse {
+				name = fmt.Sprintf("%d/released", width)
+			}
+			t.Run(name, func(t *testing.T) {
+				m := listDiscoveryModel(t, noMouse, width)
+				if width == 42 {
+					m.height = 16
+				}
+				m.help.ShowAll = true
+				beforeBody, beforeFooter := m.bodyHeight(), len(m.footerLines())
+				holdHelp := m.help.View(m.helpKeys())
+				if width == 42 {
+					requireHelpText(t, holdHelp, "L/?/q/p legend/help/quit/hold")
+				} else {
+					requireHelpText(t, holdHelp, "p hold refresh")
+				}
+
+				next, cmd := m.Update(keyPress("p"))
+				m = next.(Model)
+				if cmd != nil || !m.refreshHeld || m.keys.ToggleRefreshHold.Help().Desc != "resume refresh" {
+					t.Fatalf("hold transition = held:%t help:%q cmd:%v", m.refreshHeld, m.keys.ToggleRefreshHold.Help().Desc, cmd)
+				}
+				resumeHelp := m.help.View(m.helpKeys())
+				if width == 42 {
+					requireHelpText(t, resumeHelp, "L/?/q/p legend/help/quit/resume")
+				} else {
+					requireHelpText(t, resumeHelp, "p resume refresh")
+				}
+				if strings.Contains(strings.Join(strings.Fields(resumeHelp), " "), "hold refresh") {
+					t.Fatalf("held Help retained stale action:\n%s", resumeHelp)
+				}
+				if width == 42 {
+					if got := len(strings.Split(m.View().Content, "\n")); got != m.height {
+						t.Fatalf("held frame height = %d, want %d", got, m.height)
+					}
+				}
+				for i, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+					if got := ansi.StringWidth(line); got > width {
+						t.Fatalf("held frame line %d width = %d, want <= %d", i, got, width)
+					}
+				}
+				if m.bodyHeight() != beforeBody || len(m.footerLines()) != beforeFooter {
+					t.Fatalf("dynamic hold Help changed geometry from %d/%d to %d/%d",
+						beforeBody, beforeFooter, m.bodyHeight(), len(m.footerLines()))
+				}
+
+				next, cmd = m.Update(keyPress("p"))
+				m = next.(Model)
+				if cmd != nil || m.refreshHeld || m.keys.ToggleRefreshHold.Help().Desc != "hold refresh" {
+					t.Fatalf("release transition = held:%t help:%q cmd:%v", m.refreshHeld, m.keys.ToggleRefreshHold.Help().Desc, cmd)
 				}
 			})
 		}
@@ -490,13 +552,13 @@ func TestExpandedMouseHelpIsCompleteAtRequiredTerminalSizes(t *testing.T) {
 				}
 				if size.width == 80 {
 					requireHelpText(t, content,
-						"enter open", "r refresh", "? help", "q quit", "↑/k up", "↓/j down",
+						"enter open", "r refresh", "p hold refresh", "? help", "q quit", "↑/k up", "↓/j down",
 						"pgup page up", "pgdn page down", "g first", "G last",
 						"d hide finished", "/ find")
 				} else {
 					requireHelpText(t, content,
 						"↑/↓/k/j move", "pgup/pgdn page", "g/G first/last",
-						"enter/r open/refresh", "d / hide finished/find", "L/?/q legend/help/quit")
+						"enter/r open/refresh", "d / hide finished/find", "L/?/q/p legend/help/quit/hold")
 				}
 				if noMouse {
 					requireHelpText(t, content, "m capture")
@@ -1137,7 +1199,7 @@ func TestMouseToggleReclampsChangedHelpGeometry(t *testing.T) {
 
 func TestTeatestMouseHelpFramesAtConstrainedWidths(t *testing.T) {
 	listFull := []string{
-		"enter open", "r refresh", "? help", "q quit",
+		"enter open", "r refresh", "p hold refresh", "? help", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down",
 		"g first", "G last", "d hide finished", "/ find",
 	}
@@ -2113,10 +2175,11 @@ func TestTeatestMouseAfterFilterAndResize(t *testing.T) {
 		})
 		s.waitFor(t, "Widget sync v2")
 		s.tm.Send(tea.WindowSizeMsg{Width: termWidth, Height: 10})
-		// Input handlers are installed with rendered frames. Wait for the short
-		// resized footer before sending mouse input, rather than letting queued
-		// wheel events be translated by the old viewport's handler.
-		s.waitFor(t, "? help …")
+		// Queueing p after the resize produces a marker that can only be drawn by
+		// the resized List frame. Waiting for it ensures the new mouse hit map is
+		// installed before wheel or click input is translated.
+		s.tm.Send(keyPress("p"))
+		s.waitFor(t, "monitor held")
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
 		s.tm.Send(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelDown})
 		s.waitFor(t, "▸ #7")

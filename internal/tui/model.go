@@ -42,6 +42,9 @@ type Model struct {
 	// heartbeatCmd is injectable so scheduler tests advance only their controlled
 	// clock and deliver heartbeatMsg themselves.
 	heartbeatCmd tea.Cmd
+	// refreshHeld is the user's session-local pause for automatic Watchlist reads.
+	// It does not gate explicit reads or cancel work already in flight.
+	refreshHeld bool
 	// terminalFocused is optimistic for terminals that do not emit focus reports.
 	// It is session-local because focus is a property of this terminal session,
 	// not of the Watchlist or its refresh policy.
@@ -267,6 +270,7 @@ func New(ctx context.Context, opts Options) Model {
 		markdown:         newDetailMarkdownRenderers(0, markdownDark),
 	}
 	m = m.syncMouseKeys()
+	m = m.syncRefreshHoldKey()
 
 	if opts.InitialError != nil && provider.KindOf(opts.InitialError) == provider.KindRateLimit {
 		m.lastErr = safeErr(opts.InitialError)
@@ -572,7 +576,7 @@ func (m Model) View() tea.View {
 	if fetchedAt, complete := actionableEvidenceSnapshot(frame.input.Tickets, frame.details, markers); complete {
 		actionableRead = detailStaleness(fetchedAt, now, false)
 	}
-	header := renderHeader(frame.input, frame.staleness(), frame.hasData, frame.width, markers,
+	header := renderHeader(frame.input, frame.listStaleness(), frame.hasData, frame.width, markers,
 		actionableRead, frame.styles)
 	v.SetContent(strings.Join(append([]string{header, frame.renderBody(markers)}, frame.footerLines(markers)...), "\n"))
 	v.Cursor = frame.cursor(markers)
@@ -625,9 +629,15 @@ func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
 // scheduler policy extends it rather than copying its rate-limit decisions.
 func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
 	now := m.now()
+	// Keep an elapsed rate deadline intact while a non-rate blocker owns the
+	// decision. Once every such blocker clears, the normal expiry path below
+	// preserves #113's immediately-due edge.
+	if m.refreshHeld || !m.listArmed || m.refreshing || !m.terminalFocused {
+		return m, false, time.Time{}
+	}
 	holdExpired := !m.rateHold.manual && !m.rateHold.resetAt.IsZero() && !now.Before(m.rateHold.resetAt)
 	m = m.expireRatePolicy(now)
-	if !m.listArmed || m.refreshing || !m.terminalFocused || m.rateHold.active(now) {
+	if m.rateHold.active(now) {
 		return m, false, time.Time{}
 	}
 	due := m.effectiveAutomaticDue(now)
@@ -646,6 +656,28 @@ func (m Model) manualRefreshAdmission() (Model, bool) {
 		return m, false
 	}
 	return m, true
+}
+
+func (m Model) syncRefreshHoldKey() Model {
+	description := "hold refresh"
+	if m.refreshHeld {
+		description = "resume refresh"
+	}
+	m.keys.ToggleRefreshHold.SetHelp("p", description)
+	return m
+}
+
+func (m Model) toggleRefreshHold() (Model, tea.Cmd) {
+	m.refreshHeld = !m.refreshHeld
+	m = m.syncRefreshHoldKey()
+	if m.refreshHeld {
+		return m, nil
+	}
+	next, allowed, _ := m.automaticRefreshAdmission()
+	if !allowed {
+		return next, nil
+	}
+	return next.startRefresh()
 }
 
 func (m Model) expireRatePolicy(now time.Time) Model {
@@ -969,6 +1001,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.offset = ensureVisible(rowHeights(m.rows, m.input.Capabilities), m.selected, m.offset, m.bodyHeight())
 		return m, nil
 
+	case key.Matches(msg, m.keys.ToggleRefreshHold):
+		return m.toggleRefreshHold()
+
 	case key.Matches(msg, m.keys.Refresh):
 		next, allowed := m.manualRefreshAdmission()
 		if !allowed {
@@ -1164,6 +1199,16 @@ func (m Model) renderBody(markers listMarkers) string {
 
 func (m Model) retryBodyHint() string {
 	now := m.now()
+	if m.refreshHeld {
+		status := "Monitor held"
+		if !m.terminalFocused {
+			status += "; terminal is unfocused"
+		}
+		if m.rateHold.active(now) && !m.rateHold.manual {
+			return status + "; r is held. Press p to release hold, q to quit."
+		}
+		return status + ". Press r to try again, p to release hold, q to quit."
+	}
 	if !m.terminalFocused {
 		if m.rateHold.active(now) && !m.rateHold.manual {
 			return "Automatic refresh is paused while terminal is unfocused; r is held. Press q to quit."
@@ -1193,7 +1238,14 @@ func (m Model) footerLines(markers ...listMarkers) []string {
 			plain.LimitNotice(len(m.input.Tickets)), m.width)))
 	}
 	if m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) && provider.KindOf(m.lastErr) != provider.KindRateLimit {
-		if !m.terminalFocused {
+		if m.refreshHeld {
+			status := "monitor held"
+			if !m.terminalFocused {
+				status += separator + "terminal unfocused"
+			}
+			lines = append(lines, m.styles.Error.Render(truncateLine(
+				fmt.Sprintf("refresh failed: %v%s%s", m.lastErr, separator, status), m.width)))
+		} else if !m.terminalFocused {
 			lines = append(lines, m.styles.Error.Render(truncateLine(
 				fmt.Sprintf("refresh failed: %v%sautomatic refresh paused: terminal unfocused", m.lastErr, separator), m.width)))
 		} else {
@@ -1221,12 +1273,12 @@ func (m Model) ratePolicyFooter() string {
 	}
 	now := m.now()
 	prefix := ""
-	if !m.terminalFocused {
+	if !m.terminalFocused && !m.refreshHeld {
 		prefix = "paused: terminal unfocused; "
 	}
 	if m.rateHold.active(now) {
 		if m.rateHold.exhausted {
-			if prefix != "" {
+			if prefix != "" || m.refreshHeld {
 				return prefix + "refresh held: rate limit budget exhausted · r held"
 			}
 			return "refresh held: rate limit budget exhausted · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
@@ -1234,13 +1286,13 @@ func (m Model) ratePolicyFooter() string {
 		if m.rateHold.manual {
 			return prefix + "refresh held: " + m.rateHold.err.Error() + " · press r to try again"
 		}
-		if prefix != "" {
+		if prefix != "" || m.refreshHeld {
 			return prefix + "refresh held: " + m.rateHold.err.Error() + " · r held"
 		}
 		return "refresh held: " + m.rateHold.err.Error() + " · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
 	}
 	if m.lowBudget.active(now) {
-		if prefix != "" {
+		if prefix != "" || m.refreshHeld {
 			return prefix + "refresh slowed: low rate limit budget"
 		}
 		return "refresh slowed: low rate limit budget · next automatic refresh in " + countdown(m.lowBudget.nextAt.Sub(now))
@@ -1251,6 +1303,9 @@ func (m Model) ratePolicyFooter() string {
 func (m Model) focusPauseFooter() string {
 	if m.terminalFocused || m.refreshing {
 		return ""
+	}
+	if m.refreshHeld {
+		return "monitor held · terminal unfocused · " + m.staleness()
 	}
 	return "paused: terminal unfocused · " + m.staleness()
 }
@@ -1572,6 +1627,20 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap, markerSnapshot ...listMarker
 		}
 	}
 	return responsiveHelpKeyMap{short: short, full: full}
+}
+
+// listStaleness composes the session hold only on the List. The shared
+// staleness formatter remains the Frontier's snapshot-age contract.
+func (m Model) listStaleness() string {
+	staleness := m.staleness()
+	if m.refreshing || !m.refreshHeld {
+		return staleness
+	}
+	status := "monitor held"
+	if !m.terminalFocused {
+		status += " · terminal unfocused"
+	}
+	return status + " · " + staleness
 }
 
 // staleness is the Watchlist header's age indicator, read from the injected

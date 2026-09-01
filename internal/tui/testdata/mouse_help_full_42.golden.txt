@@ -17,7 +17,6 @@ TODO (3)
 
 DONE (3)
   #118       Cache shard lookups
-             @mara-vos  #504 merged
 
 m            release, shift-drag
 click        select Ticket
@@ -27,6 +26,7 @@ enter        open
 v            compute actionability
 V            dense Frontier
 r            refresh
+p            hold refresh
 ?            help
 L            legend
 q            quit
