@@ -293,6 +293,65 @@ func TestUnseededRateLimitBodyExplainsManualAvailability(t *testing.T) {
 	}
 }
 
+func TestInitialRateLimitErrorBodyUsesInstalledPolicy(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	reset := c.now().Add(time.Hour)
+	for _, test := range []struct {
+		name       string
+		err        error
+		want       string
+		forbid     string
+		heldManual bool
+	}{
+		{
+			name:   "known reset",
+			err:    provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: reset}, "github: rate limited"),
+			want:   "Automatic refresh resumes at " + reset.Local().Format(time.Kitchen) + "; r is held",
+			forbid: "Press r to try again",
+		},
+		{
+			name:       "unknown reset",
+			err:        provider.Errorf(provider.KindRateLimit, "gitlab: rate limited"),
+			want:       "Press r to try again",
+			forbid:     "r is held",
+			heldManual: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := New(t.Context(), Options{
+				Source:       func(context.Context) (ListInput, error) { return ListInput{}, nil },
+				InitialError: test.err,
+				Interval:     time.Minute,
+				Now:          c.now,
+				Heartbeat:    func() tea.Msg { return nil },
+			})
+			m.width, m.height, m.ready = 120, 20, true
+			if m.refreshing || m.rateHold.manual != test.heldManual {
+				t.Fatalf("InitialError policy = refreshing:%t hold:%+v", m.refreshing, m.rateHold)
+			}
+			body := m.View().Content
+			if !strings.Contains(body, test.want) || strings.Contains(body, test.forbid) {
+				t.Fatalf("InitialError body = %q", body)
+			}
+
+			m, cmd := pressListKey(t, m, 'p')
+			if cmd != nil || !m.refreshHeld {
+				t.Fatalf("holding InitialError model = held:%t cmd:%v", m.refreshHeld, cmd)
+			}
+			held := m.View().Content
+			if !strings.Contains(held, "Monitor held") || strings.Contains(held, "Automatic refresh resumes at") {
+				t.Fatalf("held InitialError body = %q", held)
+			}
+			if test.heldManual && !strings.Contains(held, "Press r to try again") {
+				t.Fatalf("held manual-only InitialError lost r remedy: %q", held)
+			}
+			if !test.heldManual && (!strings.Contains(held, "r is held") || strings.Contains(held, "Press r to try again")) {
+				t.Fatalf("held known InitialError weakened r restriction: %q", held)
+			}
+		})
+	}
+}
+
 func TestRatePolicyFrameUsesOneClockSnapshot(t *testing.T) {
 	before := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
 	after := before.Add(2 * time.Minute)
@@ -694,5 +753,407 @@ func TestViewAlwaysReportsFocus(t *testing.T) {
 				t.Fatal("View did not request terminal focus reports")
 			}
 		})
+	}
+}
+
+func refreshHoldModel(t *testing.T, c *policyClock, interval time.Duration, calls *atomic.Int32) Model {
+	t.Helper()
+	m := New(t.Context(), Options{
+		Interval: interval,
+		Now:      c.now,
+		Heartbeat: func() tea.Msg {
+			return heartbeatMsg(c.now())
+		},
+		Source: func(context.Context) (ListInput, error) {
+			calls.Add(1)
+			return ListInput{FetchedAt: c.now()}, nil
+		},
+	})
+	return m.onRefreshed(refreshedMsg{
+		generation: m.generation,
+		input:      ListInput{FetchedAt: c.now()},
+	})
+}
+
+func pressListKey(t *testing.T, m Model, code rune) (Model, tea.Cmd) {
+	t.Helper()
+	next, cmd := m.onKey(tea.KeyPressMsg{Code: code, Text: string(code)})
+	return next.(Model), cmd
+}
+
+func TestRefreshHoldBlocksHeartbeatsAndResumesExactlyOnce(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := refreshHoldModel(t, c, time.Minute, &calls)
+	generation, attempt := m.generation, m.lastAttempt
+	c.advance(10 * time.Second)
+
+	m, cmd := pressListKey(t, m, 'p')
+	if cmd != nil || !m.refreshHeld || m.keys.ToggleRefreshHold.Help().Desc != "resume refresh" ||
+		m.generation != generation || !m.lastAttempt.Equal(attempt) {
+		t.Fatalf("setting hold changed scheduler state: held=%t generation=%d attempt=%s help=%q cmd=%v",
+			m.refreshHeld, m.generation, m.lastAttempt, m.keys.ToggleRefreshHold.Help().Desc, cmd)
+	}
+
+	c.advance(2 * time.Minute)
+	for range 3 {
+		next, heartbeatCmd := m.onHeartbeat()
+		m = next.(Model)
+		if heartbeatCmd == nil || m.refreshing || m.generation != generation {
+			t.Fatal("held heartbeat did not only re-arm")
+		}
+		if _, ok := heartbeatCmd().(heartbeatMsg); !ok {
+			t.Fatal("held heartbeat did not schedule the next heartbeat")
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("held heartbeats made %d Source calls", calls.Load())
+	}
+	if got := m.listStaleness(); got != "monitor held · updated 2m ago" {
+		t.Fatalf("held List staleness = %q", got)
+	}
+
+	m, cmd = pressListKey(t, m, 'p')
+	if cmd == nil || m.refreshHeld || !m.refreshing || m.generation != generation+1 || !m.lastAttempt.Equal(c.now()) {
+		t.Fatalf("overdue release = held:%t refreshing:%t generation:%d attempt:%s cmd:%v",
+			m.refreshHeld, m.refreshing, m.generation, m.lastAttempt, cmd)
+	}
+	result, ok := cmd().(refreshedMsg)
+	if !ok || calls.Load() != 1 {
+		t.Fatalf("overdue release Source calls = %d, result=%T", calls.Load(), result)
+	}
+	if next, heartbeatCmd := m.onHeartbeat(); heartbeatCmd == nil || next.(Model).generation != m.generation || calls.Load() != 1 {
+		t.Fatal("queued heartbeat overlapped the release refresh")
+	}
+	m = m.onRefreshed(result)
+	if next, heartbeatCmd := m.onHeartbeat(); heartbeatCmd == nil || next.(Model).refreshing || calls.Load() != 1 {
+		t.Fatal("settled release scheduled a second refresh before cadence")
+	}
+}
+
+func TestRefreshHoldDoesNotCancelOrFollowUpInFlightWork(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := refreshHoldModel(t, c, time.Minute, &calls)
+	m.refreshing, m.generation = true, 13
+	m.frontierGeneration, m.detailGeneration = 7, 11
+	m.detailFanoutInflight = 3
+	detailContext, cancelDetail := context.WithCancel(t.Context())
+	frontierContext, cancelFrontier := context.WithCancel(t.Context())
+	defer cancelDetail()
+	defer cancelFrontier()
+	m.detailContext, m.cancelDetail = detailContext, cancelDetail
+	m.frontierContext, m.cancelFrontier = frontierContext, cancelFrontier
+	attempt := m.lastAttempt
+
+	m, cmd := pressListKey(t, m, 'p')
+	if cmd != nil || !m.refreshHeld || !m.refreshing || m.generation != 13 ||
+		m.frontierGeneration != 7 || m.detailGeneration != 11 || m.detailFanoutInflight != 3 ||
+		m.detailContext != detailContext || m.frontierContext != frontierContext || !m.lastAttempt.Equal(attempt) {
+		t.Fatalf("setting hold resequenced in-flight work: %+v", m)
+	}
+	m = m.onRefreshed(refreshedMsg{generation: 13, input: ListInput{FetchedAt: c.now()}})
+	if !m.refreshHeld || m.refreshing {
+		t.Fatal("in-flight completion did not settle under the existing hold")
+	}
+	c.advance(time.Minute)
+	if next, heartbeatCmd := m.onHeartbeat(); heartbeatCmd == nil || next.(Model).refreshing || calls.Load() != 0 {
+		t.Fatal("in-flight completion scheduled an automatic follow-up while held")
+	}
+}
+
+func TestRefreshHoldReleasePreservesAutomaticBlockers(t *testing.T) {
+	start := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		prepare    func(Model, *policyClock) Model
+		advance    time.Duration
+		wantLaunch bool
+	}{
+		{name: "before due", advance: 30 * time.Second},
+		{name: "terminal unfocused", advance: 2 * time.Minute, prepare: func(m Model, _ *policyClock) Model {
+			m.terminalFocused = false
+			return m
+		}},
+		{name: "positive low budget", advance: 2 * time.Minute, prepare: func(m Model, c *policyClock) Model {
+			m.lowBudget = lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(10 * time.Minute)}
+			return m
+		}},
+		{name: "unknown manual-only rate hold", advance: 2 * time.Minute, prepare: func(m Model, _ *policyClock) Model {
+			m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}
+			return m
+		}},
+		{name: "known rate hold", advance: 2 * time.Minute, prepare: func(m Model, c *policyClock) Model {
+			m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(10 * time.Minute)}
+			return m
+		}},
+		{name: "expired known hold", advance: 2 * time.Minute, wantLaunch: true, prepare: func(m Model, c *policyClock) Model {
+			m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(time.Minute)}
+			return m
+		}},
+		{name: "expired exhausted budget", advance: 2 * time.Minute, wantLaunch: true, prepare: func(m Model, c *policyClock) Model {
+			m.rateHold = rateHold{resetAt: c.now().Add(time.Minute), exhausted: true}
+			return m
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := &policyClock{value: start}
+			var calls atomic.Int32
+			m := refreshHoldModel(t, c, time.Hour, &calls)
+			if test.prepare != nil {
+				m = test.prepare(m, c)
+			}
+			attempt := m.lastAttempt
+			m, _ = pressListKey(t, m, 'p')
+			c.advance(test.advance)
+			// A beat after an elapsed reset must not consume the immediate-due edge.
+			mNext, heartbeatCmd := m.onHeartbeat()
+			m = mNext.(Model)
+			if heartbeatCmd == nil || calls.Load() != 0 || !m.lastAttempt.Equal(attempt) {
+				t.Fatal("held heartbeat changed Source or cadence")
+			}
+			m, releaseCmd := pressListKey(t, m, 'p')
+			if got := releaseCmd != nil; got != test.wantLaunch {
+				t.Fatalf("release launched=%t, want %t; state=%+v", got, test.wantLaunch, m)
+			}
+			if test.wantLaunch {
+				if !m.refreshing || m.rateHold != (rateHold{}) {
+					t.Fatalf("expired hold release state = refreshing:%t rate:%+v", m.refreshing, m.rateHold)
+				}
+			} else if m.refreshing || !m.lastAttempt.Equal(attempt) {
+				t.Fatal("blocked release changed refresh or cadence")
+			}
+		})
+	}
+}
+
+func TestExpiredRateDeadlineSurvivesHoldReleaseWhileBlurred(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		name := "known refusal"
+		if exhausted {
+			name = "exhausted budget"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+			var calls atomic.Int32
+			m := refreshHoldModel(t, c, time.Hour, &calls)
+			m.rateHold = rateHold{
+				err:       provider.Errorf(provider.KindRateLimit, "limited"),
+				resetAt:   c.now().Add(time.Minute),
+				exhausted: exhausted,
+			}
+			m, _ = pressListKey(t, m, 'p')
+			blurred, _ := m.Update(tea.BlurMsg{})
+			m = blurred.(Model)
+			c.advance(2 * time.Minute)
+			m, releaseCmd := pressListKey(t, m, 'p')
+			if releaseCmd != nil || m.refreshing || m.rateHold == (rateHold{}) {
+				t.Fatalf("blurred release consumed expired deadline: refreshing=%t hold=%+v cmd=%v", m.refreshing, m.rateHold, releaseCmd)
+			}
+			focused, cmd := m.Update(tea.FocusMsg{})
+			m = focused.(Model)
+			if cmd == nil || !m.refreshing || m.rateHold != (rateHold{}) || m.generation != 2 {
+				t.Fatalf("focus did not consume expired deadline exactly once: refreshing=%t generation=%d hold=%+v cmd=%v",
+					m.refreshing, m.generation, m.rateHold, cmd)
+			}
+			if result := cmd(); calls.Load() != 1 {
+				t.Fatalf("expired-deadline focus made %d Source calls, want one (result %T)", calls.Load(), result)
+			}
+			if duplicate, duplicateCmd := m.Update(tea.FocusMsg{}); duplicateCmd != nil || duplicate.(Model).generation != m.generation || calls.Load() != 1 {
+				t.Fatal("duplicate focus launched a second expired-deadline refresh")
+			}
+		})
+	}
+}
+
+func TestManualRefreshWhileHeldPreservesHoldAndRateSemantics(t *testing.T) {
+	start := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		policy  func(Model, *policyClock) Model
+		allowed bool
+	}{
+		{name: "ordinary", allowed: true},
+		{name: "blurred", allowed: true, policy: func(m Model, _ *policyClock) Model {
+			m.terminalFocused = false
+			return m
+		}},
+		{name: "positive low budget", allowed: true, policy: func(m Model, c *policyClock) Model {
+			m.lowBudget = lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(time.Hour)}
+			return m
+		}},
+		{name: "unknown manual-only hold", allowed: true, policy: func(m Model, _ *policyClock) Model {
+			m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}
+			return m
+		}},
+		{name: "known hold", policy: func(m Model, c *policyClock) Model {
+			m.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(time.Hour)}
+			return m
+		}},
+		{name: "exhausted budget", policy: func(m Model, c *policyClock) Model {
+			m.rateHold = rateHold{resetAt: c.now().Add(time.Hour), exhausted: true}
+			return m
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := &policyClock{value: start}
+			var calls atomic.Int32
+			m := refreshHoldModel(t, c, time.Minute, &calls)
+			m, _ = pressListKey(t, m, 'p')
+			if test.policy != nil {
+				m = test.policy(m, c)
+			}
+			generation, attempt := m.generation, m.lastAttempt
+			m, cmd := pressListKey(t, m, 'r')
+			if got := cmd != nil; got != test.allowed {
+				t.Fatalf("manual r allowed=%t, want %t", got, test.allowed)
+			}
+			if !m.refreshHeld {
+				t.Fatal("manual r released user hold")
+			}
+			if !test.allowed {
+				if m.generation != generation || !m.lastAttempt.Equal(attempt) {
+					t.Fatal("blocked manual r changed scheduler state")
+				}
+				return
+			}
+			if !m.refreshing || m.generation != generation+1 || !m.lastAttempt.Equal(c.now()) {
+				t.Fatal("allowed manual r did not start exactly one refresh")
+			}
+			result := cmd().(refreshedMsg)
+			if calls.Load() != 1 {
+				t.Fatalf("manual r Source calls = %d", calls.Load())
+			}
+			m = m.onRefreshed(result)
+			c.advance(time.Minute)
+			if next, heartbeatCmd := m.onHeartbeat(); heartbeatCmd == nil || next.(Model).refreshing || calls.Load() != 1 {
+				t.Fatal("held monitor auto-followed a manual refresh")
+			}
+		})
+	}
+}
+
+func TestRefreshHoldStatusSuppressesAutomaticPromises(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := refreshHoldModel(t, c, time.Minute, &calls)
+	m.hasData = true
+	m.width, m.height, m.ready = 120, 24, true
+	m, _ = pressListKey(t, m, 'p')
+	m.lastErr = provider.Errorf(provider.KindUnavailable, "network")
+	footer := strings.Join(m.footerLines(), "\n")
+	if !strings.Contains(footer, "refresh failed: network · monitor held") || strings.Contains(footer, "retrying in") {
+		t.Fatalf("held generic failure footer = %q", footer)
+	}
+	for _, width := range []int{42, 60, 80, 120} {
+		m.width = width
+		headerLine := strings.Split(m.View().Content, "\n")[1]
+		if !strings.Contains(headerLine, "monitor held") {
+			t.Errorf("%d-column List header lost user hold: %q", width, headerLine)
+		}
+	}
+	m.width = 120
+
+	m.refreshing = true
+	if got := m.listStaleness(); got != "refreshing…" {
+		t.Fatalf("in-flight hold status = %q", got)
+	}
+	m.refreshing = false
+	m.terminalFocused = false
+	c.advance(2 * time.Minute)
+	if got := m.listStaleness(); got != "monitor held · terminal unfocused · updated 2m ago" {
+		t.Fatalf("blurred held List status = %q", got)
+	}
+	if got := m.focusPauseFooter(); got != "monitor held · terminal unfocused · updated 2m ago" {
+		t.Fatalf("blurred held footer status = %q", got)
+	}
+
+	m.terminalFocused = true
+	m.lastErr = provider.Errorf(provider.KindRateLimit, "limited")
+	for _, test := range []struct {
+		name   string
+		hold   rateHold
+		low    lowBudgetSchedule
+		want   string
+		forbid string
+	}{
+		{name: "known", hold: rateHold{err: m.lastErr, resetAt: c.now().Add(time.Hour)}, want: "r held", forbid: "retrying at"},
+		{name: "exhausted", hold: rateHold{resetAt: c.now().Add(time.Hour), exhausted: true}, want: "budget exhausted", forbid: "retrying at"},
+		{name: "unknown", hold: rateHold{err: m.lastErr, manual: true}, want: "press r to try again", forbid: "retrying at"},
+		{name: "low", low: lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(30 * time.Minute)}, want: "refresh slowed", forbid: "next automatic refresh"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m.rateHold, m.lowBudget = test.hold, test.low
+			got := m.ratePolicyFooter()
+			if !strings.Contains(got, test.want) || strings.Contains(got, test.forbid) {
+				t.Fatalf("held policy footer = %q", got)
+			}
+		})
+	}
+
+	m.hasData = false
+	m.rateHold = rateHold{err: m.lastErr, resetAt: c.now().Add(time.Hour)}
+	if got := m.retryBodyHint(); !strings.Contains(got, "Monitor held") || !strings.Contains(got, "r is held") || strings.Contains(got, "resumes at") {
+		t.Fatalf("first-fetch hard-hold hint = %q", got)
+	}
+	m.rateHold = rateHold{err: m.lastErr, manual: true}
+	if got := m.retryBodyHint(); !strings.Contains(got, "Press r to try again") || !strings.Contains(got, "p to release hold") {
+		t.Fatalf("first-fetch manual-hold hint = %q", got)
+	}
+}
+
+func TestRefreshHoldKeyIsListOnlyAndPreservesScreenWork(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	m := refreshHoldModel(t, c, time.Minute, &calls)
+	m.frontierGeneration, m.detailGeneration = 7, 11
+	m.detailFanoutInflight = 3
+
+	next, cmd := pressListKey(t, m, 'P')
+	if cmd != nil || next.refreshHeld || next.generation != m.generation {
+		t.Fatal("uppercase P changed List hold state")
+	}
+
+	m.searching = true
+	m.search.Focus()
+	searched, _ := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	m = searched.(Model)
+	if m.refreshHeld || m.search.Value() != "p" {
+		t.Fatalf("search p = value:%q held:%t", m.search.Value(), m.refreshHeld)
+	}
+	m.searching = false
+	m.search.Blur()
+	m.search.SetValue("")
+
+	m, _ = pressListKey(t, m, 'p')
+	before := m
+	for _, screen := range []mode{modeDetail, modeFrontier} {
+		m.mode = screen
+		for _, code := range []rune{'p', 'P'} {
+			updated, screenCmd := m.Update(tea.KeyPressMsg{Code: code, Text: string(code)})
+			m = updated.(Model)
+			if screenCmd != nil || !m.refreshHeld || m.frontierGeneration != before.frontierGeneration ||
+				m.detailGeneration != before.detailGeneration || m.detailFanoutInflight != before.detailFanoutInflight {
+				t.Fatalf("%c changed %v work while hold was set", code, screen)
+			}
+		}
+		heartbeat, heartbeatCmd := m.onHeartbeat()
+		m = heartbeat.(Model)
+		if heartbeatCmd == nil || m.refreshing || calls.Load() != 0 ||
+			m.frontierGeneration != before.frontierGeneration || m.detailGeneration != before.detailGeneration {
+			t.Fatalf("held heartbeat changed %v work", screen)
+		}
+	}
+	m.mode = modeList
+	blurred, _ := m.Update(tea.BlurMsg{})
+	m = blurred.(Model)
+	c.advance(2 * time.Minute)
+	focused, focusCmd := m.Update(tea.FocusMsg{})
+	m = focused.(Model)
+	if focusCmd != nil || !m.refreshHeld || m.refreshing || calls.Load() != 0 {
+		t.Fatal("focus regain overrode the user hold")
+	}
+	if next, heartbeatCmd := m.onHeartbeat(); heartbeatCmd == nil || next.(Model).refreshing || calls.Load() != 0 {
+		t.Fatal("hold did not survive screen transitions")
 	}
 }

@@ -25,6 +25,8 @@ type KeyMap struct {
 	End key.Binding
 	// Refresh forces a refresh now.
 	Refresh key.Binding
+	// ToggleRefreshHold pauses or resumes only automatic List refreshes.
+	ToggleRefreshHold key.Binding
 	// Open opens the selected Ticket's Detail. With nothing selectable — an
 	// empty Watchlist, or a filter matching nothing — it does nothing.
 	Open key.Binding
@@ -88,6 +90,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
 		),
+		ToggleRefreshHold: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "hold refresh"),
+		),
 		Open: key.NewBinding(
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "open"),
@@ -145,7 +151,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 	// Frontier stays last so Help remains the on-screen route to the complete
 	// binding list before the optional graph shortcut competes for room.
 	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find,
-		k.ClearFilter, k.Help, k.Frontier}
+		k.ClearFilter, k.ToggleRefreshHold, k.Help, k.Frontier}
 }
 
 // FullHelp returns every binding in two dense columns. The model stacks these
@@ -153,7 +159,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.DenseFrontier, k.Refresh, k.Help, k.Legend, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.DenseFrontier, k.Refresh, k.ToggleRefreshHold, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
@@ -167,7 +173,7 @@ func actionabilityListFullHelp(k KeyMap) [][]key.Binding {
 	dense.SetHelp("V", "dense")
 	return [][]key.Binding{
 		{k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, dense, k.Help, k.Legend, k.Quit, k.Up, k.Down, k.Home},
-		{k.ToggleMouse, k.Frontier, k.Refresh, k.PageUp, k.PageDown, k.End, k.HideFinished, k.Find, k.ClearFilter},
+		{k.ToggleMouse, k.Frontier, k.Refresh, k.ToggleRefreshHold, k.PageUp, k.PageDown, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
 
@@ -175,6 +181,10 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 	mouse := k.ToggleMouse
 	if mouse.Help().Desc == mouseEnabledHelp {
 		mouse.SetHelp("m", mouseEnabledCompactHelp)
+	}
+	refreshAction := "hold"
+	if k.ToggleRefreshHold.Help().Desc == "resume refresh" {
+		refreshAction = "resume"
 	}
 	bindings := []key.Binding{
 		mouse,
@@ -186,7 +196,7 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("g/G", "first/last"),
 		helpOnlyBinding("enter/r", "open/refresh"),
 		helpOnlyBinding("d /", "hide finished/find"),
-		helpOnlyBinding("L/?/q", "legend/help/quit"),
+		helpOnlyBinding("L/?/q/p", "legend/help/quit/"+refreshAction),
 	}
 	switch {
 	case k.Frontier.Enabled() && k.DenseFrontier.Enabled() &&

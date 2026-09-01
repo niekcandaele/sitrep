@@ -485,7 +485,7 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 	m.help.ShowAll = true
 
 	cold := m.help.View(m.helpKeys())
-	requireHelpText(t, cold, "v compute actionability", "V dense Frontier")
+	requireHelpText(t, cold, "v compute actionability", "V dense Frontier", "p hold refresh")
 	if strings.Contains(strings.Join(strings.Fields(cold), " "), "v frontier") {
 		t.Errorf("cold expanded help retained the generic Frontier description:\n%s", cold)
 	}
@@ -499,7 +499,7 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 	}
 	m.details[ticket.ID] = entry
 	warm := m.help.View(m.helpKeys())
-	requireHelpText(t, warm, "v frontier")
+	requireHelpText(t, warm, "v frontier", "p hold refresh")
 	if strings.Contains(strings.Join(strings.Fields(warm), " "), "compute actionability") {
 		t.Errorf("warm expanded help still promises computation:\n%s", warm)
 	}
@@ -510,13 +510,13 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 	coldBodyHeight, coldFooterLines := m.bodyHeight(), len(m.footerLines())
 	cold = m.help.View(m.helpKeys())
 	requireHelpText(t, cold,
-		"m capture", "enter open", "v compute actionability", "V dense", "r refresh", "? help", "L legend", "q quit",
+		"m capture", "enter open", "v compute actionability", "V dense", "r refresh", "p hold refresh", "? help", "L legend", "q quit",
 		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last", "d hide finished", "/ find")
 
 	m.details[ticket.ID] = entry
 	warmBodyHeight, warmFooterLines := m.bodyHeight(), len(m.footerLines())
 	warm = m.help.View(m.helpKeys())
-	requireHelpText(t, warm, "v frontier")
+	requireHelpText(t, warm, "v frontier", "p hold refresh")
 	if coldBodyHeight != warmBodyHeight || coldFooterLines != warmFooterLines ||
 		len(strings.Split(cold, "\n")) != len(strings.Split(warm, "\n")) {
 		t.Errorf("42-column cold Help changed geometry: body/footer/help=%d/%d/%d, warm=%d/%d/%d",
@@ -524,9 +524,34 @@ func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
 			warmBodyHeight, warmFooterLines, len(strings.Split(warm, "\n")))
 	}
 
+	next, cmd := m.Update(keyPress("p"))
+	m = next.(Model)
+	if cmd != nil || !m.refreshHeld {
+		t.Fatalf("p did not hold the cold/warm Help fixture: held=%t cmd=%v", m.refreshHeld, cmd)
+	}
+	heldWarmBodyHeight, heldWarmFooterLines := m.bodyHeight(), len(m.footerLines())
+	heldWarm := m.help.View(m.helpKeys())
+	requireHelpText(t, heldWarm, "v frontier", "p resume refresh")
+	m.details = make(map[model.TicketID]detailEntry)
+	heldColdBodyHeight, heldColdFooterLines := m.bodyHeight(), len(m.footerLines())
+	heldCold := m.help.View(m.helpKeys())
+	requireHelpText(t, heldCold, "v compute actionability", "V dense", "p resume refresh")
+	if heldColdBodyHeight != heldWarmBodyHeight || heldColdFooterLines != heldWarmFooterLines ||
+		len(strings.Split(heldCold, "\n")) != len(strings.Split(heldWarm, "\n")) ||
+		heldColdBodyHeight != coldBodyHeight || heldColdFooterLines != coldFooterLines {
+		t.Errorf("42-column held/resumed cold/warm geometry changed: cold=%d/%d/%d warm=%d/%d/%d baseline=%d/%d",
+			heldColdBodyHeight, heldColdFooterLines, len(strings.Split(heldCold, "\n")),
+			heldWarmBodyHeight, heldWarmFooterLines, len(strings.Split(heldWarm, "\n")), coldBodyHeight, coldFooterLines)
+	}
+	next, cmd = m.Update(keyPress("p"))
+	m = next.(Model)
+	if cmd != nil || m.refreshHeld {
+		t.Fatalf("p did not resume the cold/warm Help fixture: held=%t cmd=%v", m.refreshHeld, cmd)
+	}
+
 	m.details = make(map[model.TicketID]detailEntry)
 	m.height = 16
-	requireHelpText(t, m.help.View(m.helpKeys()), "v compute actionability", "V dense")
+	requireHelpText(t, m.help.View(m.helpKeys()), "v compute actionability", "V dense", "L/?/q/p legend/help/quit/hold")
 
 	m.input.Capabilities.BlockingLinks = false
 	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {
