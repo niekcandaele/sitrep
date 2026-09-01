@@ -5,6 +5,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/ref"
@@ -100,6 +101,7 @@ func runDecodedMonitor(ctx context.Context, stdout, stderr io.Writer, deps Deps,
 	return runMonitor(ctx, stdout, stderr, deps, false, tui.Options{
 		Source:       source,
 		DetailSource: tui.TicketDetailSource(p),
+		DetailFanout: detailfanout.FromProvider(p),
 		Open:         &open,
 		Interval:     interval,
 		NoMouse:      noMouse,

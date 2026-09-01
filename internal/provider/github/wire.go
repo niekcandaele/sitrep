@@ -2,8 +2,10 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -197,20 +199,26 @@ type detailBatchResponse struct {
 }
 
 // decode classifies a completed aliased response. An error attributable to one
-// alias invalidates that whole Detail while successful siblings survive. An
-// error or data member that cannot be attributed invalidates the entire chunk;
-// request-wide errors retain their native classification.
-func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
+// alias invalidates that Detail while successful siblings survive. A response-wide
+// ordinary failure invalidates the chunk, but an attributed failure remains more
+// precise for its alias. A rate refusal is deliberately returned alongside local
+// failures and malformed-extra-alias evidence: it preserves every validated
+// requested sibling and must remain inspectable even when every alias has already
+// failed locally. Alias-local rate refusals are returned separately so the caller
+// never has to rediscover them by traversing an aggregate failure map.
+func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error, error) {
 	aliases := make(map[string]struct{}, len(ids))
 	for i := range ids {
 		aliases["detail"+strconv.Itoa(i)] = struct{}{}
 	}
+
+	unexpectedAliases := make([]string, 0)
 	for alias := range r.Data {
 		if _, expected := aliases[alias]; !expected {
-			return nil, nil, provider.Errorf(provider.KindUnavailable,
-				"github: malformed Detail response from %s: unexpected data alias %q", endpoint, alias)
+			unexpectedAliases = append(unexpectedAliases, alias)
 		}
 	}
+	sort.Strings(unexpectedAliases)
 
 	attributedErrors := make(map[string][]graphQLError)
 	unattributedErrors := make([]graphQLError, 0, len(r.Errors))
@@ -231,29 +239,63 @@ func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, heade
 		attributedErrors[alias] = append(attributedErrors[alias], graphErr)
 	}
 
-	details := make(map[model.TicketID]model.Detail, len(ids))
-	failures := make(map[model.TicketID]error)
-	if len(unattributedErrors) != 0 {
-		for _, id := range ids {
-			failures[id] = detailBatchUnattributedError(unattributedErrors, id, endpoint, header)
-		}
-		return details, failures, nil
+	var protocolErr error
+	if len(unexpectedAliases) != 0 {
+		protocolErr = provider.Errorf(provider.KindUnavailable,
+			"github: malformed Detail response from %s: unexpected data alias %q", endpoint, unexpectedAliases[0])
 	}
+	var responseErr error
+	if len(unattributedErrors) != 0 {
+		responseErr = detailBatchUnattributedError(unattributedErrors, ids[0], endpoint, header)
+	}
+	chunkErr := joinDetailBatchErrors(responseErr, protocolErr)
+	_, responseLimited := provider.InspectRateLimitRefusal(responseErr, time.Time{})
+	chunkLimited := responseLimited
+	attributedFailures := make(map[string]error, len(attributedErrors))
+	var aliasRefusals []error
 	for i, id := range ids {
 		alias := "detail" + strconv.Itoa(i)
-		if graphErrs := attributedErrors[alias]; len(graphErrs) != 0 {
-			failures[id] = graphQLErrors(graphErrs, detailNotFound(id), endpoint, header)
+		graphErrs := attributedErrors[alias]
+		if len(graphErrs) == 0 {
+			continue
+		}
+		failure := graphQLErrors(graphErrs, detailNotFound(id), endpoint, header)
+		attributedFailures[alias] = failure
+		if refusal, limited := provider.InspectRateLimitRefusal(failure, time.Time{}); limited {
+			aliasRefusals = append(aliasRefusals, refusal.Err)
+			chunkLimited = true
+		}
+	}
+
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	failures := make(map[model.TicketID]error)
+	for i, id := range ids {
+		alias := "detail" + strconv.Itoa(i)
+		if failure := attributedFailures[alias]; failure != nil {
+			failures[id] = failure
 			continue
 		}
 
 		node, present := r.Data[alias]
 		if !present {
-			failures[id] = provider.Errorf(provider.KindUnavailable,
-				"github: malformed Detail response from %s: missing data alias %q for %q", endpoint, alias, id)
+			if responseLimited {
+				failures[id] = responseErr
+			} else {
+				failures[id] = provider.Errorf(provider.KindUnavailable,
+					"github: malformed Detail response from %s: missing data alias %q for %q", endpoint, alias, id)
+			}
 			continue
 		}
 		if node == nil || node.ID == "" {
-			failures[id] = provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
+			if responseLimited {
+				failures[id] = responseErr
+			} else {
+				failures[id] = provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
+			}
+			continue
+		}
+		if (responseErr != nil && !responseLimited) || (protocolErr != nil && !chunkLimited) {
+			failures[id] = detailBatchErrorForID(chunkErr, id, endpoint)
 			continue
 		}
 		detail := newDetail(*node)
@@ -263,7 +305,32 @@ func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, heade
 		}
 		details[id] = detail
 	}
-	return details, failures, nil
+	return details, failures, chunkErr, errors.Join(aliasRefusals...)
+}
+
+// joinDetailBatchErrors keeps raw response causes reachable while making a rate
+// refusal the outer classification whenever one accompanied malformed data.
+func joinDetailBatchErrors(errs ...error) error {
+	var rateErrors, ordinaryErrors []error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if _, limited := provider.InspectRateLimitRefusal(err, time.Time{}); limited {
+			rateErrors = append(rateErrors, err)
+			continue
+		}
+		ordinaryErrors = append(ordinaryErrors, err)
+	}
+	return errors.Join(append(rateErrors, ordinaryErrors...)...)
+}
+
+func detailBatchErrorForID(err error, id model.TicketID, endpoint string) error {
+	if provider.KindOf(err) != provider.KindUnavailable {
+		return err
+	}
+	return provider.Errorf(provider.KindUnavailable,
+		"github: malformed Detail response for %q from %s: %w", id, endpoint, err)
 }
 
 // detailBatchUnattributedError classifies only errors that cannot belong to a

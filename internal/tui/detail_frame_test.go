@@ -9,8 +9,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 )
 
@@ -19,8 +21,9 @@ var (
 	pageUpKey = tea.KeyPressMsg{Code: tea.KeyPgUp}
 )
 
-// startBoth runs the monitor over the fake Provider through both seams — the
-// polled list and the lazy Detail — which is the wiring production uses.
+// startBoth runs the monitor over the fake Provider through the polled List and
+// singular lazy Detail seams. Its Frontier therefore uses the deterministic
+// sequential DetailSource fallback; production can supply native DetailFanout.
 func startBoth(t *testing.T, p *fake.Provider, c *clock, interval time.Duration) *session {
 	t.Helper()
 
@@ -700,5 +703,204 @@ func TestDetailPagingKeys(t *testing.T) {
 	}
 	if stepped.detail.offset != 0 {
 		t.Errorf("home left the offset at %d", stepped.detail.offset)
+	}
+}
+
+func TestDeniedUncachedDetailRendersHeldDocument(t *testing.T) {
+	m := detailModel(t)
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m.now = clock.now
+	m.width, m.height, m.ready = 42, 14, true
+	m.detail = detailState{ticket: m.detail.ticket, input: m.detail.input}
+	m.rateHold = rateHold{resetAt: clock.now().Add(time.Hour)}
+
+	next, cmd := m.startDetailFetch()
+	if cmd != nil || next.detail.loading || next.detail.loaded {
+		t.Fatalf("held reread state = loading:%t loaded:%t cmd:%v", next.detail.loading, next.detail.loaded, cmd)
+	}
+	document := strings.Join(next.detailDocument().Lines, "\n")
+	visible := string(frame(next.View().Content))
+	if strings.Contains(document, "Reading Ticket detail") || !strings.Contains(document, "Ticket detail is held") || !strings.Contains(document, "r is held") {
+		t.Fatalf("held initial document = %q", document)
+	}
+	if strings.Count(visible, "Tracker requests are held") != 1 || len(strings.Split(visible, "\n")) != next.height+1 {
+		t.Fatalf("held Detail repeated policy or changed frame height (%d lines):\n%s", len(strings.Split(visible, "\n")), visible)
+	}
+	for i, line := range strings.Split(visible, "\n") {
+		if lipgloss.Width(line) > next.width {
+			t.Errorf("held Detail line %d width=%d > %d: %q", i, lipgloss.Width(line), next.width, line)
+		}
+	}
+}
+
+func TestDeniedDetailBecomesReadyOnlyAfterHoldExpiryAndReadsOnlyOnR(t *testing.T) {
+	m := detailModel(t)
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m.now = clock.now
+	m.width, m.height, m.ready = 32, 12, true
+	m.detail = detailState{ticket: m.detail.ticket, input: m.detail.input}
+	m.rateHold = rateHold{resetAt: clock.now().Add(time.Minute)}
+
+	m, cmd := m.startDetailFetch()
+	if cmd != nil || m.detail.loading {
+		t.Fatal("known hold issued the initial Detail read")
+	}
+	clock.advance(time.Minute)
+	visible := string(frame(m.View().Content))
+	if !strings.Contains(visible, "Ticket detail has not been read") ||
+		!strings.Contains(visible, "Press r to try again") ||
+		strings.Contains(visible, "Reading Ticket detail") ||
+		strings.Contains(visible, "Ticket detail is held") ||
+		strings.Contains(visible, "Tracker requests are held") {
+		t.Fatalf("expired denied Detail was not ready to retry:\n%s", visible)
+	}
+	if got := len(strings.Split(visible, "\n")); got != m.height+1 {
+		t.Fatalf("expired ready normalized frame entries=%d want=%d:\n%s", got, m.height+1, visible)
+	}
+	for i, line := range strings.Split(visible, "\n") {
+		if lipgloss.Width(line) > m.width {
+			t.Errorf("ready Detail line %d width=%d > %d: %q", i, lipgloss.Width(line), m.width, line)
+		}
+	}
+
+	next, cmd := m.onDetailKey(tea.KeyPressMsg{Code: 'r'})
+	m = next.(Model)
+	if cmd == nil || !m.detail.loading {
+		t.Fatal("r did not start the ready Detail read")
+	}
+	visible = string(frame(m.View().Content))
+	if !strings.Contains(visible, "Reading Ticket detail") || strings.Contains(visible, "has not been read") {
+		t.Fatalf("issued Detail did not enter explicit loading state:\n%s", visible)
+	}
+}
+
+func TestDetailViewUsesOnePolicyClockSnapshotAtResetBoundary(t *testing.T) {
+	m := detailModel(t)
+	before := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	reset := before.Add(time.Nanosecond)
+	calls := 0
+	m.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return before
+		}
+		return reset
+	}
+	m.width, m.height, m.ready, m.mouseEnabled = 42, 14, true, true
+	m.detail = detailState{ticket: m.detail.ticket, input: m.detail.input}
+	m.rateHold = rateHold{resetAt: reset}
+
+	view := m.View()
+	visible := string(frame(view.Content))
+	if calls != 1 {
+		t.Fatalf("Detail View read policy clock %d times, want one", calls)
+	}
+	if strings.Count(visible, "Tracker requests are held") != 1 ||
+		!strings.Contains(visible, "Ticket detail is held") ||
+		strings.Contains(visible, "Ticket detail has not been read") || view.OnMouse == nil {
+		t.Fatalf("reset-boundary Detail mixed policy states or lost mouse geometry:\n%s", visible)
+	}
+	if got := len(strings.Split(visible, "\n")); got != m.height+1 {
+		t.Fatalf("reset-boundary normalized frame entries=%d want=%d", got, m.height+1)
+	}
+}
+
+func TestHeldCachedDetailUsesOneGlobalRatePolicyLine(t *testing.T) {
+	m := detailModel(t)
+	rateErr := provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: time.Now().Add(time.Hour)}, "rate limited")
+	m.detail.lastErr = rateErr
+	m.rateHold = rateHold{err: rateErr, resetAt: time.Now().Add(time.Hour)}
+
+	body := strings.Join(m.detailDocument().Lines, "\n")
+	footer := strings.Join(m.detailFooterLines(m.detailDocument()), "\n")
+	if !strings.Contains(body, "shard sync protocol") || strings.Contains(footer, "could not re-read this Ticket's detail") || strings.Count(footer, "Tracker requests are held") != 1 {
+		t.Fatalf("held cached detail body=%q footer=%q", body, footer)
+	}
+
+	m.detail.lastErr = errors.New("permission denied")
+	footer = strings.Join(m.detailFooterLines(m.detailDocument()), "\n")
+	if !strings.Contains(footer, "permission denied") || strings.Count(footer, "Tracker requests are held") != 1 {
+		t.Fatalf("ordinary Detail error was hidden: %q", footer)
+	}
+}
+
+func TestHeldDetailFooterKeepsListOnlyResumeOffScreenAndOutOfHelp(t *testing.T) {
+	m := detailModel(t)
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	m.now = clock.now
+	m.width, m.height, m.ready = 28, 12, true
+	m.refreshHeld = true
+	m.rateHold = rateHold{resetAt: clock.now().Add(time.Hour)}
+
+	notice := m.trackerHoldNotice()
+	footer := string(frame(strings.Join(m.detailFooterLines(m.detailDocument()), "\n")))
+	visible := string(frame(m.View().Content))
+	if !strings.Contains(notice, "Automatic List monitoring is also held") ||
+		strings.Contains(strings.ToLower(notice), "press p") {
+		t.Fatalf("Detail policy offered its off-screen List-only action: %q", notice)
+	}
+	for _, rendered := range []string{footer, visible} {
+		if strings.Contains(rendered, "p resume refresh") || strings.Contains(rendered, "p hold refresh") ||
+			strings.Contains(strings.ToLower(rendered), "press p") {
+			t.Fatalf("Detail rendered a misleading p badge or action:\n%s", rendered)
+		}
+	}
+	if got := len(strings.Split(visible, "\n")); got != m.height+1 {
+		t.Fatalf("held Detail frame entries=%d want=%d:\n%s", got, m.height+1, visible)
+	}
+	for i, line := range strings.Split(visible, "\n") {
+		if lipgloss.Width(line) > m.width {
+			t.Errorf("held Detail line %d width=%d > %d: %q", i, lipgloss.Width(line), m.width, line)
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if next := updated.(Model); cmd != nil || !next.refreshHeld {
+		t.Fatalf("Detail p changed the List hold: held=%t cmd=%v", next.refreshHeld, cmd)
+	}
+}
+
+func TestUnknownProbeOrdinaryFailureRemainsVisibleInHeldDetail(t *testing.T) {
+	m := detailModel(t)
+	m.width, m.height, m.ready = 80, 20, true
+	m.detail.loaded = false
+	m.detail.loading = true
+	m.rateHold = rateHold{manual: true}
+	var policy provider.RequestPolicy
+	var allowed bool
+	m, policy, allowed = m.trackerRequestAdmission(trackerRequestExplicit)
+	if !allowed || policy.ProbeToken == 0 {
+		t.Fatal("unknown-reset Detail probe was not admitted")
+	}
+
+	m = m.onDetailFetched(detailFetchedMsg{
+		generation:    m.detailGeneration,
+		id:            m.detail.ticket.ID,
+		err:           provider.Errorf(provider.KindUnavailable, "network"),
+		requestPolicy: policy,
+	})
+	document := strings.Join(m.detailDocument().Lines, "\n")
+	if !m.rateHold.manual || m.unknownProbeToken != 0 ||
+		!strings.Contains(document, "Ticket detail is held") ||
+		!strings.Contains(document, "Last Tracker request failed: network") ||
+		!strings.Contains(document, "one explicit List, Detail, or Frontier") ||
+		!strings.Contains(document, "Frontier may read the whole Watchlist") ||
+		!strings.Contains(document, "Press r to retry this Detail") ||
+		strings.Contains(document, "Reading Ticket detail") {
+		t.Fatalf("ordinary probe failure document = %q", document)
+	}
+}
+
+func TestUnknownHeldPolicyOnlyPromisesFreeGlobalProbe(t *testing.T) {
+	m := detailModel(t)
+	m.rateHold = rateHold{manual: true}
+	if notice := m.trackerHoldNotice(); !strings.Contains(notice, "one explicit List, Detail, or Frontier request") ||
+		!strings.Contains(notice, "Frontier may read the whole Watchlist") || strings.Contains(notice, "r is held") {
+		t.Fatalf("free unknown hold notice = %q", notice)
+	}
+	m.unknownProbeToken = 1
+	if notice := m.trackerHoldNotice(); !strings.Contains(notice, "r is held") ||
+		strings.Contains(notice, "one explicit List, Detail, or Frontier request") {
+		t.Fatalf("reserved unknown hold notice = %q", notice)
 	}
 }

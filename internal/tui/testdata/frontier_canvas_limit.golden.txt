@@ -4,8 +4,8 @@ frontier · 50 nodes · canvas refused · Details complete                      
 The selected Frontier canvas projects to 1372 × 677 cells (928844 projected cells), above the permitted 500,000 cells.
 sitrep refused the entire canvas without clipping: no Frontier graph or subset was drawn, while the fetched Watchlist
 evidence remains intact. On linux/amd64, the raw frontierCell grid payload for 500,000 cells is 24,000,000 bytes only.
-Row slices, metadata, routes, Go/runtime overhead, and total process memory are additional and architecture-dependent.
-Press v or esc to return to the Watchlist.
+Row slices, projection metadata, transient route rasterization, Go/runtime overhead, and total process memory are
+additional and architecture-dependent. Press v or esc to return to the Watchlist.
 
 
 

@@ -20,6 +20,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
 )
@@ -204,22 +205,25 @@ func blockedDetailSource(release <-chan struct{}, inner DetailSource) DetailSour
 }
 
 type controlledFrontierReply struct {
-	detail model.Detail
-	caps   model.Capabilities
-	err    error
+	detail  model.Detail
+	details map[model.TicketID]model.Detail
+	caps    model.Capabilities
+	err     error
 }
 
 type controlledFrontierCall struct {
 	id    model.TicketID
+	ids   []model.TicketID
 	ctx   context.Context
 	reply chan controlledFrontierReply
 }
 
 type controlledFrontierReads struct {
-	calls  chan controlledFrontierCall
-	active atomic.Int64
-	peak   atomic.Int64
-	total  atomic.Int64
+	calls              chan controlledFrontierCall
+	active             atomic.Int64
+	peak               atomic.Int64
+	total              atomic.Int64
+	ignoreCancellation bool
 }
 
 func newControlledFrontierReads() *controlledFrontierReads {
@@ -233,7 +237,7 @@ func (r *controlledFrontierReads) source(ctx context.Context, id model.TicketID)
 	r.total.Add(1)
 	defer r.active.Add(-1)
 
-	call := controlledFrontierCall{id: id, ctx: ctx, reply: make(chan controlledFrontierReply, 1)}
+	call := controlledFrontierCall{id: id, ids: []model.TicketID{id}, ctx: ctx, reply: make(chan controlledFrontierReply, 1)}
 	select {
 	case r.calls <- call:
 	case <-ctx.Done():
@@ -247,6 +251,40 @@ func (r *controlledFrontierReads) source(ctx context.Context, id model.TicketID)
 	}
 }
 
+func (r *controlledFrontierReads) fanout(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+	active := r.active.Add(1)
+	for peak := r.peak.Load(); active > peak && !r.peak.CompareAndSwap(peak, active); peak = r.peak.Load() {
+	}
+	r.total.Add(1)
+	defer r.active.Add(-1)
+
+	call := controlledFrontierCall{ids: slices.Clone(ids), ctx: ctx, reply: make(chan controlledFrontierReply, 1)}
+	if len(call.ids) > 0 {
+		call.id = call.ids[0]
+	}
+	select {
+	case r.calls <- call:
+	case <-ctx.Done():
+		return map[model.TicketID]model.Detail{}, model.Capabilities{}, ctx.Err()
+	}
+	if r.ignoreCancellation {
+		reply := <-call.reply
+		if reply.details == nil {
+			reply.details = make(map[model.TicketID]model.Detail)
+		}
+		return reply.details, reply.caps, reply.err
+	}
+	select {
+	case reply := <-call.reply:
+		if reply.details == nil {
+			reply.details = make(map[model.TicketID]model.Detail)
+		}
+		return reply.details, reply.caps, reply.err
+	case <-ctx.Done():
+		return map[model.TicketID]model.Detail{}, model.Capabilities{}, ctx.Err()
+	}
+}
+
 func (r *controlledFrontierReads) next(t *testing.T) controlledFrontierCall {
 	t.Helper()
 	select {
@@ -256,15 +294,6 @@ func (r *controlledFrontierReads) next(t *testing.T) controlledFrontierCall {
 		t.Fatal("timed out waiting for controlled Frontier Detail read")
 		return controlledFrontierCall{}
 	}
-}
-
-func (r *controlledFrontierReads) batch(t *testing.T, n int) []controlledFrontierCall {
-	t.Helper()
-	calls := make([]controlledFrontierCall, n)
-	for i := range n {
-		calls[i] = r.next(t)
-	}
-	return calls
 }
 
 func assertFrontierCallsCanceled(t *testing.T, calls ...controlledFrontierCall) {
@@ -320,8 +349,8 @@ func TestFrontierWithholdsEmphasisUntilEveryDetailHasAnswered(t *testing.T) {
 	got := frame(m.View().Content)
 	checkGolden(t, "frontier_loading.golden.txt", got)
 	loading := string(got)
-	if !strings.Contains(loading, "reading Detail 0/13") {
-		t.Errorf("the header does not report the live fan-out's progress:\n%s", loading)
+	if !strings.Contains(loading, "reading Details…") || strings.Contains(loading, "0/13") {
+		t.Errorf("the plural fetch header is not explicitly indeterminate:\n%s", loading)
 	}
 	if !strings.Contains(loading, "PENDING") {
 		t.Errorf("the loading frame has no plain-text provisional badge:\n%s", loading)
@@ -439,25 +468,15 @@ func TestFrontierPendingBadgesChangeTogetherAtResolution(t *testing.T) {
 			t.Errorf("%s: Status Category count = %d, want %d:\n%s", stage, got, len(tickets), plain)
 		}
 	}
-	assertPending("before answers", m)
+	assertPending("before plural answer", m)
 
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: "T-1",
-		detail: model.Detail{TicketID: "T-1", Links: links["T-1"]}, caps: in.Capabilities,
-	})
-	m = updated.(Model)
-	assertPending("after first answer", m)
-
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: "T-2",
-		detail: model.Detail{TicketID: "T-2", Links: links["T-2"]}, caps: in.Capabilities,
-	})
-	m = updated.(Model)
-	assertPending("after cycle evidence", m)
-
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: "T-3",
-		detail: model.Detail{TicketID: "T-3", Links: links["T-3"]}, caps: in.Capabilities,
+	updated, _ = m.Update(frontierDetailsMsg{
+		generation: m.frontierGeneration,
+		outcomes: []detailfanout.Outcome{
+			{ID: "T-1", Detail: model.Detail{TicketID: "T-1", Links: links["T-1"]}, Caps: in.Capabilities},
+			{ID: "T-2", Detail: model.Detail{TicketID: "T-2", Links: links["T-2"]}, Caps: in.Capabilities},
+			{ID: "T-3", Detail: model.Detail{TicketID: "T-3", Links: links["T-3"]}, Caps: in.Capabilities},
+		},
 	})
 	m = updated.(Model)
 	resolvedPlain := string(frame(m.View().Content))
@@ -485,8 +504,9 @@ func TestFrontierPendingHeadersDistinguishLiveAndInactiveSeats(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(keyPress("v"))
 	m = updated.(Model)
-	if m.frontierContext == nil || !strings.Contains(m.frontierHeader(), "reading Detail 0/1") {
-		t.Fatalf("live unresolved header does not report progress:\n%s", m.frontierHeader())
+	if m.frontierContext == nil || !strings.Contains(m.frontierHeader(), "reading Details…") ||
+		strings.Contains(m.frontierHeader(), "0/1") {
+		t.Fatalf("live unresolved header does not report indeterminate work:\n%s", m.frontierHeader())
 	}
 	if !strings.Contains(m.View().Content, "PENDING") {
 		t.Fatalf("live unresolved card has no PENDING badge:\n%s", m.View().Content)
@@ -607,21 +627,28 @@ func TestFrontierUnverifiedWhenEveryDetailReadFails(t *testing.T) {
 	}
 }
 
-func TestFrontierCancellationIsControlFlowButDeadlineIsFailure(t *testing.T) {
+func TestFrontierCancellationIsControlFlowButProviderErrorsAreFailures(t *testing.T) {
 	in := ListInput{
 		Header:       Header{Key: "W-1", Title: "one member"},
 		Tickets:      []model.Ticket{{ID: "T-1", Key: "T-1", Title: "first", Status: model.StatusTodo}},
 		Capabilities: model.Capabilities{BlockingLinks: true},
 		FetchedAt:    newClock().now(),
 	}
-	read := func(t *testing.T, readErr error) Model {
+	read := func(t *testing.T, cancelCaller bool, readErr error) Model {
 		t.Helper()
+		root, cancel := context.WithCancel(t.Context())
+		defer cancel()
 		var received context.Context
-		m := New(t.Context(), Options{
+		m := New(root, Options{
 			Initial: &in,
-			DetailSource: func(ctx context.Context, _ model.TicketID) (model.Detail, model.Capabilities, error) {
+			DetailFanout: func(ctx context.Context, _ []model.TicketID) (
+				map[model.TicketID]model.Detail, model.Capabilities, error,
+			) {
 				received = ctx
-				return model.Detail{}, in.Capabilities, readErr
+				if cancelCaller {
+					cancel()
+				}
+				return nil, in.Capabilities, readErr
 			},
 		})
 		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
@@ -631,27 +658,39 @@ func TestFrontierCancellationIsControlFlowButDeadlineIsFailure(t *testing.T) {
 
 		// Drive the same captured-context command that Bubble Tea's batch owns. The
 		// ignored batch is never run in this unit test, so exactly one result lands.
-		msg := m.frontierFetchCmd(m.frontierGeneration, m.detailEvidenceVersion, "T-1")().(frontierDetailMsg)
+		msg := m.frontierFetchCmd(m.frontierGeneration, m.detailEvidenceVersion,
+			[]model.TicketID{"T-1"})().(frontierDetailsMsg)
 		if received != m.frontierContext {
-			t.Fatal("Frontier command did not pass its generation context to DetailSource")
+			t.Fatal("Frontier command did not pass its generation context to DetailFanout")
 		}
-		updated, _ = m.onFrontierDetail(msg)
+		updated, _ = m.onFrontierDetails(msg)
 		return updated.(Model)
 	}
 
-	t.Run("wrapped cancellation", func(t *testing.T) {
-		m := read(t, errors.Join(errors.New("provider wrapper"), context.Canceled))
+	t.Run("caller cancellation", func(t *testing.T) {
+		m := read(t, true, errors.Join(errors.New("provider wrapper"), context.Canceled))
 		frame := m.View().Content
 		if len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
-			t.Errorf("cancellation became a failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+			t.Errorf("caller cancellation became a failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
 		}
 		if strings.Contains(frame, "could not be read") || strings.Contains(frame, "provider wrapper") {
-			t.Errorf("cancellation rendered a failure footer:\n%s", frame)
+			t.Errorf("caller cancellation rendered a failure footer:\n%s", frame)
+		}
+	})
+
+	t.Run("provider local wrapped cancellation", func(t *testing.T) {
+		m := read(t, false, errors.Join(errors.New("provider wrapper"), context.Canceled))
+		frame := m.View().Content
+		if _, failed := m.frontier.failed["T-1"]; !failed || !errors.Is(m.frontier.lastErr, context.Canceled) {
+			t.Errorf("provider-local cancellation was hidden: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+		}
+		if !strings.Contains(frame, "could not be read") || !strings.Contains(frame, "provider wrapper") {
+			t.Errorf("provider-local cancellation did not render as a retryable failure:\n%s", frame)
 		}
 	})
 
 	t.Run("deadline", func(t *testing.T) {
-		m := read(t, context.DeadlineExceeded)
+		m := read(t, false, context.DeadlineExceeded)
 		frame := m.View().Content
 		if _, failed := m.frontier.failed["T-1"]; !failed || !errors.Is(m.frontier.lastErr, context.DeadlineExceeded) {
 			t.Errorf("deadline was hidden: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
@@ -672,12 +711,13 @@ func TestFrontierFetchIsInterruptible(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	calls := reads.batch(t, detailfanout.Parallelism)
+	calls := []controlledFrontierCall{reads.next(t)}
 	s.waitFor(t, "reading Detail")
 	s.tm.Send(escKey)
 	s.waitFor(t, "TODO")
@@ -696,8 +736,11 @@ func TestFrontierFetchIsInterruptible(t *testing.T) {
 	if len(m.frontier.queued) != 0 {
 		t.Errorf("abandoned Frontier retained %d queued reads", len(m.frontier.queued))
 	}
-	if got := reads.total.Load(); got != detailfanout.Parallelism {
-		t.Errorf("issued reads = %d, want only the first batch of %d", got, detailfanout.Parallelism)
+	if got := len(calls[0].ids); got != len(m.input.Tickets) {
+		t.Errorf("plural request IDs = %d, want every uncached member (%d)", got, len(m.input.Tickets))
+	}
+	if got := reads.total.Load(); got != 1 {
+		t.Errorf("issued plural reads = %d, want exactly one generation command", got)
 	}
 }
 
@@ -708,17 +751,18 @@ func TestFrontierImmediateReentryUsesDistinctBoundedLifetime(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	oldCalls := reads.batch(t, detailfanout.Parallelism)
+	oldCalls := []controlledFrontierCall{reads.next(t)}
 	s.tm.Send(escKey)
 	s.waitFor(t, "TODO")
 	s.tm.Send(keyPress("v"))
 	assertFrontierCallsCanceled(t, oldCalls...)
-	newCalls := reads.batch(t, detailfanout.Parallelism)
+	newCalls := []controlledFrontierCall{reads.next(t)}
 
 	if oldCalls[0].ctx == newCalls[0].ctx {
 		t.Fatal("re-entered Frontier reused the abandoned generation context")
@@ -1274,12 +1318,13 @@ func TestFrontierFanoutLivesThroughDetailAndRootEscape(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+	frontierCalls := []controlledFrontierCall{reads.next(t)}
 
 	s.tm.Send(enterKey)
 	detailCall := reads.next(t)
@@ -1308,12 +1353,13 @@ func TestHiddenFrontierFanoutIsCancelledByWalkUp(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+	frontierCalls := []controlledFrontierCall{reads.next(t)}
 	s.tm.Send(enterKey)
 	detailCall := reads.next(t)
 	detailCall.reply <- controlledFrontierReply{
@@ -1326,8 +1372,8 @@ func TestHiddenFrontierFanoutIsCancelledByWalkUp(t *testing.T) {
 	s.waitFor(t, "TODO")
 	assertFrontierCallsCanceled(t, frontierCalls...)
 	m, _ := s.finish(t)
-	if got := reads.total.Load(); got != detailfanout.Parallelism+1 {
-		t.Errorf("u issued %d total Detail reads, want the first Frontier batch plus opened Detail", got)
+	if got := reads.total.Load(); got != 2 {
+		t.Errorf("u issued %d total Detail reads, want one plural Frontier read plus the opened Detail", got)
 	}
 	if m.mode != modeList {
 		t.Errorf("u from hidden Frontier landed in %v, want list", m.mode)
@@ -1341,20 +1387,21 @@ func TestQuitCancelsHiddenFrontierAndDetailReads(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	frontierCalls := reads.batch(t, detailfanout.Parallelism)
+	frontierCalls := []controlledFrontierCall{reads.next(t)}
 	s.tm.Send(enterKey)
 	detailCall := reads.next(t)
 
 	m, _ := s.finish(t)
 	assertFrontierCallsCanceled(t, frontierCalls...)
 	assertFrontierCallsCanceled(t, detailCall)
-	if got := reads.total.Load(); got != detailfanout.Parallelism+1 {
-		t.Errorf("quit issued %d total Detail reads, want the first Frontier batch plus opened Detail", got)
+	if got := reads.total.Load(); got != 2 {
+		t.Errorf("quit issued %d total Detail reads, want one plural Frontier read plus the opened Detail", got)
 	}
 	if !m.quitting {
 		t.Error("q did not quit from a Frontier-opened Detail")
@@ -1451,10 +1498,15 @@ func TestFrontierRefreshOnlyRetriesWhatFailed(t *testing.T) {
 	openFrontier(t, s)
 	before := p.DetailCalls()
 
+	// Drain the navigation frames left by openFrontier before using a rendered
+	// failure as the retry-settlement barrier.
+	s.tm.Send(keyPress("?"))
+	s.waitFor(t, "dense/full cards")
 	s.tm.Send(keyPress("r"))
 	waitUntil(t, "the retry of #211", func() bool {
 		return p.DetailCallsFor("acme/widgets#211") == 2
 	})
+	s.waitFor(t, "read failed for #211")
 	m, _ := s.finish(t)
 
 	// #211 has no fixture Detail, so it is the only read left to retry.
@@ -1680,15 +1732,16 @@ func frontierMouseModel(t *testing.T, tickets []model.Ticket,
 	updated, _ = m.Update(keyPress("v"))
 	m = updated.(Model)
 
+	outcomes := make([]detailfanout.Outcome, 0, len(tickets))
 	for _, ticket := range tickets {
-		updated, _ = m.Update(frontierDetailMsg{
-			generation: m.frontierGeneration,
-			id:         ticket.ID,
-			detail:     model.Detail{TicketID: ticket.ID, Links: links[ticket.ID]},
-			caps:       in.Capabilities,
+		outcomes = append(outcomes, detailfanout.Outcome{
+			ID: ticket.ID, Detail: model.Detail{TicketID: ticket.ID, Links: links[ticket.ID]}, Caps: in.Capabilities,
 		})
-		m = updated.(Model)
 	}
+	updated, _ = m.Update(frontierDetailsMsg{
+		generation: m.frontierGeneration, outcomes: outcomes,
+	})
+	m = updated.(Model)
 	if !m.frontier.isResolved() {
 		t.Fatal("the fan-out never resolved")
 	}
@@ -1725,15 +1778,14 @@ func TestFrontierAdoptsADetailFetchedByHand(t *testing.T) {
 	updated, _ = m.Update(keyPress("v"))
 	m = updated.(Model)
 
-	// The fan-out answers: #2 lands, #1 fails. The Frontier opens focused on
-	// the list's selection, which is #1.
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: "T-2",
-		detail: model.Detail{TicketID: "T-2"}, caps: in.Capabilities,
-	})
-	m = updated.(Model)
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: "T-1", err: errors.New("context deadline exceeded"),
+	// The plural fan-out answers: #2 lands and #1 fails in canonical order. The
+	// Frontier opens focused on the list's selection, which is #1.
+	updated, _ = m.Update(frontierDetailsMsg{
+		generation: m.frontierGeneration,
+		outcomes: []detailfanout.Outcome{
+			{ID: "T-1", Err: errors.New("context deadline exceeded")},
+			{ID: "T-2", Detail: model.Detail{TicketID: "T-2"}, Caps: in.Capabilities},
+		},
 	})
 	m = updated.(Model)
 
@@ -1823,54 +1875,42 @@ func TestFrontierTogglesKeepTheFanOutBounded(t *testing.T) {
 	}
 }
 
-// A completed answer remains a real Detail when the rest of its generation is
+// A completed plural outcome remains a real Detail when its generation is
 // abandoned: it warms the session cache, and re-entry plans around it instead
 // of asking the Tracker again. The abandoned seat's bookkeeping stays out.
 func TestCompletedFrontierAnswerSurvivesLaterCancellation(t *testing.T) {
-	p := fake.New(fake.WithBlockingFixture())
-	c := newClock()
-	reads := newControlledFrontierReads()
-	s := startWith(t, c, Options{
-		Source:       selectorSource(p, c),
-		DetailSource: reads.source,
-		Interval:     time.Minute,
-		Now:          c.now,
+	members, details := successfulFrontierMembers(t, 5)
+	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
+	requested := detailfanout.Plan(members, nil)
+	completed := requested[0]
+
+	updated, _ := m.leaveFrontier()
+	m = updated.(Model)
+	updated, _ = m.onFrontierDetails(frontierDetailsMsg{
+		generation:            oldGeneration,
+		detailEvidenceVersion: m.detailEvidenceVersion,
+		outcomes: []detailfanout.Outcome{{
+			ID: completed, Detail: details[completed], Caps: p.Capabilities(),
+		}},
+		err: context.Canceled,
 	})
-	s.waitFor(t, "Shard rebalancer rollout")
-	s.tm.Send(keyPress("v"))
-	calls := reads.batch(t, detailfanout.Parallelism)
-	completed := calls[0]
-	completed.reply <- controlledFrontierReply{
-		detail: model.Detail{TicketID: completed.id},
-		caps:   model.Capabilities{BlockingLinks: true},
-	}
-	s.waitFor(t, "reading Detail 1/13")
-	// The bounded scheduler immediately replaces the completed slot while this
-	// generation is still live; that replacement belongs to the old lifetime too.
-	replacement := reads.next(t)
+	m = updated.(Model)
 
-	s.tm.Send(escKey)
-	s.waitFor(t, "TODO")
-	assertFrontierCallsCanceled(t, calls[1:]...)
-	assertFrontierCallsCanceled(t, replacement)
-	s.tm.Send(keyPress("v"))
-	newCalls := reads.batch(t, detailfanout.Parallelism)
-	for _, call := range newCalls {
-		if call.id == completed.id {
-			t.Errorf("re-entered Frontier fetched cached Ticket %s again", completed.id)
-		}
+	if !m.haveDetail(completed) {
+		t.Fatalf("completed Detail %s was discarded with its cancelled generation", completed)
 	}
-	m, _ := s.finish(t)
-	assertFrontierCallsCanceled(t, newCalls...)
+	if m.frontier.done != 0 || len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
+		t.Errorf("stale cancellation changed the abandoned seat: done=%d failed=%v err=%v",
+			m.frontier.done, m.frontier.failed, m.frontier.lastErr)
+	}
 
-	if !m.haveDetail(completed.id) {
-		t.Errorf("completed Detail %s was discarded when its peers were cancelled", completed.id)
+	updated, _ = m.enterFrontier()
+	m = updated.(Model)
+	if got, want := m.frontier.planned, len(requested)-1; got != want {
+		t.Errorf("re-entry planned %d Details, want %d after adopting the paid-for success", got, want)
 	}
-	if m.frontier.done != 0 {
-		t.Errorf("frontier.done = %d, want 0 before the new generation answers", m.frontier.done)
-	}
-	if got := reads.total.Load(); got != 2*detailfanout.Parallelism+1 {
-		t.Errorf("issued reads = %d, want the old batch, its replacement, and one new bounded batch", got)
+	if calls := p.DetailCalls(); calls != 0 {
+		t.Errorf("deferred test executed %d Provider reads", calls)
 	}
 }
 
@@ -2191,8 +2231,8 @@ func frontierWithDeferredFanout(t *testing.T, members []model.Ticket,
 	if cmd == nil {
 		t.Fatal("opening the Frontier issued no command")
 	}
-	if want := min(len(members), detailfanout.Parallelism); m.detailFanoutInflight != want {
-		t.Fatalf("in-flight reads = %d, want the deferred first batch of %d", m.detailFanoutInflight, want)
+	if m.detailFanoutInflight != 1 {
+		t.Fatalf("in-flight plural commands = %d, want one deferred generation", m.detailFanoutInflight)
 	}
 	if calls := p.DetailCalls(); calls != 0 {
 		t.Fatalf("DetailCalls = %d before deferred commands ran, want 0", calls)
@@ -2332,15 +2372,16 @@ func TestFrontierResolvedHeaderMatchesListAndRefreshRepairsAStaleSeat(t *testing
 	m = updated.(Model)
 	updated, _ = m.Update(keyPress("v"))
 	m = updated.(Model)
+	outcomes := make([]detailfanout.Outcome, 0, len(members))
 	for _, ticket := range members {
-		updated, _ = m.Update(frontierDetailMsg{
-			generation: m.frontierGeneration,
-			id:         ticket.ID,
-			detail:     details[ticket.ID],
-			caps:       in.Capabilities,
+		outcomes = append(outcomes, detailfanout.Outcome{
+			ID: ticket.ID, Detail: details[ticket.ID], Caps: in.Capabilities,
 		})
-		m = updated.(Model)
 	}
+	updated, _ = m.Update(frontierDetailsMsg{
+		generation: m.frontierGeneration, outcomes: outcomes,
+	})
+	m = updated.(Model)
 
 	markers := m.listMarkers()
 	if !markers.active || !m.frontier.isResolved() {
@@ -2450,14 +2491,17 @@ func TestFrontierRefreshAdoptsEveryLateCachedAnswerWithoutFetching(t *testing.T)
 	if m.frontierGeneration == oldGeneration {
 		t.Fatal("reseating the Frontier did not retire its fan-out generation")
 	}
+	outcomes := make([]detailfanout.Outcome, 0, len(members))
 	for _, ticket := range members {
-		updated, _ := m.onFrontierDetail(frontierDetailMsg{
-			generation: oldGeneration,
-			id:         ticket.ID,
-			detail:     details[ticket.ID],
-			caps:       m.frontier.input.Capabilities,
+		outcomes = append(outcomes, detailfanout.Outcome{
+			ID: ticket.ID, Detail: details[ticket.ID], Caps: m.frontier.input.Capabilities,
 		})
-		m = updated.(Model)
+	}
+	updated, _ := m.onFrontierDetails(frontierDetailsMsg{
+		generation: oldGeneration, outcomes: outcomes,
+	})
+	m = updated.(Model)
+	for _, ticket := range members {
 		if _, cached := m.details[ticket.ID]; !cached {
 			t.Errorf("late answer for %s was not cached", ticket.ID)
 		}
@@ -2524,15 +2568,18 @@ func TestFrontierRefreshAdoptsLateBatchBeforePlanningRemainder(t *testing.T) {
 	m, p, oldGeneration := frontierWithDeferredFanout(t, members, details)
 	m, _ = m.reseatFrontier()
 
-	for _, ticket := range members[:detailfanout.Parallelism] {
-		updated, _ := m.onFrontierDetail(frontierDetailMsg{
-			generation: oldGeneration,
-			id:         ticket.ID,
-			detail:     details[ticket.ID],
-			caps:       m.frontier.input.Capabilities,
-		})
-		m = updated.(Model)
+	outcomes := make([]detailfanout.Outcome, 0, detailfanout.Parallelism)
+	for i, ticket := range members {
+		if i < detailfanout.Parallelism {
+			outcomes = append(outcomes, detailfanout.Outcome{
+				ID: ticket.ID, Detail: details[ticket.ID], Caps: m.frontier.input.Capabilities,
+			})
+		}
 	}
+	updated, _ := m.onFrontierDetails(frontierDetailsMsg{
+		generation: oldGeneration, outcomes: outcomes, err: context.Canceled,
+	})
+	m = updated.(Model)
 	last := members[len(members)-1].ID
 	for _, ticket := range members[:detailfanout.Parallelism] {
 		if _, cached := m.details[ticket.ID]; !cached {
@@ -2859,9 +2906,9 @@ func TestFrontierRefreshKeepsFocusAndOffsets(t *testing.T) {
 	}
 }
 
-// A refresh reseat cancels reads issued for the previous Watchlist instead of
-// merely dropping their answers. Cancelled reads neither warm the cache nor
-// become failures on the replacement seat.
+// This fixture deliberately has no completed outcomes before a refresh reseats
+// the Watchlist. Cancelling the previous reads therefore leaves nothing that can
+// warm the cache or become a failure on the replacement seat.
 func TestFrontierRefreshCancelsInFlightAnswers(t *testing.T) {
 	// Nothing leaves here: with every read still held there are no Links and so
 	// no Ghosts, and one added node is the only thing that moves the counts.
@@ -2874,12 +2921,13 @@ func TestFrontierRefreshCancelsInFlightAnswers(t *testing.T) {
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
 		DetailSource: reads.source,
+		DetailFanout: reads.fanout,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	calls := reads.batch(t, detailfanout.Parallelism)
+	calls := []controlledFrontierCall{reads.next(t)}
 	s.waitFor(t, "reading Detail")
 
 	s.clock.advance(61 * time.Second)
@@ -2897,9 +2945,8 @@ func TestFrontierRefreshCancelsInFlightAnswers(t *testing.T) {
 	if len(m.details) != 0 {
 		t.Errorf("cancelled reads warmed %d Detail cache entries", len(m.details))
 	}
-	if got := reads.total.Load(); got != detailfanout.Parallelism {
-		t.Errorf("interval refresh issued %d reads, want only the original batch of %d",
-			got, detailfanout.Parallelism)
+	if got := reads.total.Load(); got != 1 {
+		t.Errorf("interval refresh issued %d plural reads, want only the original generation command", got)
 	}
 	if len(m.frontier.failed) != 0 || m.frontier.lastErr != nil {
 		t.Errorf("cancellation became a Frontier failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
@@ -3417,25 +3464,31 @@ func TestFrontierRefreshDuringAFanOutIssuesNothing(t *testing.T) {
 	release := make(chan struct{})
 	p := fake.New(fake.WithBlockingFixture())
 	c := newClock()
-	// The reads are held before they reach the Provider, so the Provider's own
-	// counter never moves: this counts what the screen issued.
+	// The plural read is held before it reaches the Provider, so the Provider's
+	// own counter never moves: this counts generation commands the screen issued.
 	var issued atomic.Int64
-	held := blockedDetailSource(release, TicketDetailSource(p))
-	counting := func(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+	native := detailfanout.FromProvider(p)
+	held := func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
 		issued.Add(1)
-		return held(ctx, id)
+		select {
+		case <-release:
+			return native(ctx, ids)
+		case <-ctx.Done():
+			return nil, model.Capabilities{}, ctx.Err()
+		}
 	}
 	s := startWith(t, c, Options{
 		Source:       selectorSource(p, c),
-		DetailSource: counting,
+		DetailSource: TicketDetailSource(p),
+		DetailFanout: held,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
 	s.waitFor(t, "reading Detail")
-	waitUntil(t, "the first batch to be issued", func() bool {
-		return issued.Load() == detailfanout.Parallelism
+	waitUntil(t, "the plural command to be issued", func() bool {
+		return issued.Load() == 1
 	})
 
 	// Key presses are delivered in order and handled synchronously, so r has
@@ -3444,12 +3497,11 @@ func TestFrontierRefreshDuringAFanOutIssuesNothing(t *testing.T) {
 	m, _ := s.finish(t)
 	close(release)
 
-	if n := issued.Load(); n != detailfanout.Parallelism {
-		t.Errorf("issued %d reads, want the %d already in flight: r started a second batch",
-			n, detailfanout.Parallelism)
+	if n := issued.Load(); n != 1 {
+		t.Errorf("issued %d plural reads, want the one already in flight: r started another generation", n)
 	}
 	// quit retires the generation and clears its unissued queue. r must not have
-	// started a second batch before that retirement.
+	// started a second command before that retirement.
 	if got := len(m.frontier.queued); got != 0 {
 		t.Errorf("queued = %d after quit, want abandoned work cleared", got)
 	}
@@ -4071,35 +4123,14 @@ func TestFrontierWidthBurstSettlesLatestInnerRectAndOneWinner(t *testing.T) {
 	}
 }
 
-func TestFrontierBurstCoalescesOneHundredEvidenceUpdates(t *testing.T) {
+func TestFrontierPluralEvidenceRebuildsAtMostOnce(t *testing.T) {
 	tickets := make([]model.Ticket, 100)
+	ids := make([]model.TicketID, 100)
+	outcomes := make([]detailfanout.Outcome, 100)
 	for i := range tickets {
 		id := model.TicketID(fmt.Sprintf("T-%03d", i))
 		tickets[i] = model.Ticket{ID: id, Key: string(id), Title: string(id), Status: model.StatusTodo}
-	}
-	m := Model{
-		mode:               modeFrontier,
-		width:              120,
-		height:             30,
-		frontierKeys:       DefaultFrontierKeyMap(),
-		frontierGeneration: 1,
-		details:            make(map[model.TicketID]detailEntry),
-		now:                time.Now,
-		frontier: frontierState{input: FrontierInput{
-			Tickets: tickets, Links: map[model.TicketID][]model.Link{},
-			Capabilities: model.Capabilities{BlockingLinks: true},
-		}, planned: len(tickets)},
-	}
-	var layouts int
-	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
-		layouts++
-		return layoutFrontier(g, nodes, opts)
-	}
-	m = m.rebuildFrontier()
-	layouts = 0
-
-	var firstID, firstVersion int
-	for i, ticket := range tickets[:99] {
+		ids[i] = id
 		links := []model.Link(nil)
 		if i == 1 {
 			links = blockedBy(string(tickets[0].ID))
@@ -4107,47 +4138,46 @@ func TestFrontierBurstCoalescesOneHundredEvidenceUpdates(t *testing.T) {
 		if i == 2 {
 			links = blockedBy("GHOST")
 		}
-		updated, _ := m.Update(frontierDetailMsg{
-			generation: m.frontierGeneration, id: ticket.ID,
-			detail: model.Detail{TicketID: ticket.ID, Links: links}, caps: m.frontier.input.Capabilities,
-		})
-		m = updated.(Model)
-		if i == 0 {
-			firstID, firstVersion = m.frontierRebuildTimerID, m.frontierRebuildPendingVersion
+		outcomes[i] = detailfanout.Outcome{
+			ID: id, Detail: model.Detail{TicketID: id, Links: links},
+			Caps: model.Capabilities{BlockingLinks: true},
 		}
 	}
-	if layouts != 0 || m.frontier.isResolved() || m.frontierRebuildTimerID == 0 {
-		t.Fatalf("partial burst layouts=%d resolved=%t timer=%d, want no layout/unresolved/one timer", layouts, m.frontier.isResolved(), m.frontierRebuildTimerID)
+	m := Model{
+		mode:                   modeFrontier,
+		width:                  120,
+		height:                 30,
+		frontierKeys:           DefaultFrontierKeyMap(),
+		frontierGeneration:     1,
+		detailFanoutInflight:   1,
+		details:                make(map[model.TicketID]detailEntry),
+		now:                    time.Now,
+		layoutFrontierFn:       layoutFrontier,
+		frontierRebuildVersion: 1,
+		frontier: frontierState{input: FrontierInput{
+			Tickets: tickets, Links: map[model.TicketID][]model.Link{},
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		}, planned: len(tickets)},
 	}
-	for _, node := range frontierNodes(m.frontier.graph, tickets, false) {
-		if node.id != "GHOST" && node.emphasis.badge != "PENDING" {
-			t.Fatalf("partial burst node %q badge=%q, want PENDING", node.id, node.emphasis.badge)
-		}
+	m = m.rebuildFrontier()
+	var layouts int
+	m.layoutFrontierFn = func(g model.BlockingGraph, nodes []frontierNode, opts frontierLayoutOptions) frontierLayout {
+		layouts++
+		return layoutFrontier(g, nodes, opts)
 	}
-
-	updated, cmd := m.Update(frontierRebuildMsg{timerID: firstID, observedVersion: firstVersion})
-	m = updated.(Model)
-	if layouts != 0 || cmd == nil || m.frontierRebuildTimerID == 0 {
-		t.Fatalf("stale burst tick layouts=%d cmd=%v timer=%d, want no layout/new tick", layouts, cmd, m.frontierRebuildTimerID)
-	}
-	updated, _ = m.Update(frontierRebuildMsg{timerID: m.frontierRebuildTimerID, observedVersion: m.frontierRebuildPendingVersion})
-	m = updated.(Model)
-	if layouts != 1 {
-		t.Fatalf("quiet partial burst layouts=%d, want one", layouts)
-	}
-
 	epoch := m.mouseEpoch
-	last := tickets[len(tickets)-1]
-	updated, _ = m.Update(frontierDetailMsg{
-		generation: m.frontierGeneration, id: last.ID,
-		detail: model.Detail{TicketID: last.ID}, caps: m.frontier.input.Capabilities,
+
+	updated, _ := m.Update(frontierDetailsMsg{
+		generation: m.frontierGeneration, outcomes: outcomes,
 	})
 	m = updated.(Model)
-	if layouts != 2 || !m.frontier.isResolved() || m.mouseEpoch == epoch {
-		t.Fatalf("final evidence layouts=%d resolved=%t epoch=%d/%d, want synchronous final replacement", layouts, m.frontier.isResolved(), m.mouseEpoch, epoch)
+	if layouts != 1 || !m.frontier.isResolved() || m.mouseEpoch == epoch {
+		t.Fatalf("plural evidence layouts=%d resolved=%t epoch=%d/%d, want one atomic replacement",
+			layouts, m.frontier.isResolved(), m.mouseEpoch, epoch)
 	}
-	if layouts >= len(tickets) {
-		t.Fatalf("burst used %d layouts for %d answers", layouts, len(tickets))
+	if m.frontierRebuildTimerID != 0 || m.frontierRebuildPendingVersion != 0 {
+		t.Fatalf("resolved plural answer left deferred rebuild state: timer=%d pending=%d",
+			m.frontierRebuildTimerID, m.frontierRebuildPendingVersion)
 	}
 }
 
@@ -4177,13 +4207,14 @@ func TestFrontierImmediateRebuildRetainsOutstandingTickOwnership(t *testing.T) {
 
 func TestFrontierHiddenDetailEvidenceDoesNotScheduleOrLayout(t *testing.T) {
 	m := Model{
-		mode:               modeDetail,
-		width:              120,
-		height:             30,
-		frontierKeys:       DefaultFrontierKeyMap(),
-		frontierGeneration: 1,
-		details:            make(map[model.TicketID]detailEntry),
-		now:                time.Now,
+		mode:                 modeDetail,
+		width:                120,
+		height:               30,
+		frontierKeys:         DefaultFrontierKeyMap(),
+		frontierGeneration:   1,
+		detailFanoutInflight: 1,
+		details:              make(map[model.TicketID]detailEntry),
+		now:                  time.Now,
 		frontier: frontierState{input: FrontierInput{
 			Tickets:      []model.Ticket{{ID: "T-1", Key: "T-1", Title: "one", Status: model.StatusTodo}},
 			Capabilities: model.Capabilities{BlockingLinks: true},
@@ -4194,10 +4225,9 @@ func TestFrontierHiddenDetailEvidenceDoesNotScheduleOrLayout(t *testing.T) {
 		layouts++
 		return layoutFrontier(g, nodes, opts)
 	}
-	updated, cmd := m.Update(frontierDetailMsg{
-		generation: 1, id: "T-1", detail: model.Detail{TicketID: "T-1"},
-		caps: model.Capabilities{BlockingLinks: true},
-	})
+	updated, cmd := m.Update(frontierResultMsg(
+		1, 0, "T-1", model.Detail{TicketID: "T-1"},
+		model.Capabilities{BlockingLinks: true}, nil))
 	m = updated.(Model)
 	if layouts != 0 || cmd != nil || m.frontierRebuildTimerID != 0 || !m.frontier.isResolved() {
 		t.Fatalf("hidden answer layouts=%d cmd=%v timer=%d resolved=%t, want folded evidence only", layouts, cmd, m.frontierRebuildTimerID, m.frontier.isResolved())
@@ -4334,6 +4364,35 @@ func TestFrontierDensityKeysAreManualPersistentAndPresentationOnly(t *testing.T)
 	m = updated.(Model)
 	if m.mode != modeFrontier || m.frontierDensity != frontierDensityDense {
 		t.Fatalf("List V mode/density = %v/%v, want Frontier/dense", m.mode, m.frontierDensity)
+	}
+}
+
+func TestFrontierRefusalNoticeCanBeDismissedByReentry(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	m := cachedFrontierModel(t, tickets, links, 120, 33, nil)
+	if m.frontier.refusal == nil || m.frontier.refusal.projectedCells == "" || len(m.frontier.layout.cells) != 0 {
+		t.Fatalf("fixture refusal = %+v with %d materialized grid rows, want pre-allocation refusal",
+			m.frontier.refusal, len(m.frontier.layout.cells))
+	}
+	notice := errors.New("unrequested plural result")
+	m.frontier.protocolWarning = notice
+	footer := strings.Join(m.frontierFooterLines(), "\n")
+	if !strings.Contains(footer, "provider response warning: "+notice.Error()) ||
+		!strings.Contains(footer, "evidence remains recorded") || strings.Contains(footer, "press r") {
+		t.Fatalf("refused protocol notice = %q, want accurate retained-evidence copy", footer)
+	}
+
+	updated, _ := m.Update(keyPress("v"))
+	m = updated.(Model)
+	updated, _ = m.Update(keyPress("v"))
+	m = updated.(Model)
+	if m.mode != modeFrontier || m.frontier.refusal == nil || m.frontier.protocolWarning != nil {
+		t.Fatalf("re-entered refusal = mode:%v refusal:%v warning:%v, want same refused seat with notice dismissed",
+			m.mode, m.frontier.refusal, m.frontier.protocolWarning)
+	}
+	if len(m.frontier.layout.cells) != 0 || m.detailFanoutInflight != 0 || m.frontierContext != nil {
+		t.Errorf("re-entry crossed refusal admission or issued I/O: grid:%d in-flight:%d context:%v",
+			len(m.frontier.layout.cells), m.detailFanoutInflight, m.frontierContext)
 	}
 }
 
@@ -4624,7 +4683,7 @@ func TestFrontierCanvasRefusalFrameAndPreMaterializationGate(t *testing.T) {
 		"selected Frontier canvas projects to", "projected cells", "permitted 500,000 cells",
 		"refused the entire canvas without clipping", "no Frontier graph or subset was drawn",
 		"fetched Watchlist evidence remains intact", "linux/amd64", "raw frontierCell grid payload for 500,000 cells is 24,000,000 bytes only",
-		"Row slices", "metadata", "routes", "Go/runtime overhead", "total process memory",
+		"Row slices", "projection metadata", "transient route rasterization", "Go/runtime overhead", "total process memory",
 		"architecture-dependent", "v or esc",
 	} {
 		if !strings.Contains(visible, want) {
@@ -4935,5 +4994,167 @@ func TestFrontierRefusalKeepsFailureEvidenceWithoutAdvertisingRefresh(t *testing
 	}
 	if m.effectiveFrontierKeys().Refresh.Enabled() {
 		t.Error("refusal failure re-enabled Refresh")
+	}
+}
+
+func TestFrontierHeldPolicySuppressesContradictoryRetryGuidance(t *testing.T) {
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	base := phase2AdmissionModel(t, clock, &phase2Calls{})
+	base.rateHold = phase2KnownHold(clock)
+	base.width, base.height, base.ready = 120, 30, true
+	next, cmd := base.enterFrontier()
+	base = next.(Model)
+	phase2RunCommand(cmd)
+	ordinary := errors.New("Detail transport failed")
+	base.frontier.failed = map[model.TicketID]struct{}{"A": {}}
+	base.frontier.failureErrors = map[model.TicketID]error{"A": ordinary}
+	base.frontier.lastErr = ordinary
+
+	holds := []struct {
+		name  string
+		hold  rateHold
+		token uint64
+	}{
+		{name: "known", hold: phase2KnownHold(clock)},
+		{name: "exhausted", hold: rateHold{resetAt: clock.now().Add(time.Hour), exhausted: true}},
+		{name: "active unknown probe", hold: rateHold{err: provider.Errorf(provider.KindRateLimit, "reset unknown"), manual: true}, token: 41},
+	}
+	for _, hold := range holds {
+		for _, width := range []int{42, 120} {
+			t.Run(fmt.Sprintf("%s/%d columns", hold.name, width), func(t *testing.T) {
+				m := base
+				m.width = width
+				m.rateHold = hold.hold
+				m.unknownProbeToken = hold.token
+				m.help.ShowAll = true
+				visible := string(frame(m.frontierFrame()))
+				for _, contradiction := range []string{"Details pending · press r", "press r to retry", "r re-read Details"} {
+					if strings.Contains(visible, contradiction) {
+						t.Errorf("held Frontier advertises %q:\n%s", contradiction, visible)
+					}
+				}
+				if m.effectiveFrontierKeys().Refresh.Enabled() {
+					t.Error("held Frontier left Refresh enabled")
+				}
+				if width == 120 && (!strings.Contains(visible, "Details pending · r held") ||
+					!strings.Contains(visible, "retry held by Tracker request policy") ||
+					!strings.Contains(visible, "Tracker requests are held")) {
+					t.Errorf("wide held Frontier omitted global admission state:\n%s", visible)
+				}
+			})
+		}
+	}
+
+	available := base
+	available.rateHold = rateHold{err: provider.Errorf(provider.KindRateLimit, "reset unknown"), manual: true}
+	available.unknownProbeToken = 0
+	visible := string(frame(available.frontierFrame()))
+	if !available.effectiveFrontierKeys().Refresh.Enabled() ||
+		!strings.Contains(visible, "Details pending · press r") ||
+		!strings.Contains(visible, "press r to retry") {
+		t.Fatalf("available unknown-reset probe was not advertised truthfully:\n%s", visible)
+	}
+}
+
+func TestFrontierGlobalHoldPreservesFullDenseCycleAndLegendGeometry(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "A", Key: "A", Title: "alpha", Status: model.StatusTodo},
+		{ID: "B", Key: "B", Title: "beta", Status: model.StatusTodo},
+		{ID: "C", Key: "C", Title: "gamma", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{
+		"A": blockedBy("C"),
+		"B": blockedBy("A"),
+		"C": blockedBy("B"),
+	}
+	for _, density := range []frontierDensity{frontierDensityFull, frontierDensityDense} {
+		for _, width := range []int{50, 120} {
+			t.Run(fmt.Sprintf("density-%d/%d-columns", density, width), func(t *testing.T) {
+				m := cachedFrontierModel(t, tickets, links, width, 30, nil)
+				m.frontierDensity = density
+				m.legendVisible = true
+				m.frontier.focusID, m.frontier.hasFocus = "B", true
+				m = m.rebuildFrontier().reconcileFrontier(true)
+				beforeLayout := m.frontier.layout
+				beforeCycles := m.frontier.graph.Cycles()
+				beforeFooter, beforeBody, beforeEpoch := m.frontierFooterHeight(), m.frontierBodyHeight(), m.mouseEpoch
+				beforeInspection, beforeNode := frontierDenseInspectionForLayout(
+					m.frontier.layout, m.frontier.focusID, m.width, m.frontierBodyHeight())
+
+				reset := m.policyNow().Add(time.Hour)
+				refusal := provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: reset}, "rate limited")
+				var refused bool
+				m, refused = m.observeRateRefusal(refusal, provider.RequestPolicy{})
+				if !refused {
+					t.Fatal("fixture did not install global hold")
+				}
+				if !reflect.DeepEqual(m.frontier.layout, beforeLayout) ||
+					!reflect.DeepEqual(m.frontier.graph.Cycles(), beforeCycles) ||
+					m.frontier.focusID != "B" || !m.frontier.hasFocus {
+					t.Fatal("global hold changed cycle membership, layout, or focus")
+				}
+				if m.frontierFooterHeight() != beforeFooter+1 || m.frontierBodyHeight() != beforeBody-1 || m.mouseEpoch != beforeEpoch+1 {
+					t.Fatalf("hold geometry footer/body/epoch=%d/%d/%d want=%d/%d/%d",
+						m.frontierFooterHeight(), m.frontierBodyHeight(), m.mouseEpoch,
+						beforeFooter+1, beforeBody-1, beforeEpoch+1)
+				}
+				if density == frontierDensityDense && beforeInspection == frontierDenseInspectionCard {
+					afterInspection, afterNode := frontierDenseInspectionForLayout(
+						m.frontier.layout, m.frontier.focusID, m.width, m.frontierBodyHeight())
+					if afterInspection != frontierDenseInspectionCard || beforeNode.id != "B" || afterNode.id != "B" {
+						t.Fatalf("hold displaced dense focused-card inspection: before=%d/%s after=%d/%s",
+							beforeInspection, beforeNode.id, afterInspection, afterNode.id)
+					}
+				}
+				visible := string(frame(m.frontierFrame()))
+				if !strings.Contains(strings.ToLower(visible), "cycle") || strings.Contains(visible, "Details pending · press r") ||
+					strings.Contains(visible, "r re-read Details") {
+					t.Fatalf("held cycle frame lost semantics or advertised denied retry:\n%s", visible)
+				}
+			})
+		}
+	}
+}
+
+func TestFrontierHeldPolicyFooterChangesMeasuredGeometryAndMouseEpoch(t *testing.T) {
+	m, _ := noBlockingFrontierModel(t)
+	m.refreshHeld = true
+	beforeHeight, beforeEpoch := m.frontierFooterHeight(), m.mouseEpoch
+
+	m = m.observeExhaustedBudget(m.now().Add(time.Hour), provider.RequestPolicy{})
+	notice := m.trackerHoldNotice()
+	footer := strings.Join(m.frontierFooterBlock(), "\n")
+	if !strings.Contains(notice, "budget exhausted") || !strings.Contains(notice, "r is held") {
+		t.Fatalf("held Frontier notice = %q", notice)
+	}
+	if strings.Contains(strings.ToLower(notice), "press p") ||
+		strings.Contains(footer, "p resume refresh") || strings.Contains(footer, "p hold refresh") {
+		t.Fatalf("held Frontier advertised its List-only p action: notice=%q footer=%q", notice, footer)
+	}
+	if m.frontierFooterHeight() != beforeHeight+1 || m.frontierBodyHeight() != m.height-headerHeight-m.frontierFooterHeight() {
+		t.Fatalf("held Frontier geometry footer=%d body=%d, before footer=%d", m.frontierFooterHeight(), m.frontierBodyHeight(), beforeHeight)
+	}
+	if m.mouseEpoch != beforeEpoch+1 {
+		t.Fatalf("held Frontier footer did not invalidate mouse capture: epoch=%d want=%d", m.mouseEpoch, beforeEpoch+1)
+	}
+
+	narrow := m
+	narrow.width = 28
+	visible := string(frame(narrow.frontierFrame()))
+	if strings.Contains(strings.ToLower(visible), "press p") || strings.Contains(visible, "p resume refresh") {
+		t.Fatalf("narrow Frontier rendered a misleading p action or badge:\n%s", visible)
+	}
+	if got := len(strings.Split(visible, "\n")); got != narrow.height+1 {
+		t.Fatalf("narrow held Frontier frame entries=%d want=%d", got, narrow.height+1)
+	}
+	for i, line := range strings.Split(visible, "\n") {
+		if lipgloss.Width(line) > narrow.width {
+			t.Errorf("narrow held Frontier line %d width=%d > %d: %q", i, lipgloss.Width(line), narrow.width, line)
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if next := updated.(Model); cmd != nil || !next.refreshHeld {
+		t.Fatalf("Frontier p changed the List hold: held=%t cmd=%v", next.refreshHeld, cmd)
 	}
 }

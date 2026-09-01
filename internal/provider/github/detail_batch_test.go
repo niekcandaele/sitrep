@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -25,6 +27,20 @@ var partialDetailBatchIDs = []model.TicketID{"batch-node-a", "batch-node-b", "ba
 type detailBatchRequest struct {
 	Query     string         `json:"query"`
 	Variables map[string]any `json:"variables"`
+}
+
+type cancelAfterReader struct {
+	reader io.Reader
+	cancel func()
+	once   sync.Once
+}
+
+func (r *cancelAfterReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n != 0 || errors.Is(err, io.EOF) {
+		r.once.Do(r.cancel)
+	}
+	return n, err
 }
 
 func batchIDs(count int) []model.TicketID {
@@ -459,17 +475,6 @@ func TestFetchDetailsResponseWideFailuresCoverEveryChunkID(t *testing.T) {
 			kind:     provider.KindAuth, contains: "pathless refusal",
 		},
 		{
-			name: "alias NOT_FOUND cannot mask pathless rate limit",
-			response: response{
-				body: detailBatchBody(t, valid, []map[string]any{
-					{"type": "NOT_FOUND", "message": "local miss", "path": []any{"detail0"}},
-					{"type": "RATE_LIMITED", "message": "global rate limit"},
-				}),
-				headers: map[string]string{"x-ratelimit-reset": "1767225600"},
-			},
-			kind: provider.KindRateLimit, contains: "rate limit exceeded",
-		},
-		{
 			name: "unknown alias NOT_FOUND is malformed",
 			response: response{body: detailBatchBody(t, valid, []map[string]any{{
 				"type": "NOT_FOUND", "message": "unattributable miss", "path": []any{"detail99"},
@@ -515,6 +520,73 @@ func TestFetchDetailsResponseWideFailuresCoverEveryChunkID(t *testing.T) {
 	}
 }
 
+func TestFetchDetailsPathlessRateRefusalPreservesCompleteChunk(t *testing.T) {
+	ids := []model.TicketID{"a", "b", "c"}
+	data := map[string]any{
+		"detail0": detailNodeJSON("a", "a"),
+		"detail1": detailNodeJSON("b", "b"),
+		"detail2": detailNodeJSON("c", "c"),
+	}
+	s := newReplayServer(t, response{
+		body: detailBatchBody(t, data, []map[string]any{{
+			"type": "RATE_LIMITED", "message": "global rate limit",
+		}}),
+		headers: map[string]string{"x-ratelimit-reset": "1767225600"},
+	})
+
+	details, err := newProvider(s).FetchDetails(t.Context(), ids)
+	if len(details) != len(ids) {
+		t.Fatalf("details = %d, want all %d completed siblings", len(details), len(ids))
+	}
+	for _, id := range ids {
+		if details[id].TicketID != id {
+			t.Errorf("details[%q] = %#v, want completed sibling", id, details[id])
+		}
+	}
+	refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0))
+	if !ok || !refusal.KnownReset || provider.KindOf(err) != provider.KindRateLimit {
+		t.Errorf("error = %v, refusal %+v/%t; want inspectable known rate refusal", err, refusal, ok)
+	}
+	var failures *provider.DetailFailures
+	if errors.As(err, &failures) {
+		t.Errorf("completed chunk manufactured per-ID failures: %#v", failures.Failures)
+	}
+}
+
+func TestFetchDetailsPathlessRateRefusalPreservesPartialChunkAndStops(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after response-wide rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, generatedDetailData(t, request.Variables), []map[string]any{
+			{"type": "NOT_FOUND", "message": "local miss", "path": []any{"detail50"}},
+			{"type": "RATE_LIMITED", "message": "global rate limit"},
+		})))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 99 || details[ids[49]].TicketID != ids[49] || details[ids[51]].TicketID != ids[51] {
+		t.Errorf("details = %d with neighbours %#v/%#v, want 99 completed siblings", len(details), details[ids[49]], details[ids[51]])
+	}
+	failures := requireDetailFailures(t, err, []model.TicketID{ids[50], ids[100]})
+	if provider.KindOf(failures.Failures[ids[50]]) != provider.KindBadRef {
+		t.Errorf("local failure kind = %s, want bad ref", provider.KindOf(failures.Failures[ids[50]]))
+	}
+	refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0))
+	if !ok || !refusal.KnownReset || provider.KindOf(failures.Failures[ids[100]]) != provider.KindRateLimit {
+		t.Errorf("error = %v, refusal %+v/%t; want response refusal attributed to later ID", err, refusal, ok)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want refusal to stop before chunk two", requests.Load())
+	}
+}
+
 func TestFetchDetailsContinuesAfterOrdinaryFailedChunk(t *testing.T) {
 	ids := batchIDs(101)
 	var requests atomic.Int64
@@ -542,6 +614,322 @@ func TestFetchDetailsContinuesAfterOrdinaryFailedChunk(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Errorf("requests = %d, want failed chunk followed by successful chunk", requests.Load())
+	}
+}
+
+func TestFetchDetailsStopsAfterResponseWideRateRefusal(t *testing.T) {
+	ids := batchIDs(101)
+	tests := []struct {
+		name    string
+		headers map[string]string
+		status  int
+		known   bool
+	}{
+		{name: "known reset", headers: map[string]string{"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1767225600"}, status: http.StatusForbidden, known: true},
+		{name: "unknown reset", status: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int64
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				for key, value := range tt.headers {
+					w.Header().Set(key, value)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"message":"rate refusal"}`))
+			}))
+			t.Cleanup(s.Close)
+
+			details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+			if len(details) != 0 {
+				t.Errorf("details = %d, want none", len(details))
+			}
+			failures := requireDetailFailures(t, err, ids)
+			later := failures.Failures[ids[100]]
+			policy, ok := provider.InspectRateLimitRefusal(later, time.Unix(1, 0))
+			if !ok || policy.KnownReset != tt.known || provider.KindOf(later) != provider.KindRateLimit {
+				t.Errorf("later failure = %v, policy %+v/%t", later, policy, ok)
+			}
+			if requests.Load() != 1 {
+				t.Errorf("requests = %d, want refusal to stop before chunk two", requests.Load())
+			}
+		})
+	}
+}
+
+func TestFetchDetailsStopsAfterAliasLocalRateRefusalAndPreservesSiblings(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, generatedDetailData(t, request.Variables), []map[string]any{{
+			"type": "RATE_LIMITED", "message": "alias refusal", "path": []any{"detail50"},
+		}})))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 99 || details[ids[49]].TicketID != ids[49] || details[ids[51]].TicketID != ids[51] {
+		t.Errorf("details = %d with neighbours %#v/%#v, want 99 successful siblings", len(details), details[ids[49]], details[ids[51]])
+	}
+	failures := requireDetailFailures(t, err, []model.TicketID{ids[50], ids[100]})
+	for _, id := range []model.TicketID{ids[50], ids[100]} {
+		policy, ok := provider.InspectRateLimitRefusal(failures.Failures[id], time.Unix(1, 0))
+		if !ok || !policy.KnownReset || provider.KindOf(failures.Failures[id]) != provider.KindRateLimit {
+			t.Errorf("failure[%q] = %v, policy %+v/%t", id, failures.Failures[id], policy, ok)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want one chunk only", requests.Load())
+	}
+}
+
+func TestFetchDetailsSurfacesLateAliasRateRefusalOutsideAggregateSafetyWindow(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after late alias rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		responseErrors := make([]map[string]any, 0, 81)
+		for i := range 80 {
+			responseErrors = append(responseErrors, map[string]any{
+				"type": "NOT_FOUND", "message": "local miss", "path": []any{"detail" + strconv.Itoa(i)},
+			})
+		}
+		responseErrors = append(responseErrors, map[string]any{
+			"type": "RATE_LIMITED", "message": "late refusal", "path": []any{"detail80"},
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, generatedDetailData(t, request.Variables), responseErrors)))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 19 || details[ids[81]].TicketID != ids[81] || details[ids[99]].TicketID != ids[99] {
+		t.Fatalf("details = %d with retained siblings %#v/%#v, want aliases 81-99", len(details), details[ids[81]], details[ids[99]])
+	}
+	failures := requireDetailFailures(t, err, append(ids[:81:81], ids[100]))
+	if provider.KindOf(failures.Failures[ids[0]]) != provider.KindBadRef {
+		t.Errorf("first local failure = %v, want bad ref", failures.Failures[ids[0]])
+	}
+	for _, id := range []model.TicketID{ids[80], ids[100]} {
+		if refusal, ok := provider.InspectRateLimitRefusal(failures.Failures[id], time.Unix(1, 0)); !ok || !refusal.KnownReset {
+			t.Errorf("failure[%q] = %v, refusal %+v/%t; want known rate refusal", id, failures.Failures[id], refusal, ok)
+		}
+	}
+	for _, id := range []model.TicketID{ids[81], ids[99]} {
+		if _, fabricated := failures.Failures[id]; fabricated {
+			t.Errorf("successful sibling %q received a fabricated failure", id)
+		}
+	}
+	normalized := detailfanout.NormalizeError(err)
+	if refusal, ok := provider.InspectRateLimitRefusal(normalized, time.Unix(1, 0)); !ok || !refusal.KnownReset {
+		t.Fatalf("normalized late refusal = %+v/%t, want known reset", refusal, ok)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want refusal to stop before chunk two", requests.Load())
+	}
+}
+
+func TestFetchDetailsStopsAfterMalformedDataAndAliasRateRefusal(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after decoded rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		data := generatedDetailData(t, request.Variables)
+		data["detail100"] = detailNodeJSON("unexpected", "malformed")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, data, []map[string]any{{
+			"type": "RATE_LIMITED", "message": "alias refusal", "path": []any{"detail50"},
+		}})))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 99 {
+		t.Fatalf("details = %d, want 99 validated siblings from the completed chunk", len(details))
+	}
+	for _, id := range []model.TicketID{ids[0], ids[49], ids[51], ids[99]} {
+		if details[id].TicketID != id {
+			t.Errorf("details[%q] = %+v, want retained validated sibling", id, details[id])
+		}
+	}
+	failures := requireDetailFailures(t, err, []model.TicketID{ids[50], ids[100]})
+	if provider.KindOf(failures.Failures[ids[50]]) != provider.KindRateLimit {
+		t.Errorf("alias failure = %v, want rate refusal", failures.Failures[ids[50]])
+	}
+	if refusal, ok := provider.InspectRateLimitRefusal(failures.Failures[ids[100]], time.Unix(1, 0)); !ok || !refusal.KnownReset {
+		t.Errorf("unissued failure = %v, refusal %+v/%t; want known rate refusal", failures.Failures[ids[100]], refusal, ok)
+	}
+	if provider.KindOf(err) != provider.KindRateLimit || !strings.Contains(err.Error(), "unexpected data alias") {
+		t.Errorf("error = %v, want inspectable rate refusal and protocol evidence", err)
+	}
+	if refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0)); !ok || !refusal.KnownReset || provider.KindOf(err) != provider.KindRateLimit {
+		t.Errorf("error = %v, refusal %+v/%t; want inspectable rate classification", err, refusal, ok)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want no chunk two after rate refusal", requests.Load())
+	}
+}
+
+func TestFetchDetailsPreservesValidSiblingsWithMalformedDataAndResponseRateRefusal(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after response-wide rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		data := generatedDetailData(t, request.Variables)
+		data["detail100"] = detailNodeJSON("unexpected", "malformed")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, data, []map[string]any{{
+			"type": "RATE_LIMITED", "message": "response refusal",
+		}})))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 100 || details[ids[0]].TicketID != ids[0] || details[ids[99]].TicketID != ids[99] {
+		t.Fatalf("details = %d with endpoints %+v/%+v, want all 100 validated siblings",
+			len(details), details[ids[0]], details[ids[99]])
+	}
+	failures := requireDetailFailures(t, err, []model.TicketID{ids[100]})
+	if refusal, ok := provider.InspectRateLimitRefusal(failures.Failures[ids[100]], time.Unix(1, 0)); !ok || !refusal.KnownReset {
+		t.Errorf("unissued failure = %v, refusal %+v/%t; want known response refusal", failures.Failures[ids[100]], refusal, ok)
+	}
+	if provider.KindOf(err) != provider.KindRateLimit || !strings.Contains(err.Error(), "unexpected data alias") {
+		t.Errorf("error = %v, want inspectable response refusal and protocol evidence", err)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want no chunk two after refusal", requests.Load())
+	}
+}
+
+func TestFetchDetailsStopsAfterMixedResponseAndAliasRateRefusals(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after decoded rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, generatedDetailData(t, request.Variables), []map[string]any{
+			{"type": "FORBIDDEN", "message": "response refusal"},
+			{"type": "RATE_LIMITED", "message": "alias refusal", "path": []any{"detail50"}},
+		})))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 0 {
+		t.Errorf("details = %d, want response-wide ordinary failure to discard chunk", len(details))
+	}
+	failures := requireDetailFailures(t, err, ids)
+	if provider.KindOf(failures.Failures[ids[0]]) != provider.KindAuth {
+		t.Errorf("response failure = %v, want auth", failures.Failures[ids[0]])
+	}
+	for _, id := range []model.TicketID{ids[50], ids[100]} {
+		if refusal, ok := provider.InspectRateLimitRefusal(failures.Failures[id], time.Unix(1, 0)); !ok || !refusal.KnownReset {
+			t.Errorf("failure[%q] = %v, refusal %+v/%t; want rate refusal", id, failures.Failures[id], refusal, ok)
+		}
+	}
+	if refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0)); !ok || !refusal.KnownReset || provider.KindOf(err) != provider.KindRateLimit {
+		t.Errorf("error = %v, refusal %+v/%t; want response and alias rate inspectable", err, refusal, ok)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want no chunk two after rate refusal", requests.Load())
+	}
+}
+
+func TestFetchDetailsResponseRateSurvivesWhenEveryAliasFailedLocally(t *testing.T) {
+	ids := batchIDs(101)
+	var requests atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			t.Errorf("unexpected request after response-wide rate refusal")
+		}
+		request := decodeDetailBatchRequest(t, r)
+		errors := make([]map[string]any, 0, len(request.Variables)+1)
+		for i := range len(request.Variables) {
+			errors = append(errors, map[string]any{
+				"type": "NOT_FOUND", "message": "local miss", "path": []any{"detail" + strconv.Itoa(i)},
+			})
+		}
+		errors = append(errors, map[string]any{"type": "RATE_LIMITED", "message": "response rate refusal"})
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ratelimit-reset", "1767225600")
+		_, _ = w.Write([]byte(detailBatchBody(t, generatedDetailData(t, request.Variables), errors)))
+	}))
+	t.Cleanup(s.Close)
+
+	details, err := httpBatchProvider(s.URL).FetchDetails(t.Context(), ids)
+	if len(details) != 0 {
+		t.Errorf("details = %d, want no local successes", len(details))
+	}
+	failures := requireDetailFailures(t, err, ids)
+	if provider.KindOf(failures.Failures[ids[0]]) != provider.KindBadRef {
+		t.Errorf("local failure = %v, want bad ref", failures.Failures[ids[0]])
+	}
+	if provider.KindOf(failures.Failures[ids[100]]) != provider.KindRateLimit {
+		t.Errorf("later failure = %v, want response rate refusal", failures.Failures[ids[100]])
+	}
+	if refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0)); !ok || !refusal.KnownReset || provider.KindOf(err) != provider.KindRateLimit {
+		t.Errorf("error = %v, refusal %+v/%t; want raw response rate retained", err, refusal, ok)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want no chunk two after response-wide rate refusal", requests.Load())
+	}
+}
+
+func TestFetchDetailsCancellationRacingDecodedRateRefusalReturnsContextError(t *testing.T) {
+	ids := batchIDs(101)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	body := detailBatchBody(t, map[string]any{}, []map[string]any{{
+		"type": "RATE_LIMITED", "message": "response refusal",
+	}})
+	var requests atomic.Int64
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"X-Ratelimit-Reset": []string{"1767225600"}},
+			Body: io.NopCloser(&cancelAfterReader{
+				reader: strings.NewReader(body),
+				cancel: cancel,
+			}),
+		}, nil
+	})}
+	p := github.New("github.com",
+		github.WithHTTPClient(client),
+		github.WithTokenSource(func(context.Context, string) (string, error) { return fixtureToken, nil }),
+	)
+
+	details, err := p.FetchDetails(ctx, ids)
+	var failures *provider.DetailFailures
+	refusal, limited := provider.InspectRateLimitRefusal(err, time.Unix(1, 0))
+	if len(details) != 0 || !errors.Is(err, context.Canceled) || errors.As(err, &failures) || !limited || !refusal.KnownReset {
+		t.Errorf("details/error = %#v/%v, refusal %+v/%t; want empty cancellation with retained raw rate refusal", details, err, refusal, limited)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("requests = %d, want no later chunk after cancellation", requests.Load())
 	}
 }
 

@@ -29,8 +29,8 @@ func BenchmarkFrontierLayout(b *testing.B) {
 						direction:  frontierRanksHorizontal,
 					})
 				}
-				b.ReportMetric(float64(len(layout.routes)), "routes")
-				b.ReportMetric(float64(len(layout.strokes)), "stroke_slots")
+				b.ReportMetric(float64(len(projectedFrontierRoutes(layout))), "routes")
+				b.ReportMetric(0, "retained_stroke_slots")
 				runtime.KeepAlive(layout)
 			})
 		}
@@ -59,18 +59,18 @@ func BenchmarkDenseFrontierLayout(b *testing.B) {
 					projection: &projection,
 				})
 			}
-			b.ReportMetric(float64(len(layout.routes)), "routes")
-			b.ReportMetric(float64(len(layout.strokes)), "stroke_slots")
+			b.ReportMetric(float64(len(projectedFrontierRoutes(layout))), "routes")
+			b.ReportMetric(0, "retained_stroke_slots")
 			runtime.KeepAlive(layout)
 		})
 	}
 }
 
-// BenchmarkFrontierProjectionRefusal measures hostile production policy. N=50
-// already exceeds the hard ceiling; every larger fixture remains projection-only
-// and retains no grid, route, incident, or stroke metadata.
+// BenchmarkFrontierProjectionRefusal measures hostile production policy at the
+// maximum authorized hostile size. N=50 already exceeds the hard ceiling and
+// remains projection-only with no grid, route, incident, or stroke metadata.
 func BenchmarkFrontierProjectionRefusal(b *testing.B) {
-	for _, n := range []int{50, 100, 200, 500, 1000} {
+	for _, n := range []int{50} {
 		b.Run("hostile/N="+strconv.Itoa(n), func(b *testing.B) {
 			tickets, links := benchmarkFrontierFixture("hostile", n)
 			graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
@@ -110,7 +110,7 @@ func BenchmarkFrontierFocusedRender(b *testing.B) {
 				direction:  frontierRanksHorizontal,
 			})
 			focus := model.TicketID("B-" + strconv.Itoa(n/2))
-			if got := len(layout.incident[focus]); got != 2 {
+			if got := len(projectedIncidentRoutes(layout, focus)); got != 2 {
 				b.Fatalf("focused route count = %d, want 2", got)
 			}
 			const height = 30
@@ -141,7 +141,7 @@ func BenchmarkFrontierFocusedHubOverlay(b *testing.B) {
 				direction:  frontierRanksHorizontal,
 			})
 			focus := model.TicketID("B-0")
-			if got := len(layout.incident[focus]); got != n-1 {
+			if got := len(projectedIncidentRoutes(layout, focus)); got != n-1 {
 				b.Fatalf("hub incident route count = %d, want %d", got, n-1)
 			}
 			const height = 30
@@ -158,7 +158,7 @@ func BenchmarkFrontierFocusedHubOverlay(b *testing.B) {
 				overlay = focusedFrontierOverlay(layout, focus, offsetX, offsetY,
 					frontierBenchmarkWidth, height)
 			}
-			b.ReportMetric(float64(len(layout.incident[focus])), "incident_routes")
+			b.ReportMetric(float64(len(projectedIncidentRoutes(layout, focus))), "incident_routes")
 			b.ReportMetric(float64(visibleCards), "visible_cards")
 			runtime.KeepAlive(overlay)
 		})
@@ -184,6 +184,12 @@ func benchmarkFrontierFixture(shape string, n int) ([]model.Ticket, map[model.Ti
 			blockers := []string{"B-0"}
 			if i > 1 {
 				blockers = append(blockers, "B-"+strconv.Itoa(i-1))
+			}
+			links[id] = blockedBy(blockers...)
+		case "complete":
+			blockers := make([]string, i)
+			for blocker := range i {
+				blockers[blocker] = "B-" + strconv.Itoa(blocker)
 			}
 			links[id] = blockedBy(blockers...)
 		}

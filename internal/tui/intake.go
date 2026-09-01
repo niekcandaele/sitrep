@@ -12,13 +12,13 @@ import (
 //	state, not at the moment it is rendered, and not because of who produced
 //	it.
 //
-// The monitor takes model data through four funnels — Options.Initial,
-// Options.Open, Options.Source and Options.DetailSource — and none of them has
-// to come from a Provider: a Source is any closure at all, and a caller that
-// never went near provider.Sanitized can seat whatever it likes. So the package
-// makes its own inputs safe here, at intake, and the renderers below stop being
-// where safety is decided. A new screen consuming a ListInput or a DetailInput
-// inherits that without doing anything.
+// The monitor takes model data through five funnels — Options.Initial,
+// Options.Open, Options.Source, Options.DetailSource and Options.DetailFanout —
+// and none of them has to come from a Provider: each source may be an arbitrary
+// closure, and a caller that never went near provider.Sanitized can seat whatever
+// it likes. So the package makes its own inputs safe here, at intake, and the
+// renderers below stop being where safety is decided. A new screen consuming a
+// ListInput or DetailInput inherits that without doing anything.
 //
 // The functions here are the only sanitizing calls in this package, with one
 // stated exception: renderHyperlink cleans its text and URI for scope
@@ -72,9 +72,10 @@ func safeDetail(d model.Detail) model.Detail {
 	return termtext.Detail(d)
 }
 
-// safeErr cleans the text of a Source or DetailSource failure, which the footer
-// and the error document draw. provider.Errorf already cleans a classified
-// Provider error; a directly constructed source can return any error at all.
+// safeErr cleans error text from Source, DetailSource, or DetailFanout before a
+// footer, error document, or Frontier failure renders it. provider.Errorf already
+// cleans a classified Provider error; a directly constructed closure can return
+// any error at all.
 func safeErr(err error) error {
 	return termtext.Err(err)
 }
