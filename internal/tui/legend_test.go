@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 )
 
@@ -312,15 +313,16 @@ func TestFrontierDetailLegendRefreshesResolvedGraphWithoutLayout(t *testing.T) {
 	capabilities := model.Capabilities{BlockingLinks: true}
 	ticket := model.Ticket{ID: "one", Key: "ONE", Status: model.StatusTodo}
 	m := Model{
-		mode:               modeDetail,
-		width:              120,
-		height:             30,
-		legendVisible:      true,
-		detailReturn:       modeFrontier,
-		frontierGeneration: 1,
-		details:            make(map[model.TicketID]detailEntry),
-		now:                time.Now,
-		detail:             detailState{ticket: ticket, frontierMember: true},
+		mode:                 modeDetail,
+		width:                120,
+		height:               30,
+		legendVisible:        true,
+		detailReturn:         modeFrontier,
+		frontierGeneration:   1,
+		detailFanoutInflight: 1,
+		details:              make(map[model.TicketID]detailEntry),
+		now:                  time.Now,
+		detail:               detailState{ticket: ticket, frontierMember: true},
 		frontier: frontierState{
 			graph:   model.BuildBlockingGraph([]model.Ticket{ticket}, nil, capabilities),
 			input:   FrontierInput{Tickets: []model.Ticket{ticket}, Capabilities: capabilities},
@@ -332,12 +334,8 @@ func TestFrontierDetailLegendRefreshesResolvedGraphWithoutLayout(t *testing.T) {
 		layouts++
 		return layoutFrontier(g, nodes, opts)
 	}
-	updated, cmd := m.Update(frontierDetailMsg{
-		generation: 1,
-		id:         ticket.ID,
-		detail:     model.Detail{TicketID: ticket.ID},
-		caps:       capabilities,
-	})
+	updated, cmd := m.Update(frontierResultMsg(
+		1, 0, ticket.ID, model.Detail{TicketID: ticket.ID}, capabilities, nil))
 	m = updated.(Model)
 	if cmd == nil || layouts != 0 || !m.frontier.isResolved() {
 		t.Fatalf("hidden Frontier update cmd=%v layouts=%d resolved=%t, want repaint/no layout/resolved", cmd, layouts, m.frontier.isResolved())
@@ -355,15 +353,16 @@ func TestFrontierDetailLegendRefreshesNewCycleEvidenceWithoutLayout(t *testing.T
 		{ID: "two", Key: "TWO", Status: model.StatusTodo},
 	}
 	m := Model{
-		mode:               modeDetail,
-		width:              120,
-		height:             30,
-		legendVisible:      true,
-		detailReturn:       modeFrontier,
-		frontierGeneration: 1,
-		details:            make(map[model.TicketID]detailEntry),
-		now:                time.Now,
-		detail:             detailState{ticket: tickets[0], frontierMember: true},
+		mode:                 modeDetail,
+		width:                120,
+		height:               30,
+		legendVisible:        true,
+		detailReturn:         modeFrontier,
+		frontierGeneration:   1,
+		detailFanoutInflight: 1,
+		details:              make(map[model.TicketID]detailEntry),
+		now:                  time.Now,
+		detail:               detailState{ticket: tickets[0], frontierMember: true},
 		frontier: frontierState{
 			graph:   model.BuildBlockingGraph(tickets, nil, capabilities),
 			input:   FrontierInput{Tickets: tickets, Capabilities: capabilities},
@@ -375,29 +374,20 @@ func TestFrontierDetailLegendRefreshesNewCycleEvidenceWithoutLayout(t *testing.T
 		layouts++
 		return layoutFrontier(g, nodes, opts)
 	}
-	updated, first := m.Update(frontierDetailMsg{
+	updated, cmd := m.Update(frontierDetailsMsg{
 		generation: 1,
-		id:         "one",
-		detail: model.Detail{TicketID: "one", Links: []model.Link{{
-			Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "two", Key: "TWO"},
-		}}},
-		caps: capabilities,
+		outcomes: []detailfanout.Outcome{
+			{ID: "one", Detail: model.Detail{TicketID: "one", Links: []model.Link{{
+				Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "two", Key: "TWO"},
+			}}}, Caps: capabilities},
+			{ID: "two", Detail: model.Detail{TicketID: "two", Links: []model.Link{{
+				Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "one", Key: "ONE"},
+			}}}, Caps: capabilities},
+		},
 	})
 	m = updated.(Model)
-	if first != nil || m.frontier.isResolved() {
-		t.Fatalf("partial hidden Frontier update cmd=%v resolved=%t, want no command/unresolved", first, m.frontier.isResolved())
-	}
-	updated, second := m.Update(frontierDetailMsg{
-		generation: 1,
-		id:         "two",
-		detail: model.Detail{TicketID: "two", Links: []model.Link{{
-			Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "one", Key: "ONE"},
-		}}},
-		caps: capabilities,
-	})
-	m = updated.(Model)
-	if second == nil || layouts != 0 || !m.frontier.isResolved() {
-		t.Fatalf("resolved hidden Frontier update cmd=%v layouts=%d resolved=%t, want repaint/no layout/resolved", second, layouts, m.frontier.isResolved())
+	if cmd == nil || layouts != 0 || !m.frontier.isResolved() {
+		t.Fatalf("resolved hidden Frontier update cmd=%v layouts=%d resolved=%t, want repaint/no layout/resolved", cmd, layouts, m.frontier.isResolved())
 	}
 	got := strings.Join(m.detailLegendLines(detailDocument{}), "\n")
 	if !strings.Contains(got, "CYCLE") || !strings.Contains(got, "cycle 1:") {
@@ -744,13 +734,8 @@ func TestFrontierFanoutDoesNotOverwriteNewerDetailEvidence(t *testing.T) {
 				t.Fatalf("direct Detail cmd=%v layouts=%d fetches=%d, want repaint/no layout/no fetch", cmd, layouts, fetches)
 			}
 
-			updated, cmd = m.Update(frontierDetailMsg{
-				generation: tc.generation,
-				id:         "one",
-				detail:     tc.detail,
-				caps:       capabilities,
-				err:        tc.err,
-			})
+			updated, cmd = m.Update(frontierResultMsg(
+				tc.generation, 0, "one", tc.detail, capabilities, tc.err))
 			m = updated.(Model)
 			if layouts != 0 || fetches != 0 || (tc.generation == 4 && cmd == nil) || (tc.generation != 4 && cmd != nil) {
 				t.Fatalf("late fan-out cmd=%v layouts=%d fetches=%d, want current repaint or stale no-op with no layout/fetch", cmd, layouts, fetches)
@@ -827,10 +812,8 @@ func TestFrontierFanoutPreservesNewerDirectDetailAcrossModes(t *testing.T) {
 			m.frontier = frontierState{
 				input: FrontierInput{Tickets: tickets, Links: map[model.TicketID][]model.Link{"two": nil}, Capabilities: capabilities},
 			}
-			updated, cmd := m.Update(frontierDetailMsg{
-				generation: 4, detailEvidenceVersion: 0, id: "one", caps: capabilities,
-				detail: model.Detail{Description: "stale F4 Detail"},
-			})
+			updated, cmd := m.Update(frontierResultMsg(
+				4, 0, "one", model.Detail{Description: "stale F4 Detail"}, capabilities, nil))
 			m = updated.(Model)
 			if m.details["one"].detail.Description != "new direct Detail" {
 				t.Fatalf("stale F4 replaced newer direct cache: cmd=%v entry=%#v", cmd, m.details["one"])
@@ -838,10 +821,9 @@ func TestFrontierFanoutPreservesNewerDirectDetailAcrossModes(t *testing.T) {
 
 			// A F5 command issued after the direct read carries its version and may
 			// replace it normally.
-			updated, cmd = m.Update(frontierDetailMsg{
-				generation: 5, detailEvidenceVersion: m.detailEvidenceVersion, id: "one", caps: capabilities,
-				detail: model.Detail{Description: "new F5 Detail"},
-			})
+			updated, cmd = m.Update(frontierResultMsg(
+				5, m.detailEvidenceVersion, "one",
+				model.Detail{Description: "new F5 Detail"}, capabilities, nil))
 			m = updated.(Model)
 			if cmd == nil || m.details["one"].detail.Description != "new F5 Detail" {
 				t.Fatalf("F5 did not replace direct cache: cmd=%v entry=%#v", cmd, m.details["one"])
@@ -881,25 +863,17 @@ func TestCurrentFrontierFanoutOverridesStaleGenerationCache(t *testing.T) {
 		return model.Detail{}, model.Capabilities{}, nil
 	}
 
-	updated, cmd := m.Update(frontierDetailMsg{
-		generation: 6,
-		id:         "one",
-		detail:     model.Detail{Description: "old F6", Links: nil},
-		caps:       capabilities,
-	})
+	updated, cmd := m.Update(frontierResultMsg(
+		6, 0, "one", model.Detail{Description: "old F6", Links: nil}, capabilities, nil))
 	m = updated.(Model)
 	if cmd != nil || m.details["one"].detail.Description != "old F6" {
 		t.Fatalf("stale F6 did not preserve normal cache warming: cmd=%v entry=%#v", cmd, m.details["one"])
 	}
 
-	updated, cmd = m.Update(frontierDetailMsg{
-		generation: 7,
-		id:         "one",
-		detail: model.Detail{Description: "new F7", Links: []model.Link{{
+	updated, cmd = m.Update(frontierResultMsg(
+		7, 0, "one", model.Detail{Description: "new F7", Links: []model.Link{{
 			Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "two", Key: "TWO"},
-		}}},
-		caps: capabilities,
-	})
+		}}}, capabilities, nil))
 	m = updated.(Model)
 	if cmd == nil || layouts != 0 || fetches != 0 {
 		t.Fatalf("current F7 cmd=%v layouts=%d fetches=%d, want repaint/no layout/no fetch", cmd, layouts, fetches)
@@ -909,6 +883,136 @@ func TestCurrentFrontierFanoutOverridesStaleGenerationCache(t *testing.T) {
 	}
 	if got := m.frontier.input.Links["one"]; len(got) != 1 || got[0].Target.ID != "two" {
 		t.Fatalf("current F7 failed to seat its Links: %#v", got)
+	}
+}
+
+func TestNewerSuccessfulFanoutRejectsOlderSuccessEverywhere(t *testing.T) {
+	caps := model.Capabilities{BlockingLinks: true}
+	tickets := []model.Ticket{
+		{ID: "A", Key: "A", Status: model.StatusTodo},
+		{ID: "B", Key: "B", Status: model.StatusTodo},
+	}
+	hAt := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	oldArrivesAt := hAt.Add(time.Hour)
+	now := hAt
+	m := Model{
+		mode:                 modeFrontier,
+		width:                120,
+		height:               30,
+		frontierGeneration:   8,
+		detailFanoutInflight: 2,
+		details: map[model.TicketID]detailEntry{
+			"B": {
+				detail:            model.Detail{TicketID: "B"},
+				caps:              caps,
+				fetchedAt:         hAt,
+				frontierDetail:    model.Detail{TicketID: "B"},
+				frontierFetchedAt: hAt,
+				frontierEvidence:  true,
+			},
+		},
+		now:   func() time.Time { return now },
+		input: ListInput{Tickets: tickets, Capabilities: caps, FetchedAt: hAt},
+		frontier: frontierState{
+			input: FrontierInput{
+				Tickets: tickets, Links: map[model.TicketID][]model.Link{"B": nil}, Capabilities: caps,
+			},
+			planned: 1,
+		},
+	}
+	hDetail := model.Detail{TicketID: "A", Description: "accepted H", Links: []model.Link{{
+		Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "B", Key: "B"},
+	}}}
+	updated, _ := m.onFrontierDetails(frontierResultMsg(8, 0, "A", hDetail, caps, nil))
+	m = updated.(Model)
+	hMarkers := m.listMarkers()
+	if !hMarkers.active || hMarkers.has("A") || !hMarkers.has("B") || hMarkers.count != 1 {
+		t.Fatalf("List markers after H = %+v, want only B Actionable", hMarkers)
+	}
+
+	now = oldArrivesAt
+	gDetail := model.Detail{TicketID: "A", Description: "late G"}
+	updated, _ = m.onFrontierDetails(frontierResultMsg(7, 0, "A", gDetail, caps, nil))
+	m = updated.(Model)
+
+	entry := m.details["A"]
+	if entry.detail.Description != hDetail.Description || entry.lastFanoutGeneration != 8 {
+		t.Fatalf("late G regressed accepted H cache/provenance: %#v", entry)
+	}
+	if !entry.fetchedAt.Equal(hAt) || !entry.frontierFetchedAt.Equal(hAt) {
+		t.Errorf("late G restamped H evidence: fetched=%v frontier=%v want %v",
+			entry.fetchedAt, entry.frontierFetchedAt, hAt)
+	}
+	if got := m.frontier.input.Links["A"]; len(got) != 1 || got[0].Target.ID != "B" {
+		t.Fatalf("late G regressed current H seat: %#v", got)
+	}
+	markers := m.listMarkers()
+	if markers.active != hMarkers.active || markers.count != hMarkers.count || markers.has("A") != hMarkers.has("A") || markers.has("B") != hMarkers.has("B") {
+		t.Errorf("late G regressed List markers from %+v to %+v", hMarkers, markers)
+	}
+
+	adopted := m
+	adopted.frontier.input.Links = map[model.TicketID][]model.Link{"B": nil}
+	adopted = adopted.adoptCachedLinks()
+	if got := adopted.frontier.input.Links["A"]; len(got) != 1 || got[0].Target.ID != "B" {
+		t.Errorf("later cache adoption used G instead of accepted H: %#v", got)
+	}
+}
+
+func TestNewerFanoutFailureDoesNotBlockOlderSuccessWarming(t *testing.T) {
+	caps := model.Capabilities{BlockingLinks: true}
+	tickets := []model.Ticket{
+		{ID: "A", Key: "A", Status: model.StatusTodo},
+		{ID: "B", Key: "B", Status: model.StatusTodo},
+	}
+	gAt := time.Date(2026, time.September, 1, 13, 0, 0, 0, time.UTC)
+	hErr := errors.New("H failed")
+	m := Model{
+		mode:                 modeFrontier,
+		width:                120,
+		height:               30,
+		frontierGeneration:   8,
+		detailFanoutInflight: 2,
+		details:              make(map[model.TicketID]detailEntry),
+		now:                  func() time.Time { return gAt },
+		input:                ListInput{Tickets: tickets, Capabilities: caps, FetchedAt: gAt},
+		frontier: frontierState{
+			input: FrontierInput{
+				Tickets: tickets, Links: map[model.TicketID][]model.Link{"B": nil}, Capabilities: caps,
+			},
+			planned: 1,
+		},
+	}
+
+	updated, _ := m.onFrontierDetails(frontierResultMsg(8, 0, "A", model.Detail{}, caps, hErr))
+	m = updated.(Model)
+	if _, failed := m.frontier.failed["A"]; !failed || !errors.Is(m.frontier.lastErr, hErr) {
+		t.Fatalf("H failure was not retained on its current seat: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+	}
+
+	gDetail := model.Detail{TicketID: "A", Description: "paid-for G", Links: []model.Link{{
+		Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "B", Key: "B"},
+	}}}
+	updated, _ = m.onFrontierDetails(frontierResultMsg(7, 0, "A", gDetail, caps, nil))
+	m = updated.(Model)
+
+	entry := m.details["A"]
+	if entry.detail.Description != gDetail.Description || entry.lastFanoutGeneration != 7 || !entry.fetchedAt.Equal(gAt) {
+		t.Fatalf("H failure suppressed paid-for G cache warming: %#v", entry)
+	}
+	if _, seated := m.frontier.input.Links["A"]; seated {
+		t.Fatal("stale G mutated H's current failed seat before adoption")
+	}
+	if _, failed := m.frontier.failed["A"]; !failed || !errors.Is(m.frontier.lastErr, hErr) {
+		t.Fatalf("stale G cleared H failure: failed=%v err=%v", m.frontier.failed, m.frontier.lastErr)
+	}
+
+	adopted := m.adoptCachedLinks()
+	if got := adopted.frontier.input.Links["A"]; len(got) != 1 || got[0].Target.ID != "B" {
+		t.Errorf("normal adoption did not seat paid-for G: %#v", got)
+	}
+	if _, failed := adopted.frontier.failed["A"]; failed {
+		t.Error("normal adoption left H's obsolete failure attached")
 	}
 }
 
@@ -1022,9 +1126,8 @@ func TestFollowedWatchlistAliasNeverSeedsFrontierEvidence(t *testing.T) {
 	older := model.Detail{Links: []model.Link{{
 		Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: source.ID, Key: source.Key},
 	}}}
-	updated, _ = m.onFrontierDetail(frontierDetailMsg{
-		generation: m.frontierGeneration, id: alias.ID, detail: older,
-	})
+	updated, _ = m.onFrontierDetails(frontierResultMsg(
+		m.frontierGeneration, 0, alias.ID, older, model.Capabilities{}, nil))
 	m = updated.(Model)
 	if !m.details[alias.ID].frontierIneligible || !slices.Equal(m.details[alias.ID].detail.Links, followedLinks) {
 		t.Fatalf("older fan-out replaced followed alias display cache: %#v", m.details[alias.ID])
@@ -1036,9 +1139,8 @@ func TestFollowedWatchlistAliasNeverSeedsFrontierEvidence(t *testing.T) {
 		t.Fatalf("older fan-out success changed evidence or accounting: entry=%#v done=%d inflight=%d", m.details[alias.ID], m.frontier.done, m.detailFanoutInflight)
 	}
 	failure := errors.New("older fan-out failed")
-	updated, _ = m.onFrontierDetail(frontierDetailMsg{
-		generation: m.frontierGeneration, id: alias.ID, err: failure,
-	})
+	updated, _ = m.onFrontierDetails(frontierResultMsg(
+		m.frontierGeneration, 0, alias.ID, model.Detail{}, model.Capabilities{}, failure))
 	m = updated.(Model)
 	if _, failed := m.frontier.failed[alias.ID]; failed {
 		t.Fatal("older fan-out failure became followed alias Frontier failure")
@@ -1171,8 +1273,9 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	m := Model{
 		mode: modeDetail, detailReturn: modeFrontier, detailGeneration: 1,
 		detailEvidenceVersion: 7, now: func() time.Time { return displayAt },
-		detail:             detailState{ticket: alias, loading: true},
-		frontierGeneration: 1,
+		detail:               detailState{ticket: alias, loading: true},
+		frontierGeneration:   1,
+		detailFanoutInflight: 2,
 		details: map[model.TicketID]detailEntry{
 			alias.ID: {
 				detail: prior, fetchedAt: priorAt, frontierDetail: prior,
@@ -1192,9 +1295,8 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	}
 
 	stale := model.Detail{Links: []model.Link{{Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "stale", Key: "STALE"}}}}
-	updated, _ = m.onFrontierDetail(frontierDetailMsg{
-		generation: 1, detailEvidenceVersion: 7, id: alias.ID, detail: stale,
-	})
+	updated, _ = m.onFrontierDetails(frontierResultMsg(
+		1, 7, alias.ID, stale, model.Capabilities{}, nil))
 	m = updated.(Model)
 	got, eligible = m.details[alias.ID].frontierLinks()
 	if !eligible || !slices.Equal(got.Links, prior.Links) || !slices.Equal(m.details[alias.ID].detail.Links, followed.Links) || !m.details[alias.ID].frontierIneligible {
@@ -1202,9 +1304,8 @@ func TestFollowedAliasPreservesPriorEligibleEvidenceOrdering(t *testing.T) {
 	}
 
 	current := model.Detail{Links: []model.Link{{Kind: model.LinkBlockedBy, Target: model.LinkTarget{ID: "current", Key: "CURRENT"}}}}
-	updated, _ = m.onFrontierDetail(frontierDetailMsg{
-		generation: 1, detailEvidenceVersion: 8, id: alias.ID, detail: current,
-	})
+	updated, _ = m.onFrontierDetails(frontierResultMsg(
+		1, 8, alias.ID, current, model.Capabilities{}, nil))
 	m = updated.(Model)
 	got, eligible = m.details[alias.ID].frontierLinks()
 	if !eligible || !slices.Equal(got.Links, current.Links) {

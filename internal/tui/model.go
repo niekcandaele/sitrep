@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/render/plain"
@@ -23,9 +24,10 @@ import (
 // Model is the monitor's state: the last good reading of the Watchlist, the
 // rows derived from it, and where the cursor sits.
 type Model struct {
-	fetch    func() (ListInput, error)
-	now      func() time.Time
-	interval time.Duration
+	fetch          func(context.Context) (ListInput, error)
+	sessionContext context.Context
+	now            func() time.Time
+	interval       time.Duration
 
 	input       ListInput
 	hasData     bool
@@ -33,10 +35,24 @@ type Model struct {
 	refreshing  bool
 	generation  int
 	lastAttempt time.Time
-	// rateHold blocks refreshes after a current rate-limit refusal or an exhausted
-	// successful budget. An empty reset is the deliberate manual-only hold for a
-	// refusal whose headers supplied no usable deadline.
+	// rateHold blocks automatic Tracker requests and all explicit requests except
+	// the one reserved probe through an unknown-reset refusal. An empty reset is
+	// the deliberate manual-only hold for a refusal whose headers supplied no
+	// usable deadline.
 	rateHold rateHold
+	// requestPolicyEpoch invalidates work admitted before a refusal or exhausted
+	// budget observation. unknownProbeToken reserves the sole explicit request
+	// allowed through an unknown-reset hold until that request settles. A later
+	// tokenless unknown refusal can revoke only the reservation's clearing authority,
+	// not release the reservation itself.
+	requestPolicyEpoch      uint64
+	unknownProbeToken       uint64
+	unknownProbeInvalidated bool
+	nextUnknownProbeToken   uint64
+	sourceRequestPolicy     provider.RequestPolicy
+	detailRequestPolicy     provider.RequestPolicy
+	frontierRequestPolicy   provider.RequestPolicy
+	frontierAdmissionReady  bool
 	// lowBudget widens only automatic cadence after a successful low-budget read.
 	lowBudget lowBudgetSchedule
 	// heartbeatCmd is injectable so scheduler tests advance only their controlled
@@ -118,9 +134,9 @@ type Model struct {
 	frontierRebuildPendingGeneration int
 	frontierRebuildTimerID           int
 	frontierRebuildNextTimerID       int
-	// detailFanoutInflight counts issued bulk reads across Frontier generations.
-	// Cancellation does not release a slot until the command returns, so rapid
-	// leave/re-entry cycles can never exceed detailfanout.Parallelism.
+	// detailFanoutInflight counts issued plural commands across Frontier
+	// generations. Cancellation does not release a slot until the command returns,
+	// so rapid leave/re-entry cycles can never exceed detailfanout.Parallelism.
 	detailFanoutInflight int
 	// detailReturn is the mode a root Detail seat returns to on esc. The
 	// Frontier is a second rendering of the list, not a Trail entry, so a Ticket
@@ -132,7 +148,8 @@ type Model struct {
 	// cannot act after capture changes or after leaving and returning to the same ID.
 	mouseEpoch int
 
-	fetchDetail DetailSource
+	fetchDetail  DetailSource
+	fetchDetails detailfanout.Fetch
 	// newReadContext derives one independently cancellable Detail or Frontier
 	// generation from the monitor session. The cancel functions live on Model,
 	// never in the render seats restored by Detail Trail or Frontier reseats.
@@ -172,11 +189,81 @@ type rateHold struct {
 	resetAt   time.Time
 	exhausted bool
 	manual    bool
+	// A known refusal from the reserved explicit probe is authoritative over
+	// tokenless responses admitted before that probe. Keeping its provenance
+	// makes that rule independent of response order after the reservation settles.
+	probeToken uint64
+	probeEpoch uint64
 }
 
 func (h rateHold) active(now time.Time) bool {
 	return h.manual || now.Before(h.resetAt)
 }
+
+// trackerHoldNotice is the one terminal-visible account of a Tracker-wide hard
+// hold. Every screen uses it so a rate refusal is not restated as a local read
+// failure with an untruthful retry promise.
+func (m Model) trackerHoldNotice() string {
+	now := m.policyNow()
+	if !m.rateHold.active(now) {
+		return ""
+	}
+	if m.rateHold.exhausted {
+		notice := "Tracker requests are held: rate limit budget exhausted until " +
+			m.rateHold.resetAt.Local().Format(time.Kitchen) + "; r is held."
+		if m.refreshHeld {
+			notice = "Tracker requests are held: rate limit budget exhausted until " +
+				m.rateHold.resetAt.Local().Format(time.Kitchen) + ". " + m.refreshHoldGuidance() + " r is held."
+		}
+		return notice
+	}
+	if m.rateHold.manual {
+		if m.unknownProbeToken != 0 {
+			notice := "Tracker requests are held: reset time is unknown and an explicit retry is in progress, so r is held."
+			if m.refreshHeld {
+				notice += " " + m.refreshHoldGuidance()
+			}
+			return notice
+		}
+		notice := "Tracker requests are held except for one explicit List, Detail, or Frontier request while reset time is unknown; Frontier may read the whole Watchlist."
+		if m.refreshHeld {
+			notice += " " + m.refreshHoldGuidance()
+		}
+		return notice
+	}
+	if m.refreshHeld {
+		return "Tracker requests are held until " + m.rateHold.resetAt.Local().Format(time.Kitchen) +
+			". " + m.refreshHoldGuidance() + " r is held."
+	}
+	return "Tracker requests are held. Automatic refresh resumes at " +
+		m.rateHold.resetAt.Local().Format(time.Kitchen) + "; r is held."
+}
+
+func (m Model) refreshHoldGuidance() string {
+	if m.mode == modeList {
+		return "Monitor refresh is also held; press p to resume it."
+	}
+	return "Automatic List monitoring is also held; resume it from the List."
+}
+
+func (m Model) rateRefusal(err error) bool {
+	_, found := provider.InspectRateLimitRefusal(err, m.policyNow())
+	return found
+}
+
+func (m Model) policyNow() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+type trackerRequestIntent uint8
+
+const (
+	trackerRequestAutomatic trackerRequestIntent = iota
+	trackerRequestExplicit
+)
 
 type lowBudgetSchedule struct {
 	resetAt time.Time
@@ -223,6 +310,18 @@ func New(ctx context.Context, opts Options) Model {
 		d, caps, err := detailSrc(ctx, id)
 		return safeDetail(d), caps, safeErr(err)
 	}
+	fanoutSrc := opts.DetailFanout
+	if fanoutSrc == nil {
+		fanoutSrc = detailFanoutFromSource(fetchDetail)
+	}
+	fetchDetails := func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		details, caps, err := fanoutSrc(ctx, ids)
+		cleaned := make(map[model.TicketID]model.Detail, len(details))
+		for id, detail := range details {
+			cleaned[id] = safeDetail(detail)
+		}
+		return cleaned, caps, safeDetailFanoutError(err)
+	}
 
 	// The box draws no cursor of its own: the real terminal cursor is placed
 	// on it from View, which keeps the frame free of a blinking glyph that a
@@ -233,16 +332,17 @@ func New(ctx context.Context, opts Options) Model {
 	search.SetVirtualCursor(false)
 
 	m := Model{
-		fetch: func() (ListInput, error) {
+		fetch: func(ctx context.Context) (ListInput, error) {
 			if src == nil {
 				return ListInput{}, errNoSource
 			}
-			in, err := src(sessionCtx)
+			in, err := src(ctx)
 			return safeListInput(in), safeErr(err)
 		},
-		now:          now,
-		interval:     opts.Interval,
-		heartbeatCmd: heartbeatCmd,
+		sessionContext: sessionCtx,
+		now:            now,
+		interval:       opts.Interval,
+		heartbeatCmd:   heartbeatCmd,
 		// The first refresh is already on its way out of Init.
 		generation:      1,
 		refreshing:      true,
@@ -253,6 +353,7 @@ func New(ctx context.Context, opts Options) Model {
 		legendVisible:   true,
 		search:          search,
 		fetchDetail:     fetchDetail,
+		fetchDetails:    fetchDetails,
 		cancelSession:   cancelSession,
 		newReadContext: func() (context.Context, context.CancelFunc) {
 			return context.WithCancel(sessionCtx)
@@ -272,12 +373,17 @@ func New(ctx context.Context, opts Options) Model {
 	m = m.syncMouseKeys()
 	m = m.syncRefreshHoldKey()
 
-	if opts.InitialError != nil && provider.KindOf(opts.InitialError) == provider.KindRateLimit {
-		m.lastErr = safeErr(opts.InitialError)
-		m.rateHold = m.rateLimitHold(m.lastErr)
-		if m.rateHold.manual || !m.rateHold.resetAt.IsZero() {
-			m.refreshing = false
-			m.generation = 0
+	if opts.InitialError != nil {
+		initialErr := safeErr(opts.InitialError)
+		if next, refused := m.observeRateRefusal(initialErr, provider.RequestPolicy{}); refused {
+			m = next
+			if m.rateHold.active(m.policyNow()) {
+				m.lastErr = initialErr
+				m.refreshing = false
+				m.generation = 0
+			} else {
+				m.sourceRequestPolicy = provider.RequestPolicy{Epoch: m.requestPolicyEpoch}
+			}
 		}
 	}
 
@@ -287,7 +393,7 @@ func New(ctx context.Context, opts Options) Model {
 		// clock runs from when the reading was *taken*, so the first auto-refresh
 		// lands one interval after that rather than one interval after startup.
 		m.input = safeListInput(*opts.Initial)
-		m = m.applySuccessfulBudgetPolicy(m.input)
+		m = m.applySuccessfulBudgetPolicy(m.input, provider.RequestPolicy{Epoch: m.requestPolicyEpoch})
 		m.hasData = true
 		m.refreshing = false
 		m.generation = 0
@@ -328,14 +434,18 @@ func (m Model) retireDetailRead() Model {
 	}
 	m.detailContext = nil
 	m.cancelDetail = nil
+	m.detailRequestPolicy = provider.RequestPolicy{}
 	m.detailGeneration++
 	return m
 }
 
 // startDetailRead gives the current Detail generation its own session child.
 // Callers invoke it only when they will issue a Provider command.
-func (m Model) startDetailRead() Model {
-	m.detailContext, m.cancelDetail = m.newReadContext()
+func (m Model) startDetailRead(policy provider.RequestPolicy) Model {
+	ctx, cancel := m.newReadContext()
+	m.detailContext = provider.WithRequestPolicy(ctx, policy)
+	m.cancelDetail = cancel
+	m.detailRequestPolicy = policy
 	return m
 }
 
@@ -347,6 +457,15 @@ func (m Model) finishDetailRead() Model {
 	}
 	m.detailContext = nil
 	m.cancelDetail = nil
+	m.detailRequestPolicy = provider.RequestPolicy{}
+	return m
+}
+
+func (m Model) releaseUndispatchedFrontierProbe() Model {
+	policy := m.frontierRequestPolicy
+	if m.frontierAdmissionReady && policy.ProbeToken != 0 && policy.ProbeToken == m.unknownProbeToken {
+		return m.clearUnknownProbeReservation()
+	}
 	return m
 }
 
@@ -355,29 +474,39 @@ func (m Model) finishDetailRead() Model {
 // shared in-flight count is deliberately untouched until those commands return.
 func (m Model) retireFrontierFanout() Model {
 	m = m.discardPendingFrontierRebuild()
+	m = m.releaseUndispatchedFrontierProbe()
 	if m.cancelFrontier != nil {
 		m.cancelFrontier()
 	}
 	m.frontierContext = nil
 	m.cancelFrontier = nil
+	m.frontierRequestPolicy = provider.RequestPolicy{}
+	m.frontierAdmissionReady = false
 	m.frontierGeneration++
 	m.frontier.queued = nil
 	return m
 }
 
 // startFrontierFanout gives an accepted non-empty plan one session child.
-func (m Model) startFrontierFanout() Model {
-	m.frontierContext, m.cancelFrontier = m.newReadContext()
+func (m Model) startFrontierFanout(policy provider.RequestPolicy) Model {
+	ctx, cancel := m.newReadContext()
+	m.frontierContext = provider.WithRequestPolicy(ctx, policy)
+	m.cancelFrontier = cancel
+	m.frontierRequestPolicy = policy
+	m.frontierAdmissionReady = true
 	return m
 }
 
 // finishFrontierFanout releases a settled child without invalidating the seat.
 func (m Model) finishFrontierFanout() Model {
+	m = m.releaseUndispatchedFrontierProbe()
 	if m.cancelFrontier != nil {
 		m.cancelFrontier()
 	}
 	m.frontierContext = nil
 	m.cancelFrontier = nil
+	m.frontierRequestPolicy = provider.RequestPolicy{}
+	m.frontierAdmissionReady = false
 	return m
 }
 
@@ -444,8 +573,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case frontierRebuildMsg:
 		return m.onFrontierRebuild(msg)
 
-	case frontierDetailMsg:
-		return m.onFrontierDetail(msg)
+	case frontierDetailsMsg:
+		return m.onFrontierDetails(msg)
 
 	case frontierMouseClickMsg:
 		if m.mode != modeFrontier || !m.mouseEnabled || msg.epoch != m.mouseEpoch {
@@ -550,18 +679,26 @@ func (m Model) View() tea.View {
 	}
 
 	if m.mode == modeDetail {
-		doc := m.detailDocument()
-		v.SetContent(m.detailFrame(doc))
-		if m.mouseEnabled {
-			v.OnMouse = m.detailMouseHandler(doc)
+		// Keep policy wording, document selection, footer height, and mouse geometry
+		// on one side of a reset boundary for the whole frame.
+		now := m.policyNow()
+		frame := m
+		frame.now = func() time.Time { return now }
+		doc := frame.detailDocument()
+		v.SetContent(frame.detailFrame(doc))
+		if frame.mouseEnabled {
+			v.OnMouse = frame.detailMouseHandler(doc)
 		}
 		return v
 	}
 
 	if m.mode == modeFrontier {
-		v.SetContent(m.frontierFrame())
-		if m.mouseEnabled {
-			v.OnMouse = m.frontierMouseHandler()
+		now := m.policyNow()
+		frame := m
+		frame.now = func() time.Time { return now }
+		v.SetContent(frame.frontierFrame())
+		if frame.mouseEnabled {
+			v.OnMouse = frame.frontierMouseHandler()
 		}
 		return v
 	}
@@ -625,6 +762,146 @@ func (m Model) onHeartbeat() (tea.Model, tea.Cmd) {
 	return next, tea.Batch(cmd, next.heartbeatCmd)
 }
 
+func (m Model) trackerExplicitRequestAvailable() bool {
+	now := m.policyNow()
+	return !m.rateHold.active(now) || m.rateHold.manual && m.unknownProbeToken == 0
+}
+
+func (m Model) trackerRequestAdmission(intent trackerRequestIntent) (Model, provider.RequestPolicy, bool) {
+	now := m.policyNow()
+	m = m.expireRatePolicy(now)
+	policy := provider.RequestPolicy{Epoch: m.requestPolicyEpoch}
+	if !m.rateHold.active(now) {
+		return m, policy, true
+	}
+	if intent == trackerRequestAutomatic || !m.rateHold.manual || m.unknownProbeToken != 0 {
+		return m, provider.RequestPolicy{}, false
+	}
+	m.nextUnknownProbeToken++
+	m.unknownProbeToken = m.nextUnknownProbeToken
+	m.unknownProbeInvalidated = false
+	policy.ProbeToken = m.unknownProbeToken
+	return m, policy, true
+}
+
+func (m Model) clearUnknownProbeReservation() Model {
+	m.unknownProbeToken = 0
+	m.unknownProbeInvalidated = false
+	return m
+}
+
+func (m Model) trackerAdmissionStillValid(policy provider.RequestPolicy) (Model, bool) {
+	now := m.policyNow()
+	m = m.expireRatePolicy(now)
+	if policy.Epoch != m.requestPolicyEpoch {
+		return m, false
+	}
+	if !m.rateHold.active(now) {
+		return m, policy.ProbeToken == 0
+	}
+	return m, m.rateHold.manual && policy.ProbeToken != 0 && policy.ProbeToken == m.unknownProbeToken
+}
+
+// settleTrackerRequest updates Tracker policy independently of screen
+// generations. A stale payload can therefore install a real refusal while all
+// of its semantic state remains rejectable by the caller.
+func (m Model) settleTrackerRequest(policy provider.RequestPolicy, err error, success bool) (Model, bool) {
+	var refused bool
+	m, refused = m.observeRateRefusal(err, policy)
+	if policy.ProbeToken == 0 || policy.ProbeToken != m.unknownProbeToken {
+		return m, refused
+	}
+	if !refused && success && m.rateHold.manual && !m.unknownProbeInvalidated {
+		m.rateHold = rateHold{}
+	}
+	return m.clearUnknownProbeReservation(), refused
+}
+
+func (m Model) observeRateRefusal(err error, policy provider.RequestPolicy) (Model, bool) {
+	if err == nil {
+		return m, false
+	}
+	now := m.policyNow()
+	refusal, found := provider.InspectRateLimitRefusal(err, now)
+	if !found {
+		return m, false
+	}
+	if refusal.ExpiredOnly {
+		// The deadline creates no hold, but the Provider still refused work admitted
+		// in this epoch. Advancing it lets an epoch-scoped Provider barrier admit the
+		// next request instead of replaying the elapsed refusal forever.
+		m.requestPolicyEpoch++
+		m.lowBudget = lowBudgetSchedule{}
+		return m, true
+	}
+	m = m.expireRatePolicy(now)
+	frontierFooterHeight := m.frontierFooterHeight()
+	currentProbe := policy.ProbeToken != 0 && policy.ProbeToken == m.unknownProbeToken
+	invalidatesProbeClear := m.unknownProbeToken != 0 && !currentProbe && !refusal.KnownReset
+	knownFromCurrentProbe := currentProbe && refusal.KnownReset
+	probeKnownDominates := !m.rateHold.manual && m.rateHold.probeToken != 0 &&
+		!refusal.KnownReset && policy.Epoch <= m.rateHold.probeEpoch
+
+	switch {
+	case !m.rateHold.active(now):
+		m.rateHold = holdFromRefusal(refusal)
+	case m.rateHold.manual:
+		switch {
+		case knownFromCurrentProbe:
+			m.rateHold = holdFromRefusal(refusal)
+			m.rateHold.probeToken = policy.ProbeToken
+			m.rateHold.probeEpoch = policy.Epoch
+		case !refusal.KnownReset:
+			m.rateHold = holdFromRefusal(refusal)
+		}
+	case probeKnownDominates:
+		// A response admitted before the explicit probe cannot undo that probe's
+		// successful known-reset evidence merely by arriving later.
+	case !refusal.KnownReset:
+		m.rateHold = holdFromRefusal(refusal)
+	case refusal.ResetAt.After(m.rateHold.resetAt):
+		m.rateHold = holdFromRefusal(refusal)
+	}
+
+	if currentProbe {
+		m = m.clearUnknownProbeReservation()
+	} else if invalidatesProbeClear {
+		m.unknownProbeInvalidated = true
+	}
+	m.requestPolicyEpoch++
+	m.lowBudget = lowBudgetSchedule{}
+	if m.mode == modeFrontier && m.frontierFooterHeight() != frontierFooterHeight {
+		m.mouseEpoch++
+	}
+	return m, true
+}
+
+func holdFromRefusal(refusal provider.RateLimitRefusal) rateHold {
+	if !refusal.KnownReset {
+		return rateHold{err: refusal.Err, manual: true}
+	}
+	return rateHold{err: refusal.Err, resetAt: refusal.ResetAt}
+}
+
+func (m Model) observeExhaustedBudget(resetAt time.Time, _ provider.RequestPolicy) Model {
+	now := m.policyNow()
+	if !now.Before(resetAt) {
+		return m
+	}
+	m = m.expireRatePolicy(now)
+	frontierFooterHeight := m.frontierFooterHeight()
+	if m.rateHold.active(now) && !m.rateHold.manual && !resetAt.After(m.rateHold.resetAt) {
+		return m
+	}
+	m.rateHold = rateHold{resetAt: resetAt.UTC(), exhausted: true}
+	m.requestPolicyEpoch++
+	m.lowBudget = lowBudgetSchedule{}
+	if m.mode == modeFrontier && m.frontierFooterHeight() != frontierFooterHeight {
+		m.mouseEpoch++
+	}
+	return m
+}
+
 // automaticRefreshAdmission is the single automatic-refresh gate. Future
 // scheduler policy extends it rather than copying its rate-limit decisions.
 func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
@@ -644,18 +921,29 @@ func (m Model) automaticRefreshAdmission() (Model, bool, time.Time) {
 	if holdExpired {
 		due = now
 	}
-	return m, !now.Before(due), due
+	if now.Before(due) {
+		return m, false, due
+	}
+	next, policy, allowed := m.trackerRequestAdmission(trackerRequestAutomatic)
+	if !allowed {
+		return next, false, time.Time{}
+	}
+	next.sourceRequestPolicy = policy
+	return next, true, due
 }
 
 // manualRefreshAdmission deliberately bypasses only a positive low-budget
 // widening. A known refusal and an exhausted budget remain hard holds.
 func (m Model) manualRefreshAdmission() (Model, bool) {
-	now := m.now()
-	m = m.expireRatePolicy(now)
-	if m.refreshing || (m.rateHold.active(now) && !m.rateHold.manual) {
+	if m.refreshing {
 		return m, false
 	}
-	return m, true
+	next, policy, allowed := m.trackerRequestAdmission(trackerRequestExplicit)
+	if !allowed {
+		return next, false
+	}
+	next.sourceRequestPolicy = policy
+	return next, true
 }
 
 func (m Model) syncRefreshHoldKey() Model {
@@ -681,11 +969,15 @@ func (m Model) toggleRefreshHold() (Model, tea.Cmd) {
 }
 
 func (m Model) expireRatePolicy(now time.Time) Model {
+	frontierFooterHeight := m.frontierFooterHeight()
 	if !m.rateHold.manual && !m.rateHold.resetAt.IsZero() && !now.Before(m.rateHold.resetAt) {
 		m.rateHold = rateHold{}
 	}
 	if !m.lowBudget.resetAt.IsZero() && !now.Before(m.lowBudget.resetAt) {
 		m.lowBudget = lowBudgetSchedule{}
+	}
+	if m.mode == modeFrontier && m.frontierFooterHeight() != frontierFooterHeight {
+		m.mouseEpoch++
 	}
 	return m
 }
@@ -708,22 +1000,25 @@ func (m Model) startRefresh() (Model, tea.Cmd) {
 	m.refreshing = true
 	m.listArmed = true
 	m.lastAttempt = m.now()
-	return m, m.fetchCmd(m.generation)
+	cmd := m.fetchCmd(m.generation)
+	return m, cmd
 }
 
 // fetchCmd reads the Source on Bubble Tea's goroutine pool, tagging the result
 // with the generation that asked for it.
 func (m Model) fetchCmd(generation int) tea.Cmd {
 	fetch := m.fetch
+	ctx := provider.WithRequestPolicy(m.sessionContext, m.sourceRequestPolicy)
+	policy := m.sourceRequestPolicy
 	return func() tea.Msg {
-		in, err := fetch()
-		return refreshedMsg{generation: generation, input: in, err: err}
+		in, err := fetch(ctx)
+		return refreshedMsg{generation: generation, input: in, err: err, requestPolicy: policy}
 	}
 }
 
-// applyRefresh folds one reading in and, when the Frontier is the screen on
-// display, reseats it on the new reading. A refresh that failed or answered a
-// superseded generation changes nothing, so it reseats nothing either.
+// applyRefresh folds one Source result in. A current successful reading replaces
+// List state and reseats the active Frontier; failed or superseded readings may
+// still update Tracker-wide request policy, but never replace state or reseat it.
 func (m Model) applyRefresh(msg refreshedMsg) (tea.Model, tea.Cmd) {
 	landed := msg.generation == m.generation && msg.err == nil
 	next := m.onRefreshed(msg)
@@ -808,56 +1103,78 @@ func (m Model) hasMember(id model.TicketID) bool {
 // counting from the last *successful* fetch, because the data really is that
 // old.
 func (m Model) onRefreshed(msg refreshedMsg) Model {
+	msg.err = safeErr(msg.err)
+	policy := msg.requestPolicy
+	if policy == (provider.RequestPolicy{}) && msg.generation == m.generation &&
+		m.sourceRequestPolicy != (provider.RequestPolicy{}) {
+		// Focused model tests and embedding callers may construct a current result
+		// directly. It still belongs to the policy captured by its active Source
+		// lifecycle.
+		policy = m.sourceRequestPolicy
+	}
+	var refused bool
+	m, refused = m.settleTrackerRequest(policy, msg.err, msg.err == nil)
 	if msg.generation != m.generation {
 		// A slow auto-refresh answering after a manual one must not land on
-		// top of the fresher reading.
+		// top of the fresher reading. Refusal policy was still observed above.
+		// An exhausted successful budget is likewise Tracker-wide evidence.
+		if msg.err == nil {
+			m, _ = m.observeSuccessfulExhaustedBudget(msg.input, policy)
+		}
 		return m
 	}
 	m.refreshing = false
+	m.sourceRequestPolicy = provider.RequestPolicy{}
 
 	if msg.err != nil {
 		m.lastErr = msg.err
-		if provider.KindOf(msg.err) == provider.KindRateLimit {
-			m.lowBudget = lowBudgetSchedule{}
-			m.rateHold = m.rateLimitHold(msg.err)
-		} else if m.lowBudget != (lowBudgetSchedule{}) {
+		if !refused && m.lowBudget != (lowBudgetSchedule{}) {
 			m = m.advanceLowBudgetAfterAttempt()
 		}
 		return m
 	}
 	m.lastErr = nil
-	m = m.applySuccessfulBudgetPolicy(msg.input)
+	m = m.applySuccessfulBudgetPolicy(msg.input, policy)
 	m.input = msg.input
 	m.hasData = true
 	return m.rebuildRows()
 }
 
-func (m Model) rateLimitHold(err error) rateHold {
-	metadata, ok := provider.RateLimitMetadataOf(err)
-	if !ok {
-		return rateHold{err: err, manual: true}
+func (m Model) observeSuccessfulExhaustedBudget(in ListInput, policy provider.RequestPolicy) (Model, bool) {
+	budget := in.RateLimitBudget
+	if !in.Capabilities.RateLimitBudget || !budget.Valid() || budget.Remaining != 0 {
+		return m, false
 	}
-	now := m.now()
-	resetAt, hasDeadline := metadata.Deadline(now)
-	if !hasDeadline || !now.Before(resetAt) {
-		return rateHold{}
+	if now := m.policyNow(); now.Before(budget.ResetsAt) {
+		return m.observeExhaustedBudget(budget.ResetsAt, policy), true
 	}
-	return rateHold{err: err, resetAt: resetAt}
+	return m, false
 }
 
-func (m Model) applySuccessfulBudgetPolicy(in ListInput) Model {
-	m.rateHold = rateHold{}
-	m.lowBudget = lowBudgetSchedule{}
+func (m Model) applySuccessfulBudgetPolicy(in ListInput, policy provider.RequestPolicy) Model {
+	var exhausted bool
+	m, exhausted = m.observeSuccessfulExhaustedBudget(in, policy)
+	if exhausted {
+		return m
+	}
 	budget := in.RateLimitBudget
+	if policy.Epoch != m.requestPolicyEpoch {
+		return m
+	}
+	m.lowBudget = lowBudgetSchedule{}
 	if !in.Capabilities.RateLimitBudget || !budget.Valid() {
 		return m
 	}
-	now := m.now()
-	if !now.Before(budget.ResetsAt) {
+	if budget.Remaining == 0 {
+		// A live exhausted budget was installed above. An elapsed exhausted
+		// observation carries no low-budget cadence and cannot be a divisor.
 		return m
 	}
-	if budget.Remaining == 0 {
-		m.rateHold = rateHold{resetAt: budget.ResetsAt, exhausted: true}
+	now := m.policyNow()
+	if m.rateHold.active(now) {
+		return m
+	}
+	if !now.Before(budget.ResetsAt) {
 		return m
 	}
 	if budget.Remaining > 100 {
@@ -1184,6 +1501,18 @@ func (m Model) renderBody(markers listMarkers) string {
 			"No Tickets match this filter.  Press esc to clear it.", m.width)), height)
 	case m.hasData:
 		return pad(m.styles.Muted.Render("This Watchlist has no Tickets."), height)
+	case m.trackerHoldNotice() != "":
+		lines := []string{}
+		if m.lastErr != nil && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+			lines = append(lines,
+				m.styles.Error.Render(truncateLine("Last Tracker request failed: "+m.lastErr.Error(), m.width)),
+				"")
+		}
+		lines = append(lines,
+			m.styles.Error.Render(truncateLine(m.trackerHoldNotice(), m.width)),
+			"",
+			m.styles.Muted.Render(m.retryBodyHint()))
+		return pad(strings.Join(lines, "\n"), height)
 	case m.lastErr != nil:
 		// A monitor that exits on one bad DNS lookup is useless on an SSH box:
 		// the screen says what went wrong and how to try again, and waits.
@@ -1198,16 +1527,28 @@ func (m Model) renderBody(markers listMarkers) string {
 }
 
 func (m Model) retryBodyHint() string {
-	now := m.now()
+	if notice := m.trackerHoldNotice(); notice != "" {
+		if m.refreshHeld {
+			if m.rateHold.manual && m.unknownProbeToken == 0 {
+				return "Monitor automatic refresh is held. Press p to resume it; press r to retry this List, q to quit."
+			}
+			return "Monitor automatic refresh is held. Press p to resume it; Tracker requests remain held and r is held. Press q to quit."
+		}
+		if m.rateHold.manual && m.unknownProbeToken == 0 {
+			return "Press r to retry this List, q to quit."
+		}
+		return "Tracker requests are held; r is held. Press q to quit."
+	}
+	now := m.policyNow()
 	if m.refreshHeld {
-		status := "Monitor held"
+		status := "Monitor automatic refresh is held"
 		if !m.terminalFocused {
 			status += "; terminal is unfocused"
 		}
 		if m.rateHold.active(now) && !m.rateHold.manual {
-			return status + "; r is held. Press p to release hold, q to quit."
+			return status + "; r is held. Press p to resume automatic refresh, q to quit."
 		}
-		return status + ". Press r to try again, p to release hold, q to quit."
+		return status + ". Press r to try again, p to resume automatic refresh, q to quit."
 	}
 	if !m.terminalFocused {
 		if m.rateHold.active(now) && !m.rateHold.manual {
@@ -1221,6 +1562,11 @@ func (m Model) retryBodyHint() string {
 	return "Press r to try again, q to quit."
 }
 
+func (m Model) listRefreshErrorVisible(holdNotice string) bool {
+	return m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) &&
+		(holdNotice == "" || provider.KindOf(m.lastErr) != provider.KindRateLimit)
+}
+
 // footerLines is the always-visible bottom block, line by line: a blank
 // spacer, the Query cutoff notice when there is one, the refresh error when
 // there is one, the filter state when there is one, then the help line. The
@@ -1232,12 +1578,13 @@ func (m Model) retryBodyHint() string {
 // which row it was drawn on to put the cursor there.
 func (m Model) footerLines(markers ...listMarkers) []string {
 	now := m.now()
+	holdNotice := m.trackerHoldNotice()
 	lines := []string{""}
 	if m.hasData && m.input.LimitReached {
 		lines = append(lines, m.styles.Muted.Render(truncateLine(
 			plain.LimitNotice(len(m.input.Tickets)), m.width)))
 	}
-	if m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+	if m.listRefreshErrorVisible(holdNotice) {
 		if m.refreshHeld {
 			status := "monitor held"
 			if !m.terminalFocused {
@@ -1248,6 +1595,9 @@ func (m Model) footerLines(markers ...listMarkers) []string {
 		} else if !m.terminalFocused {
 			lines = append(lines, m.styles.Error.Render(truncateLine(
 				fmt.Sprintf("refresh failed: %v%sautomatic refresh paused: terminal unfocused", m.lastErr, separator), m.width)))
+		} else if m.rateHold.manual {
+			lines = append(lines, m.styles.Error.Render(truncateLine(
+				fmt.Sprintf("refresh failed: %v%sTracker hold remains; another explicit action is required", m.lastErr, separator), m.width)))
 		} else {
 			remaining := m.effectiveAutomaticDue(now).Sub(now)
 			lines = append(lines, m.styles.Error.Render(truncateLine(
@@ -1268,28 +1618,16 @@ func (m Model) footerLines(markers ...listMarkers) []string {
 }
 
 func (m Model) ratePolicyFooter() string {
+	now := m.policyNow()
+	if m.rateHold.active(now) {
+		return m.trackerHoldNotice()
+	}
 	if m.refreshing && !m.terminalFocused {
 		return ""
 	}
-	now := m.now()
 	prefix := ""
 	if !m.terminalFocused && !m.refreshHeld {
 		prefix = "paused: terminal unfocused; "
-	}
-	if m.rateHold.active(now) {
-		if m.rateHold.exhausted {
-			if prefix != "" || m.refreshHeld {
-				return prefix + "refresh held: rate limit budget exhausted · r held"
-			}
-			return "refresh held: rate limit budget exhausted · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
-		}
-		if m.rateHold.manual {
-			return prefix + "refresh held: " + m.rateHold.err.Error() + " · press r to try again"
-		}
-		if prefix != "" || m.refreshHeld {
-			return prefix + "refresh held: " + m.rateHold.err.Error() + " · r held"
-		}
-		return "refresh held: " + m.rateHold.err.Error() + " · retrying at " + m.rateHold.resetAt.Local().Format(time.Kitchen) + " · r held"
 	}
 	if m.lowBudget.active(now) {
 		if prefix != "" || m.refreshHeld {
@@ -1370,7 +1708,7 @@ func (m Model) filterLineIndex() int {
 	if m.hasData && m.input.LimitReached {
 		index++
 	}
-	if m.lastErr != nil && m.hasData && (!m.refreshing || m.terminalFocused) && provider.KindOf(m.lastErr) != provider.KindRateLimit {
+	if m.listRefreshErrorVisible(m.trackerHoldNotice()) {
 		index++
 	}
 	if m.ratePolicyFooter() != "" {
@@ -1401,6 +1739,9 @@ func (m Model) helpKeys(markers ...listMarkers) help.KeyMap {
 // are disabled in one place so advertised bindings and every input path agree.
 func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 	keys := m.frontierKeys
+	if m.frontier.protocolWarning != nil {
+		keys.Refresh.SetHelp(keys.Refresh.Help().Key, "dismiss warning")
+	}
 	if m.frontier.direction == frontierRanksVertical {
 		keys.Up.SetHelp(keys.Up.Help().Key, "blocker side")
 		keys.Down.SetHelp(keys.Down.Help().Key, "dependent side")
@@ -1408,6 +1749,9 @@ func (m Model) effectiveFrontierKeys() FrontierKeyMap {
 		keys.Right.SetHelp(keys.Right.Help().Key, "next node")
 	}
 	if m.frontier.input.Capabilities.BlockingLinks && m.frontier.refusal == nil {
+		if m.frontierRetryBlocked() {
+			keys.Refresh.SetEnabled(false)
+		}
 		return keys
 	}
 	for _, binding := range []*key.Binding{&keys.Open, &keys.Refresh,

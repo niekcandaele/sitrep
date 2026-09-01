@@ -228,6 +228,23 @@ func TestPrintableUnicodeSurvivesBothPolicies(t *testing.T) {
 
 var errSentinel = errors.New("sentinel")
 
+type panickingTypedNilError struct{}
+
+func (*panickingTypedNilError) Error() string { panic("typed-nil Error called") }
+
+func TestErrRejectsTypedNilBeforeRendering(t *testing.T) {
+	var typedNil *panickingTypedNilError
+	err := termtext.Err(typedNil)
+
+	if err == nil || err.Error() != "typed-nil error" {
+		t.Fatalf("Err(typed nil) = %v, want deterministic non-nil failure", err)
+	}
+	termtexttest.AssertClean(t, "typed-nil error", err.Error())
+	if errors.Is(err, typedNil) {
+		t.Error("replacement retained the unsafe typed-nil error in its chain")
+	}
+}
+
 func TestErrPreservesUnwrap(t *testing.T) {
 	err := termtext.Err(fmt.Errorf("source failed: boom\x1b[2J\nnext: %w", errSentinel))
 

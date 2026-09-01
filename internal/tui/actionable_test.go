@@ -281,12 +281,9 @@ func TestFrontierRebuildRequestsDoNotRestampEvidenceButNewDetailDoes(t *testing.
 		t.Fatalf("rebuild requests moved evidence stamp to %v, want %v", got, evidenceAt)
 	}
 
-	updated, _ := m.onFrontierDetail(frontierDetailMsg{
-		generation: m.frontierGeneration,
-		id:         first.ID,
-		detail:     model.Detail{TicketID: first.ID},
-		caps:       blockingCaps,
-	})
+	updated, _ := m.onFrontierDetails(frontierResultMsg(
+		m.frontierGeneration, 0, first.ID,
+		model.Detail{TicketID: first.ID}, blockingCaps, nil))
 	m = updated.(Model)
 	if got := m.details[first.ID].frontierFetchedAt; !got.Equal(retryAt) {
 		t.Fatalf("new eligible Detail stamp = %v, want retry landing %v", got, retryAt)

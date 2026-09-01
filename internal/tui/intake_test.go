@@ -61,10 +61,11 @@ var (
 	}
 )
 
-// The monitor is safe for data arriving through any of its four funnels, with
-// no dependence on the caller having wrapped a Provider: every Source and
-// DetailSource below is a plain closure. The assertions are on Model state,
-// not on rendered bytes, because that is where the boundary is.
+// The four direct non-plural funnels below are safe without depending on a
+// Provider: every Source and DetailSource is a plain closure. The fifth funnel,
+// DetailFanout, is exercised through Frontier because its boundary is the plural
+// result fold rather than Model construction. Assertions target Model state,
+// where the boundary owns the data, instead of rendered bytes.
 func TestEveryDirectInputFunnelIsSanitized(t *testing.T) {
 	now := time.Date(2026, time.March, 4, 12, 0, 0, 0, time.UTC)
 

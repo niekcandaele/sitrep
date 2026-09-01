@@ -103,7 +103,7 @@ func TestKnownRateLimitHoldBlocksAutomaticAndManualUntilDeadline(t *testing.T) {
 	if next, allowed := m.manualRefreshAdmission(); allowed || next.generation != generation || !next.lastAttempt.Equal(attempt) {
 		t.Fatal("manual refresh bypassed a known reset")
 	}
-	if got := m.ratePolicyFooter(); got == "" || !strings.Contains(got, "r held") {
+	if got := m.ratePolicyFooter(); got == "" || !strings.Contains(got, "Tracker requests are held") || !strings.Contains(got, "r is held") || strings.Contains(got, "API rate limit exceeded") {
 		t.Errorf("held footer = %q, want known hold", got)
 	}
 
@@ -157,8 +157,23 @@ func TestUnknownRateLimitRequiresManualSuccess(t *testing.T) {
 	if !next.rateHold.manual {
 		t.Fatal("ordinary manual failure cleared unknown rate-limit hold")
 	}
-	if got := next.ratePolicyFooter(); got == "" || !strings.Contains(got, "press r to try again") {
-		t.Errorf("manual hold footer = %q", got)
+	footer := next.ratePolicyFooter()
+	if footer == "" || !strings.Contains(footer, "one explicit List, Detail, or Frontier request") ||
+		!strings.Contains(footer, "Frontier may read the whole Watchlist") || strings.Contains(footer, "gitlab: rate limited") {
+		t.Errorf("manual hold footer = %q", footer)
+	}
+	next.width, next.height = 120, 20
+	body := next.renderBody(listMarkers{})
+	if !strings.Contains(body, "Last Tracker request failed: network") || strings.Contains(body, "retrying in") {
+		t.Errorf("manual probe failure body = %q", body)
+	}
+	loaded := next
+	loaded.hasData = true
+	loadedFooter := strings.Join(loaded.footerLines(), "\n")
+	if !strings.Contains(loadedFooter, "refresh failed: network") ||
+		!strings.Contains(loadedFooter, "another explicit action is required") ||
+		strings.Contains(loadedFooter, "retrying in") {
+		t.Errorf("manual probe failure footer = %q", loadedFooter)
 	}
 }
 
@@ -239,12 +254,14 @@ func TestInitialKnownRateLimitHoldAvoidsDuplicateStartupFetch(t *testing.T) {
 func TestElapsedInitialRateLimitDeadlineStartsTheNormalInitialFetch(t *testing.T) {
 	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
 	var calls atomic.Int32
+	var gotPolicy provider.RequestPolicy
 	m := New(t.Context(), Options{
 		Interval:  time.Minute,
 		Now:       c.now,
 		Heartbeat: func() tea.Msg { return nil },
-		Source: func(context.Context) (ListInput, error) {
+		Source: func(ctx context.Context) (ListInput, error) {
 			calls.Add(1)
+			gotPolicy = provider.RequestPolicyFromContext(ctx)
 			return ListInput{}, nil
 		},
 		InitialError: provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: c.now()}, "github: rate limited"),
@@ -264,6 +281,9 @@ func TestElapsedInitialRateLimitDeadlineStartsTheNormalInitialFetch(t *testing.T
 	if calls.Load() != 1 {
 		t.Fatalf("elapsed initial deadline started %d source calls, want one", calls.Load())
 	}
+	if gotPolicy != (provider.RequestPolicy{Epoch: 1}) {
+		t.Fatalf("initial fetch policy = %+v, want acknowledged epoch 1", gotPolicy)
+	}
 }
 
 func TestUnseededRateLimitBodyExplainsManualAvailability(t *testing.T) {
@@ -276,7 +296,7 @@ func TestUnseededRateLimitBodyExplainsManualAvailability(t *testing.T) {
 	}{
 		{"known", rateHold{resetAt: c.now().Add(time.Hour)}, "r is held", "Press r to try again"},
 		{"exhausted", rateHold{resetAt: c.now().Add(time.Hour), exhausted: true}, "r is held", "Press r to try again"},
-		{"unknown", rateHold{manual: true}, "Press r to try again", "r is held"},
+		{"unknown", rateHold{manual: true}, "one explicit List, Detail, or Frontier request", "r is held"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := policyModel(t, c, time.Minute)
@@ -312,7 +332,7 @@ func TestInitialRateLimitErrorBodyUsesInstalledPolicy(t *testing.T) {
 		{
 			name:       "unknown reset",
 			err:        provider.Errorf(provider.KindRateLimit, "gitlab: rate limited"),
-			want:       "Press r to try again",
+			want:       "one explicit List, Detail, or Frontier request",
 			forbid:     "r is held",
 			heldManual: true,
 		},
@@ -339,10 +359,11 @@ func TestInitialRateLimitErrorBodyUsesInstalledPolicy(t *testing.T) {
 				t.Fatalf("holding InitialError model = held:%t cmd:%v", m.refreshHeld, cmd)
 			}
 			held := m.View().Content
-			if !strings.Contains(held, "Monitor held") || strings.Contains(held, "Automatic refresh resumes at") {
+			if !strings.Contains(held, "Monitor automatic refresh is held") || strings.Contains(held, "Automatic refresh resumes at") {
 				t.Fatalf("held InitialError body = %q", held)
 			}
-			if test.heldManual && !strings.Contains(held, "Press r to try again") {
+			if test.heldManual && (!strings.Contains(held, "press r to retry this List") ||
+				!strings.Contains(held, "one explicit List, Detail, or Frontier request")) {
 				t.Fatalf("held manual-only InitialError lost r remedy: %q", held)
 			}
 			if !test.heldManual && (!strings.Contains(held, "r is held") || strings.Contains(held, "Press r to try again")) {
@@ -377,7 +398,7 @@ func TestRatePolicyFrameUsesOneClockSnapshot(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("View read clock %d times, want one frame snapshot", calls)
 	}
-	if !strings.Contains(view.Content, "refresh held") {
+	if !strings.Contains(view.Content, "Tracker requests are held") {
 		t.Fatalf("clock-boundary frame lost active hold: %q", view.Content)
 	}
 	if view.Cursor == nil {
@@ -477,7 +498,7 @@ func TestRatePolicyFooterParticipatesInFrameSizingAndFilterIndex(t *testing.T) {
 	if got, want := m.bodyHeight(), m.height-headerHeight-len(lines); got != want {
 		t.Fatalf("body height = %d, want %d with policy footer", got, want)
 	}
-	if !strings.Contains(lines[1], "refresh held") {
+	if !strings.Contains(lines[1], "Tracker requests") {
 		t.Errorf("narrow policy footer lost held status: %q", lines[1])
 	}
 }
@@ -514,6 +535,21 @@ func TestSuccessfulBudgetPolicyClearsAndExpiresOnlyAtItsReset(t *testing.T) {
 	absent = absent.onRefreshed(refreshedMsg{generation: absent.generation, input: ListInput{RateLimitBudget: policyReading(c.now().Add(time.Minute), 0).RateLimitBudget}})
 	if absent.rateHold != (rateHold{}) || absent.lowBudget != (lowBudgetSchedule{}) {
 		t.Fatal("capability-absent budget changed policy")
+	}
+}
+
+func TestElapsedSuccessfulExhaustedBudgetDoesNotScheduleLowBudget(t *testing.T) {
+	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	for _, resetAt := range []time.Time{c.now(), c.now().Add(-time.Minute)} {
+		m := policyModel(t, c, time.Minute)
+		m.lowBudget = lowBudgetSchedule{
+			resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(time.Minute), cadence: time.Minute,
+		}
+		m = m.applySuccessfulBudgetPolicy(policyReading(resetAt, 0), provider.RequestPolicy{})
+		if m.rateHold != (rateHold{}) || m.lowBudget != (lowBudgetSchedule{}) {
+			t.Errorf("elapsed exhausted budget at %s left policy hold=%+v low=%+v",
+				resetAt, m.rateHold, m.lowBudget)
+		}
 	}
 }
 
@@ -612,6 +648,41 @@ func TestTerminalFocusExtendsOnlyAutomaticAdmission(t *testing.T) {
 	}
 }
 
+func TestMonitorPauseAndFocusGateOnlyAutomaticListRequests(t *testing.T) {
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	for _, test := range []struct {
+		name        string
+		refreshHeld bool
+		focused     bool
+	}{
+		{name: "user-held automatic refresh", refreshHeld: true, focused: true},
+		{name: "unfocused terminal", focused: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			newModel := func() Model {
+				m := phase2AdmissionModel(t, clock, &phase2Calls{})
+				m.refreshHeld = test.refreshHeld
+				m.terminalFocused = test.focused
+				m.lastAttempt = clock.now().Add(-time.Hour)
+				return m
+			}
+
+			m := newModel()
+			if next, allowed, _ := m.automaticRefreshAdmission(); allowed || next.refreshing {
+				t.Fatal("automatic List request bypassed Monitor-only gate")
+			}
+			m = newModel()
+			if next, cmd := m.openDetail(); cmd == nil || !next.(Model).detail.loading {
+				t.Fatal("Monitor-only gate denied explicit Detail request")
+			}
+			m = newModel()
+			if next, cmd := m.enterFrontier(); cmd == nil || next.(Model).frontierContext == nil {
+				t.Fatal("Monitor-only gate denied explicit Frontier request")
+			}
+		})
+	}
+}
+
 func TestFocusRegainRespectsDueAndRatePolicy(t *testing.T) {
 	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
 	for _, test := range []struct {
@@ -676,19 +747,31 @@ func TestBlurredStatusIsTruthfulAndStalenessAdvances(t *testing.T) {
 		low  lowBudgetSchedule
 		want string
 	}{
-		{"known", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(time.Hour)}, lowBudgetSchedule{}, "r held"},
-		{"unknown", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}, lowBudgetSchedule{}, "press r to try again"},
+		{"known", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), resetAt: c.now().Add(time.Hour)}, lowBudgetSchedule{}, "r is held"},
+		{"unknown", rateHold{err: provider.Errorf(provider.KindRateLimit, "limited"), manual: true}, lowBudgetSchedule{}, "one explicit List, Detail, or Frontier request"},
 		{"exhausted", rateHold{exhausted: true, resetAt: c.now().Add(time.Hour)}, lowBudgetSchedule{}, "budget exhausted"},
 		{"low", rateHold{}, lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(30 * time.Minute)}, "refresh slowed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m.rateHold, m.lowBudget = test.hold, test.low
 			got := m.ratePolicyFooter()
-			if !strings.Contains(got, "paused: terminal unfocused") || !strings.Contains(got, test.want) || strings.Contains(got, "retrying at") || strings.Contains(got, "next automatic refresh") {
+			hardHold := test.hold != (rateHold{})
+			if hardHold {
+				if !strings.Contains(got, "Tracker requests are held") || !strings.Contains(got, test.want) ||
+					strings.Contains(got, "limited") || strings.Contains(got, "paused: terminal unfocused") {
+					t.Fatalf("blurred %s policy = %q", test.name, got)
+				}
+			} else if !strings.Contains(got, "paused: terminal unfocused") || !strings.Contains(got, test.want) ||
+				strings.Contains(got, "next automatic refresh") {
 				t.Fatalf("blurred %s policy = %q", test.name, got)
 			}
 			m.refreshing = true
-			if got = m.ratePolicyFooter(); got != "" {
+			got = m.ratePolicyFooter()
+			if hardHold {
+				if !strings.Contains(got, "Tracker requests are held") {
+					t.Fatalf("blurred in-flight %s hid global Tracker policy: %q", test.name, got)
+				}
+			} else if got != "" {
 				t.Fatalf("blurred in-flight %s policy rendered beside refreshing state: %q", test.name, got)
 			}
 			m.refreshing = false
@@ -696,7 +779,7 @@ func TestBlurredStatusIsTruthfulAndStalenessAdvances(t *testing.T) {
 	}
 }
 
-func TestBlurredUnknownManualRefreshDefersPolicyFooter(t *testing.T) {
+func TestBlurredUnknownManualRefreshKeepsGlobalPolicyVisible(t *testing.T) {
 	c := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
 	m := policyModel(t, c, time.Minute)
 	m = m.onRefreshed(refreshedMsg{generation: m.generation, input: ListInput{FetchedAt: c.now()}})
@@ -705,11 +788,13 @@ func TestBlurredUnknownManualRefreshDefersPolicyFooter(t *testing.T) {
 	m = blurred.(Model)
 	manual, cmd := m.onKey(tea.KeyPressMsg{Code: 'r'})
 	m = manual.(Model)
-	if cmd == nil || !m.refreshing || m.ratePolicyFooter() != "" || m.focusPauseFooter() != "" || m.staleness() != "refreshing…" {
-		t.Fatal("blurred unknown-hold manual refresh did not defer policy output to refreshing")
+	if cmd == nil || !m.refreshing || !strings.Contains(m.ratePolicyFooter(), "explicit retry is in progress") ||
+		m.focusPauseFooter() != "" || m.staleness() != "refreshing…" {
+		t.Fatal("blurred unknown-hold manual refresh hid global Tracker policy")
 	}
 	m = m.onRefreshed(refreshedMsg{generation: m.generation, err: provider.Errorf(provider.KindUnavailable, "network")})
-	if got := m.ratePolicyFooter(); !strings.Contains(got, "paused: terminal unfocused") || !strings.Contains(got, "press r to try again") {
+	if got := m.ratePolicyFooter(); !strings.Contains(got, "Tracker requests are held") ||
+		!strings.Contains(got, "one explicit List, Detail, or Frontier request") || strings.Contains(got, "limited") {
 		t.Fatalf("settled unknown-hold manual refresh lost paused policy: %q", got)
 	}
 }
@@ -1077,9 +1162,9 @@ func TestRefreshHoldStatusSuppressesAutomaticPromises(t *testing.T) {
 		want   string
 		forbid string
 	}{
-		{name: "known", hold: rateHold{err: m.lastErr, resetAt: c.now().Add(time.Hour)}, want: "r held", forbid: "retrying at"},
+		{name: "known", hold: rateHold{err: m.lastErr, resetAt: c.now().Add(time.Hour)}, want: "r is held", forbid: "limited"},
 		{name: "exhausted", hold: rateHold{resetAt: c.now().Add(time.Hour), exhausted: true}, want: "budget exhausted", forbid: "retrying at"},
-		{name: "unknown", hold: rateHold{err: m.lastErr, manual: true}, want: "press r to try again", forbid: "retrying at"},
+		{name: "unknown", hold: rateHold{err: m.lastErr, manual: true}, want: "one explicit List, Detail, or Frontier request", forbid: "limited"},
 		{name: "low", low: lowBudgetSchedule{resetAt: c.now().Add(time.Hour), nextAt: c.now().Add(30 * time.Minute)}, want: "refresh slowed", forbid: "next automatic refresh"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1093,12 +1178,91 @@ func TestRefreshHoldStatusSuppressesAutomaticPromises(t *testing.T) {
 
 	m.hasData = false
 	m.rateHold = rateHold{err: m.lastErr, resetAt: c.now().Add(time.Hour)}
-	if got := m.retryBodyHint(); !strings.Contains(got, "Monitor held") || !strings.Contains(got, "r is held") || strings.Contains(got, "resumes at") {
+	if got := m.retryBodyHint(); !strings.Contains(got, "Monitor automatic refresh is held") || !strings.Contains(got, "r is held") || strings.Contains(got, "resumes at") {
 		t.Fatalf("first-fetch hard-hold hint = %q", got)
 	}
 	m.rateHold = rateHold{err: m.lastErr, manual: true}
-	if got := m.retryBodyHint(); !strings.Contains(got, "Press r to try again") || !strings.Contains(got, "p to release hold") {
+	if got := m.retryBodyHint(); !strings.Contains(got, "r to retry this List") || !strings.Contains(got, "p to resume it") || strings.Contains(got, "release hold") {
 		t.Fatalf("first-fetch manual-hold hint = %q", got)
+	}
+	m.refreshHeld = false
+	if got := m.retryBodyHint(); !strings.Contains(got, "r to retry this List") || strings.Contains(got, " p ") || strings.Contains(got, "release") || strings.Contains(got, "resume") {
+		t.Fatalf("unheld Monitor advertised p as Tracker release: %q", got)
+	}
+}
+
+func TestRefreshHeldTrackerNoticeMatchesActiveScreen(t *testing.T) {
+	clock := &policyClock{value: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	var calls atomic.Int32
+	base := refreshHoldModel(t, clock, time.Minute, &calls)
+	base.refreshHeld = true
+
+	holds := []struct {
+		name       string
+		hold       rateHold
+		probeToken uint64
+		wantR      string
+		forbidR    string
+	}{
+		{
+			name:    "known reset",
+			hold:    rateHold{resetAt: clock.now().Add(time.Hour)},
+			wantR:   "r is held",
+			forbidR: "Press r to try",
+		},
+		{
+			name:    "exhausted budget",
+			hold:    rateHold{resetAt: clock.now().Add(time.Hour), exhausted: true},
+			wantR:   "r is held",
+			forbidR: "Press r to try",
+		},
+		{
+			name:    "unknown reset",
+			hold:    rateHold{manual: true},
+			wantR:   "one explicit List, Detail, or Frontier request",
+			forbidR: "r is held",
+		},
+		{
+			name:       "unknown probe in progress",
+			hold:       rateHold{manual: true},
+			probeToken: 1,
+			wantR:      "r is held",
+			forbidR:    "Press r to try",
+		},
+	}
+	modes := []struct {
+		name string
+		mode mode
+	}{
+		{name: "List", mode: modeList},
+		{name: "Detail", mode: modeDetail},
+		{name: "Frontier", mode: modeFrontier},
+	}
+
+	for _, screen := range modes {
+		for _, policy := range holds {
+			t.Run(screen.name+"/"+policy.name, func(t *testing.T) {
+				m := base
+				m.mode = screen.mode
+				m.rateHold = policy.hold
+				m.unknownProbeToken = policy.probeToken
+				notice := m.trackerHoldNotice()
+				if !strings.Contains(notice, policy.wantR) || strings.Contains(notice, policy.forbidR) {
+					t.Fatalf("r guidance = %q", notice)
+				}
+				if screen.mode == modeList {
+					if !strings.Contains(notice, "press p to resume it") {
+						t.Fatalf("List lost p guidance: %q", notice)
+					}
+					return
+				}
+				if !strings.Contains(notice, "Automatic List monitoring is also held") ||
+					!strings.Contains(notice, "resume it from the List") ||
+					strings.Contains(strings.ToLower(notice), "press p") {
+					t.Fatalf("%s advertised an unavailable p action: %q", screen.name, notice)
+				}
+			})
+		}
 	}
 }
 

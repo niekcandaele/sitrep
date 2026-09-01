@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/termtext/termtexttest"
 )
 
@@ -57,9 +59,11 @@ const (
 // policies could not be asserted absent.
 const boundaryPTYBodyPayload = "cHR5LWJvZHktcGF5bG9hZA=="
 
-// Every hostile field of every funnel, through a real terminal. The frame-level
-// tests assert what the Model drew; this asserts what the terminal actually
-// received, across both screens and a Trail step, including the teardown.
+// Every hostile field carried by the four PTY-fed funnels, through a real
+// terminal. The frame-level tests assert what the Model drew; this asserts what
+// the terminal actually received across both screens and a Trail step, including
+// teardown. DetailFanout's fifth intake boundary is exercised separately through
+// its plural Frontier result path.
 func TestBoundaryHostileFieldsThroughRawPTY(t *testing.T) {
 	raw := runBoundaryPTYSession(t)
 	if !utf8.Valid(raw) {
@@ -749,8 +753,10 @@ func hostilePTYTicket(id model.TicketID, marker string) model.Ticket {
 	return ticket
 }
 
-// boundaryPTYOptions fills all four funnels: a seated reading, a decoded Ticket,
-// a Source and a DetailSource, none of them a Provider.
+// boundaryPTYOptions fills the four PTY-fed funnels: a seated reading, a decoded
+// Ticket, a Source, and a DetailSource, none of them a Provider. The fifth
+// DetailFanout funnel is not synthesized here; Frontier reaches its fallback
+// through the already-sanitized DetailSource.
 func boundaryPTYOptions() Options {
 	now := time.Unix(1_700_000_000, 0)
 	capabilities := model.Capabilities{Comments: true, BlockingLinks: true, PullRequests: true}
@@ -928,4 +934,379 @@ func runBoundaryPTYSession(t *testing.T) []byte {
 	}
 	_ = master.Close()
 	return output
+}
+
+const (
+	ratePTYHelperMode     = "SITREP_RATE_ADMISSION_PTY_HELPER"
+	ratePTYLogPathEnv     = "SITREP_RATE_ADMISSION_PTY_LOG"
+	ratePTYReleasePathEnv = "SITREP_RATE_ADMISSION_PTY_RELEASE"
+)
+
+// TestRateAdmissionPTYHelper is deliberately a separate process. Its fake
+// Tracker callbacks run behind Bubble Tea's real command scheduler, while the
+// parent observes only the terminal conversation and a local, deterministic
+// call ledger.
+func TestRateAdmissionPTYHelper(t *testing.T) {
+	fixture := os.Getenv(ratePTYHelperMode)
+	if fixture == "" {
+		return
+	}
+	if err := Run(context.Background(), ratePTYOptions(fixture)); err != nil {
+		t.Fatalf("tui.Run: %v", err)
+	}
+}
+
+func ratePTYEvent(event string) {
+	log, err := os.OpenFile(os.Getenv(ratePTYLogPathEnv), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		panic(err)
+	}
+	defer log.Close()
+	if _, err := io.WriteString(log, event+"\n"); err != nil {
+		panic(err)
+	}
+}
+
+func ratePTYOptions(fixture string) Options {
+	now := time.Unix(1_700_000_000, 0)
+	capabilities := model.Capabilities{BlockingLinks: true}
+	input := ListInput{
+		Header: Header{Key: "#rate", Title: "RATE-PTY-" + fixture},
+		Tickets: []model.Ticket{
+			{ID: "P-1", Key: "P-1", Title: "PARTIAL-ONE", Status: model.StatusTodo},
+			{ID: "P-2", Key: "P-2", Title: "PARTIAL-TWO", Status: model.StatusTodo},
+			{ID: "P-3", Key: "P-3", Title: "PARTIAL-THREE", Status: model.StatusTodo},
+		},
+		Capabilities: capabilities,
+		FetchedAt:    now,
+	}
+
+	cloneInput := func(title string) ListInput {
+		result := input
+		result.Header.Title = title
+		result.Tickets = append([]model.Ticket(nil), input.Tickets...)
+		return result
+	}
+	sourceCalls := 0
+	source := func(context.Context) (ListInput, error) {
+		sourceCalls++
+		ratePTYEvent("source:" + string(rune('0'+sourceCalls)))
+		switch fixture {
+		case "known":
+			return ListInput{}, provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: now.Add(time.Hour)}, "KNOWN-TRACKER-REFUSAL")
+		case "unknown":
+			if sourceCalls == 1 {
+				return ListInput{}, provider.Errorf(provider.KindRateLimit, "UNKNOWN-TRACKER-REFUSAL")
+			}
+			ratePTYEvent("unknown-probe:started")
+			release := os.Getenv(ratePTYReleasePathEnv)
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				} else if !errors.Is(err, os.ErrNotExist) {
+					panic(err)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			result := cloneInput("UNKNOWN-PROBE-SUCCESS")
+			ratePTYEvent("unknown-probe:settled")
+			return result, nil
+		case "composition":
+			return cloneInput("MANUAL-SOURCE"), nil
+		default:
+			return cloneInput(input.Header.Title), nil
+		}
+	}
+
+	return Options{
+		Initial: &input,
+		Source:  source,
+		DetailSource: func(_ context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+			ratePTYEvent("detail:" + string(id))
+			return model.Detail{TicketID: id, Description: "DETAIL-ALLOWED"}, capabilities, nil
+		},
+		DetailFanout: func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+			joined := strings.Join(ticketIDStrings(ids), ",")
+			ratePTYEvent("fanout:" + joined)
+			switch fixture {
+			case "partial":
+				details := map[model.TicketID]model.Detail{
+					"P-1": {TicketID: "P-1"},
+					"P-3": {TicketID: "P-3"},
+				}
+				failures := &provider.DetailFailures{Failures: map[model.TicketID]error{
+					"P-2": errors.New("PARTIAL-MEMBER-FAILURE"),
+				}}
+				return details, capabilities, failures
+			case "cancel":
+				<-ctx.Done()
+				ratePTYEvent("fanout:cancelled")
+				return nil, capabilities, ctx.Err()
+			default:
+				details := make(map[model.TicketID]model.Detail, len(ids))
+				for _, id := range ids {
+					details[id] = model.Detail{TicketID: id}
+				}
+				return details, capabilities, nil
+			}
+		},
+		Interval: time.Hour,
+		Now:      func() time.Time { return now },
+		Input:    os.Stdin,
+		Output:   os.Stdout,
+	}
+}
+
+func ticketIDStrings(ids []model.TicketID) []string {
+	values := make([]string, len(ids))
+	for i, id := range ids {
+		values[i] = string(id)
+	}
+	return values
+}
+
+type ratePTYSession struct {
+	t       *testing.T
+	master  *os.File
+	command *exec.Cmd
+	chunks  <-chan []byte
+	output  []byte
+	log     string
+	release string
+}
+
+func startRatePTYSession(t *testing.T, fixture string, width, height int) *ratePTYSession {
+	t.Helper()
+	master, slave := openMarkdownPTY(t, uint16(width), uint16(height))
+	dir := t.TempDir()
+	session := &ratePTYSession{t: t, master: master, log: dir + "/calls", release: dir + "/release"}
+	command := exec.Command(os.Args[0], "-test.run=^TestRateAdmissionPTYHelper$", "-test.v=false")
+	command.Env = environmentWithout(os.Environ(), "TERM")
+	command.Env = environmentWithout(command.Env, "COLORTERM")
+	command.Env = append(command.Env,
+		ratePTYHelperMode+"="+fixture,
+		ratePTYLogPathEnv+"="+session.log,
+		ratePTYReleasePathEnv+"="+session.release,
+		"TERM=xterm-256color", "GLAMOUR_STYLE=dark")
+	command.Stdin, command.Stdout, command.Stderr = slave, slave, slave
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start rate admission PTY helper: %v", err)
+	}
+	t.Cleanup(func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	})
+	_ = slave.Close()
+	session.command = command
+
+	chunks := make(chan []byte, 256)
+	go func() {
+		defer close(chunks)
+		buffer := make([]byte, 4096)
+		for {
+			n, err := master.Read(buffer)
+			if n > 0 {
+				chunks <- append([]byte(nil), buffer[:n]...)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	session.chunks = chunks
+	return session
+}
+
+func (s *ratePTYSession) send(inputs ...string) {
+	s.t.Helper()
+	writeFrontierPTYInput(s.t, s.master, inputs...)
+}
+
+func (s *ratePTYSession) waitScreen(width, height int, marker string) {
+	s.t.Helper()
+	s.output = waitForPTYScreenMarker(s.t, s.chunks, s.output, width, height, marker)
+}
+
+func (s *ratePTYSession) screen(width, height int) string {
+	s.t.Helper()
+	screen := newFrontierPTYScreen(width, height)
+	screen.write(s.output)
+	return screen.normalized()
+}
+
+func (s *ratePTYSession) waitEvent(event string) string {
+	s.t.Helper()
+	deadline := time.NewTimer(frontierLimitPTYTimeout)
+	defer deadline.Stop()
+	for {
+		contents, err := os.ReadFile(s.log)
+		if err == nil && strings.Contains(string(contents), event) {
+			return string(contents)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.t.Fatalf("read rate admission call ledger: %v", err)
+		}
+		select {
+		case <-deadline.C:
+			s.t.Fatalf("rate admission helper did not record %q", event)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func (s *ratePTYSession) events() string {
+	s.t.Helper()
+	contents, err := os.ReadFile(s.log)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.t.Fatalf("read rate admission call ledger: %v", err)
+	}
+	return string(contents)
+}
+
+func (s *ratePTYSession) finish() []byte {
+	s.t.Helper()
+	s.send("q")
+	waited := make(chan error, 1)
+	go func() { waited <- s.command.Wait() }()
+	deadline := time.NewTimer(frontierLimitPTYTimeout)
+	defer deadline.Stop()
+	readerOpen, processDone := true, false
+	for readerOpen || !processDone {
+		select {
+		case chunk, ok := <-s.chunks:
+			if !ok {
+				readerOpen = false
+				s.chunks = nil
+				continue
+			}
+			s.output = append(s.output, chunk...)
+		case err := <-waited:
+			processDone, waited = true, nil
+			if err != nil {
+				s.t.Fatalf("rate admission PTY helper exited unsuccessfully: %v\n%s", err, s.output)
+			}
+		case <-deadline.C:
+			_ = s.command.Process.Kill()
+			s.t.Fatalf("rate admission PTY helper did not cleanly exit\n%s", s.output)
+		}
+	}
+	_ = s.master.Close()
+	return s.output
+}
+
+func assertRatePTYTeardown(t *testing.T, output []byte) {
+	t.Helper()
+	raw := string(output)
+	assertTerminalModePair(t, raw, ansi.SetModeAltScreenSaveCursor, ansi.ResetModeAltScreenSaveCursor)
+	assertTerminalModePair(t, raw, ansi.SetModeMouseButtonEvent, ansi.ResetModeMouseButtonEvent)
+	assertTerminalModePair(t, raw, ansi.SetModeMouseExtSgr, ansi.ResetModeMouseExtSgr)
+	assertTerminalModePair(t, raw, ansi.SetModeFocusEvent, ansi.ResetModeFocusEvent)
+	assertTerminalModePair(t, raw, ansi.HideCursor, ansi.ShowCursor)
+}
+
+func TestFrontierPartialMemberFailureThroughRawPTY(t *testing.T) {
+	session := startRatePTYSession(t, "partial", 180, 40)
+	session.waitScreen(180, 40, "PARTIAL-ONE")
+	session.send("v")
+	session.waitScreen(180, 40, "1 Ticket's Links could not be read")
+	session.waitScreen(180, 40, "PARTIAL-MEMBER-FAILURE")
+	events := session.waitEvent("fanout:P-1,P-2,P-3")
+	if strings.Count(events, "fanout:") != 1 {
+		t.Fatalf("plural Frontier issued %d fan-out commands, want one:\n%s", strings.Count(events, "fanout:"), events)
+	}
+	assertRatePTYTeardown(t, session.finish())
+}
+
+func TestTrackerHardRefusalAcrossRawPTYScreens(t *testing.T) {
+	session := startRatePTYSession(t, "known", 180, 40)
+	session.waitScreen(180, 40, "RATE-PTY-known")
+	session.send("r")
+	session.waitScreen(180, 40, "Tracker requests are held.")
+	session.send("\r") // uncached Detail is denied in place.
+	session.send("v")
+	session.waitScreen(180, 40, "frontier")
+	visible := session.screen(180, 40)
+	if !strings.Contains(visible, "Tracker requests are held.") {
+		t.Fatalf("Frontier hid the Tracker-wide refusal:\n%s", visible)
+	}
+	events := session.waitEvent("source:1")
+	if strings.Contains(events, "detail:") || strings.Contains(events, "fanout:") {
+		t.Fatalf("hard refusal issued denied work:\n%s", events)
+	}
+	assertRatePTYTeardown(t, session.finish())
+}
+
+func TestUnknownProbeReservationThroughRawPTY(t *testing.T) {
+	session := startRatePTYSession(t, "unknown", 180, 40)
+	session.waitScreen(180, 40, "RATE-PTY-unknown")
+	session.send("r")
+	session.waitScreen(180, 40, "reset time is unknown")
+	session.send("r")
+	session.waitScreen(180, 40, "explicit retry is in progress")
+	session.waitEvent("unknown-probe:started")
+	session.send("\r")
+	session.waitScreen(180, 40, "Ticket detail is held")
+	session.send("\x1b")
+	session.waitScreen(180, 40, "TODO (3)")
+	session.send("v")
+	session.waitScreen(180, 40, "frontier ·")
+	if events := session.events(); strings.Contains(events, "detail:") || strings.Contains(events, "fanout:") {
+		t.Fatalf("unknown-reset reservation admitted overlapping work:\n%s", events)
+	}
+	if err := os.WriteFile(session.release, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release unknown probe: %v", err)
+	}
+	session.waitEvent("unknown-probe:settled")
+	session.waitScreen(180, 40, "r re-read Details")
+	session.send("\r")
+	session.waitScreen(180, 40, "DETAIL-ALLOWED")
+	events := session.waitEvent("detail:P-1")
+	if strings.Count(events, "source:") != 2 || strings.Count(events, "detail:") != 1 || strings.Contains(events, "fanout:") {
+		t.Fatalf("unknown probe settlement calls = %q, want two Source, one Detail, no Frontier", events)
+	}
+	assertRatePTYTeardown(t, session.finish())
+}
+
+func TestFrontierCancellationThroughRawPTY(t *testing.T) {
+	session := startRatePTYSession(t, "cancel", 180, 40)
+	session.waitScreen(180, 40, "RATE-PTY-cancel")
+	session.send("v")
+	session.waitEvent("fanout:P-1,P-2,P-3")
+	session.send("v")
+	session.waitEvent("fanout:cancelled")
+	events := session.events()
+	if strings.Count(events, "fanout:") != 2 { // start and cancellation acknowledgement
+		t.Fatalf("Frontier cancellation ledger = %q, want one start and one cancellation", events)
+	}
+	assertRatePTYTeardown(t, session.finish())
+}
+
+func TestRefreshHoldFocusManualAndNarrowHelpThroughRawPTY(t *testing.T) {
+	const width, height = 60, 20
+	session := startRatePTYSession(t, "composition", width, height)
+	session.waitScreen(width, height, "RATE-PTY-composition")
+	session.send("p")
+	session.waitScreen(width, height, "monitor held")
+	session.send("\x1b[O")
+	session.waitScreen(width, height, "terminal unfocused")
+	session.send("\x1b[I")
+	session.waitScreen(width, height, "monitor held")
+	if events := session.events(); events != "" {
+		t.Fatalf("hold/focus composition started automatic work:\n%s", events)
+	}
+	session.send("r")
+	session.waitScreen(width, height, "MANUAL-SOURCE")
+	session.waitEvent("source:1")
+	session.send("?")
+	session.waitScreen(width, height, "p resume refresh")
+	visible := session.screen(width, height)
+	for _, marker := range []string{"? help", "q quit", "p resume refresh"} {
+		if !strings.Contains(visible, marker) {
+			t.Fatalf("narrow Help/footer lost %q:\n%s", marker, visible)
+		}
+	}
+	assertRatePTYTeardown(t, session.finish())
 }

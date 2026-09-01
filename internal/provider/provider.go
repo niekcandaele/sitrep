@@ -34,6 +34,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,6 +42,7 @@ import (
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // DefaultMaxTickets is the membership budget used for Query Selectors when a
@@ -154,19 +156,44 @@ type Provider interface {
 	// refresh path. Implementations canonicalize first-seen, non-empty IDs;
 	// empty input performs no I/O and returns a non-nil empty map. Successful
 	// entries retain their requested TicketID. A partial result is reported with
-	// a *DetailFailures error. Cancellation returns completed successes with the
-	// context error and does not invent per-Ticket failures for incomplete IDs.
+	// a *DetailFailures error. A rate refusal stops internal fallback/chunk work
+	// and is attributed to later unissued IDs. Cancellation returns completed
+	// successes with an error matching the context and does not invent per-Ticket
+	// cancellation failures for incomplete IDs. If a paid-for callback also returns
+	// a rate refusal, that aggregate remains inspectable for Tracker admission.
 	FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error)
 }
 
 // DetailFailures reports failures for individual Tickets in a plural Detail
 // read. Successful siblings remain in the result map. Consumers inspect
-// Failures rather than parsing Error; errors.Is reaches each contained error.
+// Failures rather than parsing Error. errors.Is reaches every child in an
+// aggregate of at most 64 failures; a larger untrusted aggregate exposes only a
+// bounds sentinel through error traversal.
 type DetailFailures struct {
 	Failures map[model.TicketID]error
 }
 
+const maxDetailFailureUnwrapChildren = 64
+
+var errDetailFailuresExceedSafeBounds = errors.New("provider: DetailFailures exceeds safe unwrap bounds")
+
+// DetailFailuresByTicket exposes the constituent map to plural-boundary
+// normalization without requiring errors.As to traverse a potentially malformed
+// error graph first.
+func (e *DetailFailures) DetailFailuresByTicket() map[model.TicketID]error {
+	if e == nil {
+		return nil
+	}
+	return e.Failures
+}
+
 func (e *DetailFailures) Error() string {
+	if e == nil {
+		return "provider: typed-nil DetailFailures"
+	}
+	if len(e.Failures) > maxDetailFailureUnwrapChildren {
+		return errDetailFailuresExceedSafeBounds.Error()
+	}
 	ids := make([]string, 0, len(e.Failures))
 	for id := range e.Failures {
 		ids = append(ids, string(id))
@@ -175,37 +202,83 @@ func (e *DetailFailures) Error() string {
 	return fmt.Sprintf("details could not be read for %s", strings.Join(ids, ", "))
 }
 
-// Unwrap exposes every per-Ticket error to errors.Is and errors.As.
+// Unwrap exposes every per-Ticket error for an ordinary bounded aggregate. An
+// oversized third-party aggregate exposes only a deterministic sentinel; callers
+// can inspect Failures directly when they already trust its provenance.
 func (e *DetailFailures) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	if len(e.Failures) > maxDetailFailureUnwrapChildren {
+		return []error{errDetailFailuresExceedSafeBounds}
+	}
 	ids := make([]string, 0, len(e.Failures))
 	for id := range e.Failures {
 		ids = append(ids, string(id))
 	}
 	sort.Strings(ids)
 	errs := make([]error, 0, len(ids))
-	for _, id := range ids {
-		if err := e.Failures[model.TicketID(id)]; err != nil {
+	for _, rawID := range ids {
+		id := model.TicketID(rawID)
+		err := e.Failures[id]
+		switch {
+		case termtext.IsTypedNilError(err):
+			errs = append(errs, fmt.Errorf("provider: FetchDetails returned a typed-nil failure for %q", id))
+		case err != nil:
 			errs = append(errs, err)
 		}
 	}
 	return errs
 }
 
+type detailFailuresWithRefusal struct {
+	failures *DetailFailures
+	refusal  error
+}
+
+func (e *detailFailuresWithRefusal) Error() string { return e.failures.Error() }
+func (e *detailFailuresWithRefusal) Unwrap() []error {
+	return []error{e.refusal, e.failures}
+}
+
+func newDetailFailuresError(failures map[model.TicketID]error, refusal error) error {
+	aggregate := &DetailFailures{Failures: failures}
+	if refusal == nil {
+		return aggregate
+	}
+	return &detailFailuresWithRefusal{failures: aggregate, refusal: refusal}
+}
+
 // FetchDetailsDefault supplies the generic plural implementation for Providers
 // without a Tracker-native batch. It canonicalizes first-seen non-empty IDs and
 // invokes fetch sequentially in canonical order. An empty input performs no I/O
 // and returns a non-nil empty map. Singular failures are accumulated as
-// DetailFailures; cancellation is returned directly with completed successes.
+// DetailFailures. Ordinary failures continue, while the first rate refusal is
+// assigned to its attempted ID and all later unissued canonical IDs and stops
+// the loop. Caller cancellation is direct control flow for consumers, while a
+// rate refusal returned by the same paid-for callback remains in its aggregate
+// error for Tracker admission policy.
 func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(context.Context, model.TicketID) (model.Detail, error)) (map[model.TicketID]model.Detail, error) {
 	canonical := canonicalDetailIDs(ids)
 	details := make(map[model.TicketID]model.Detail, len(canonical))
 	failures := make(map[model.TicketID]error)
-	for _, id := range canonical {
+	var rateRefusal error
+	for i, id := range canonical {
 		if err := ctx.Err(); err != nil {
 			return details, err
 		}
 		detail, err := fetch(ctx, id)
 		if err != nil {
+			if refusal, limited := InspectRateLimitRefusal(err, time.Time{}); limited {
+				rateRefusal = err
+				for _, unissued := range canonical[i:] {
+					failures[unissued] = refusal.Err
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return details, errors.Join(ctxErr, newDetailFailuresError(failures, rateRefusal))
+				}
+				break
+			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return details, ctxErr
 			}
@@ -225,7 +298,7 @@ func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(c
 		}
 	}
 	if len(failures) != 0 {
-		return details, &DetailFailures{Failures: failures}
+		return details, newDetailFailuresError(failures, rateRefusal)
 	}
 	return details, nil
 }

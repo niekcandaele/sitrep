@@ -340,9 +340,62 @@ func crossingFrontierFixture() ([]model.Ticket, map[model.TicketID][]model.Link)
 	}
 }
 
+type frontierRoute struct {
+	blocker, dependent model.TicketID
+	strokeCapacity     int
+}
+
+type frontierStroke struct {
+	from, to frontierPoint
+}
+
+// A local gutter segment emits at most six strokes. Each intermediate dummy
+// adds one, so a route spanning k ranks needs at most 6k+(k-1) strokes.
+func frontierRouteStrokeCapacity(rankSpan int) int {
+	return 7*rankSpan - 1
+}
+
+func projectedFrontierRoutes(l frontierLayout) []frontierRoute {
+	var routes []frontierRoute
+	for _, edge := range l.routeProjection.edges {
+		blockerRank := l.routeProjection.ranks[edge.blocker]
+		dependentRank := l.routeProjection.ranks[edge.dependent]
+		if dependentRank <= blockerRank {
+			continue
+		}
+		routes = append(routes, frontierRoute{
+			blocker:        l.order[edge.blocker],
+			dependent:      l.order[edge.dependent],
+			strokeCapacity: frontierRouteStrokeCapacity(dependentRank - blockerRank),
+		})
+	}
+	return routes
+}
+
+func projectedIncidentRoutes(l frontierLayout, id model.TicketID) []frontierRoute {
+	var incident []frontierRoute
+	for _, route := range projectedFrontierRoutes(l) {
+		if route.blocker == id || route.dependent == id {
+			incident = append(incident, route)
+		}
+	}
+	return incident
+}
+
+func streamedFrontierRouteStrokes(l frontierLayout, route frontierRoute) []frontierStroke {
+	var strokes []frontierStroke
+	streamFrontierRouteStrokes(l.routeProjection, l.order, l.nodeAt, l.rankOrigin,
+		l.direction, func(blocker, dependent model.TicketID) bool {
+			return blocker == route.blocker && dependent == route.dependent
+		}, func(from, to frontierPoint, _ rune) {
+			strokes = append(strokes, frontierStroke{from: from, to: to})
+		})
+	return strokes
+}
+
 func frontierRouteCells(l frontierLayout, route frontierRoute) map[frontierPoint]struct{} {
 	cells := make(map[frontierPoint]struct{})
-	for _, stroke := range l.routeStrokes(route) {
+	for _, stroke := range streamedFrontierRouteStrokes(l, route) {
 		dx, dy := 0, 0
 		if stroke.from.x < stroke.to.x {
 			dx = 1
@@ -364,9 +417,10 @@ func frontierRouteCells(l frontierLayout, route frontierRoute) map[frontierPoint
 	return cells
 }
 
-func sharedRouteCrossings(l frontierLayout, first, second frontierRouteID) []frontierPoint {
-	firstCells := frontierRouteCells(l, l.routes[int(first)-1])
-	secondCells := frontierRouteCells(l, l.routes[int(second)-1])
+func sharedRouteCrossings(l frontierLayout, first, second int) []frontierPoint {
+	routes := projectedFrontierRoutes(l)
+	firstCells := frontierRouteCells(l, routes[first-1])
+	secondCells := frontierRouteCells(l, routes[second-1])
 	var crossings []frontierPoint
 	for at := range firstCells {
 		if _, shared := secondCells[at]; shared && l.cells[at.y][at.x].r == '┼' {
@@ -463,16 +517,18 @@ func TestFrontierDeduplicatesBlockedByFromDuplicateDependentMembers(t *testing.T
 		"c": nil,
 	})
 
-	plan := planFrontierRanks(g, frontierNodes(g, tickets, true))
-	if len(plan.routes) != 1 {
-		t.Fatalf("routes = %+v, want one canonical c -> a route", plan.routes)
+	nodes := frontierNodes(g, tickets, true)
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{innerWidth: 120, direction: frontierRanksHorizontal})
+	routes := projectedFrontierRoutes(layout)
+	if len(routes) != 1 {
+		t.Fatalf("routes = %+v, want one canonical c -> a route", routes)
 	}
-	if got := plan.routes[0]; got.blocker != "c" || got.dependent != "a" {
+	if got := routes[0]; got.blocker != "c" || got.dependent != "a" {
 		t.Errorf("route = %+v, want blocker c and dependent a", got)
 	}
 	for _, id := range []model.TicketID{"a", "c"} {
-		if got, want := plan.incident[id], []frontierRouteID{1}; !reflect.DeepEqual(got, want) {
-			t.Errorf("incident[%s] = %v, want %v", id, got, want)
+		if got := projectedIncidentRoutes(layout, id); len(got) != 1 || got[0] != routes[0] {
+			t.Errorf("incident[%s] = %v, want %v", id, got, routes[0])
 		}
 	}
 }
@@ -578,66 +634,52 @@ func TestFrontierRoutesRetainCanonicalIdentityGeometryAndCrossings(t *testing.T)
 	tickets, links := crossingFrontierFixture()
 	g := graphOf(tickets, links)
 	nodes := frontierNodes(g, tickets, true)
-	plan := planFrontierRanks(g, nodes)
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 200, direction: frontierRanksHorizontal,
+	})
+	routes := projectedFrontierRoutes(layout)
 	wantRoutes := []struct {
 		blocker, dependent model.TicketID
 	}{
 		{"B", "C"}, {"A", "D"}, {"D", "E"}, {"C", "F"},
 		{"E", "G"}, {"F", "G"}, {"A", "G"},
 	}
-	if len(plan.routes) != len(wantRoutes) {
-		t.Fatalf("routes = %d, want %d", len(plan.routes), len(wantRoutes))
+	if len(routes) != len(wantRoutes) {
+		t.Fatalf("routes = %d, want %d", len(routes), len(wantRoutes))
 	}
+	gotIncident := make(map[model.TicketID][]int)
 	for i, want := range wantRoutes {
-		got := plan.routes[i]
+		got := routes[i]
 		if got.blocker != want.blocker || got.dependent != want.dependent {
 			t.Errorf("route %d endpoints = %s -> %s, want %s -> %s",
 				i+1, got.blocker, got.dependent, want.blocker, want.dependent)
 		}
+		gotIncident[got.blocker] = append(gotIncident[got.blocker], i+1)
+		gotIncident[got.dependent] = append(gotIncident[got.dependent], i+1)
 	}
-	wantIncident := map[model.TicketID][]frontierRouteID{
+	wantIncident := map[model.TicketID][]int{
 		"A": {2, 7}, "B": {1}, "C": {1, 4}, "D": {2, 3},
 		"E": {3, 5}, "F": {4, 6}, "G": {5, 6, 7},
 	}
-	if !reflect.DeepEqual(plan.incident, wantIncident) {
-		t.Errorf("incident index = %v, want canonical %v", plan.incident, wantIncident)
+	if !reflect.DeepEqual(gotIncident, wantIncident) {
+		t.Errorf("derived incident routes = %v, want canonical %v", gotIncident, wantIncident)
 	}
-
-	segments := 0
-	for _, rank := range plan.segments {
-		for _, segment := range rank {
-			segments++
-			if segment.routeID == 0 || int(segment.routeID) > len(plan.routes) {
-				t.Errorf("segment %+v has no canonical route", segment)
-			}
-		}
-	}
-	if segments != 9 {
-		t.Errorf("local segments = %d, want six adjacent plus three for the long route", segments)
+	if got := layout.routeProjection.work.channelSegments; got != 9 {
+		t.Errorf("local route segments = %d, want six adjacent plus three for the long route", got)
 	}
 	dummies := 0
-	for _, rank := range plan.slots {
-		for _, slot := range rank {
-			if slot.dummy {
-				dummies++
-				if slot.routeID != 7 {
-					t.Errorf("long-span dummy route = %d, want canonical route 7", slot.routeID)
-				}
-			}
-		}
+	for rank := range layout.routeProjection.slotCounts {
+		dummies += layout.routeProjection.slotCounts[rank] - layout.routeProjection.realCounts[rank]
 	}
 	if dummies != 2 {
-		t.Errorf("long-span dummies = %d, want 2", dummies)
+		t.Errorf("projected dummies = %d, want 2", dummies)
 	}
 
-	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
-		innerWidth: 200, direction: frontierRanksHorizontal, plan: &plan,
-	})
-	for i, route := range layout.routes {
+	for i, route := range routes {
 		if route.blocker != wantRoutes[i].blocker || route.dependent != wantRoutes[i].dependent {
-			t.Errorf("materialized route %d lost semantic endpoints: %+v", i+1, route)
+			t.Errorf("streamed route %d lost semantic endpoints: %+v", i+1, route)
 		}
-		strokes := layout.routeStrokes(route)
+		strokes := streamedFrontierRouteStrokes(layout, route)
 		if len(strokes) == 0 {
 			t.Errorf("materialized route %d has no geometry", i+1)
 		}
@@ -650,18 +692,17 @@ func TestFrontierRoutesRetainCanonicalIdentityGeometryAndCrossings(t *testing.T)
 			}
 		}
 	}
-	for _, pair := range [][2]frontierRouteID{{1, 2}, {3, 4}} {
+	for _, pair := range [][2]int{{1, 2}, {3, 4}} {
 		if crossings := sharedRouteCrossings(layout, pair[0], pair[1]); len(crossings) == 0 {
 			t.Errorf("routes %d and %d have no preserved shared crossing", pair[0], pair[1])
 		}
 	}
 
-	againPlan := planFrontierRanks(g, nodes)
 	again := layoutFrontier(g, nodes, frontierLayoutOptions{
-		innerWidth: 200, direction: frontierRanksHorizontal, plan: &againPlan,
+		innerWidth: 200, direction: frontierRanksHorizontal,
 	})
 	if !reflect.DeepEqual(layout, again) {
-		t.Error("identical graph input produced non-deterministic route metadata or materialization")
+		t.Error("identical graph input produced non-deterministic projection or streamed materialization")
 	}
 }
 
@@ -694,22 +735,23 @@ func TestFocusedFrontierCrossingUsesEitherOwnerAndIncidentRoutesOnly(t *testing.
 	}
 
 	overlay := focusedFrontierOverlay(layout, "C", 0, 0, layout.width, layout.height)
-	if got := layout.incident["C"]; !reflect.DeepEqual(got, []frontierRouteID{1, 4}) {
-		t.Fatalf("C incident routes = %v, want inbound 1 and outbound 4", got)
+	routes := projectedFrontierRoutes(layout)
+	if got, want := projectedIncidentRoutes(layout, "C"), []frontierRoute{routes[0], routes[3]}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("C incident routes = %v, want canonical %v", got, want)
 	}
-	for _, routeID := range []frontierRouteID{1, 4} {
+	for _, routeIndex := range []int{0, 3} {
 		found := false
-		for at := range frontierRouteCells(layout, layout.routes[int(routeID)-1]) {
+		for at := range frontierRouteCells(layout, routes[routeIndex]) {
 			if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("incident route %d contributes no focused cells", routeID)
+			t.Errorf("incident route %d contributes no focused cells", routeIndex+1)
 		}
 	}
-	for at := range frontierRouteCells(layout, layout.routes[4]) {
+	for at := range frontierRouteCells(layout, routes[4]) {
 		if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
 			t.Errorf("nonincident route 5 highlighted at %+v", at)
 			break
@@ -718,35 +760,72 @@ func TestFocusedFrontierCrossingUsesEitherOwnerAndIncidentRoutesOnly(t *testing.
 }
 
 func TestFocusedFrontierOverlayClipsAndRejectsProtectedCells(t *testing.T) {
-	cells := make([]frontierCell, 8)
-	for i := range cells {
-		cells[i] = frontierCell{r: '─'}
+	raster := newFrontierRouteRaster(frontierRect{W: 8, H: 1})
+	raster.add(frontierPoint{x: -1_000_000}, frontierPoint{x: 5}, '─')
+	var clipped []frontierPoint
+	raster.each(func(x, y int, _ rune) {
+		clipped = append(clipped, frontierPoint{x: x, y: y})
+	})
+	if got, want := clipped, []frontierPoint{{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("clipped route coverage = %v, want %v", got, want)
 	}
-	cells[4] = frontierCell{continuation: true}
-	cells[5] = frontierCell{r: '─', link: 1}
-	layout := frontierLayout{
-		cells:  [][]frontierCell{cells},
-		width:  8,
-		height: 1,
-		order:  []model.TicketID{"card"},
-		nodeAt: map[model.TicketID]frontierRect{"card": {X: 2, W: 2, H: 1}},
-		routes: []frontierRoute{
-			{blocker: "focus", dependent: "dependent", strokeStart: 0, strokeCount: 1, strokeCapacity: 1},
-			{blocker: "other", dependent: "elsewhere", strokeStart: 1, strokeCount: 1, strokeCapacity: 1},
-		},
-		strokes: []frontierStroke{
-			{from: frontierPoint{x: -1_000_000}, to: frontierPoint{x: 5}},
-			{from: frontierPoint{x: 6}, to: frontierPoint{x: 7}},
-		},
-		incident: map[model.TicketID][]frontierRouteID{"focus": {1}},
+
+	tickets := []model.Ticket{
+		blockingTicket("focus", model.StatusTodo),
+		blockingTicket("middle", model.StatusTodo),
+		blockingTicket("dependent", model.StatusTodo),
 	}
-	overlay := focusedFrontierOverlay(layout, "focus", 0, 0, 8, 1)
-	want := map[[2]int]frontierCell{
-		{0, 0}: {r: '─', style: frontierFocusedEdgeStyle},
-		{1, 0}: {r: '─', style: frontierFocusedEdgeStyle},
+	_, layout := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"focus": nil, "middle": blockedBy("focus"), "dependent": blockedBy("middle", "focus"),
+	})
+	var longRoute frontierRoute
+	for _, route := range projectedFrontierRoutes(layout) {
+		if route.blocker == "focus" && route.dependent == "dependent" {
+			longRoute = route
+		}
 	}
-	if !reflect.DeepEqual(overlay, want) {
-		t.Errorf("protected/clipped overlay = %#v, want only visible unprotected incident cells %#v", overlay, want)
+	if longRoute.blocker == "" {
+		t.Fatal("fixture has no long focused route")
+	}
+	routeCells := frontierRouteCells(layout, longRoute)
+	var unprotected, continuation, linked frontierPoint
+	found := 0
+	for y := range layout.height {
+		for x := range layout.width {
+			at := frontierPoint{x: x, y: y}
+			if _, routed := routeCells[at]; !routed || layout.insideCard(x, y) {
+				continue
+			}
+			switch found {
+			case 0:
+				unprotected = at
+			case 1:
+				continuation = at
+			case 2:
+				linked = at
+			}
+			found++
+			if found == 3 {
+				break
+			}
+		}
+		if found == 3 {
+			break
+		}
+	}
+	if found != 3 {
+		t.Fatalf("route has %d usable cells, want at least three", found)
+	}
+	layout.cells[continuation.y][continuation.x].continuation = true
+	layout.cells[linked.y][linked.x].link = 1
+	overlay := focusedFrontierOverlay(layout, "focus", 0, 0, layout.width, layout.height)
+	if _, ok := overlay[[2]int{unprotected.x, unprotected.y}]; !ok {
+		t.Errorf("unprotected route cell %+v was not highlighted", unprotected)
+	}
+	for _, protected := range []frontierPoint{continuation, linked} {
+		if _, ok := overlay[[2]int{protected.x, protected.y}]; ok {
+			t.Errorf("protected route cell %+v was highlighted", protected)
+		}
 	}
 }
 
@@ -833,7 +912,7 @@ func TestFocusedFrontierHubChecksOnlyVisibleCards(t *testing.T) {
 		direction:  frontierRanksHorizontal,
 	})
 	focus := model.TicketID("B-0")
-	if got := len(layout.incident[focus]); got != n-1 {
+	if got := len(projectedIncidentRoutes(layout, focus)); got != n-1 {
 		t.Fatalf("hub incident routes = %d, want %d", got, n-1)
 	}
 	rect := layout.nodeAt[focus]
@@ -901,26 +980,26 @@ func TestFrontierRouteIdentityPreservesGhostsLongSpansCyclesAndDirections(t *tes
 			wantRoutes := map[[2]model.TicketID]bool{
 				{"Q", "P"}: true, {"ghost", "P"}: true, {"ghost", "Q"}: true,
 			}
-			for _, route := range layout.routes {
+			routes := projectedFrontierRoutes(layout)
+			for _, route := range routes {
 				delete(wantRoutes, [2]model.TicketID{route.blocker, route.dependent})
 			}
 			if len(wantRoutes) != 0 {
 				t.Errorf("direction %d missing semantic routes %v", direction, wantRoutes)
 			}
-			if len(layout.incident["X"]) != 0 || len(layout.incident["Y"]) != 0 {
-				t.Errorf("direction %d routed SCC-internal cycle edges: X=%v Y=%v",
-					direction, layout.incident["X"], layout.incident["Y"])
+			if x, y := projectedIncidentRoutes(layout, "X"), projectedIncidentRoutes(layout, "Y"); len(x) != 0 || len(y) != 0 {
+				t.Errorf("direction %d routed SCC-internal cycle edges: X=%v Y=%v", direction, x, y)
 			}
 			if len(g.Cycles()) != 1 {
 				t.Errorf("direction %d cycles = %v, want X/Y cycle truth", direction, g.Cycles())
 			}
-			longRoute := -1
-			for i, route := range layout.routes {
-				if route.blocker == "ghost" && route.dependent == "P" {
-					longRoute = i
+			var longRoute *frontierRoute
+			for i := range routes {
+				if routes[i].blocker == "ghost" && routes[i].dependent == "P" {
+					longRoute = &routes[i]
 				}
 			}
-			if longRoute < 0 || len(layout.routeStrokes(layout.routes[longRoute])) < 3 {
+			if longRoute == nil || len(streamedFrontierRouteStrokes(layout, *longRoute)) < 3 {
 				t.Fatalf("direction %d long Ghost route has no dummy geometry", direction)
 			}
 			overlay := focusedFrontierOverlay(layout, "ghost", 0, 0, layout.width, layout.height)
@@ -959,70 +1038,74 @@ func TestFrontierCellsCarryNoRouteOwnershipMetadata(t *testing.T) {
 	}
 }
 
-func TestFrontierRoutesUseOneBoundedStrokeArena(t *testing.T) {
-	routeType := reflect.TypeOf(frontierRoute{})
-	for i := range routeType.NumField() {
-		if field := routeType.Field(i); field.Type.Kind() == reflect.Slice {
-			t.Errorf("frontierRoute field %q has a per-route backing slice", field.Name)
+func TestFrontierRoutesStreamWithoutRetainedArena(t *testing.T) {
+	layoutType := reflect.TypeOf(frontierLayout{})
+	for _, field := range []string{"routes", "strokes", "incident"} {
+		if _, retained := layoutType.FieldByName(field); retained {
+			t.Errorf("frontierLayout retains legacy %s state", field)
 		}
 	}
-
 	tickets, links := crossingFrontierFixture()
 	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
 		_, layout := layoutOfDirection(tickets, links, direction, 200)
-		nextStart := 0
-		materialized := 0
-		for i, route := range layout.routes {
-			if route.strokeStart != nextStart {
-				t.Errorf("direction %d route %d starts at %d, want contiguous arena offset %d",
-					direction, i+1, route.strokeStart, nextStart)
-			}
-			wantCapacity := frontierRouteStrokeCapacity(
-				layout.rankOf[route.dependent] - layout.rankOf[route.blocker])
-			if route.strokeCapacity != wantCapacity {
-				t.Errorf("direction %d route %d capacity = %d, want bound %d",
-					direction, i+1, route.strokeCapacity, wantCapacity)
-			}
-			strokes := layout.routeStrokes(route)
+		routes := projectedFrontierRoutes(layout)
+		if len(routes) == 0 {
+			t.Fatalf("direction %d projected no semantic routes", direction)
+		}
+		for i, route := range routes {
+			strokes := streamedFrontierRouteStrokes(layout, route)
 			if len(strokes) == 0 || len(strokes) > route.strokeCapacity {
-				t.Errorf("direction %d route %d materialized %d of %d stroke slots",
+				t.Errorf("direction %d route %d streamed %d of at most %d strokes",
 					direction, i+1, len(strokes), route.strokeCapacity)
 			}
-			materialized += len(strokes)
-			nextStart += route.strokeCapacity
-		}
-		if nextStart != len(layout.strokes) {
-			t.Errorf("direction %d arena slots = %d, want route ranges totaling %d",
-				direction, len(layout.strokes), nextStart)
-		}
-		if materialized == 0 {
-			t.Errorf("direction %d materialized no route geometry", direction)
 		}
 	}
 }
 
-func TestClipFrontierStrokePreservesAxisAndTravelOrder(t *testing.T) {
+func TestFrontierRouteRasterClipsAxisAlignedRanges(t *testing.T) {
 	clip := frontierRect{X: 2, Y: 3, W: 4, H: 5}
+	horizontal := map[frontierPoint]rune{}
+	for x := 2; x <= 5; x++ {
+		horizontal[frontierPoint{x: x, y: 4}] = '─'
+	}
+	vertical := map[frontierPoint]rune{}
+	for y := 3; y <= 7; y++ {
+		vertical[frontierPoint{x: 3, y: y}] = '│'
+	}
 	for _, test := range []struct {
-		name   string
-		stroke frontierStroke
-		want   frontierStroke
-		ok     bool
+		name     string
+		from, to frontierPoint
+		glyph    rune
+		want     map[frontierPoint]rune
 	}{
-		{"right", frontierStroke{frontierPoint{x: -9, y: 4}, frontierPoint{x: 20, y: 4}}, frontierStroke{frontierPoint{x: 2, y: 4}, frontierPoint{x: 5, y: 4}}, true},
-		{"left", frontierStroke{frontierPoint{x: 20, y: 4}, frontierPoint{x: -9, y: 4}}, frontierStroke{frontierPoint{x: 5, y: 4}, frontierPoint{x: 2, y: 4}}, true},
-		{"down", frontierStroke{frontierPoint{x: 3, y: -9}, frontierPoint{x: 3, y: 20}}, frontierStroke{frontierPoint{x: 3, y: 3}, frontierPoint{x: 3, y: 7}}, true},
-		{"up", frontierStroke{frontierPoint{x: 3, y: 20}, frontierPoint{x: 3, y: -9}}, frontierStroke{frontierPoint{x: 3, y: 7}, frontierPoint{x: 3, y: 3}}, true},
-		{"outside", frontierStroke{frontierPoint{x: 1, y: 0}, frontierPoint{x: 1, y: 20}}, frontierStroke{}, false},
-		{"diagonal", frontierStroke{frontierPoint{x: 2, y: 3}, frontierPoint{x: 3, y: 4}}, frontierStroke{}, false},
+		{"right", frontierPoint{x: -9, y: 4}, frontierPoint{x: 20, y: 4}, '─', horizontal},
+		{"left", frontierPoint{x: 20, y: 4}, frontierPoint{x: -9, y: 4}, '─', horizontal},
+		{"down", frontierPoint{x: 3, y: -9}, frontierPoint{x: 3, y: 20}, '│', vertical},
+		{"up", frontierPoint{x: 3, y: 20}, frontierPoint{x: 3, y: -9}, '│', vertical},
+		{"outside", frontierPoint{x: 1, y: 0}, frontierPoint{x: 1, y: 20}, '│', map[frontierPoint]rune{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := clipFrontierStroke(test.stroke, clip)
-			if ok != test.ok || got != test.want {
-				t.Errorf("clip = %+v/%t, want %+v/%t", got, ok, test.want, test.ok)
+			raster := newFrontierRouteRaster(clip)
+			raster.add(test.from, test.to, test.glyph)
+			got := map[frontierPoint]rune{}
+			raster.each(func(x, y int, glyph rune) {
+				got[frontierPoint{x: x, y: y}] = glyph
+			})
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("clipped raster = %v, want %v", got, test.want)
 			}
 		})
 	}
+
+	t.Run("diagonal rejected", func(t *testing.T) {
+		raster := newFrontierRouteRaster(clip)
+		defer func() {
+			if recover() == nil {
+				t.Error("diagonal route did not fail fast")
+			}
+		}()
+		raster.add(frontierPoint{x: 2, y: 3}, frontierPoint{x: 3, y: 4}, '─')
+	})
 }
 
 func TestMergeGlyph(t *testing.T) {
@@ -1282,8 +1365,8 @@ func TestFrontierDirectionChoiceUsesFitPhysicalRowsAndHorizontalTies(t *testing.
 	g := graphOf(chain, map[model.TicketID][]model.Link{
 		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
 	})
-	plan := planFrontierRanks(g, frontierNodes(g, chain, true))
-	candidates := frontierCandidates(plan, 80)
+	projection := projectFrontierRanks(g, frontierNodes(g, chain, true), 80, frontierDensityFull)
+	candidates := projection.candidates
 	if candidates[frontierRanksHorizontal].fullyFits(80, 24) ||
 		!candidates[frontierRanksVertical].fullyFits(80, 24) {
 		t.Fatalf("chain candidates = %+v, want only vertical to fit 80x24", candidates)
@@ -1339,7 +1422,7 @@ func TestFrontierDirectionHysteresisIsStrictAndSeatLocal(t *testing.T) {
 	}
 }
 
-func TestFrontierProjectionMatchesAdmittedPlanAndIsPure(t *testing.T) {
+func TestFrontierProjectionMatchesAdmittedLayoutAndIsPure(t *testing.T) {
 	tickets, links := crossingFrontierFixture()
 	g := graphOf(tickets, links)
 	nodes := frontierNodes(g, tickets, true)
@@ -1351,11 +1434,11 @@ func TestFrontierProjectionMatchesAdmittedPlanAndIsPure(t *testing.T) {
 				t.Fatalf("density %d width %d repeated projection differs\nfirst:  %#v\nsecond: %#v",
 					density, width, projection, again)
 			}
-			plan := materializeFrontierRankPlan(nodes, projection)
-			if got, want := projection.candidates,
-				frontierCandidatesForGeometry(plan, projection.geometry); !reflect.DeepEqual(got, want) {
-				t.Errorf("density %d width %d projected candidates = %+v, materialized shape = %+v",
-					density, width, got, want)
+			wantCandidates := frontierCandidatesFromShapeForGeometry(
+				len(projection.realCounts), projection.peers, projection.channelCounts, projection.geometry)
+			if !reflect.DeepEqual(projection.candidates, wantCandidates) {
+				t.Errorf("density %d width %d projected candidates = %+v, scalar shape = %+v",
+					density, width, projection.candidates, wantCandidates)
 			}
 			for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
 				candidate := projection.candidates[direction]
@@ -1366,11 +1449,11 @@ func TestFrontierProjectionMatchesAdmittedPlanAndIsPure(t *testing.T) {
 				withProjection := layoutFrontier(g, nodes, frontierLayoutOptions{
 					innerWidth: width, direction: direction, density: density, projection: &projection,
 				})
-				withPlan := layoutFrontier(g, nodes, frontierLayoutOptions{
-					innerWidth: width, direction: direction, density: density, plan: &plan,
+				direct := layoutFrontier(g, nodes, frontierLayoutOptions{
+					innerWidth: width, direction: direction, density: density,
 				})
-				if !reflect.DeepEqual(withProjection, withPlan) {
-					t.Errorf("density %d width %d direction %d projection changed admitted geometry",
+				if !reflect.DeepEqual(withProjection, direct) {
+					t.Errorf("density %d width %d direction %d supplied projection changed admitted geometry",
 						density, width, direction)
 				}
 			}
@@ -1449,38 +1532,110 @@ func TestFrontierProjectionAndAdmissionFailClosedOnOverflow(t *testing.T) {
 	}
 }
 
-func TestFrontierHostileProjectionRetainsNoMaterializedTopology(t *testing.T) {
-	const n = 1000
-	tickets, links := benchmarkFrontierFixture("hostile", n)
+func TestFrontierCompleteDAGRefusesBeforePerSpanProjectionWork(t *testing.T) {
+	const n = 50
+	tickets, links := benchmarkFrontierFixture("complete", n)
 	g := graphOf(tickets, links)
 	nodes := frontierNodes(g, tickets, true)
-	projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth, frontierDensityFull)
-	direction := chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30)
-	if refusal := refuseFrontierCandidate(projection.candidates[direction], len(nodes), len(g.Ghosts())); refusal == nil {
-		t.Fatalf("hostile N=%d admitted candidate %+v", n, projection.candidates[direction])
+	for _, density := range []frontierDensity{frontierDensityFull, frontierDensityDense} {
+		projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth, density)
+		for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+			candidate := projection.candidates[direction]
+			if refusal := refuseFrontierCandidate(candidate, len(nodes), len(g.Ghosts())); refusal == nil {
+				t.Errorf("density %d direction %d admitted complete-DAG N=%d candidate %+v",
+					density, direction, n, candidate)
+			}
+		}
+		wantEdges := n * (n - 1) / 2
+		if projection.work.edges != wantEdges || projection.work.ranks != n || projection.work.channelSegments != 0 {
+			t.Errorf("density %d projection work = %+v, want %d summarized edges, %d ranks, and no per-span work",
+				density, projection.work, wantEdges, n)
+		}
+		if len(projection.ranks) != n || len(projection.realPeerOf) != n ||
+			len(projection.slotCounts) != n || len(projection.channelCounts) != n-1 {
+			t.Errorf("density %d scalar metadata sizes = ranks %d peers %d slots %d channels %d, want O(N) rank data",
+				density, len(projection.ranks), len(projection.realPeerOf),
+				len(projection.slotCounts), len(projection.channelCounts))
+		}
+
+		forbiddenNames := map[string]string{
+			"slots": "dummy slots", "segments": "segments", "routes": "routes",
+			"incident": "incident index", "strokes": "strokes", "cells": "cells", "hitmap": "hit map",
+		}
+		projectionType := reflect.TypeOf(projection)
+		for i := range projectionType.NumField() {
+			field := projectionType.Field(i)
+			if retained, forbidden := forbiddenNames[strings.ToLower(field.Name)]; forbidden {
+				t.Errorf("projection field %q retains forbidden %s metadata", field.Name, retained)
+			}
+		}
 	}
-	if len(projection.ranks) != n || len(projection.realPeerOf) != n ||
-		len(projection.slotCounts) != n || len(projection.channelCounts) != n-1 {
-		t.Errorf("projection scalar metadata sizes = ranks %d peers %d slots %d channels %d, want O(N) rank data",
-			len(projection.ranks), len(projection.realPeerOf), len(projection.slotCounts), len(projection.channelCounts))
+}
+
+func TestFrontierCompleteDAGAtSafeCeilingStreamsWithoutRouteArena(t *testing.T) {
+	const n = 40
+	tickets := make([]model.Ticket, n)
+	links := make(map[model.TicketID][]model.Link, n)
+	for dependent := range n {
+		id := fmt.Sprintf("T-%04d", dependent)
+		tickets[dependent] = blockingTicket(id, model.StatusTodo)
+		blockers := make([]string, dependent)
+		for blocker := range dependent {
+			blockers[blocker] = fmt.Sprintf("T-%04d", blocker)
+		}
+		links[model.TicketID(id)] = blockedBy(blockers...)
+	}
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth, frontierDensityDense)
+	candidate := projection.candidates[frontierRanksHorizontal]
+	if candidate.width != 632 || candidate.height != 762 {
+		t.Fatalf("safe complete-DAG candidate = %dx%d, want 632x762", candidate.width, candidate.height)
+	}
+	if cells, ok := candidate.projectedCells(); !ok || cells != 481_584 {
+		t.Fatalf("safe complete-DAG cells = %d/%t, want 481584", cells, ok)
+	}
+	if refusal := refuseFrontierCandidate(candidate, len(nodes), len(g.Ghosts())); refusal != nil {
+		t.Fatalf("safe complete-DAG candidate refused: %+v", refusal)
+	}
+	if got := chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30); got != frontierRanksHorizontal {
+		t.Fatalf("safe complete-DAG selected direction = %d, want horizontal", got)
+	}
+	if projection.work.edges != 780 || projection.work.channelSegments != 10_660 {
+		t.Fatalf("safe complete-DAG projection work = %+v, want 780 edges and 10660 streamed spans",
+			projection.work)
 	}
 
-	forbidden := map[reflect.Type]string{
-		reflect.TypeOf(frontierSlot{}):    "dummy slots",
-		reflect.TypeOf(frontierSegment{}): "segments",
-		reflect.TypeOf(frontierRoute{}):   "routes",
-		reflect.TypeOf(frontierStroke{}):  "strokes",
-		reflect.TypeOf(frontierCell{}):    "cells",
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: frontierBenchmarkWidth, direction: frontierRanksHorizontal,
+		density: frontierDensityDense, projection: &projection,
+	})
+	if len(layout.cells) != candidate.height {
+		t.Fatalf("safe complete-DAG grid rows = %d, want %d", len(layout.cells), candidate.height)
 	}
-	projectionType := reflect.TypeOf(projection)
-	for i := range projectionType.NumField() {
-		field := projectionType.Field(i)
-		typeOf := field.Type
-		for typeOf.Kind() == reflect.Array || typeOf.Kind() == reflect.Slice || typeOf.Kind() == reflect.Pointer {
-			typeOf = typeOf.Elem()
+	for row, cells := range layout.cells {
+		if len(cells) != candidate.width {
+			t.Fatalf("safe complete-DAG grid row %d width = %d, want %d", row, len(cells), candidate.width)
 		}
-		if name, found := forbidden[typeOf]; found {
-			t.Errorf("projection field %q retains %s", field.Name, name)
+	}
+	layoutType := reflect.TypeOf(layout)
+	for _, field := range []string{"routes", "segments", "strokes", "incident", "slots"} {
+		if _, retained := layoutType.FieldByName(field); retained {
+			t.Errorf("safe complete-DAG layout retains legacy %s arena", field)
+		}
+	}
+
+	const viewportWidth, viewportHeight = 37, 11
+	overlay := focusedFrontierOverlay(layout, "T-0000", 0, 0, viewportWidth, viewportHeight)
+	if len(overlay) == 0 {
+		t.Fatal("safe complete-DAG focused overlay has no visible incident coverage")
+	}
+	if len(overlay) > viewportWidth*viewportHeight {
+		t.Fatalf("focused overlay has %d cells, exceeds %d-cell viewport", len(overlay), viewportWidth*viewportHeight)
+	}
+	for at := range overlay {
+		if at[0] < 0 || at[0] >= viewportWidth || at[1] < 0 || at[1] >= viewportHeight {
+			t.Fatalf("focused overlay cell %v escapes %dx%d viewport", at, viewportWidth, viewportHeight)
 		}
 	}
 }
@@ -1506,11 +1661,13 @@ func TestFrontierCandidateMeasurementAllocatesNoCellGrid(t *testing.T) {
 	g := graphOf(tickets, map[model.TicketID][]model.Link{
 		"#1": blockedBy("#2", "#3"), "#2": blockedBy("#3"), "#3": nil,
 	})
-	plan := planFrontierRanks(g, frontierNodes(g, tickets, true))
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, 80, frontierDensityFull)
 	if allocations := testing.AllocsPerRun(100, func() {
-		_ = frontierCandidates(plan, 80)
+		_ = frontierCandidatesFromShapeForGeometry(len(projection.realCounts), projection.peers,
+			projection.channelCounts, projection.geometry)
 	}); allocations != 0 {
-		t.Errorf("candidate measurement allocated %.0f objects, want metadata only", allocations)
+		t.Errorf("candidate measurement allocated %.0f objects, want scalar metadata only", allocations)
 	}
 }
 

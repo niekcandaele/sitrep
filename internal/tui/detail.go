@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/termtext"
@@ -138,6 +139,27 @@ func TicketDetailSource(p provider.Provider) DetailSource {
 	}
 }
 
+// detailFanoutFromSource preserves the injectable singular seam for callers
+// that do not supply native plural transport. The Provider helper owns canonical
+// ordering, deterministic sequential calls, partial failures, and cancellation.
+func detailFanoutFromSource(fetch DetailSource) detailfanout.Fetch {
+	return func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
+		var caps model.Capabilities
+		details, err := provider.FetchDetailsDefault(ctx, ids, func(ctx context.Context, id model.TicketID) (model.Detail, error) {
+			detail, observedCaps, err := fetch(ctx, id)
+			if err == nil {
+				caps = observedCaps
+			}
+			return detail, err
+		})
+		return details, caps, err
+	}
+}
+
+func safeDetailFanoutError(err error) error {
+	return safeErr(detailfanout.NormalizeError(err))
+}
+
 // detailEntry is one Ticket's cached Detail, stamped with when it was read. The
 // stamp is what makes a cached reading say "read 4m ago" rather than looking as
 // fresh as the list beside it.
@@ -156,6 +178,10 @@ type detailEntry struct {
 	// against captured Frontier fan-out reads. It is session-local and never
 	// persisted, regardless of whether this Detail is Frontier evidence.
 	directDetailVersion int
+	// lastFanoutGeneration orders accepted fan-out successes for this Ticket.
+	// Failures never advance it: an older paid-for success may still warm an
+	// otherwise unproven cache after a newer generation failed.
+	lastFanoutGeneration int
 }
 
 // frontierLinks returns the Detail that may supply Watchlist graph evidence.
@@ -240,11 +266,12 @@ type detailTrailEntry struct {
 // keystroke rather than a timer: open #112, esc, open #113, and #112's slow
 // answer would otherwise paint over #113.
 type detailFetchedMsg struct {
-	generation int
-	id         model.TicketID
-	detail     model.Detail
-	caps       model.Capabilities
-	err        error
+	generation    int
+	id            model.TicketID
+	detail        model.Detail
+	caps          model.Capabilities
+	err           error
+	requestPolicy provider.RequestPolicy
 }
 
 // detailStaleness renders how old the Detail on screen is: "read 4s ago". It is
@@ -315,14 +342,24 @@ func (m Model) seatDetail(t model.Ticket, parent Header, caps model.Capabilities
 		}
 		// A followed alias may have display data for this ID, but a native Frontier
 		// seat still needs its own read before it can become graph evidence.
+		next, policy, allowed := m.trackerRequestAdmission(trackerRequestExplicit)
+		if !allowed {
+			return m.reconcileDetail(true), nil
+		}
+		m = next
 		m.detail.loading = true
-		m = m.startDetailRead()
+		m = m.startDetailRead(policy)
 		m = m.reconcileDetail(true)
 		return m, m.detailFetchCmd(m.detailGeneration, t.ID)
 	}
 
+	next, policy, allowed := m.trackerRequestAdmission(trackerRequestExplicit)
+	if !allowed {
+		return m.reconcileDetail(false), nil
+	}
+	m = next
 	m.detail.loading = true
-	m = m.startDetailRead()
+	m = m.startDetailRead(policy)
 	m = m.reconcileDetail(false)
 	return m, m.detailFetchCmd(m.detailGeneration, t.ID)
 }
@@ -536,8 +573,15 @@ func (m Model) walkUp() (tea.Model, tea.Cmd) {
 	if m.listArmed {
 		return m, nil
 	}
-	next, cmd := m.startRefresh()
-	return next, cmd
+	// Walking up opts into monitoring even when policy denies the immediate read;
+	// the heartbeat can then start it when a known hold expires.
+	m.listArmed = true
+	next, policy, allowed := m.trackerRequestAdmission(trackerRequestExplicit)
+	if !allowed {
+		return next, nil
+	}
+	next.sourceRequestPolicy = policy
+	return next.startRefresh()
 }
 
 // startDetailFetch begins one explicit re-read. Even a malformed empty ID
@@ -548,14 +592,19 @@ func (m Model) startDetailFetch() (Model, tea.Cmd) {
 	if m.detail.loading {
 		return m, nil
 	}
-	m = m.retireDetailRead()
 	if m.detail.ticket.ID == "" {
+		m = m.retireDetailRead()
 		m.detail.loading = false
 		m.detail.lastErr = errEmptyLinkTargetID
 		return m.reconcileDetail(false), nil
 	}
+	next, policy, allowed := m.trackerRequestAdmission(trackerRequestExplicit)
+	if !allowed {
+		return m, nil
+	}
+	m = next.retireDetailRead()
 	m.detail.loading = true
-	m = m.startDetailRead()
+	m = m.startDetailRead(policy)
 	return m, m.detailFetchCmd(m.detailGeneration, m.detail.ticket.ID)
 }
 
@@ -565,18 +614,25 @@ func (m Model) startDetailFetch() (Model, tea.Cmd) {
 func (m Model) detailFetchCmd(generation int, id model.TicketID) tea.Cmd {
 	fetch := m.fetchDetail
 	ctx := m.detailContext
+	policy := m.detailRequestPolicy
 	return func() tea.Msg {
 		d, caps, err := fetch(ctx, id)
-		return detailFetchedMsg{generation: generation, id: id, detail: d, caps: caps, err: err}
+		return detailFetchedMsg{
+			generation: generation, id: id, detail: d, caps: caps, err: err,
+			requestPolicy: policy,
+		}
 	}
 }
 
-// onDetailFetched folds one Detail reading in, dropping any answer the screen is
-// no longer waiting for.
+// onDetailFetched observes Tracker policy from every result before folding the
+// semantic Detail answer only when the screen is still waiting for it.
 func (m Model) onDetailFetched(msg detailFetchedMsg) Model {
+	msg.err = safeErr(msg.err)
+	m, _ = m.settleTrackerRequest(msg.requestPolicy, msg.err, msg.err == nil)
 	if msg.generation != m.detailGeneration || msg.id != m.detail.ticket.ID {
 		// Open #112, esc, open #113: #112's slow answer must not paint over
 		// #113, and must not clear the in-flight flag or child of the read that is.
+		// Tracker refusal policy was still observed above.
 		return m
 	}
 	m = m.finishDetailRead()
@@ -734,6 +790,7 @@ func (m Model) clampDetail(offset int) int {
 // the model's current state. Loading and first-read failures are documents too,
 // but deliberately have no Link rows.
 func (m Model) detailDocument() detailDocument {
+	policy := m.trackerHoldNotice()
 	switch {
 	case m.detail.loaded:
 		markdown := m.effectiveMarkdownRenderers()
@@ -745,12 +802,53 @@ func (m Model) detailDocument() detailDocument {
 		}
 		return composeDetailDocumentWithSections(m.detail.input, m.width, m.styles, m.detail.linkFocus,
 			m.detail.hasLinkFocus, sections)
+	case policy != "":
+		retryAvailable := m.rateHold.manual && m.unknownProbeToken == 0
+		return heldDetailDocument(policy, m.detail.lastErr, retryAvailable, m.width, m.styles, m.detailBackDescription())
 	case m.detail.lastErr != nil:
 		return initialDetailErrorDocument(m.detail.lastErr, m.width, m.styles, m.detailBackDescription())
-	default:
+	case m.detail.loading:
 		return detailDocument{Lines: truncateDocumentLines(
 			[]string{m.styles.Muted.Render("Reading Ticket detail…")}, m.width)}
+	default:
+		return unreadDetailDocument(m.width, m.styles, m.detailBackDescription())
 	}
+}
+
+func heldDetailDocument(notice string, lastErr error, retryAvailable bool, width int, styles Styles, backDescription string) detailDocument {
+	lines := []string{styles.Error.Render("Ticket detail is held."), ""}
+	if lastErr != nil && provider.KindOf(lastErr) != provider.KindRateLimit {
+		lines = append(lines, styles.Error.Render("Last Tracker request failed: "+lastErr.Error()), "")
+	}
+	for _, line := range wrapText(notice, width) {
+		lines = append(lines, styles.Error.Render(line))
+	}
+	lines = append(lines, "")
+
+	exitAction := backDescription
+	if exitAction == "back" {
+		exitAction = "go back"
+	}
+	guidance := "Press esc to " + exitAction + "."
+	if retryAvailable {
+		guidance = "Press r to retry this Detail, esc to " + exitAction + "."
+	}
+	for _, line := range wrapText(guidance, width) {
+		lines = append(lines, styles.Muted.Render(line))
+	}
+	return detailDocument{Lines: truncateDocumentLines(lines, width)}
+}
+
+func unreadDetailDocument(width int, styles Styles, backDescription string) detailDocument {
+	lines := []string{styles.Muted.Render("Ticket detail has not been read."), ""}
+	exitAction := backDescription
+	if exitAction == "back" {
+		exitAction = "go back"
+	}
+	for _, line := range wrapText("Press r to try again, esc to "+exitAction+".", width) {
+		lines = append(lines, styles.Muted.Render(line))
+	}
+	return detailDocument{Lines: truncateDocumentLines(lines, width)}
 }
 
 func initialDetailErrorDocument(err error, width int, styles Styles, backDescription string) detailDocument {
@@ -799,11 +897,16 @@ func (m Model) detailFrame(doc detailDocument) string {
 // never clips a priority action.
 func (m Model) detailFooterLines(doc detailDocument) []string {
 	lines := []string{""}
+	policy := m.trackerHoldNotice()
 	// A read that failed with a Detail already on screen is a footer line, not a
-	// body: what the reader has is still worth reading.
-	if m.detail.lastErr != nil && m.detail.loaded {
+	// body: what the reader has is still worth reading. The Tracker-wide policy
+	// owns rate-refusal wording, so do not restate it as a local failure.
+	if m.detail.lastErr != nil && m.detail.loaded && (policy == "" || !m.rateRefusal(m.detail.lastErr)) {
 		lines = append(lines, m.styles.Error.Render(truncateLine(
 			"could not re-read this Ticket's detail: "+m.detail.lastErr.Error(), m.width)))
+	}
+	if policy != "" && m.detail.loaded {
+		lines = append(lines, m.styles.Error.Render(truncateLine(policy, m.width)))
 	}
 
 	help := strings.Split(m.detailHelpView(), "\n")
@@ -832,7 +935,11 @@ func (m Model) detailFooterLines(doc detailDocument) []string {
 // spacer or a help line and never adds a line.
 func (m Model) detailBodyHeight() int {
 	lines := 1
-	if m.detail.lastErr != nil && m.detail.loaded {
+	policy := m.trackerHoldNotice()
+	if m.detail.lastErr != nil && m.detail.loaded && (policy == "" || !m.rateRefusal(m.detail.lastErr)) {
+		lines++
+	}
+	if policy != "" && m.detail.loaded {
 		lines++
 	}
 	lines += len(strings.Split(m.detailHelpView(), "\n"))

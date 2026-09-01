@@ -40,6 +40,8 @@
 package termtext
 
 import (
+	"errors"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -88,19 +90,39 @@ func Body(s string) string {
 // Err returns an error whose rendered message has crossed Line, keeping
 // everything it wrapped reachable so errors.Is, errors.As and provider.KindOf
 // still see through it. An error that is already clean is returned unchanged.
+// A typed-nil error is replaced before its Error method can be called.
 //
-// It exists because the TUI's Source and DetailSource are plain functions: a
-// caller that never went near a Provider can return any error, and the footer
-// draws its text.
+// It exists because the TUI's Source, DetailSource, and DetailFanout are plain
+// functions: a caller that never went near a Provider can return any error, and
+// the footer, Detail error document, or Frontier failure UI draws its text.
 func Err(err error) error {
 	if err == nil {
 		return nil
+	}
+	if IsTypedNilError(err) {
+		return errors.New("typed-nil error")
 	}
 	message := err.Error()
 	if clean := Line(message); clean != message {
 		return &cleanedMessage{msg: clean, err: err}
 	}
 	return err
+}
+
+// IsTypedNilError reports whether err's interface contains a nil value of a
+// nilable concrete type. Such an interface compares non-nil but may panic when
+// Error, Unwrap, errors.Is, or errors.As invokes a method on its nil receiver.
+func IsTypedNilError(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := reflect.ValueOf(err)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // cleanedMessage replaces an error's rendered text while keeping everything it

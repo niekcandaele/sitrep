@@ -673,6 +673,9 @@ func TestDetailDocumentsStayWidthBoundedAtExtremeWidths(t *testing.T) {
 	failed.detail.loading = false
 	failed.detail.lastErr = errors.New("échec 界面 with a long diagnostic")
 
+	ready := loading
+	ready.detail.loading = false
+
 	states := []struct {
 		name  string
 		model Model
@@ -680,6 +683,7 @@ func TestDetailDocumentsStayWidthBoundedAtExtremeWidths(t *testing.T) {
 		{name: "loaded Unicode", model: loaded},
 		{name: "loaded empty sections", model: empty},
 		{name: "loading", model: loading},
+		{name: "ready to read", model: ready},
 		{name: "initial error", model: failed},
 	}
 	for _, width := range []int{0, 1, 2, 3, 5, 9} {

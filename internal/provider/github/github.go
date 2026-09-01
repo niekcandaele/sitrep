@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -491,8 +492,9 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 
 // FetchDetails reads canonical Ticket IDs through bounded aliased Detail
 // documents. Chunks are sequential: ordinary failures stay attributable to the
-// IDs in that chunk while later chunks continue, and caller cancellation stops
-// before any further request.
+// IDs in that chunk while later chunks continue. A rate refusal is attributed to
+// every later unissued ID and stops before another request; caller cancellation
+// also stops before further I/O.
 func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
 	canonical := canonicalDetailIDs(ids)
 	details := make(map[model.TicketID]model.Detail, len(canonical))
@@ -504,36 +506,98 @@ func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[
 	}
 
 	failures := make(map[model.TicketID]error)
+	var responseErr, rateRefusal error
 	for start := 0; start < len(canonical); start += maxQueryAliases {
 		end := min(start+maxQueryAliases, len(canonical))
 		chunk := canonical[start:end]
-		chunkDetails, chunkFailures, err := p.fetchDetailChunk(ctx, chunk)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return details, ctxErr
+		chunkDetails, chunkFailures, chunkErr, chunkRefusal := p.fetchDetailChunk(ctx, chunk)
+		for id, detail := range chunkDetails {
+			details[id] = detail
+		}
+
+		inspectErr := joinDetailBatchErrors(chunkErr, chunkRefusal)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if refusal, limited := provider.InspectRateLimitRefusal(inspectErr, time.Time{}); limited {
+				return details, errors.Join(ctxErr, refusal.Err)
 			}
+			return details, ctxErr
+		}
+		for id, failure := range chunkFailures {
+			failures[id] = failure
+		}
+		if chunkErr != nil {
 			for _, id := range chunk {
-				failures[id] = err
+				if _, succeeded := chunkDetails[id]; succeeded {
+					continue
+				}
+				if _, failed := chunkFailures[id]; !failed {
+					failures[id] = chunkErr
+				}
 			}
-		} else {
-			for id, detail := range chunkDetails {
-				details[id] = detail
+			responseErr = joinDetailBatchErrors(responseErr, chunkErr)
+		}
+
+		if refusal, limited := provider.InspectRateLimitRefusal(inspectErr, time.Time{}); limited {
+			rateRefusal = refusal.Err
+			for _, unissued := range canonical[end:] {
+				failures[unissued] = refusal.Err
 			}
-			for id, failure := range chunkFailures {
-				failures[id] = failure
-			}
+			break
 		}
 		if err := ctx.Err(); err != nil {
 			return details, err
 		}
 	}
-	if len(failures) != 0 {
-		return details, &provider.DetailFailures{Failures: failures}
-	}
-	return details, nil
+	return details, detailBatchResultError(responseErr, failures, rateRefusal)
 }
 
-func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, map[model.TicketID]error, error) {
+func detailFailuresError(failures map[model.TicketID]error) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	return &provider.DetailFailures{Failures: failures}
+}
+
+// detailBatchResultError preserves raw response causes that may have no natural
+// ticket owner. The already-inspected refusal is also a direct sibling when it
+// otherwise exists only inside per-Ticket failures, so bounded consumers retain
+// Tracker admission policy without widening their error-graph safety window.
+func detailBatchResultError(responseErr error, failures map[model.TicketID]error, rateRefusal error) error {
+	result := joinDetailBatchErrors(responseErr, detailFailuresError(failures))
+	if rateRefusal == nil || hasDirectRateLimitChild(result) {
+		return result
+	}
+	return &detailBatchRateRefusal{result: result, refusal: rateRefusal}
+}
+
+type detailBatchRateRefusal struct {
+	result  error
+	refusal error
+}
+
+func (e *detailBatchRateRefusal) Error() string { return e.result.Error() }
+func (e *detailBatchRateRefusal) Unwrap() []error {
+	return []error{e.refusal, e.result}
+}
+
+func hasDirectRateLimitChild(err error) bool {
+	if classified, ok := err.(*provider.Error); ok && classified != nil && classified.Kind == provider.KindRateLimit { //nolint:errorlint // Only direct placement matters here.
+		return true
+	}
+	many, ok := err.(interface{ Unwrap() []error }) //nolint:errorlint // This is a single-level placement check, not graph traversal.
+	if !ok {
+		return false
+	}
+	for _, child := range many.Unwrap() {
+		classified, direct := child.(*provider.Error) //nolint:errorlint // Only direct placement matters here.
+		if direct && classified != nil && classified.Kind == provider.KindRateLimit {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, map[model.TicketID]error, error, error) {
 	variables := make(map[string]any, len(ids))
 	for i, id := range ids {
 		variables["id"+strconv.Itoa(i)] = string(id)
@@ -542,7 +606,7 @@ func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (
 	var resp detailBatchResponse
 	header, err := p.do(ctx, buildDetailBatchQuery(len(ids)), variables, &resp)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, nil
 	}
 	return resp.decode(ids, p.endpoint, header)
 }

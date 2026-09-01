@@ -15,12 +15,12 @@
 //
 // # The terminal-text boundary
 //
-// Model data enters this package through exactly four funnels — Options.Initial,
-// Options.Open, Options.Source and Options.DetailSource — and none of them has
-// to come from a Provider: a Source is any closure the caller wrote. So the
-// screens do not trust their caller. Everything entering Model state crosses
-// intake.go, which applies internal/termtext to whole model values, and the
-// renderers below are therefore free of sanitizing calls (ADR-0006).
+// Model data enters this package through exactly five funnels — Options.Initial,
+// Options.Open, Options.Source, Options.DetailSource and Options.DetailFanout —
+// and none of them has to come from a Provider: a Source is any closure the
+// caller wrote. So the screens do not trust their caller. Everything entering
+// Model state crosses intake.go, which applies internal/termtext to whole model
+// values, and the renderers below are therefore free of sanitizing calls (ADR-0006).
 //
 // A new screen inherits that by consuming a ListInput or a DetailInput: both
 // can only be seated through those funnels or through DetailFromTicket, which
@@ -151,11 +151,10 @@
 //
 // # One clock, one timer
 //
-// Model.now is the only clock in the package: nothing else may call time.Now,
-// because the staleness indicator is the one place a clock reaches the screen
-// and golden frames need it fixed. A single one-second heartbeat drives both
-// that indicator and the decision to refresh, so the label and the refresh can
-// never disagree about how old the data is.
+// Constructed Models always install Model.now as the package clock; policyNow's
+// time.Now fallback exists only for focused tests that use zero-value fixtures.
+// A single one-second heartbeat drives both the staleness indicator and the
+// decision to refresh, so the label and refresh cannot disagree about age.
 package tui
 
 import (
@@ -166,6 +165,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/terminal"
 )
 
@@ -180,6 +180,12 @@ type Options struct {
 	// when the user explicitly re-reads it. A monitor without one still lists
 	// Tickets; enter then says why it cannot open them.
 	DetailSource DetailSource
+	// DetailFanout reads the canonical missing Details for one explicit Frontier
+	// generation. Production callers adapt the same Provider through
+	// detailfanout.FromProvider, allowing native plural transport without teaching
+	// the TUI about Tracker implementations. When nil, New preserves custom/test
+	// DetailSource callers with a deterministic sequential fallback.
+	DetailFanout detailfanout.Fetch
 	// Open, when non-nil, starts the program on one Ticket's Detail instead of
 	// the list: the decoder entry point for a Ref that named a Ticket. The
 	// Detail itself is read from DetailSource on the first frame, the same way a
