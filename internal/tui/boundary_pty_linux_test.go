@@ -1031,11 +1031,11 @@ func ratePTYOptions(fixture string) Options {
 			switch fixture {
 			case "partial":
 				return map[model.TicketID]model.Detail{
-					"P-1": {TicketID: "P-1"},
-					"P-3": {TicketID: "P-3"},
-				}, capabilities, &provider.DetailFailures{Failures: map[model.TicketID]error{
-					"P-2": errors.New("PARTIAL-MEMBER-FAILURE"),
-				}}
+						"P-1": {TicketID: "P-1"},
+						"P-3": {TicketID: "P-3"},
+					}, capabilities, &provider.DetailFailures{Failures: map[model.TicketID]error{
+						"P-2": errors.New("PARTIAL-MEMBER-FAILURE"),
+					}}
 			case "cancel":
 				<-ctx.Done()
 				ratePTYEvent("fanout:cancelled")
