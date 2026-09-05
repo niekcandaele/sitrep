@@ -25,14 +25,18 @@ type KeyMap struct {
 	End key.Binding
 	// Refresh forces a refresh now.
 	Refresh key.Binding
+	// ToggleRefreshHold pauses or resumes only automatic List refreshes.
+	ToggleRefreshHold key.Binding
 	// Open opens the selected Ticket's Detail. With nothing selectable — an
 	// empty Watchlist, or a filter matching nothing — it does nothing.
 	Open key.Binding
 	// HideFinished toggles hiding Done and Cancelled Tickets.
 	HideFinished key.Binding
-	// Frontier opens the Frontier: the same Watchlist drawn as blocking-graph
-	// nodes. It is offered only when there is a Watchlist to draw.
+	// Frontier opens the Frontier with the current manual density preference.
 	Frontier key.Binding
+	// DenseFrontier opens the Frontier with dense chips selected. It is omitted
+	// from ShortHelp so the established List footer priority stays unchanged.
+	DenseFrontier key.Binding
 	// Find opens the fuzzy find over Ticket keys and titles.
 	Find key.Binding
 	// ClearFilter drops both filter criteria. It is enabled only while a
@@ -49,6 +53,8 @@ type KeyMap struct {
 	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -84,6 +90,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
 		),
+		ToggleRefreshHold: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "hold refresh"),
+		),
 		Open: key.NewBinding(
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "open"),
@@ -95,6 +105,11 @@ func DefaultKeyMap() KeyMap {
 		Frontier: key.NewBinding(
 			key.WithKeys("v"),
 			key.WithHelp("v", "frontier"),
+			key.WithDisabled(),
+		),
+		DenseFrontier: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "dense Frontier"),
 			key.WithDisabled(),
 		),
 		Find: key.NewBinding(
@@ -117,6 +132,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
 		),
+		Legend: key.NewBinding(
+			key.WithKeys("L"),
+			key.WithHelp("L", "legend"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c", "esc"),
 			key.WithHelp("q", "quit"),
@@ -124,16 +143,15 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
-// ShortHelp returns the bindings the one-line footer shows. The mouse escape
-// hatch comes first so terminals too narrow for the normal primary-action trio
-// still explain how to recover text selection. Open and quit follow, keeping all
-// three visible at 80 columns. Every binding remains available in FullHelp.
+// ShortHelp returns the stable priority order for the one-line list footer.
+// The model keeps the mouse escape hatch, open, quit, and Help visible from 60
+// columns upward while spending remaining room on this sequence. Every omitted
+// binding remains available in FullHelp and through keyboard dispatch.
 func (k KeyMap) ShortHelp() []key.Binding {
-	// Frontier comes last: at 80 and at 120 columns the line is already full,
-	// and dropping "? help" — the one binding that reveals the rest — to make
-	// room for a binding the expanded listing already carries is a bad trade.
+	// Frontier stays last so Help remains the on-screen route to the complete
+	// binding list before the optional graph shortcut competes for room.
 	return []key.Binding{k.ToggleMouse, k.Open, k.Quit, k.Up, k.Down, k.HideFinished, k.Find,
-		k.ClearFilter, k.Help, k.Frontier}
+		k.ClearFilter, k.ToggleRefreshHold, k.Help, k.Frontier}
 }
 
 // FullHelp returns every binding in two dense columns. The model stacks these
@@ -141,8 +159,21 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // remains complete rather than letting bubbles omit the trailing group.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.Refresh, k.Help, k.Quit},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Frontier, k.DenseFrontier, k.Refresh, k.ToggleRefreshHold, k.Help, k.Legend, k.Quit},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End, k.HideFinished, k.Find, k.ClearFilter},
+	}
+}
+
+// actionabilityListFullHelp redistributes the longer cold Frontier description
+// and the short disabled-mouse roles across the two columns. It is a measured
+// fallback only: callers retain the ordinary groups whenever those already fit,
+// and stack if this arrangement still does not.
+func actionabilityListFullHelp(k KeyMap) [][]key.Binding {
+	dense := k.DenseFrontier
+	dense.SetHelp("V", "dense")
+	return [][]key.Binding{
+		{k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, dense, k.Help, k.Legend, k.Quit, k.Up, k.Down, k.Home},
+		{k.ToggleMouse, k.Frontier, k.Refresh, k.ToggleRefreshHold, k.PageUp, k.PageDown, k.End, k.HideFinished, k.Find, k.ClearFilter},
 	}
 }
 
@@ -150,6 +181,10 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 	mouse := k.ToggleMouse
 	if mouse.Help().Desc == mouseEnabledHelp {
 		mouse.SetHelp("m", mouseEnabledCompactHelp)
+	}
+	refreshAction := "hold"
+	if k.ToggleRefreshHold.Help().Desc == "resume refresh" {
+		refreshAction = "resume"
 	}
 	bindings := []key.Binding{
 		mouse,
@@ -161,10 +196,18 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("g/G", "first/last"),
 		helpOnlyBinding("enter/r", "open/refresh"),
 		helpOnlyBinding("d /", "hide finished/find"),
-		helpOnlyBinding("?/q", "help/quit"),
+		helpOnlyBinding("L/?/q/p", "legend/help/quit/"+refreshAction),
 	}
-	if k.Frontier.Enabled() {
+	switch {
+	case k.Frontier.Enabled() && k.DenseFrontier.Enabled() &&
+		k.Frontier.Help().Desc == "compute actionability":
+		bindings = append(bindings, helpOnlyBinding("v", "compute actionability · V dense"))
+	case k.Frontier.Enabled() && k.DenseFrontier.Enabled():
+		bindings = append(bindings, helpOnlyBinding("v/V", "frontier/dense Frontier"))
+	case k.Frontier.Enabled():
 		bindings = append(bindings, k.Frontier)
+	case k.DenseFrontier.Enabled():
+		bindings = append(bindings, k.DenseFrontier)
 	}
 	if k.ClearFilter.Enabled() {
 		bindings = append(bindings, k.ClearFilter)
@@ -216,6 +259,8 @@ type DetailKeyMap struct {
 	MouseFollow key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -259,6 +304,7 @@ func DefaultDetailKeyMap() DetailKeyMap {
 		MouseWheel:  helpOnlyBinding("wheel", "scroll body"),
 		MouseFollow: helpOnlyBinding("click Link", "follow"),
 		Help:        list.Help,
+		Legend:      list.Legend,
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -280,10 +326,10 @@ func (k DetailKeyMap) FullHelp() [][]key.Binding {
 }
 
 // FrontierKeyMap is the keyboard while the Frontier is open. It reuses list
-// bindings where key and meaning match and replaces the list's paging with
-// movement along the two axes a graph has. Neither d nor / appears: filters do
-// not apply on this screen, and the footer says so rather than binding a key
-// that would quietly lie.
+// bindings where key and meaning match. Arrows move graph focus along its axes;
+// page keys move the vertical canvas window without moving focus. Neither d nor
+// / appears: filters do not apply on this screen, and the footer says so rather
+// than binding a key that would quietly lie.
 type FrontierKeyMap struct {
 	// Up moves focus to the previous node in this column.
 	Up key.Binding
@@ -293,6 +339,10 @@ type FrontierKeyMap struct {
 	Left key.Binding
 	// Right moves focus to the dependent side.
 	Right key.Binding
+	// PageUp moves the canvas window backward by one current visible body-height page.
+	PageUp key.Binding
+	// PageDown moves the canvas window forward by one current visible body-height page.
+	PageDown key.Binding
 	// Home focuses the first node in canonical order.
 	Home key.Binding
 	// End focuses the last node in canonical order.
@@ -301,6 +351,8 @@ type FrontierKeyMap struct {
 	Open key.Binding
 	// Toggle returns to the list, dropping every outstanding Detail read.
 	Toggle key.Binding
+	// Density toggles dense chips and full cards without leaving the Frontier.
+	Density key.Binding
 	// Refresh re-issues the Detail reads that never succeeded.
 	Refresh key.Binding
 	// ToggleMouse enables or disables terminal mouse capture.
@@ -313,6 +365,8 @@ type FrontierKeyMap struct {
 	MouseWheel key.Binding
 	// Help toggles the full help listing.
 	Help key.Binding
+	// Legend toggles the session-local slack-space legend.
+	Legend key.Binding
 	// Quit ends the program.
 	Quit key.Binding
 }
@@ -340,6 +394,8 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 			key.WithKeys("right", "l"),
 			key.WithHelp("→/l", "dependent side"),
 		),
+		PageUp:   list.PageUp,
+		PageDown: list.PageDown,
 		Home: key.NewBinding(
 			key.WithKeys("home", "g"),
 			key.WithHelp("g", "first node"),
@@ -359,6 +415,10 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 			// ? panel alike.
 			key.WithHelp("v/esc", "list"),
 		),
+		Density: key.NewBinding(
+			key.WithKeys("V"),
+			key.WithHelp("V", "dense/full cards"),
+		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "re-read Details"),
@@ -368,6 +428,7 @@ func DefaultFrontierKeyMap() FrontierKeyMap {
 		MouseOpen:   helpOnlyBinding("double-click", "open Ticket"),
 		MouseWheel:  helpOnlyBinding("wheel", "scroll"),
 		Help:        list.Help,
+		Legend:      list.Legend,
 		// esc belongs to Toggle here, so Quit is q and ctrl+c only — the same
 		// separation the Detail screen makes.
 		Quit: key.NewBinding(
@@ -397,8 +458,8 @@ func (k FrontierKeyMap) ShortHelp() []key.Binding {
 // when the terminal cannot show them side by side.
 func (k FrontierKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Refresh, k.Help, k.Quit},
-		{k.Up, k.Down, k.Left, k.Right, k.Home, k.End},
+		{k.ToggleMouse, k.MouseSelect, k.MouseOpen, k.MouseWheel, k.Open, k.Toggle, k.Density, k.Refresh, k.Help, k.Legend, k.Quit},
+		{k.Up, k.Down, k.Left, k.Right, k.PageUp, k.PageDown, k.Home, k.End},
 	}
 }
 

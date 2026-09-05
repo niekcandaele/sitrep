@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -33,8 +34,8 @@ const (
 	actionableMarker = "● "
 	// notActionableMarker keeps every other Ticket's title in the same column.
 	notActionableMarker = "  "
-	// actionableColumn is the two columns the marker occupies, reserved on
-	// every Ticket row while markers are active and on none while they are not.
+	// actionableColumn is the two columns the marker occupies, reserved on every
+	// Ticket row whether or not marker evidence is warm.
 	actionableColumn = 2
 )
 
@@ -55,10 +56,11 @@ const (
 // Before the first reading lands there is no progress to report, so the bar is
 // left out rather than drawn as a truthful-looking "0/0 done · 0%".
 func renderHeader(in ListInput, staleness string, hasData bool, width int, markers listMarkers,
-	s Styles) string {
+	actionableRead string, s Styles) string {
 	progress := rightAlign(s.Staleness.Render(staleness), width)
 	if hasData {
-		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, markers, s)
+		progress = headerProgress(model.ComputeProgress(in.Tickets), staleness, width, markers,
+			actionableRead, s, rateLimitHeader(in.Capabilities, in.RateLimitBudget))
 	}
 	return strings.Join([]string{headerIdentity(in.Header, width, s), progress, ""}, "\n")
 }
@@ -95,32 +97,136 @@ func headerIdentity(h Header, width int, s Styles, hyperlinkKey ...bool) string 
 	return left + strings.Repeat(" ", width-lipgloss.Width(left)-lipgloss.Width(right)) + right
 }
 
-// headerProgress draws the bar, the counts and the staleness indicator. The
-// Cancelled count appears only when there is one: "0 cancelled" is noise on the
-// nine epics out of ten that have none.
-//
-// The Actionable count is the opposite case and prints even at zero: it is the
-// row marker's only legend, and without it "warm, and nothing is Actionable"
-// and "cold, so nothing is claimed" would render identically. It counts the
-// whole reading, like the progress counts, so no filter can move it.
+// headerProgress draws the bar, atomic count facts and the staleness indicator.
+// Cancelled appears only when non-zero. An active Actionable count includes zero:
+// that distinguishes a complete "none" answer from a cold cache.
 func headerProgress(p model.Progress, staleness string, width int, markers listMarkers,
-	s Styles) string {
-	counts := fmt.Sprintf("%d/%d done", p.Done, p.Denominator)
+	actionableRead string, s Styles, budget ...rateLimitHeaderFact) string {
+	base := fmt.Sprintf("%d/%d done", p.Done, p.Denominator)
 	if p.Cancelled > 0 {
-		counts += fmt.Sprintf("%s%d cancelled", separator, p.Cancelled)
+		base += fmt.Sprintf("%s%d cancelled", separator, p.Cancelled)
 	}
-	counts += fmt.Sprintf("%s%d%%", separator, p.PercentDone)
-	if markers.active {
-		counts += fmt.Sprintf("%s%d actionable", separator, markers.count)
+	base += fmt.Sprintf("%s%d%%", separator, p.PercentDone)
+
+	var rateLimit rateLimitHeaderFact
+	if len(budget) > 0 {
+		rateLimit = budget[0]
+	}
+	counts := base
+	for _, candidate := range headerProgressCandidates(base, markers, actionableRead, rateLimit) {
+		if headerFactsFit(candidate, staleness, width) {
+			counts = candidate
+			break
+		}
 	}
 
 	right := s.Staleness.Render(staleness)
-	// The bar takes what is left after the counts and the indicator, within
-	// its bounds.
 	barWidth := width - lipgloss.Width(counts) - lipgloss.Width(right) - 6
 	barWidth = min(max(barWidth, minBarWidth), maxBarWidth)
 
-	return pairLine(renderBar(p, barWidth, s)+"  "+s.Counts.Render(counts), right, width)
+	return pairLineReserved(renderBar(p, barWidth, s)+"  "+s.Counts.Render(counts), right, width)
+}
+
+// headerProgressCandidates orders whole semantic fallbacks. Progress and the
+// right-hand Watchlist age are load-bearing; budget reset, evidence age, compact
+// budget, and finally the Actionable count yield only as complete fragments.
+func headerProgressCandidates(base string, markers listMarkers, actionableRead string,
+	budget rateLimitHeaderFact) []string {
+	compact, full := budget.fragments()
+	if !markers.active {
+		return uniqueHeaderCandidates(
+			joinHeaderFacts(base, full),
+			joinHeaderFacts(base, compact),
+			base,
+		)
+	}
+
+	actionable := fmt.Sprintf("%d actionable", markers.count)
+	asOf := ""
+	if actionableRead != "" {
+		asOf = "actionable as of" + separator + actionableRead
+	}
+	return uniqueHeaderCandidates(
+		joinHeaderFacts(base, actionable, full, asOf),
+		joinHeaderFacts(base, actionable, compact, asOf),
+		joinHeaderFacts(base, actionable, full),
+		joinHeaderFacts(base, actionable, compact),
+		joinHeaderFacts(base, actionable, asOf),
+		joinHeaderFacts(base, actionable),
+		base,
+	)
+}
+
+func joinHeaderFacts(base string, facts ...string) string {
+	for _, fact := range facts {
+		if fact != "" {
+			base += separator + fact
+		}
+	}
+	return base
+}
+
+func uniqueHeaderCandidates(candidates ...string) []string {
+	unique := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		unique = append(unique, candidate)
+	}
+	return unique
+}
+
+type rateLimitHeaderFact struct {
+	budget model.RateLimitBudget
+	valid  bool
+}
+
+func rateLimitHeader(caps model.Capabilities, budget model.RateLimitBudget) rateLimitHeaderFact {
+	return rateLimitHeaderFact{budget: budget, valid: caps.RateLimitBudget && budget.Valid()}
+}
+
+func (f rateLimitHeaderFact) fragments() (compact, full string) {
+	if !f.valid {
+		return "", ""
+	}
+	compact = fmt.Sprintf("budget %d", f.budget.Remaining)
+	return compact, compact + separator + "resets " + f.budget.ResetsAt.UTC().Format(time.RFC3339)
+}
+
+func (f rateLimitHeaderFact) appendTo(counts, staleness string, width int) string {
+	compact, full := f.fragments()
+	if compact == "" {
+		return counts
+	}
+	if headerFactsFit(counts+separator+full, staleness, width) {
+		return counts + separator + full
+	}
+	if headerFactsFit(counts+separator+compact, staleness, width) {
+		return counts + separator + compact
+	}
+	return counts
+}
+
+func (f rateLimitHeaderFact) appendToLine(counts, staleness string, width int) string {
+	if !f.valid {
+		return counts
+	}
+	compact := fmt.Sprintf("budget %d", f.budget.Remaining)
+	full := compact + separator + "resets " + f.budget.ResetsAt.UTC().Format(time.RFC3339)
+	if lipgloss.Width(counts+separator+full)+lipgloss.Width(staleness)+1 <= width {
+		return counts + separator + full
+	}
+	if lipgloss.Width(counts+separator+compact)+lipgloss.Width(staleness)+1 <= width {
+		return counts + separator + compact
+	}
+	return counts
+}
+
+func headerFactsFit(left, staleness string, width int) bool {
+	return width-lipgloss.Width(left)-lipgloss.Width(staleness)-6 >= minBarWidth
 }
 
 // pairLine lays a left fragment against the right-hand edge of the terminal on
@@ -192,14 +298,10 @@ func rowLines(rows []Row, i, keyColumn, width int, selected bool, caps model.Cap
 
 	// One indent feeds both the title's budget and the meta line's padding, so
 	// the two lines cannot end and begin in different columns.
-	indent := keyColumn
-	actionable := ""
-	if markers.active {
-		indent += actionableColumn
-		actionable = notActionableMarker
-		if markers.has(r.Ticket.ID) {
-			actionable = s.Actionable.Render(actionableMarker)
-		}
+	indent := keyColumn + actionableColumn
+	actionable := notActionableMarker
+	if markers.has(r.Ticket.ID) {
+		actionable = s.Actionable.Render(actionableMarker)
 	}
 
 	titleWidth := width - selectionGutter - indent

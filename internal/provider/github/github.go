@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -34,10 +35,10 @@ const defaultHost = "github.com"
 // an unbounded loop against a paging API is how a polling tool hangs.
 const maxPages = 50
 
-// maxRefListAliases bounds one dynamically aliased GraphQL document. Larger
-// explicit lists are finite, known membership and are read in consecutive
-// chunks without changing their Selector order.
-const maxRefListAliases = 100
+// maxQueryAliases bounds one dynamically aliased GraphQL document. Exact-Ref
+// and Detail reads both use it so GitHub's per-document alias budget has one
+// definition.
+const maxQueryAliases = 100
 
 // requestTimeout is the default per-request budget when the caller supplies no
 // HTTP client of its own.
@@ -149,10 +150,11 @@ func (p *Provider) Name() string { return "github" }
 // data behind it.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true, // sub-issues are how an Epic is assembled
-		BlockingLinks: true, // blockedBy / blocking on the detail query
-		Comments:      true, // comments on the detail query
-		PullRequests:  true, // closing references and PR-sourced cross-reference events
+		Hierarchy:       true, // sub-issues are how an Epic is assembled
+		BlockingLinks:   true, // blockedBy / blocking on the detail query
+		Comments:        true, // comments on the detail query
+		PullRequests:    true, // closing references and PR-sourced cross-reference events
+		RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{
 			Epic: true, RefList: true, Query: true,
 		},
@@ -166,16 +168,27 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
+	collector := &provider.RateLimitBudgetCollector{}
+	ctx = withRateLimitCollector(ctx, collector)
+	var (
+		snap model.WatchlistSnapshot
+		err  error
+	)
 	switch selected := selector.(type) {
 	case provider.EpicSelector:
-		return p.resolveEpic(ctx, selected.Ref)
+		snap, err = p.resolveEpic(ctx, selected.Ref)
 	case provider.RefListSelector:
-		return p.resolveRefList(ctx, selected.Refs)
+		snap, err = p.resolveRefList(ctx, selected.Refs)
 	case provider.QuerySelector:
-		return p.resolveQuery(ctx, selected.Query)
+		snap, err = p.resolveQuery(ctx, selected.Query)
 	default:
 		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	snap.RateLimitBudget = collector.Budget()
+	return snap, nil
 }
 
 // resolveEpic returns the named Epic and every one of its sub-issues, following
@@ -208,10 +221,11 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 				refKey(r), maxPages*100)
 		}
 
-		issue, err := p.fetchPage(ctx, r, cursor)
+		issue, rateLimit, err := p.fetchPage(ctx, r, cursor)
 		if err != nil {
 			return model.WatchlistSnapshot{}, err
 		}
+		observeRateLimit(ctx, rateLimit)
 
 		if !haveEpic {
 			// The epic's own fields repeat on every page; the first page wins so
@@ -286,6 +300,7 @@ func (p *Provider) resolveQuery(ctx context.Context, query string) (model.Watchl
 			return model.WatchlistSnapshot{}, provider.Errorf(provider.KindUnavailable,
 				"github: unexpected response %d from %s", status, p.endpoint)
 		}
+		observeRateLimit(ctx, response.Data.RateLimit)
 
 		strongestIssueCount = max(strongestIssueCount, response.Data.Search.IssueCount)
 		nodes := response.Data.Search.Nodes
@@ -398,8 +413,8 @@ func (p *Provider) readExactRefs(ctx context.Context, refs []ref.Ref) ([]model.T
 	}
 
 	tickets := make([]model.Ticket, 0, len(refs))
-	for start := 0; start < len(refs); start += maxRefListAliases {
-		end := min(start+maxRefListAliases, len(refs))
+	for start := 0; start < len(refs); start += maxQueryAliases {
+		end := min(start+maxQueryAliases, len(refs))
 		chunk, err := p.readExactRefChunk(ctx, refs[start:end])
 		if err != nil {
 			return nil, err
@@ -426,6 +441,7 @@ func (p *Provider) readExactRefChunk(ctx context.Context, refs []ref.Ref) ([]mod
 	if err := resp.err(refs, p.endpoint, header); err != nil {
 		return nil, err
 	}
+	observeRateLimit(ctx, resp.RateLimit)
 
 	tickets := make([]model.Ticket, 0, len(refs))
 	for i, r := range refs {
@@ -474,6 +490,140 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	return newDetail(*resp.Data.Node), nil
 }
 
+// FetchDetails reads canonical Ticket IDs through bounded aliased Detail
+// documents. Chunks are sequential: ordinary failures stay attributable to the
+// IDs in that chunk while later chunks continue. A rate refusal is attributed to
+// every later unissued ID and stops before another request; caller cancellation
+// also stops before further I/O.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	canonical := canonicalDetailIDs(ids)
+	details := make(map[model.TicketID]model.Detail, len(canonical))
+	if len(canonical) == 0 {
+		return details, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return details, err
+	}
+
+	failures := make(map[model.TicketID]error)
+	var responseErr, rateRefusal error
+	for start := 0; start < len(canonical); start += maxQueryAliases {
+		end := min(start+maxQueryAliases, len(canonical))
+		chunk := canonical[start:end]
+		chunkDetails, chunkFailures, chunkErr, chunkRefusal := p.fetchDetailChunk(ctx, chunk)
+		for id, detail := range chunkDetails {
+			details[id] = detail
+		}
+
+		inspectErr := joinDetailBatchErrors(chunkErr, chunkRefusal)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if refusal, limited := provider.InspectRateLimitRefusal(inspectErr, time.Time{}); limited {
+				return details, errors.Join(ctxErr, refusal.Err)
+			}
+			return details, ctxErr
+		}
+		for id, failure := range chunkFailures {
+			failures[id] = failure
+		}
+		if chunkErr != nil {
+			for _, id := range chunk {
+				if _, succeeded := chunkDetails[id]; succeeded {
+					continue
+				}
+				if _, failed := chunkFailures[id]; !failed {
+					failures[id] = chunkErr
+				}
+			}
+			responseErr = joinDetailBatchErrors(responseErr, chunkErr)
+		}
+
+		if refusal, limited := provider.InspectRateLimitRefusal(inspectErr, time.Time{}); limited {
+			rateRefusal = refusal.Err
+			for _, unissued := range canonical[end:] {
+				failures[unissued] = refusal.Err
+			}
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+	}
+	return details, detailBatchResultError(responseErr, failures, rateRefusal)
+}
+
+func detailFailuresError(failures map[model.TicketID]error) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	return &provider.DetailFailures{Failures: failures}
+}
+
+// detailBatchResultError preserves raw response causes that may have no natural
+// ticket owner. The already-inspected refusal is also a direct sibling when it
+// otherwise exists only inside per-Ticket failures, so bounded consumers retain
+// Tracker admission policy without widening their error-graph safety window.
+func detailBatchResultError(responseErr error, failures map[model.TicketID]error, rateRefusal error) error {
+	result := joinDetailBatchErrors(responseErr, detailFailuresError(failures))
+	if rateRefusal == nil || hasDirectRateLimitChild(result) {
+		return result
+	}
+	return &detailBatchRateRefusal{result: result, refusal: rateRefusal}
+}
+
+type detailBatchRateRefusal struct {
+	result  error
+	refusal error
+}
+
+func (e *detailBatchRateRefusal) Error() string { return e.result.Error() }
+func (e *detailBatchRateRefusal) Unwrap() []error {
+	return []error{e.refusal, e.result}
+}
+
+func hasDirectRateLimitChild(err error) bool {
+	if classified, ok := err.(*provider.Error); ok && classified != nil && classified.Kind == provider.KindRateLimit { //nolint:errorlint // Only direct placement matters here.
+		return true
+	}
+	many, ok := err.(interface{ Unwrap() []error }) //nolint:errorlint // This is a single-level placement check, not graph traversal.
+	if !ok {
+		return false
+	}
+	for _, child := range many.Unwrap() {
+		classified, direct := child.(*provider.Error) //nolint:errorlint // Only direct placement matters here.
+		if direct && classified != nil && classified.Kind == provider.KindRateLimit {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, map[model.TicketID]error, error, error) {
+	variables := make(map[string]any, len(ids))
+	for i, id := range ids {
+		variables["id"+strconv.Itoa(i)] = string(id)
+	}
+
+	var resp detailBatchResponse
+	header, err := p.do(ctx, buildDetailBatchQuery(len(ids)), variables, &resp)
+	if err != nil {
+		return nil, nil, err, nil
+	}
+	return resp.decode(ids, p.endpoint, header)
+}
+
+func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
+	canonical := make([]model.TicketID, 0, len(ids))
+	seen := make(map[model.TicketID]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		canonical = append(canonical, id)
+	}
+	return canonical
+}
+
 // checkRef rejects a Ref this driver cannot serve before any network call.
 func checkRef(r ref.Ref) error {
 	if r.Tracker != ref.TrackerGitHub {
@@ -502,7 +652,7 @@ func refKey(r ref.Ref) string {
 
 // fetchPage issues one query and returns the epic issue it found, with the
 // sub-issue page the cursor selected.
-func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (issueNode, error) {
+func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (issueNode, rateLimitNode, error) {
 	variables := map[string]any{
 		"owner":  r.Owner,
 		"repo":   r.Repo,
@@ -515,14 +665,14 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 	var resp graphQLResponse
 	header, err := p.do(ctx, epicQuery, variables, &resp)
 	if err != nil {
-		return issueNode{}, err
+		return issueNode{}, rateLimitNode{}, err
 	}
 
 	// A GraphQL response can carry both data and errors. A missing repository or
 	// issue is authoritative, but an errors[] entry usually says more, so it is
 	// preferred when there is one.
 	if err := resp.err(r, p.endpoint, header); err != nil {
-		return issueNode{}, err
+		return issueNode{}, rateLimitNode{}, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
 		// GitHub shares one number namespace between issues and pull requests,
@@ -531,13 +681,13 @@ func (p *Provider) fetchPage(ctx context.Context, r ref.Ref, cursor string) (iss
 		// The aliased issueOrPullRequest selection is what tells the two apart.
 		if kind := resp.Data.Repository; kind != nil && kind.Kind != nil &&
 			kind.Kind.TypeName == "PullRequest" {
-			return issueNode{}, provider.Errorf(provider.KindBadRef,
+			return issueNode{}, rateLimitNode{}, provider.Errorf(provider.KindBadRef,
 				"github: %s is a pull request, not a Ticket", refKey(r))
 		}
-		return issueNode{}, provider.Errorf(provider.KindBadRef,
+		return issueNode{}, rateLimitNode{}, provider.Errorf(provider.KindBadRef,
 			"github: %s not found (or you lack access)", refKey(r))
 	}
-	return *resp.Data.Repository.Issue, nil
+	return *resp.Data.Repository.Issue, resp.Data.RateLimit, nil
 }
 
 // do performs one GraphQL POST of document and decodes the response into out,
@@ -631,10 +781,10 @@ func (p *Provider) checkStatus(res *http.Response) error {
 	case res.StatusCode == http.StatusOK:
 		return nil
 	case isRateLimited(res):
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: rateLimitResetAt(res.Header)},
 			"github: API rate limit exceeded; resets at %s", rateLimitReset(res.Header))
 	case isSecondaryRateLimited(res):
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(provider.RateLimitMetadata{RetryAfter: retryAfterDuration(res.Header)},
 			"github: secondary rate limit hit; retry after %s", retryAfter(res.Header))
 	case res.StatusCode == http.StatusUnauthorized:
 		return provider.Errorf(provider.KindAuth,
@@ -700,22 +850,38 @@ func ssoHint(value string) string {
 // rateLimitReset renders the reset moment in the user's own timezone, because
 // "resets at 14:32" is actionable and a unix timestamp is not.
 func rateLimitReset(header http.Header) string {
-	secs, err := strconv.ParseInt(header.Get("x-ratelimit-reset"), 10, 64)
-	if err != nil || secs <= 0 {
+	reset := rateLimitResetAt(header)
+	if reset.IsZero() {
 		return "an unknown time"
 	}
-	return time.Unix(secs, 0).Local().Format(time.RFC1123)
+	return reset.Local().Format(time.RFC1123)
+}
+
+func rateLimitResetAt(header http.Header) time.Time {
+	secs, err := strconv.ParseInt(header.Get("x-ratelimit-reset"), 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0)
 }
 
 // retryAfter renders the retry-after header a secondary limit carries, which
 // GitHub sends in seconds. It mirrors rateLimitReset: an unparseable value says
 // so rather than being echoed back as a number with no unit.
 func retryAfter(header http.Header) string {
-	secs, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
-	if err != nil || secs <= 0 {
+	delay := retryAfterDuration(header)
+	if delay <= 0 {
 		return "an unknown time"
 	}
-	return (time.Duration(secs) * time.Second).String()
+	return delay.String()
+}
+
+func retryAfterDuration(header http.Header) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // resolveToken resolves the token once and then reuses it for the process

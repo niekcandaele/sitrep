@@ -93,7 +93,7 @@ func TestEffectiveMaxTickets(t *testing.T) {
 
 func TestNewFakeProviderUsesProfileMaxTicketsIndependentlyOfCadence(t *testing.T) {
 	profile := &config.Profile{MaxTickets: 2, RefreshInterval: time.Hour}
-	p, err := (Deps{}).newProvider(providerFake, connectionRoute{}, profile, "")
+	p, err := (Deps{}).newProvider(providerFake, connectionRoute{}, profile, "", fakeProviderSettings{})
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
@@ -106,6 +106,42 @@ func TestNewFakeProviderUsesProfileMaxTicketsIndependentlyOfCadence(t *testing.T
 	}
 	if got := effectiveInterval(false, 0, profile.RefreshInterval); got != time.Hour {
 		t.Errorf("effective interval = %s, want 1h", got)
+	}
+}
+
+func TestNewFakeProviderWiresCancellableDelay(t *testing.T) {
+	constructed, err := (Deps{}).newProvider(providerFake, connectionRoute{}, nil, "", fakeProviderSettings{
+		delay:    time.Hour,
+		delaySet: true,
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	p := constructed.(*fake.Provider)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := p.Resolve(ctx, provider.QuerySelector{Query: "q"})
+		result <- err
+	}()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for p.ResolveCalls() == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("Resolve did not start")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Resolve error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Resolve did not return after cancellation")
 	}
 }
 
@@ -133,7 +169,7 @@ func TestNewProviderForwardsProfileWontDoLabelsToTheGitLabDriver(t *testing.T) {
 		deps := Deps{GitLabTokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
 		constructed, err := deps.newProvider(providerAuto, connectionRoute{
 			tracker: ref.TrackerGitLab, host: "gitlab.com", gitLabPath: profile.Project, raw: "8509",
-		}, profile, "")
+		}, profile, "", fakeProviderSettings{})
 		if err != nil {
 			t.Fatalf("newProvider: %v", err)
 		}
@@ -210,7 +246,7 @@ func TestNewProviderForwardsProfileMaxTicketsToConcreteProviders(t *testing.T) {
 		deps := Deps{TokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
 		constructed, err := deps.newProvider(providerAuto, connectionRoute{
 			tracker: ref.TrackerGitHub, host: "github.com", raw: "--query",
-		}, profile, "")
+		}, profile, "", fakeProviderSettings{})
 		if err != nil {
 			t.Fatalf("newProvider: %v", err)
 		}
@@ -243,7 +279,7 @@ func TestNewProviderForwardsProfileMaxTicketsToConcreteProviders(t *testing.T) {
 		deps := Deps{GitLabTokenSource: func(context.Context, string) (string, error) { return "test-token", nil }}
 		constructed, err := deps.newProvider(providerAuto, connectionRoute{
 			tracker: ref.TrackerGitLab, host: "gitlab.com", raw: "--query",
-		}, profile, "")
+		}, profile, "", fakeProviderSettings{})
 		if err != nil {
 			t.Fatalf("newProvider: %v", err)
 		}
@@ -276,7 +312,7 @@ func TestNewProviderForwardsProfileMaxTicketsToConcreteProviders(t *testing.T) {
 		}}
 		constructed, err := deps.newProvider(providerAuto, connectionRoute{
 			tracker: ref.TrackerJira, host: "acme.atlassian.net", raw: "--query",
-		}, profile, "/tmp/config.yml")
+		}, profile, "/tmp/config.yml", fakeProviderSettings{})
 		if err != nil {
 			t.Fatalf("newProvider: %v", err)
 		}
@@ -424,7 +460,7 @@ func TestResolveSelectionDetachesFullURLBeforeProviderRetention(t *testing.T) {
 		}
 	}
 
-	p, err := deps.newProvider(providerAuto, selection.route, selection.profile, "")
+	p, err := deps.newProvider(providerAuto, selection.route, selection.profile, "", fakeProviderSettings{})
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}

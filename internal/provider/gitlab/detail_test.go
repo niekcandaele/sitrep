@@ -223,6 +223,29 @@ func TestFetchDetailSendsExactlyWhatItNeeds(t *testing.T) {
 	}
 }
 
+func TestFetchDetailsUsesTheSingularFallback(t *testing.T) {
+	s := fullDetail(t)
+	details, err := newProvider(s).FetchDetails(t.Context(), []model.TicketID{"", issueTicketID, issueTicketID})
+	if err != nil {
+		t.Fatalf("FetchDetails: %v", err)
+	}
+	if len(details) != 1 || details[issueTicketID].TicketID != issueTicketID {
+		t.Errorf("Details = %+v, want one canonical %q result", details, issueTicketID)
+	}
+	for _, request := range []struct {
+		path  string
+		label string
+	}{
+		{issuePath, "issue"},
+		{issueNotesPath, "notes"},
+		{issueLinksPath, "links"},
+	} {
+		if got := len(s.requestsTo(request.path)); got != 1 {
+			t.Errorf("%s requests = %d, want one singular Detail read", request.label, got)
+		}
+	}
+}
+
 // The epic Detail path, and its trap: GitLab's epic notes endpoint is addressed
 // by the epic's database id, not its iid, which is why the epic is read first.
 func TestFetchDetailOnAnEpic(t *testing.T) {

@@ -22,6 +22,7 @@ const queryMembershipDocument = `query($query:String!, $first:Int!, $after:Strin
       }
     }
   }
+  rateLimit { remaining resetAt }
 }`
 
 // epicQuery is the one GraphQL document the epic hot path sends. It is a
@@ -95,6 +96,7 @@ const epicQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:St
       }
     }
   }
+  rateLimit { remaining resetAt }
 }
 ` + issuePullRequestRelationshipsFragment + "\n" + pullRequestListFragment
 
@@ -144,6 +146,7 @@ func buildRefListQuery(count int) string {
 		document.WriteString("    issue(number:$number" + suffix + ") { ...RefListTicketFields }\n")
 		document.WriteString("  }\n")
 	}
+	document.WriteString("  rateLimit { remaining resetAt }\n")
 	document.WriteString("}\n")
 	document.WriteString(refListTicketFragment)
 	document.WriteString("\n")
@@ -163,7 +166,7 @@ const refListTicketFragment = `fragment RefListTicketFields on Issue {
   ...IssuePullRequestRelationships
 }`
 
-// detailQuery is the second GraphQL document this driver sends, and it is
+// detailQuery is the singular Detail document, and it is
 // deliberately separate from epicQuery rather than an addition to it: the epic
 // document is polled every interval, this one is sent once, when a human opens a
 // Ticket (ADR-0003). Merging them would put a body, a hundred comments and two
@@ -187,28 +190,55 @@ const refListTicketFragment = `fragment RefListTicketFields on Issue {
 // behind the `... on User` fragment.
 const detailQuery = `query($id:ID!) {
   node(id:$id) {
-    ... on Issue {
-      id number url body
+    ...DetailFields
+  }
+}
+` + detailFieldsFragment
+
+// buildDetailBatchQuery constructs one node lookup per requested Ticket. Only
+// numeric suffixes are generated; Ticket IDs remain in the variables map.
+func buildDetailBatchQuery(count int) string {
+	var document strings.Builder
+	document.WriteString("query(")
+	for i := range count {
+		if i > 0 {
+			document.WriteString(", ")
+		}
+		suffix := strconv.Itoa(i)
+		document.WriteString("$id" + suffix + ":ID!")
+	}
+	document.WriteString(") {\n")
+	for i := range count {
+		suffix := strconv.Itoa(i)
+		document.WriteString("  detail" + suffix + ": node(id:$id" + suffix + ") { ...DetailFields }\n")
+	}
+	document.WriteString("}\n")
+	document.WriteString(detailFieldsFragment)
+	return document.String()
+}
+
+// detailFieldsFragment is shared verbatim by singular and plural Detail reads,
+// keeping their normalized wire fields identical.
+const detailFieldsFragment = `fragment DetailFields on Issue {
+  id number url body
+  repository { nameWithOwner }
+  comments(last:100) {
+    totalCount
+    nodes {
+      id url body createdAt
+      author { login ... on User { name avatarUrl } }
+    }
+  }
+  blockedBy(first:50) {
+    nodes {
+      id number title url state stateReason
       repository { nameWithOwner }
-      comments(last:100) {
-        totalCount
-        nodes {
-          id url body createdAt
-          author { login ... on User { name avatarUrl } }
-        }
-      }
-      blockedBy(first:50) {
-        nodes {
-          id number title url state stateReason
-          repository { nameWithOwner }
-        }
-      }
-      blocking(first:50) {
-        nodes {
-          id number title url state stateReason
-          repository { nameWithOwner }
-        }
-      }
+    }
+  }
+  blocking(first:50) {
+    nodes {
+      id number title url state stateReason
+      repository { nameWithOwner }
     }
   }
 }`

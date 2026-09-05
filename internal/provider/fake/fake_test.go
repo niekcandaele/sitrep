@@ -43,7 +43,7 @@ func TestNameAndCapabilities(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", p.Name(), "fake")
 	}
 	want := model.Capabilities{
-		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true,
+		Hierarchy: true, BlockingLinks: true, Comments: true, PullRequests: true, RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
 	}
 	if got := p.Capabilities(); got != want {
@@ -531,6 +531,20 @@ func TestFetchDetailServesTheFixture(t *testing.T) {
 		t.Error("FetchDetail of an unknown ticket succeeded, want an error")
 	} else if !strings.Contains(err.Error(), "no-such-ticket") {
 		t.Errorf("error = %q, want it to name the ticket", err)
+	}
+}
+
+func TestFetchDetailsUsesTheSingularFixtureSeam(t *testing.T) {
+	p := fake.New()
+	details, err := p.FetchDetails(context.Background(), []model.TicketID{richTicket, "", richTicket})
+	if err != nil {
+		t.Fatalf("FetchDetails: %v", err)
+	}
+	if len(details) != 1 || details[richTicket].TicketID != richTicket {
+		t.Errorf("details = %v, want one %q Detail", details, richTicket)
+	}
+	if got := p.DetailCalls(); got != 1 {
+		t.Errorf("DetailCalls() = %d, want one canonical singular read", got)
 	}
 }
 

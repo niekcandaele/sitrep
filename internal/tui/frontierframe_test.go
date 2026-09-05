@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"fmt"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
@@ -35,7 +40,394 @@ func graphOf(tickets []model.Ticket, links map[model.TicketID][]model.Link) mode
 
 func layoutOf(tickets []model.Ticket, links map[model.TicketID][]model.Link) (model.BlockingGraph, frontierLayout) {
 	g := graphOf(tickets, links)
-	return g, layoutFrontier(g, frontierNodes(g, tickets, true), 120)
+	return g, layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+		innerWidth: 120,
+		direction:  frontierRanksHorizontal,
+	})
+}
+
+func TestDenseFrontierUsesMeasuredOneRowLinkedChips(t *testing.T) {
+	tickets := []model.Ticket{
+		{ID: "one", Key: "TEAM-12345", Title: "dependent", URL: "https://example.test/one", Status: model.StatusTodo},
+		{ID: "two", Key: "#2", Title: "blocker", URL: "https://example.test/two", Status: model.StatusTodo},
+		{ID: "emoji", Key: "👩‍💻", Title: "joined emoji", URL: "https://example.test/emoji", Status: model.StatusTodo},
+	}
+	links := map[model.TicketID][]model.Link{"one": blockedBy("two"), "two": nil, "emoji": nil}
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, 120, frontierDensityDense)
+	wantSlotWidth := 2 + lipgloss.Width("TEAM-12345")
+	if got := projection.geometry; got.density != frontierDensityDense || got.slotWidth != wantSlotWidth ||
+		got.cardHeight != 1 || got.slotHeight != 2 {
+		t.Fatalf("dense geometry = %+v, want width %d and 1x2 card/slot height", got, wantSlotWidth)
+	}
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 120, direction: frontierRanksHorizontal, density: frontierDensityDense,
+		projection: &projection,
+	})
+	if got := layout.nodeAt["one"]; got.W != 2+lipgloss.Width("TEAM-12345") || got.H != 1 {
+		t.Errorf("long chip rect = %+v", got)
+	}
+	if got := layout.nodeAt["two"]; got.W != 2+lipgloss.Width("#2") || got.H != 1 {
+		t.Errorf("short chip rect = %+v", got)
+	}
+	if got := layout.nodeAt["emoji"]; got.W != 2+lipgloss.Width("👩‍💻") || got.H != 1 {
+		t.Errorf("joined-emoji chip rect = %+v", got)
+	}
+	raw := strings.Join(renderFrontierCanvas(layout, "", false, 0, 0,
+		layout.width, layout.height, DefaultStyles(false)), "\n")
+	visible := ansi.Strip(raw)
+	for _, want := range []string{"┫ TEAM-12345", "━ #2", "━ 👩‍💻"} {
+		if !strings.Contains(visible, want) {
+			t.Errorf("dense canvas lost %q:\n%s", want, visible)
+		}
+	}
+	for _, ticket := range tickets {
+		if got := strings.Count(raw, hyperlinkOpen(ticket.URL)); got != 1 {
+			t.Errorf("hyperlink opens for %s = %d, want 1", ticket.URL, got)
+		}
+	}
+	if got := strings.Count(raw, ansi.ResetHyperlink()); got != len(tickets) {
+		t.Errorf("hyperlink resets = %d, want %d", got, len(tickets))
+	}
+
+	chipRect := layout.nodeAt["one"]
+	for x := chipRect.X; x < chipRect.X+chipRect.W; x++ {
+		cell := layout.cells[chipRect.Y][x]
+		style := layout.styles[cell.style]
+		if style.Role != frontierRoleCategory || style.Category != tickets[0].Status {
+			t.Errorf("chip cell %d style = %+v, want only Status Category %+v", x-chipRect.X, style, tickets[0].Status)
+		}
+		if x < chipRect.X+2 && cell.link != 0 {
+			t.Errorf("glyph/separator cell %d link = %d, want unlinked", x-chipRect.X, cell.link)
+		}
+		if x >= chipRect.X+2 && (cell.link == 0 || layout.links[cell.link] != tickets[0].URL) {
+			t.Errorf("Key cell %d link = %d/%q, want %q", x-chipRect.X, cell.link, layout.links[cell.link], tickets[0].URL)
+		}
+	}
+
+	for _, focused := range []bool{false, true} {
+		focus := model.TicketID("")
+		if focused {
+			focus = tickets[0].ID
+		}
+		chipRaw := strings.Join(renderFrontierCanvas(layout, focus, focused,
+			chipRect.X, chipRect.Y, chipRect.W, chipRect.H, DefaultStyles(false)), "\n")
+		if got, want := ansi.Strip(chipRaw), "┫ TEAM-12345"; got != want {
+			t.Errorf("focused=%t chip = %q, want exact glyph-space-Key %q", focused, got, want)
+		}
+		assertBalancedHyperlink(t, chipRaw, tickets[0].URL, 1)
+		opener := hyperlinkOpen(tickets[0].URL)
+		open := strings.Index(chipRaw, opener)
+		if open < 0 {
+			t.Errorf("focused=%t chip lacks linked public Key opener: %q", focused, chipRaw)
+			continue
+		}
+		scope := chipRaw[open+len(opener):]
+		reset := strings.Index(scope, ansi.ResetHyperlink())
+		if reset < 0 {
+			t.Errorf("focused=%t chip lacks linked public Key reset: %q", focused, chipRaw)
+			continue
+		}
+		if got := ansi.Strip(scope[:reset]); got != tickets[0].Key {
+			t.Errorf("focused=%t linked text = %q, want exact public Key %q", focused, got, tickets[0].Key)
+		}
+	}
+
+	emoji := tickets[2]
+	emojiRect := layout.nodeAt[emoji.ID]
+	for x := emojiRect.X; x < emojiRect.X+emojiRect.W; x++ {
+		cell := layout.cells[emojiRect.Y][x]
+		if x < emojiRect.X+2 && cell.link != 0 {
+			t.Errorf("joined-emoji glyph/separator cell %d link = %d, want unlinked", x-emojiRect.X, cell.link)
+		}
+		if x >= emojiRect.X+2 && (cell.link == 0 || layout.links[cell.link] != emoji.URL) {
+			t.Errorf("joined-emoji Key cell %d link = %d/%q, want %q",
+				x-emojiRect.X, cell.link, layout.links[cell.link], emoji.URL)
+		}
+	}
+	for _, focused := range []bool{false, true} {
+		focus := model.TicketID("")
+		if focused {
+			focus = emoji.ID
+		}
+		chipRaw := strings.Join(renderFrontierCanvas(layout, focus, focused,
+			emojiRect.X, emojiRect.Y, emojiRect.W, emojiRect.H, DefaultStyles(false)), "\n")
+		if got, want := ansi.Strip(chipRaw), "━ "+emoji.Key; got != want {
+			t.Errorf("focused=%t joined-emoji chip = %q, want exact glyph-space-Key %q", focused, got, want)
+		}
+		assertBalancedHyperlink(t, chipRaw, emoji.URL, 1)
+		opener := hyperlinkOpen(emoji.URL)
+		open := strings.Index(chipRaw, opener)
+		if open < 0 {
+			t.Errorf("focused=%t joined-emoji chip lacks linked public Key opener: %q", focused, chipRaw)
+			continue
+		}
+		scope := chipRaw[open+len(opener):]
+		reset := strings.Index(scope, ansi.ResetHyperlink())
+		if reset < 0 {
+			t.Errorf("focused=%t joined-emoji chip lacks linked public Key reset: %q", focused, chipRaw)
+			continue
+		}
+		if got := ansi.Strip(scope[:reset]); got != emoji.Key {
+			t.Errorf("focused=%t joined-emoji linked text = %q, want exact public Key %q", focused, got, emoji.Key)
+		}
+	}
+}
+
+func TestFrontierWritePreservesLeadingZeroWidthClusters(t *testing.T) {
+	key := string([]rune{0x2068, 0x200e}) + "ABC" + string(rune(0x2069))
+	const url = "https://example.test/leading-controls"
+	layout := frontierLayout{
+		width: 8, height: 1,
+		cells:  [][]frontierCell{make([]frontierCell, 8)},
+		styles: []frontierStyle{{}},
+		links:  []string{"", url},
+	}
+	for i := range layout.cells[0] {
+		layout.cells[0][i].r = ' '
+	}
+	layout.write(0, 0, key, frontierBlankStyle, 1, layout.width)
+	raw := strings.Join(renderFrontierCanvas(layout, "", false, 0, 0,
+		layout.width, layout.height, DefaultStyles(false)), "\n")
+	if got := strings.TrimRight(ansi.Strip(raw), " "); got != key {
+		t.Fatalf("rendered leading controls = %q, want exact %q", got, key)
+	}
+	assertBalancedHyperlink(t, raw, url, 1)
+	opener := hyperlinkOpen(url)
+	open := strings.Index(raw, opener)
+	if open < 0 {
+		t.Fatalf("leading-control text lacks hyperlink opener: %q", raw)
+	}
+	scope := raw[open+len(opener):]
+	reset := strings.Index(scope, ansi.ResetHyperlink())
+	if reset < 0 {
+		t.Fatalf("leading-control text lacks hyperlink reset: %q", raw)
+	}
+	if got := ansi.Strip(scope[:reset]); got != key {
+		t.Errorf("linked leading-control text = %q, want exact %q", got, key)
+	}
+}
+
+func TestFrontierLinkIndexInternsManyURLsDeterministically(t *testing.T) {
+	layout := frontierLayout{links: []string{""}}
+	const count = 2_000
+	urls := make([]string, count)
+	for i := range count {
+		urls[i] = fmt.Sprintf("https://example.test/tickets/%04d", i)
+		if got, want := layout.linkIndex(urls[i]), i+1; got != want {
+			t.Fatalf("new URL %d index = %d, want %d", i, got, want)
+		}
+	}
+	for i := count - 1; i >= 0; i-- {
+		if got, want := layout.linkIndex(urls[i]), i+1; got != want {
+			t.Fatalf("duplicate URL %d index = %d, want %d", i, got, want)
+		}
+	}
+	if got := len(layout.links); got != count+1 {
+		t.Errorf("URL table length = %d, want %d including no-link sentinel", got, count+1)
+	}
+	if got := len(layout.linkByURL); got != count {
+		t.Errorf("URL index size = %d, want %d", got, count)
+	}
+}
+
+func TestFrontierDensityFailsFastWhenUnsupportedOrMismatched(t *testing.T) {
+	assertPanics := func(name string, fn func()) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected density failure to panic")
+				}
+			}()
+			fn()
+		})
+	}
+
+	assertPanics("unsupported geometry", func() {
+		frontierGeometryFor(nil, 120, frontierDensity(255))
+	})
+	assertPanics("unsupported toggle", func() {
+		frontierDensity(255).toggled()
+	})
+	assertPanics("unsupported layout", func() {
+		layoutFrontier(model.BlockingGraph{}, nil, frontierLayoutOptions{density: frontierDensity(255)})
+	})
+	assertPanics("projection mismatch", func() {
+		tickets := []model.Ticket{{ID: "one", Key: "#1", Status: model.StatusTodo}}
+		g := graphOf(tickets, map[model.TicketID][]model.Link{"one": nil})
+		nodes := frontierNodes(g, tickets, true)
+		projection := projectFrontierRanks(g, nodes, 120, frontierDensityFull)
+		layoutFrontier(g, nodes, frontierLayoutOptions{
+			innerWidth: 120, direction: frontierRanksHorizontal,
+			density: frontierDensityDense, projection: &projection,
+		})
+	})
+}
+
+func TestDenseFrontierGlyphTaxonomyIsDistinctAndOneColumn(t *testing.T) {
+	ticket := func(id string) model.Ticket {
+		return model.Ticket{ID: model.TicketID(id), Key: id, Status: model.StatusTodo}
+	}
+	glyph := func(tickets []model.Ticket, links map[model.TicketID][]model.Link,
+		id model.TicketID, resolved bool, failed map[model.TicketID]struct{}) rune {
+		t.Helper()
+		g := graphOf(tickets, links)
+		for _, node := range frontierNodes(g, tickets, resolved, failed) {
+			if node.id == id {
+				return frontierDenseGlyph(node)
+			}
+		}
+		t.Fatalf("node %s not found", id)
+		return 0
+	}
+
+	if got := glyph([]model.Ticket{{Key: "EMPTY", Status: model.StatusTodo}},
+		map[model.TicketID][]model.Link{"": nil}, "", true, nil); got != '━' {
+		t.Errorf("empty-ID actionable member glyph = %q, want actionable", got)
+	}
+	for _, status := range []model.StatusCategory{
+		model.StatusInProgress, model.StatusDone, model.StatusCancelled,
+	} {
+		id := model.TicketID(status.String())
+		got := glyph([]model.Ticket{{ID: id, Key: string(id), Status: status}},
+			map[model.TicketID][]model.Link{id: nil}, id, true, nil)
+		if got != '┫' {
+			t.Errorf("clean %s member glyph = %q, want known non-actionable", status, got)
+		}
+	}
+
+	cases := map[string]rune{
+		"pending": glyph([]model.Ticket{ticket("P")}, nil, "P", false, nil),
+		"cycle": glyph([]model.Ticket{ticket("C1"), ticket("C2")}, map[model.TicketID][]model.Link{
+			"C1": blockedBy("C2"), "C2": blockedBy("C1"),
+		}, "C1", true, nil),
+		"failure": glyph([]model.Ticket{ticket("F")}, nil, "F", true,
+			map[model.TicketID]struct{}{"F": {}}),
+		"unknown": glyph([]model.Ticket{ticket("U")}, nil, "U", true, nil),
+		"blocked": glyph([]model.Ticket{ticket("B"), ticket("D")}, map[model.TicketID][]model.Link{
+			"B": blockedBy("D"), "D": nil,
+		}, "B", true, nil),
+		"actionable": glyph([]model.Ticket{ticket("A")}, map[model.TicketID][]model.Link{"A": nil}, "A", true, nil),
+		"outside":    frontierDenseGlyph(frontierNode{key: "O"}),
+	}
+	seen := make(map[rune]string, len(cases))
+	for name, got := range cases {
+		if width := lipgloss.Width(string(got)); width != 1 {
+			t.Errorf("%s glyph %q width = %d, want 1", name, got, width)
+		}
+		if prior := seen[got]; prior != "" {
+			t.Errorf("%s and %s share glyph %q", prior, name, got)
+		}
+		seen[got] = name
+	}
+}
+
+func crossingFrontierFixture() ([]model.Ticket, map[model.TicketID][]model.Link) {
+	tickets := make([]model.Ticket, 0, 7)
+	for _, id := range []string{"A", "B", "C", "D", "E", "F", "G"} {
+		tickets = append(tickets, blockingTicket(id, model.StatusTodo))
+	}
+	return tickets, map[model.TicketID][]model.Link{
+		"A": nil,
+		"B": nil,
+		"C": blockedBy("B"),
+		"D": blockedBy("A"),
+		"E": blockedBy("D"),
+		"F": blockedBy("C"),
+		"G": blockedBy("E", "F", "A"),
+	}
+}
+
+type frontierRoute struct {
+	blocker, dependent model.TicketID
+	strokeCapacity     int
+}
+
+type frontierStroke struct {
+	from, to frontierPoint
+}
+
+// A local gutter segment emits at most six strokes. Each intermediate dummy
+// adds one, so a route spanning k ranks needs at most 6k+(k-1) strokes.
+func frontierRouteStrokeCapacity(rankSpan int) int {
+	return 7*rankSpan - 1
+}
+
+func projectedFrontierRoutes(l frontierLayout) []frontierRoute {
+	var routes []frontierRoute
+	for _, edge := range l.routeProjection.edges {
+		blockerRank := l.routeProjection.ranks[edge.blocker]
+		dependentRank := l.routeProjection.ranks[edge.dependent]
+		if dependentRank <= blockerRank {
+			continue
+		}
+		routes = append(routes, frontierRoute{
+			blocker:        l.order[edge.blocker],
+			dependent:      l.order[edge.dependent],
+			strokeCapacity: frontierRouteStrokeCapacity(dependentRank - blockerRank),
+		})
+	}
+	return routes
+}
+
+func projectedIncidentRoutes(l frontierLayout, id model.TicketID) []frontierRoute {
+	var incident []frontierRoute
+	for _, route := range projectedFrontierRoutes(l) {
+		if route.blocker == id || route.dependent == id {
+			incident = append(incident, route)
+		}
+	}
+	return incident
+}
+
+func streamedFrontierRouteStrokes(l frontierLayout, route frontierRoute) []frontierStroke {
+	var strokes []frontierStroke
+	streamFrontierRouteStrokes(l.routeProjection, l.order, l.nodeAt, l.rankOrigin,
+		l.direction, func(blocker, dependent model.TicketID) bool {
+			return blocker == route.blocker && dependent == route.dependent
+		}, func(from, to frontierPoint, _ rune) {
+			strokes = append(strokes, frontierStroke{from: from, to: to})
+		})
+	return strokes
+}
+
+func frontierRouteCells(l frontierLayout, route frontierRoute) map[frontierPoint]struct{} {
+	cells := make(map[frontierPoint]struct{})
+	for _, stroke := range streamedFrontierRouteStrokes(l, route) {
+		dx, dy := 0, 0
+		if stroke.from.x < stroke.to.x {
+			dx = 1
+		} else if stroke.from.x > stroke.to.x {
+			dx = -1
+		}
+		if stroke.from.y < stroke.to.y {
+			dy = 1
+		} else if stroke.from.y > stroke.to.y {
+			dy = -1
+		}
+		for at := stroke.from; ; at.x, at.y = at.x+dx, at.y+dy {
+			cells[at] = struct{}{}
+			if at == stroke.to {
+				break
+			}
+		}
+	}
+	return cells
+}
+
+func sharedRouteCrossings(l frontierLayout, first, second int) []frontierPoint {
+	routes := projectedFrontierRoutes(l)
+	firstCells := frontierRouteCells(l, routes[first-1])
+	secondCells := frontierRouteCells(l, routes[second-1])
+	var crossings []frontierPoint
+	for at := range firstCells {
+		if _, shared := secondCells[at]; shared && l.cells[at.y][at.x].r == '┼' {
+			crossings = append(crossings, at)
+		}
+	}
+	return crossings
 }
 
 // Blockers sit left of their dependents: reading left to right is "this must
@@ -56,7 +448,7 @@ func TestFrontierLayoutPutsBlockersLeftOfDependents(t *testing.T) {
 		id     model.TicketID
 		column int
 	}{{"#3", 0}, {"#2", 1}, {"#1", 2}} {
-		if got := l.columnOf[want.id]; got != want.column {
+		if got := l.rankOf[want.id]; got != want.column {
 			t.Errorf("column of %s = %d, want %d", want.id, got, want.column)
 		}
 	}
@@ -68,11 +460,76 @@ func TestFrontierLayoutPutsAGhostInColumnZero(t *testing.T) {
 	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
 	_, l := layoutOf(tickets, map[model.TicketID][]model.Link{"#1": blockedBy("#ghost")})
 
-	if got, ok := l.columnOf["#ghost"]; !ok || got != 0 {
+	if got, ok := l.rankOf["#ghost"]; !ok || got != 0 {
 		t.Errorf("Ghost column = %d (present %v), want 0", got, ok)
 	}
-	if l.columnOf["#1"] != 1 {
-		t.Errorf("dependent column = %d, want 1", l.columnOf["#1"])
+	if l.rankOf["#1"] != 1 {
+		t.Errorf("dependent column = %d, want 1", l.rankOf["#1"])
+	}
+}
+
+func TestFrontierDeduplicatesBlocksFromDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("c", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"a": {{
+			Kind: model.LinkBlocks,
+			Target: model.LinkTarget{
+				ID: "c", Key: "c", Status: model.StatusTodo,
+			},
+		}},
+		"c": {},
+	})
+	nodes := frontierNodes(g, tickets, true)
+	index := make(map[model.TicketID]int, len(nodes))
+	for i, node := range nodes {
+		index[node.id] = i
+	}
+
+	edges := frontierEdges(g, index)
+	want := frontierEdge{dependent: index["c"], blocker: index["a"]}
+	if len(edges) != 1 || edges[0] != want {
+		t.Errorf("frontierEdges() = %+v, want only %+v", edges, want)
+	}
+
+	for _, node := range nodes {
+		if node.id == "c" {
+			if got := frontierBadgeLine(node, g, 60); got != "blocked by 1" {
+				t.Errorf("c badge = %q, want %q", got, "blocked by 1")
+			}
+			return
+		}
+	}
+	t.Fatal("c has no Frontier node")
+}
+
+func TestFrontierDeduplicatesBlockedByFromDuplicateDependentMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("a", model.StatusTodo),
+		blockingTicket("c", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"a": blockedBy("c"),
+		"c": nil,
+	})
+
+	nodes := frontierNodes(g, tickets, true)
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{innerWidth: 120, direction: frontierRanksHorizontal})
+	routes := projectedFrontierRoutes(layout)
+	if len(routes) != 1 {
+		t.Fatalf("routes = %+v, want one canonical c -> a route", routes)
+	}
+	if got := routes[0]; got.blocker != "c" || got.dependent != "a" {
+		t.Errorf("route = %+v, want blocker c and dependent a", got)
+	}
+	for _, id := range []model.TicketID{"a", "c"} {
+		if got := projectedIncidentRoutes(layout, id); len(got) != 1 || got[0] != routes[0] {
+			t.Errorf("incident[%s] = %v, want %v", id, got, routes[0])
+		}
 	}
 }
 
@@ -85,22 +542,27 @@ func TestFrontierLayoutTerminatesOnACycleAndASelfLoop(t *testing.T) {
 		blockingTicket("#2", model.StatusTodo),
 		blockingTicket("#3", model.StatusTodo),
 	}
-	g, l := layoutOf(tickets, map[model.TicketID][]model.Link{
+	links := map[model.TicketID][]model.Link{
 		"#1": blockedBy("#2"),
 		"#2": blockedBy("#1"),
 		"#3": blockedBy("#3"),
-	})
-
-	if l.columnOf["#1"] != l.columnOf["#2"] {
-		t.Errorf("cycle members are in columns %d and %d, want one column",
-			l.columnOf["#1"], l.columnOf["#2"])
 	}
+	g := graphOf(tickets, links)
 	if len(g.Cycles()) != 2 {
 		t.Fatalf("Cycles() = %v, want the two-cycle and the self-loop", g.Cycles())
 	}
-	for _, id := range []model.TicketID{"#1", "#2", "#3"} {
-		if _, ok := l.nodeAt[id]; !ok {
-			t.Errorf("%s was not drawn", id)
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		l := layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+			innerWidth: 120, direction: direction,
+		})
+		if l.rankOf["#1"] != l.rankOf["#2"] {
+			t.Errorf("direction %v cycle members are in ranks %d and %d, want one rank",
+				direction, l.rankOf["#1"], l.rankOf["#2"])
+		}
+		for _, id := range []model.TicketID{"#1", "#2", "#3"} {
+			if _, ok := l.nodeAt[id]; !ok {
+				t.Errorf("direction %v did not draw %s", direction, id)
+			}
 		}
 	}
 }
@@ -125,8 +587,8 @@ func TestFrontierLayoutSpansTwoColumnsWithOneWaypointAndNoEdgeOverACard(t *testi
 		borders[n.id] = n.emphasis.border
 	}
 
-	if l.columnOf["#1"] != 2 || l.columnOf["#2"] != 1 || l.columnOf["#3"] != 0 {
-		t.Fatalf("columns = %v, want #3 0, #2 1, #1 2", l.columnOf)
+	if l.rankOf["#1"] != 2 || l.rankOf["#2"] != 1 || l.rankOf["#3"] != 0 {
+		t.Fatalf("columns = %v, want #3 0, #2 1, #1 2", l.rankOf)
 	}
 
 	// Every card is intact after routing: the waypoint pass makes each segment
@@ -168,6 +630,484 @@ func insideAnyCard(l frontierLayout, x, y int) bool {
 	return false
 }
 
+func TestFrontierRoutesRetainCanonicalIdentityGeometryAndCrossings(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 200, direction: frontierRanksHorizontal,
+	})
+	routes := projectedFrontierRoutes(layout)
+	wantRoutes := []struct {
+		blocker, dependent model.TicketID
+	}{
+		{"B", "C"}, {"A", "D"}, {"D", "E"}, {"C", "F"},
+		{"E", "G"}, {"F", "G"}, {"A", "G"},
+	}
+	if len(routes) != len(wantRoutes) {
+		t.Fatalf("routes = %d, want %d", len(routes), len(wantRoutes))
+	}
+	gotIncident := make(map[model.TicketID][]int)
+	for i, want := range wantRoutes {
+		got := routes[i]
+		if got.blocker != want.blocker || got.dependent != want.dependent {
+			t.Errorf("route %d endpoints = %s -> %s, want %s -> %s",
+				i+1, got.blocker, got.dependent, want.blocker, want.dependent)
+		}
+		gotIncident[got.blocker] = append(gotIncident[got.blocker], i+1)
+		gotIncident[got.dependent] = append(gotIncident[got.dependent], i+1)
+	}
+	wantIncident := map[model.TicketID][]int{
+		"A": {2, 7}, "B": {1}, "C": {1, 4}, "D": {2, 3},
+		"E": {3, 5}, "F": {4, 6}, "G": {5, 6, 7},
+	}
+	if !reflect.DeepEqual(gotIncident, wantIncident) {
+		t.Errorf("derived incident routes = %v, want canonical %v", gotIncident, wantIncident)
+	}
+	if got := layout.routeProjection.work.channelSegments; got != 9 {
+		t.Errorf("local route segments = %d, want six adjacent plus three for the long route", got)
+	}
+	dummies := 0
+	for rank := range layout.routeProjection.slotCounts {
+		dummies += layout.routeProjection.slotCounts[rank] - layout.routeProjection.realCounts[rank]
+	}
+	if dummies != 2 {
+		t.Errorf("projected dummies = %d, want 2", dummies)
+	}
+
+	for i, route := range routes {
+		if route.blocker != wantRoutes[i].blocker || route.dependent != wantRoutes[i].dependent {
+			t.Errorf("streamed route %d lost semantic endpoints: %+v", i+1, route)
+		}
+		strokes := streamedFrontierRouteStrokes(layout, route)
+		if len(strokes) == 0 {
+			t.Errorf("materialized route %d has no geometry", i+1)
+		}
+		for j := 1; j < len(strokes); j++ {
+			previous, current := strokes[j-1], strokes[j]
+			distance := absInt(previous.to.x-current.from.x) + absInt(previous.to.y-current.from.y)
+			if distance != 1 {
+				t.Errorf("route %d strokes %d and %d are not blocker-to-dependent neighbors: %+v then %+v",
+					i+1, j-1, j, previous, current)
+			}
+		}
+	}
+	for _, pair := range [][2]int{{1, 2}, {3, 4}} {
+		if crossings := sharedRouteCrossings(layout, pair[0], pair[1]); len(crossings) == 0 {
+			t.Errorf("routes %d and %d have no preserved shared crossing", pair[0], pair[1])
+		}
+	}
+
+	again := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 200, direction: frontierRanksHorizontal,
+	})
+	if !reflect.DeepEqual(layout, again) {
+		t.Error("identical graph input produced non-deterministic projection or streamed materialization")
+	}
+}
+
+func TestFocusedFrontierCrossingUsesEitherOwnerAndIncidentRoutesOnly(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	_, layout := layoutOfDirection(tickets, links, frontierRanksHorizontal, 200)
+	crossings := sharedRouteCrossings(layout, 1, 2)
+	if len(crossings) == 0 {
+		t.Fatal("crossing fixture has no shared route-1/route-2 junction")
+	}
+	crossing := crossings[0]
+	glyphAt := func(focus model.TicketID) rune {
+		t.Helper()
+		lines := renderFrontierCanvas(layout, focus, true, 0, 0,
+			layout.width, layout.height, DefaultStyles(true))
+		row := []rune(ansi.Strip(lines[crossing.y]))
+		if crossing.x >= len(row) {
+			t.Fatalf("crossing x=%d is outside rendered row width %d", crossing.x, len(row))
+		}
+		return row[crossing.x]
+	}
+	if got := glyphAt("C"); got != '╋' {
+		t.Errorf("dependent owner C crossing = %q, want heavy junction", got)
+	}
+	if got := glyphAt("D"); got != '╋' {
+		t.Errorf("dependent owner D crossing = %q, want heavy junction", got)
+	}
+	if got := glyphAt("E"); got != '┼' {
+		t.Errorf("unrelated focus E crossing = %q, want normal junction", got)
+	}
+
+	overlay := focusedFrontierOverlay(layout, "C", 0, 0, layout.width, layout.height)
+	routes := projectedFrontierRoutes(layout)
+	if got, want := projectedIncidentRoutes(layout, "C"), []frontierRoute{routes[0], routes[3]}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("C incident routes = %v, want canonical %v", got, want)
+	}
+	for _, routeIndex := range []int{0, 3} {
+		found := false
+		for at := range frontierRouteCells(layout, routes[routeIndex]) {
+			if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("incident route %d contributes no focused cells", routeIndex+1)
+		}
+	}
+	for at := range frontierRouteCells(layout, routes[4]) {
+		if _, highlighted := overlay[[2]int{at.x, at.y}]; highlighted {
+			t.Errorf("nonincident route 5 highlighted at %+v", at)
+			break
+		}
+	}
+}
+
+func TestFocusedFrontierOverlayClipsAndRejectsProtectedCells(t *testing.T) {
+	raster := newFrontierRouteRaster(frontierRect{W: 8, H: 1})
+	raster.add(frontierPoint{x: -1_000_000}, frontierPoint{x: 5}, '─')
+	var clipped []frontierPoint
+	raster.each(func(x, y int, _ rune) {
+		clipped = append(clipped, frontierPoint{x: x, y: y})
+	})
+	if got, want := clipped, []frontierPoint{{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("clipped route coverage = %v, want %v", got, want)
+	}
+
+	tickets := []model.Ticket{
+		blockingTicket("focus", model.StatusTodo),
+		blockingTicket("middle", model.StatusTodo),
+		blockingTicket("dependent", model.StatusTodo),
+	}
+	_, layout := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"focus": nil, "middle": blockedBy("focus"), "dependent": blockedBy("middle", "focus"),
+	})
+	var longRoute frontierRoute
+	for _, route := range projectedFrontierRoutes(layout) {
+		if route.blocker == "focus" && route.dependent == "dependent" {
+			longRoute = route
+		}
+	}
+	if longRoute.blocker == "" {
+		t.Fatal("fixture has no long focused route")
+	}
+	routeCells := frontierRouteCells(layout, longRoute)
+	var unprotected, continuation, linked frontierPoint
+	found := 0
+	for y := range layout.height {
+		for x := range layout.width {
+			at := frontierPoint{x: x, y: y}
+			if _, routed := routeCells[at]; !routed || layout.insideCard(x, y) {
+				continue
+			}
+			switch found {
+			case 0:
+				unprotected = at
+			case 1:
+				continuation = at
+			case 2:
+				linked = at
+			}
+			found++
+			if found == 3 {
+				break
+			}
+		}
+		if found == 3 {
+			break
+		}
+	}
+	if found != 3 {
+		t.Fatalf("route has %d usable cells, want at least three", found)
+	}
+	layout.cells[continuation.y][continuation.x].continuation = true
+	layout.cells[linked.y][linked.x].link = 1
+	overlay := focusedFrontierOverlay(layout, "focus", 0, 0, layout.width, layout.height)
+	if _, ok := overlay[[2]int{unprotected.x, unprotected.y}]; !ok {
+		t.Errorf("unprotected route cell %+v was not highlighted", unprotected)
+	}
+	for _, protected := range []frontierPoint{continuation, linked} {
+		if _, ok := overlay[[2]int{protected.x, protected.y}]; ok {
+			t.Errorf("protected route cell %+v was highlighted", protected)
+		}
+	}
+}
+
+func TestFocusedFrontierClippedTerminalArrowHasMonochromeIdentity(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{"#1": blockedBy("#2"), "#2": nil}
+	for _, tc := range []struct {
+		name         string
+		direction    frontierRankDirection
+		arrow        rune
+		focusedArrow rune
+	}{
+		{name: "horizontal", direction: frontierRanksHorizontal, arrow: '▶', focusedArrow: '▸'},
+		{name: "vertical", direction: frontierRanksVertical, arrow: '▼', focusedArrow: '▾'},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, layout := layoutOfDirection(tickets, links, tc.direction, 120)
+			arrowAt := frontierPoint{x: -1, y: -1}
+			for y, row := range layout.cells {
+				for x, cell := range row {
+					if cell.r == tc.arrow {
+						arrowAt = frontierPoint{x: x, y: y}
+					}
+				}
+			}
+			if arrowAt.x < 0 {
+				t.Fatalf("real %s layout has no %q terminal arrow", tc.name, tc.arrow)
+			}
+
+			styles := DefaultStyles(true)
+			unfocused := ansi.Strip(strings.Join(renderFrontierCanvas(layout, "#1", false,
+				arrowAt.x, arrowAt.y, 1, 1, styles), "\n"))
+			focused := ansi.Strip(strings.Join(renderFrontierCanvas(layout, "#1", true,
+				arrowAt.x, arrowAt.y, 1, 1, styles), "\n"))
+			if unfocused != string(tc.arrow) {
+				t.Fatalf("unfocused clipped terminal = %q, want %q", unfocused, tc.arrow)
+			}
+			if focused == unfocused {
+				t.Errorf("focused and unfocused clipped terminals are both %q after ANSI stripping", focused)
+			}
+			if focused != string(tc.focusedArrow) {
+				t.Errorf("focused clipped terminal = %q, want %q", focused, tc.focusedArrow)
+			}
+
+			if tc.direction == frontierRanksVertical {
+				const viewportWidth, viewportHeight = 28, 6
+				rect := layout.nodeAt["#1"]
+				offsetX, offsetY := ensureNodeVisible(rect, 0, arrowAt.y,
+					viewportWidth, viewportHeight)
+				if offsetX != 0 || offsetY != arrowAt.y {
+					t.Fatalf("reachable retained offset = %d,%d, want 0,%d",
+						offsetX, offsetY, arrowAt.y)
+				}
+				unfocusedRows := renderFrontierCanvas(layout, "#1", false, offsetX, offsetY,
+					viewportWidth, viewportHeight, styles)
+				focusedRows := renderFrontierCanvas(layout, "#1", true, offsetX, offsetY,
+					viewportWidth, viewportHeight, styles)
+				unfocusedFirst := ansi.Strip(unfocusedRows[0])
+				focusedFirst := ansi.Strip(focusedRows[0])
+				if focusedFirst == unfocusedFirst {
+					t.Errorf("reachable focused and unfocused first rows are both %q after ANSI stripping",
+						focusedFirst)
+				}
+				if !strings.ContainsRune(focusedFirst, tc.focusedArrow) {
+					t.Errorf("reachable focused first row %q has no %q", focusedFirst, tc.focusedArrow)
+				}
+			}
+		})
+	}
+}
+
+func TestFocusedFrontierHubChecksOnlyVisibleCards(t *testing.T) {
+	const (
+		n      = 500
+		height = 30
+	)
+	tickets, links := benchmarkFrontierFixture("hub", n)
+	graph := model.BuildBlockingGraph(tickets, links, model.Capabilities{BlockingLinks: true})
+	layout := layoutFrontier(graph, frontierNodes(graph, tickets, true), frontierLayoutOptions{
+		innerWidth: frontierBenchmarkWidth,
+		direction:  frontierRanksHorizontal,
+	})
+	focus := model.TicketID("B-0")
+	if got := len(projectedIncidentRoutes(layout, focus)); got != n-1 {
+		t.Fatalf("hub incident routes = %d, want %d", got, n-1)
+	}
+	rect := layout.nodeAt[focus]
+	offsetX, offsetY := ensureNodeVisible(rect, 0, 0, frontierBenchmarkWidth, height)
+	offsetX = clampFrontierOffset(offsetX, layout.width, frontierBenchmarkWidth)
+	offsetY = clampFrontierOffset(offsetY, layout.height, height)
+	clip := frontierRect{X: offsetX, Y: offsetY, W: frontierBenchmarkWidth, H: height}
+	visibleCards := visibleFrontierCardRects(layout, clip)
+	if got := len(visibleCards); got == 0 || got*10 >= len(layout.nodeAt) {
+		t.Fatalf("visible card subset = %d of %d, want a non-empty viewport-bounded subset",
+			got, len(layout.nodeAt))
+	}
+	for _, rect := range layout.nodeAt {
+		wantVisible := frontierRectsIntersect(rect, clip)
+		gotVisible := false
+		for _, visible := range visibleCards {
+			if visible == rect {
+				gotVisible = true
+				break
+			}
+		}
+		if gotVisible != wantVisible {
+			t.Errorf("card %+v visible = %v, want %v", rect, gotVisible, wantVisible)
+		}
+	}
+
+	overlay := focusedFrontierOverlay(layout, focus, offsetX, offsetY,
+		frontierBenchmarkWidth, height)
+	for at := range overlay {
+		x, y := at[0]+offsetX, at[1]+offsetY
+		if insideFrontierCardRects(visibleCards, x, y) || layout.insideCard(x, y) {
+			t.Errorf("focused hub overlay overwrote card at (%d,%d)", x, y)
+		}
+	}
+}
+
+func TestFocusedFrontierHeavyGlyphsSurviveANSIStripping(t *testing.T) {
+	const light = "─│┌┐└┘┼▶▼"
+	const heavy = "━┃┏┓┗┛╋▶▼"
+	if got := heavyFrontierEdgeText(light); got != heavy {
+		t.Errorf("heavy substitution = %q, want %q", got, heavy)
+	}
+	styled := DefaultStyles(true).FrontierBold.Render(heavyFrontierEdgeText(light))
+	if got := ansi.Strip(styled); got != heavy {
+		t.Errorf("ANSI-stripped heavy geometry = %q, want %q", got, heavy)
+	}
+}
+
+func TestFrontierRouteIdentityPreservesGhostsLongSpansCyclesAndDirections(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("P", model.StatusTodo),
+		blockingTicket("Q", model.StatusTodo),
+		blockingTicket("X", model.StatusTodo),
+		blockingTicket("Y", model.StatusTodo),
+	}
+	links := map[model.TicketID][]model.Link{
+		"P": blockedBy("Q", "ghost"),
+		"Q": blockedBy("ghost"),
+		"X": blockedBy("Y"),
+		"Y": blockedBy("X"),
+	}
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		t.Run(fmt.Sprintf("direction-%d", direction), func(t *testing.T) {
+			g, layout := layoutOfDirection(tickets, links, direction, 160)
+			wantRoutes := map[[2]model.TicketID]bool{
+				{"Q", "P"}: true, {"ghost", "P"}: true, {"ghost", "Q"}: true,
+			}
+			routes := projectedFrontierRoutes(layout)
+			for _, route := range routes {
+				delete(wantRoutes, [2]model.TicketID{route.blocker, route.dependent})
+			}
+			if len(wantRoutes) != 0 {
+				t.Errorf("direction %d missing semantic routes %v", direction, wantRoutes)
+			}
+			if x, y := projectedIncidentRoutes(layout, "X"), projectedIncidentRoutes(layout, "Y"); len(x) != 0 || len(y) != 0 {
+				t.Errorf("direction %d routed SCC-internal cycle edges: X=%v Y=%v", direction, x, y)
+			}
+			if len(g.Cycles()) != 1 {
+				t.Errorf("direction %d cycles = %v, want X/Y cycle truth", direction, g.Cycles())
+			}
+			var longRoute *frontierRoute
+			for i := range routes {
+				if routes[i].blocker == "ghost" && routes[i].dependent == "P" {
+					longRoute = &routes[i]
+				}
+			}
+			if longRoute == nil || len(streamedFrontierRouteStrokes(layout, *longRoute)) < 3 {
+				t.Fatalf("direction %d long Ghost route has no dummy geometry", direction)
+			}
+			overlay := focusedFrontierOverlay(layout, "ghost", 0, 0, layout.width, layout.height)
+			for at := range overlay {
+				if layout.insideCard(at[0], at[1]) {
+					t.Errorf("direction %d focused edge overwrote card at %v", direction, at)
+				}
+			}
+			visible := ansi.Strip(strings.Join(renderFrontierCanvas(layout, "ghost", true,
+				0, 0, layout.width, layout.height, DefaultStyles(true)), "\n"))
+			if !strings.ContainsAny(visible, "━┃┏┓┗┛╋") {
+				t.Errorf("direction %d rendered no heavy Ghost incident geometry", direction)
+			}
+			if direction == frontierRanksHorizontal {
+				if !strings.ContainsRune(visible, '▶') || strings.ContainsRune(visible, '▼') {
+					t.Errorf("horizontal route arrows lost direction:\n%s", visible)
+				}
+			} else if !strings.ContainsRune(visible, '▼') || strings.ContainsRune(visible, '▶') {
+				t.Errorf("vertical route arrows lost direction:\n%s", visible)
+			}
+		})
+	}
+}
+
+func TestFrontierCellsCarryNoRouteOwnershipMetadata(t *testing.T) {
+	cellType := reflect.TypeOf(frontierCell{})
+	for i := range cellType.NumField() {
+		field := cellType.Field(i)
+		name := strings.ToLower(field.Name)
+		if strings.Contains(name, "route") || strings.Contains(name, "owner") {
+			t.Errorf("frontierCell field %q stores topology ownership", field.Name)
+		}
+		if field.Type.Kind() == reflect.Slice {
+			t.Errorf("frontierCell field %q is a per-cell slice", field.Name)
+		}
+	}
+}
+
+func TestFrontierRoutesStreamWithoutRetainedArena(t *testing.T) {
+	layoutType := reflect.TypeOf(frontierLayout{})
+	for _, field := range []string{"routes", "strokes", "incident"} {
+		if _, retained := layoutType.FieldByName(field); retained {
+			t.Errorf("frontierLayout retains legacy %s state", field)
+		}
+	}
+	tickets, links := crossingFrontierFixture()
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		_, layout := layoutOfDirection(tickets, links, direction, 200)
+		routes := projectedFrontierRoutes(layout)
+		if len(routes) == 0 {
+			t.Fatalf("direction %d projected no semantic routes", direction)
+		}
+		for i, route := range routes {
+			strokes := streamedFrontierRouteStrokes(layout, route)
+			if len(strokes) == 0 || len(strokes) > route.strokeCapacity {
+				t.Errorf("direction %d route %d streamed %d of at most %d strokes",
+					direction, i+1, len(strokes), route.strokeCapacity)
+			}
+		}
+	}
+}
+
+func TestFrontierRouteRasterClipsAxisAlignedRanges(t *testing.T) {
+	clip := frontierRect{X: 2, Y: 3, W: 4, H: 5}
+	horizontal := map[frontierPoint]rune{}
+	for x := 2; x <= 5; x++ {
+		horizontal[frontierPoint{x: x, y: 4}] = '─'
+	}
+	vertical := map[frontierPoint]rune{}
+	for y := 3; y <= 7; y++ {
+		vertical[frontierPoint{x: 3, y: y}] = '│'
+	}
+	for _, test := range []struct {
+		name     string
+		from, to frontierPoint
+		glyph    rune
+		want     map[frontierPoint]rune
+	}{
+		{"right", frontierPoint{x: -9, y: 4}, frontierPoint{x: 20, y: 4}, '─', horizontal},
+		{"left", frontierPoint{x: 20, y: 4}, frontierPoint{x: -9, y: 4}, '─', horizontal},
+		{"down", frontierPoint{x: 3, y: -9}, frontierPoint{x: 3, y: 20}, '│', vertical},
+		{"up", frontierPoint{x: 3, y: 20}, frontierPoint{x: 3, y: -9}, '│', vertical},
+		{"outside", frontierPoint{x: 1, y: 0}, frontierPoint{x: 1, y: 20}, '│', map[frontierPoint]rune{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raster := newFrontierRouteRaster(clip)
+			raster.add(test.from, test.to, test.glyph)
+			got := map[frontierPoint]rune{}
+			raster.each(func(x, y int, glyph rune) {
+				got[frontierPoint{x: x, y: y}] = glyph
+			})
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("clipped raster = %v, want %v", got, test.want)
+			}
+		})
+	}
+
+	t.Run("diagonal rejected", func(t *testing.T) {
+		raster := newFrontierRouteRaster(clip)
+		defer func() {
+			if recover() == nil {
+				t.Error("diagonal route did not fail fast")
+			}
+		}()
+		raster.add(frontierPoint{x: 2, y: 3}, frontierPoint{x: 3, y: 4}, '─')
+	})
+}
+
 func TestMergeGlyph(t *testing.T) {
 	tests := []struct {
 		existing, incoming, want rune
@@ -176,6 +1116,8 @@ func TestMergeGlyph(t *testing.T) {
 		{0, '│', '│'},
 		{'─', '▶', '▶'},
 		{'▶', '─', '▶'},
+		{'│', '▼', '▼'},
+		{'▼', '│', '▼'},
 		{'─', '─', '─'},
 		{'│', '│', '│'},
 		{'─', '│', '┼'},
@@ -266,16 +1208,548 @@ func TestFrontierFocusMovement(t *testing.T) {
 	}
 }
 
-// Emphasis is withheld until every Detail read has answered: a half-loaded
-// Frontier that already claims something is Actionable is the one wrong answer
-// this screen must not give.
+func layoutOfDirection(tickets []model.Ticket, links map[model.TicketID][]model.Link,
+	direction frontierRankDirection, innerWidth int) (model.BlockingGraph, frontierLayout) {
+	g := graphOf(tickets, links)
+	return g, layoutFrontier(g, frontierNodes(g, tickets, true), frontierLayoutOptions{
+		innerWidth: innerWidth,
+		direction:  direction,
+	})
+}
+
+func TestFrontierVerticalLayoutKeepsCardsUprightAndRoutesDown(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusDone),
+	}
+	links := map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"),
+		"#2": blockedBy("#3"),
+		"#3": nil,
+	}
+	g, layout := layoutOfDirection(tickets, links, frontierRanksVertical, 120)
+	if layout.direction != frontierRanksVertical {
+		t.Fatalf("direction = %v, want vertical", layout.direction)
+	}
+	if layout.nodeAt["#3"].Y >= layout.nodeAt["#2"].Y ||
+		layout.nodeAt["#2"].Y >= layout.nodeAt["#1"].Y {
+		t.Fatalf("vertical ranks = #3:%+v #2:%+v #1:%+v, want blockers above dependents",
+			layout.nodeAt["#3"], layout.nodeAt["#2"], layout.nodeAt["#1"])
+	}
+	for id, rect := range layout.nodeAt {
+		if rect.W != frontierCardWidth || rect.H != frontierCardHeight {
+			t.Errorf("%s rect = %+v, want an upright %dx%d card", id, rect, frontierCardWidth, frontierCardHeight)
+		}
+	}
+
+	arrows := 0
+	for y, row := range layout.cells {
+		for x, cell := range row {
+			if cell.r == '▶' {
+				t.Errorf("horizontal arrow at %d,%d in vertical layout", x, y)
+			}
+			if cell.r == '▼' {
+				arrows++
+			}
+		}
+	}
+	if arrows == 0 {
+		t.Fatal("vertical layout drew no downward arrow")
+	}
+
+	// The direct #3 -> #1 edge spans the real #2 rank. Its dummy must run
+	// vertically through that rank in a peer slot no card occupies.
+	middle := layout.nodeAt["#2"]
+	waypointColumn := -1
+	for x := range layout.width {
+		if !insideAnyCard(layout, x, middle.Y) && layout.cells[middle.Y][x].r == '│' {
+			waypointColumn = x
+			break
+		}
+	}
+	if waypointColumn < 0 {
+		t.Error("the vertical long-span edge inserted no dummy waypoint")
+	}
+
+	borders := make(map[model.TicketID]frontierBorder)
+	for _, node := range frontierNodes(g, tickets, true) {
+		borders[node.id] = node.emphasis.border
+	}
+	for id, rect := range layout.nodeAt {
+		border := borders[id]
+		for x := rect.X; x < rect.X+rect.W; x++ {
+			want := border.horizontal
+			switch x {
+			case rect.X:
+				want = border.topLeft
+			case rect.X + rect.W - 1:
+				want = border.topRight
+			}
+			if got := layout.cells[rect.Y][x].r; got != want {
+				t.Fatalf("vertical routing overwrote %s top border at %d with %q, want %q", id, x, got, want)
+			}
+		}
+	}
+}
+
+func TestFrontierVerticalLayoutPlacesGhostBlockersAboveDependents(t *testing.T) {
+	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
+	_, layout := layoutOfDirection(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#ghost"),
+	}, frontierRanksVertical, 120)
+
+	ghost, ghostDrawn := layout.nodeAt["#ghost"]
+	dependent, dependentDrawn := layout.nodeAt["#1"]
+	if !ghostDrawn || !dependentDrawn {
+		t.Fatalf("drawn nodes = %v, want dependent and Ghost", layout.nodeAt)
+	}
+	if layout.rankOf["#ghost"] != 0 || ghost.Y >= dependent.Y {
+		t.Errorf("Ghost rect/rank = %+v/%d, dependent = %+v; want rank-zero Ghost above",
+			ghost, layout.rankOf["#ghost"], dependent)
+	}
+	if ghost.W != frontierCardWidth || ghost.H != frontierCardHeight {
+		t.Errorf("Ghost rect = %+v, want upright %dx%d", ghost, frontierCardWidth, frontierCardHeight)
+	}
+}
+
+func TestFrontierVerticalPhysicalNavigationAndCanonicalTie(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusDone),
+	}
+	_, layout := layoutOfDirection(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#3"), "#2": blockedBy("#3"), "#3": nil,
+	}, frontierRanksVertical, 120)
+	for _, test := range []struct {
+		name   string
+		from   model.TicketID
+		dx, dy int
+		want   model.TicketID
+	}{
+		{"right moves among peers", "#1", 1, 0, "#2"},
+		{"left moves among peers", "#2", -1, 0, "#1"},
+		{"up crosses to blocker rank", "#1", 0, -1, "#3"},
+		{"down crosses to dependent rank", "#3", 0, 1, "#1"},
+		{"unavailable rank retains focus", "#3", 0, -1, "#3"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got, ok := layout.moveFocus(test.from, test.dx, test.dy); !ok || got != test.want {
+				t.Errorf("move = %q/%t, want %q/true", got, ok, test.want)
+			}
+		})
+	}
+
+	// Handcrafted geometry makes the equal-distance rule observable: canonical
+	// byRank order, not map order, breaks the tie.
+	tie := frontierLayout{
+		direction: frontierRanksVertical,
+		rankOf:    map[model.TicketID]int{"from": 0, "first": 1, "second": 1},
+		byRank:    [][]model.TicketID{{"from"}, {"first", "second"}},
+		nodeAt: map[model.TicketID]frontierRect{
+			"from": {X: 10}, "first": {X: 0}, "second": {X: 20},
+		},
+	}
+	if got, _ := tie.moveFocus("from", 0, 1); got != "first" {
+		t.Errorf("equal-distance tie focused %q, want first canonical peer", got)
+	}
+}
+
+func TestFrontierDirectionChoiceUsesFitPhysicalRowsAndHorizontalTies(t *testing.T) {
+	chain := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	g := graphOf(chain, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
+	})
+	projection := projectFrontierRanks(g, frontierNodes(g, chain, true), 80, frontierDensityFull)
+	candidates := projection.candidates
+	if candidates[frontierRanksHorizontal].fullyFits(80, 24) ||
+		!candidates[frontierRanksVertical].fullyFits(80, 24) {
+		t.Fatalf("chain candidates = %+v, want only vertical to fit 80x24", candidates)
+	}
+	if got := chooseFrontierDirection(candidates, 80, 24); got != frontierRanksVertical {
+		t.Errorf("sole-fit direction = %v, want vertical", got)
+	}
+
+	probe := frontierLayoutCandidate{width: 3, height: 1}
+	if got, want := frontierAspectError(probe, 80, 24), absInt(3*48-80); got != want {
+		t.Errorf("80x24 aspect error = %d, want 80x48 cross-product %d", got, want)
+	}
+
+	// This metadata shape is the correction-sensitive boundary: both candidates
+	// overflow, raw 80x24 would prefer vertical, but physical 80x48 prefers horizontal.
+	boundary := [2]frontierLayoutCandidate{
+		{direction: frontierRanksHorizontal, width: 96, height: 24},
+		{direction: frontierRanksVertical, width: 112, height: 30},
+	}
+	if got := chooseFrontierDirection(boundary, 80, 24); got != frontierRanksHorizontal {
+		t.Errorf("corrected boundary direction = %v, want horizontal", got)
+	}
+	rawError := func(candidate frontierLayoutCandidate) int {
+		return absInt(candidate.width*24 - 80*candidate.height)
+	}
+	if rawError(boundary[frontierRanksVertical]) >= rawError(boundary[frontierRanksHorizontal]) {
+		t.Fatal("boundary fixture does not change without the physical-row correction")
+	}
+
+	tie := [2]frontierLayoutCandidate{
+		{direction: frontierRanksHorizontal, width: 10, height: 10},
+		{direction: frontierRanksVertical, width: 10, height: 10},
+	}
+	if got := chooseFrontierDirection(tie, 80, 24); got != frontierRanksHorizontal {
+		t.Errorf("exact tie direction = %v, want horizontal", got)
+	}
+}
+
+func TestFrontierDirectionHysteresisIsStrictAndSeatLocal(t *testing.T) {
+	bothFit := [2]frontierLayoutCandidate{{width: 20, height: 10}, {width: 10, height: 20}}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothFit, 30, 30); got != frontierRanksVertical {
+		t.Errorf("both-fit resize changed to %v", got)
+	}
+	bothOverflow := [2]frontierLayoutCandidate{{width: 40, height: 10}, {width: 10, height: 40}}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothOverflow, 20, 20); got != frontierRanksVertical {
+		t.Errorf("both-overflow resize changed to %v", got)
+	}
+	if got := frontierDirectionAfterResize(frontierRanksVertical, bothFit, 25, 15); got != frontierRanksHorizontal {
+		t.Errorf("clear fit boundary retained %v, want horizontal", got)
+	}
+	if got := frontierDirectionAfterResize(frontierRanksHorizontal, bothFit, 30, 30); got != frontierRanksHorizontal {
+		t.Errorf("ordinary both-fit resize flipped back to %v", got)
+	}
+}
+
+func TestFrontierProjectionMatchesAdmittedLayoutAndIsPure(t *testing.T) {
+	tickets, links := crossingFrontierFixture()
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	for _, density := range []frontierDensity{frontierDensityFull, frontierDensityDense} {
+		for _, width := range []int{20, 80, 200} {
+			projection := projectFrontierRanks(g, nodes, width, density)
+			again := projectFrontierRanks(g, nodes, width, density)
+			if !reflect.DeepEqual(projection, again) {
+				t.Fatalf("density %d width %d repeated projection differs\nfirst:  %#v\nsecond: %#v",
+					density, width, projection, again)
+			}
+			wantCandidates := frontierCandidatesFromShapeForGeometry(
+				len(projection.realCounts), projection.peers, projection.channelCounts, projection.geometry)
+			if !reflect.DeepEqual(projection.candidates, wantCandidates) {
+				t.Errorf("density %d width %d projected candidates = %+v, scalar shape = %+v",
+					density, width, projection.candidates, wantCandidates)
+			}
+			for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+				candidate := projection.candidates[direction]
+				if !candidate.withinCellLimit(frontierCanvasCellLimit) {
+					t.Fatalf("density %d width %d direction %d unexpectedly exceeds test ceiling: %+v",
+						density, width, direction, candidate)
+				}
+				withProjection := layoutFrontier(g, nodes, frontierLayoutOptions{
+					innerWidth: width, direction: direction, density: density, projection: &projection,
+				})
+				direct := layoutFrontier(g, nodes, frontierLayoutOptions{
+					innerWidth: width, direction: direction, density: density,
+				})
+				if !reflect.DeepEqual(withProjection, direct) {
+					t.Errorf("density %d width %d direction %d supplied projection changed admitted geometry",
+						density, width, direction)
+				}
+			}
+		}
+	}
+}
+
+func TestFrontierDensityProjectionsApplyTheCeilingIndependently(t *testing.T) {
+	tickets, links := benchmarkFrontierFixture("hostile", 50)
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	selected := make(map[frontierDensity]frontierLayoutCandidate, 2)
+	projections := make(map[frontierDensity]frontierRankProjection, 2)
+	for _, density := range []frontierDensity{frontierDensityFull, frontierDensityDense} {
+		projection := projectFrontierRanks(g, nodes, 118, density)
+		direction := chooseFrontierDirection(projection.candidates, 118, 30)
+		projections[density] = projection
+		selected[density] = projection.candidates[direction]
+	}
+	if selected[frontierDensityFull].withinCellLimit(frontierCanvasCellLimit) {
+		t.Fatalf("full hostile N=50 unexpectedly admitted: %+v", selected[frontierDensityFull])
+	}
+	if !selected[frontierDensityDense].withinCellLimit(frontierCanvasCellLimit) {
+		t.Fatalf("dense hostile N=50 unexpectedly refused: %+v", selected[frontierDensityDense])
+	}
+
+	projection := projections[frontierDensityDense]
+	direction := selected[frontierDensityDense].direction
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: 118, direction: direction, density: frontierDensityDense, projection: &projection,
+	})
+	candidate := selected[frontierDensityDense]
+	if layout.width != candidate.width || layout.height != candidate.height || len(layout.cells) != candidate.height {
+		t.Errorf("dense admitted materialization = %dx%d/%d rows, projected %+v",
+			layout.width, layout.height, len(layout.cells), candidate)
+	}
+}
+
+func TestFrontierCanvasCeilingAdmitsBoundaryAndRefusesOneOverWithoutClipping(t *testing.T) {
+	atLimit := frontierLayoutCandidate{
+		direction: frontierRanksHorizontal, width: frontierCanvasCellLimit, height: 1,
+	}
+	if refusal := refuseFrontierCandidate(atLimit, 1, 0); refusal != nil {
+		t.Fatalf("exactly %d cells refused: %+v", frontierCanvasCellLimit, refusal)
+	}
+
+	oneOver := frontierLayoutCandidate{
+		direction: frontierRanksVertical, width: frontierCanvasCellLimit + 1, height: 1,
+	}
+	refusal := refuseFrontierCandidate(oneOver, 17, 3)
+	if refusal == nil {
+		t.Fatalf("%d cells admitted", frontierCanvasCellLimit+1)
+	}
+	if refusal.width != oneOver.width || refusal.height != oneOver.height ||
+		refusal.projectedCells != "500001" || refusal.direction != oneOver.direction {
+		t.Errorf("refusal clipped or rewrote selected geometry: %+v, want %+v and 500001 cells", refusal, oneOver)
+	}
+}
+
+func TestFrontierProjectionAndAdmissionFailClosedOnOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	candidate := frontierLayoutCandidate{width: maxInt, height: 2}
+	if candidate.withinCellLimit(frontierCanvasCellLimit) {
+		t.Fatal("overflowing projected cell multiplication admitted")
+	}
+	refusal := refuseFrontierCandidate(candidate, 1, 0)
+	if refusal == nil || refusal.projectedCells == "" {
+		t.Fatalf("overflow refusal = %+v, want immutable projected-cell metadata", refusal)
+	}
+
+	projected := frontierCandidatesFromShape(maxInt, 1, nil, 120)
+	for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+		if !projected[direction].overflow || projected[direction].withinCellLimit(frontierCanvasCellLimit) {
+			t.Errorf("direction %d checked dimension overflow = %+v, want refused", direction, projected[direction])
+		}
+	}
+}
+
+func TestFrontierCompleteDAGRefusesBeforePerSpanProjectionWork(t *testing.T) {
+	const n = 50
+	tickets, links := benchmarkFrontierFixture("complete", n)
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	for _, density := range []frontierDensity{frontierDensityFull, frontierDensityDense} {
+		projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth, density)
+		for _, direction := range []frontierRankDirection{frontierRanksHorizontal, frontierRanksVertical} {
+			candidate := projection.candidates[direction]
+			if refusal := refuseFrontierCandidate(candidate, len(nodes), len(g.Ghosts())); refusal == nil {
+				t.Errorf("density %d direction %d admitted complete-DAG N=%d candidate %+v",
+					density, direction, n, candidate)
+			}
+		}
+		wantEdges := n * (n - 1) / 2
+		if projection.work.edges != wantEdges || projection.work.ranks != n || projection.work.channelSegments != 0 {
+			t.Errorf("density %d projection work = %+v, want %d summarized edges, %d ranks, and no per-span work",
+				density, projection.work, wantEdges, n)
+		}
+		if len(projection.ranks) != n || len(projection.realPeerOf) != n ||
+			len(projection.slotCounts) != n || len(projection.channelCounts) != n-1 {
+			t.Errorf("density %d scalar metadata sizes = ranks %d peers %d slots %d channels %d, want O(N) rank data",
+				density, len(projection.ranks), len(projection.realPeerOf),
+				len(projection.slotCounts), len(projection.channelCounts))
+		}
+
+		forbiddenNames := map[string]string{
+			"slots": "dummy slots", "segments": "segments", "routes": "routes",
+			"incident": "incident index", "strokes": "strokes", "cells": "cells", "hitmap": "hit map",
+		}
+		projectionType := reflect.TypeOf(projection)
+		for i := range projectionType.NumField() {
+			field := projectionType.Field(i)
+			if retained, forbidden := forbiddenNames[strings.ToLower(field.Name)]; forbidden {
+				t.Errorf("projection field %q retains forbidden %s metadata", field.Name, retained)
+			}
+		}
+	}
+}
+
+func TestFrontierCompleteDAGAtSafeCeilingStreamsWithoutRouteArena(t *testing.T) {
+	const n = 40
+	tickets := make([]model.Ticket, n)
+	links := make(map[model.TicketID][]model.Link, n)
+	for dependent := range n {
+		id := fmt.Sprintf("T-%04d", dependent)
+		tickets[dependent] = blockingTicket(id, model.StatusTodo)
+		blockers := make([]string, dependent)
+		for blocker := range dependent {
+			blockers[blocker] = fmt.Sprintf("T-%04d", blocker)
+		}
+		links[model.TicketID(id)] = blockedBy(blockers...)
+	}
+	g := graphOf(tickets, links)
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, frontierBenchmarkWidth, frontierDensityDense)
+	candidate := projection.candidates[frontierRanksHorizontal]
+	if candidate.width != 632 || candidate.height != 762 {
+		t.Fatalf("safe complete-DAG candidate = %dx%d, want 632x762", candidate.width, candidate.height)
+	}
+	if cells, ok := candidate.projectedCells(); !ok || cells != 481_584 {
+		t.Fatalf("safe complete-DAG cells = %d/%t, want 481584", cells, ok)
+	}
+	if refusal := refuseFrontierCandidate(candidate, len(nodes), len(g.Ghosts())); refusal != nil {
+		t.Fatalf("safe complete-DAG candidate refused: %+v", refusal)
+	}
+	if got := chooseFrontierDirection(projection.candidates, frontierBenchmarkWidth, 30); got != frontierRanksHorizontal {
+		t.Fatalf("safe complete-DAG selected direction = %d, want horizontal", got)
+	}
+	if projection.work.edges != 780 || projection.work.channelSegments != 10_660 {
+		t.Fatalf("safe complete-DAG projection work = %+v, want 780 edges and 10660 streamed spans",
+			projection.work)
+	}
+
+	layout := layoutFrontier(g, nodes, frontierLayoutOptions{
+		innerWidth: frontierBenchmarkWidth, direction: frontierRanksHorizontal,
+		density: frontierDensityDense, projection: &projection,
+	})
+	if len(layout.cells) != candidate.height {
+		t.Fatalf("safe complete-DAG grid rows = %d, want %d", len(layout.cells), candidate.height)
+	}
+	for row, cells := range layout.cells {
+		if len(cells) != candidate.width {
+			t.Fatalf("safe complete-DAG grid row %d width = %d, want %d", row, len(cells), candidate.width)
+		}
+	}
+	layoutType := reflect.TypeOf(layout)
+	for _, field := range []string{"routes", "segments", "strokes", "incident", "slots"} {
+		if _, retained := layoutType.FieldByName(field); retained {
+			t.Errorf("safe complete-DAG layout retains legacy %s arena", field)
+		}
+	}
+
+	const viewportWidth, viewportHeight = 37, 11
+	overlay := focusedFrontierOverlay(layout, "T-0000", 0, 0, viewportWidth, viewportHeight)
+	if len(overlay) == 0 {
+		t.Fatal("safe complete-DAG focused overlay has no visible incident coverage")
+	}
+	if len(overlay) > viewportWidth*viewportHeight {
+		t.Fatalf("focused overlay has %d cells, exceeds %d-cell viewport", len(overlay), viewportWidth*viewportHeight)
+	}
+	for at := range overlay {
+		if at[0] < 0 || at[0] >= viewportWidth || at[1] < 0 || at[1] >= viewportHeight {
+			t.Fatalf("focused overlay cell %v escapes %dx%d viewport", at, viewportWidth, viewportHeight)
+		}
+	}
+}
+
+func TestFrontierRawGridPayloadQualificationMatchesLinuxAMD64(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("the diagnostic explicitly qualifies the measured linux/amd64 payload")
+	}
+	if got := unsafe.Sizeof(frontierCell{}); got != 48 {
+		t.Fatalf("linux/amd64 frontierCell size = %d bytes, diagnostic assumes 48", got)
+	}
+	if got := frontierCanvasCellLimit * int(unsafe.Sizeof(frontierCell{})); got != frontierRawGridBytesLinuxAMD64 {
+		t.Errorf("raw payload = %d bytes, want %d", got, frontierRawGridBytesLinuxAMD64)
+	}
+}
+
+func TestFrontierCandidateMeasurementAllocatesNoCellGrid(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusTodo),
+	}
+	g := graphOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"), "#2": blockedBy("#3"), "#3": nil,
+	})
+	nodes := frontierNodes(g, tickets, true)
+	projection := projectFrontierRanks(g, nodes, 80, frontierDensityFull)
+	if allocations := testing.AllocsPerRun(100, func() {
+		_ = frontierCandidatesFromShapeForGeometry(len(projection.realCounts), projection.peers,
+			projection.channelCounts, projection.geometry)
+	}); allocations != 0 {
+		t.Errorf("candidate measurement allocated %.0f objects, want scalar metadata only", allocations)
+	}
+}
+
+func TestFrontierInnerRectDegradesPerAxisAndChromeStaysInRing(t *testing.T) {
+	for _, test := range []struct {
+		width, height int
+		want          frontierRect
+	}{
+		{0, 5, frontierRect{Y: 1, H: 3}},
+		{5, 0, frontierRect{X: 1, W: 3}},
+		{-1, 3, frontierRect{Y: 1, H: 1}},
+		{1, 1, frontierRect{W: 1, H: 1}},
+		{2, 2, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+		{3, 3, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+		{4, 5, frontierRect{X: 1, Y: 1, W: 2, H: 3}},
+		{1, 3, frontierRect{X: 0, Y: 1, W: 1, H: 1}},
+		{3, 2, frontierRect{X: 1, Y: 1, W: 1, H: 1}},
+	} {
+		if got := frontierInnerRect(test.width, test.height); got != test.want {
+			t.Errorf("frontierInnerRect(%d,%d) = %+v, want %+v", test.width, test.height, got, test.want)
+		}
+	}
+
+	if got := frontierCardWidthFor(28); got != 26 {
+		t.Errorf("inner width 28 chose card width %d, want 26 (outer width must not leak into narrow input)", got)
+	}
+
+	layout := frontierLayout{
+		width: 20, height: 20,
+		styles: []frontierStyle{{Role: frontierRoleText}},
+		cells:  make([][]frontierCell, 20),
+	}
+	for y := range layout.cells {
+		layout.cells[y] = make([]frontierCell, 20)
+		for x := range layout.cells[y] {
+			layout.cells[y][x] = frontierCell{r: ' '}
+		}
+	}
+	for _, size := range []struct {
+		width, height int
+		want          map[[2]int]rune
+	}{
+		{0, 5, map[[2]int]rune{}},
+		{5, 0, map[[2]int]rune{}},
+		{1, 1, map[[2]int]rune{}},
+		{2, 2, map[[2]int]rune{{1, 0}: '▲', {0, 1}: '‹'}},
+		{3, 3, map[[2]int]rune{{1, 0}: '▲', {1, 2}: '▼', {0, 1}: '‹', {2, 1}: '›'}},
+		{8, 6, map[[2]int]rune{{4, 0}: '▲', {4, 5}: '▼', {0, 3}: '‹', {7, 3}: '›'}},
+	} {
+		inner := frontierInnerRect(size.width, size.height)
+		chrome := frontierChromeGlyphs(layout, inner, 1, 1, size.width, size.height)
+		if !reflect.DeepEqual(chrome, size.want) {
+			t.Errorf("%dx%d chrome = %v, want fixed ring cues %v", size.width, size.height, chrome, size.want)
+		}
+		for at := range chrome {
+			if at[0] >= inner.X && at[0] < inner.X+inner.W &&
+				at[1] >= inner.Y && at[1] < inner.Y+inner.H {
+				t.Errorf("%dx%d chrome %v overlaps inner %+v", size.width, size.height, at, inner)
+			}
+		}
+		lines := renderFrontierBody(layout, "", false, 1, 1, size.width, size.height, DefaultStyles(true))
+		if len(lines) != size.height {
+			t.Errorf("%dx%d body has %d lines, want %d", size.width, size.height, len(lines), size.height)
+		}
+		for _, line := range lines {
+			if got := lipgloss.Width(line); got != size.width {
+				t.Errorf("%dx%d body line width = %d, want exactly %d", size.width, size.height, got, size.width)
+			}
+		}
+	}
+}
+
+// Graph-derived emphasis is withheld until every Detail read has answered: a
+// half-loaded Frontier visibly says PENDING instead of giving a premature graph
+// conclusion.
 func TestFrontierEmphasisIsWithheldUntilResolved(t *testing.T) {
 	tickets := []model.Ticket{blockingTicket("#1", model.StatusTodo)}
 	g := graphOf(tickets, map[model.TicketID][]model.Link{"#1": nil})
 
 	loading := frontierNodes(g, tickets, false)
-	if loading[0].emphasis.badge != "" {
-		t.Errorf("badge while loading = %q, want none", loading[0].emphasis.badge)
+	if loading[0].emphasis.badge != "PENDING" {
+		t.Errorf("badge while loading = %q, want PENDING", loading[0].emphasis.badge)
 	}
 	resolved := frontierNodes(g, tickets, true)
 	if resolved[0].emphasis.badge != "ACTIONABLE" {
@@ -283,31 +1757,119 @@ func TestFrontierEmphasisIsWithheldUntilResolved(t *testing.T) {
 	}
 }
 
-func TestFrontierBadgeWords(t *testing.T) {
+func TestFrontierEvidenceLabelsSeparateCausesAndPreserveKnownBlockers(t *testing.T) {
 	tickets := []model.Ticket{
 		blockingTicket("#1", model.StatusTodo),
 		blockingTicket("#2", model.StatusTodo),
-		blockingTicket("#3", model.StatusTodo),
-		blockingTicket("#4", model.StatusTodo),
+		blockingTicket("#3", model.StatusUnknown),
 	}
-	// #2 is blocked by a Todo member; #3's own Links were never read; #4 sits on
-	// a self-loop.
-	g := graphOf(tickets, map[model.TicketID][]model.Link{
-		"#1": nil,
-		"#2": blockedBy("#1"),
-		"#4": blockedBy("#4"),
-	})
+	links := map[model.TicketID][]model.Link{
+		"#2": {
+			{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}},
+		},
+		"#3": nil,
+	}
+	g := graphOf(tickets, links)
 	nodes := frontierNodes(g, tickets, true)
-
-	want := map[model.TicketID]string{
-		"#1": "ACTIONABLE",
-		"#2": "blocked by 1",
-		"#3": "UNVERIFIED",
-		"#4": "CYCLE",
-	}
+	byID := make(map[model.TicketID]frontierNode, len(nodes))
 	for _, n := range nodes {
-		if n.emphasis.badge != want[n.id] {
-			t.Errorf("badge of %s = %q, want %q", n.id, n.emphasis.badge, want[n.id])
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, 60); got != "blocked by 1 LINKS FAILED" {
+		t.Errorf("failed own Links with known blocker = %q, want distinct local failure", got)
+	}
+
+	g = graphOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2", "#3"), "#2": nil, "#3": nil,
+	})
+	nodes = frontierNodes(g, tickets, true)
+	byID = make(map[model.TicketID]frontierNode, len(nodes))
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, frontierCardWidth-2); got != "blocked by 1 BLOCKER?" {
+		t.Errorf("known and unresolved blockers = %q, want known count plus blocker uncertainty", got)
+	}
+}
+
+func TestFrontierEvidenceLabelsPreferKnownCountAndLocalFailureAtCompactWidths(t *testing.T) {
+	tickets := []model.Ticket{
+		blockingTicket("#1", model.StatusTodo),
+		blockingTicket("#2", model.StatusTodo),
+		blockingTicket("#3", model.StatusUnknown),
+	}
+	cases := []struct {
+		name  string
+		links map[model.TicketID][]model.Link
+	}{
+		{
+			name: "local failure",
+			links: map[model.TicketID][]model.Link{
+				"#2": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}}},
+				"#3": nil,
+			},
+		},
+		{
+			name: "local failure and blocker unknown",
+			links: map[model.TicketID][]model.Link{
+				"#2": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusTodo}}},
+				"#3": {{Kind: model.LinkBlocks, Target: model.LinkTarget{ID: "#1", Key: "#1", Status: model.StatusUnknown}}},
+			},
+		},
+	}
+	want := map[int]string{
+		16: "blocked by 1", 17: "blocked by 1", 18: "blocked by 1",
+		19: "BLOCKED 1 LINK FAIL", 20: "BLOCKED 1 LINK FAIL", 21: "BLOCKED 1 LINK FAIL",
+		22: "blocked by 1 LINK FAIL", 23: "blocked by 1 LINK FAIL", 24: "blocked by 1 LINK FAIL",
+		25: "blocked by 1 LINKS FAILED",
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := graphOf(tickets, tc.links)
+			nodes := frontierNodes(g, tickets, true)
+			for _, n := range nodes {
+				if n.id != "#1" {
+					continue
+				}
+				for width, expected := range want {
+					if got := frontierBadgeLine(n, g, width); got != expected {
+						t.Errorf("width %d = %q, want %q", width, got, expected)
+					}
+				}
+				return
+			}
+			t.Fatal("missing #1 Frontier node")
+		})
+	}
+}
+
+func TestFrontierEvidenceLabelsNameOutsideWatchlistAndNeverClipWords(t *testing.T) {
+	ticket := blockingTicket("#1", model.StatusTodo)
+	outside := model.LinkTarget{ID: "OUT-1", Key: "OUT-1", Title: "outside", Status: model.StatusUnknown}
+	g := graphOf([]model.Ticket{ticket}, map[model.TicketID][]model.Link{
+		"#1": {{Kind: model.LinkBlockedBy, Target: outside}},
+	})
+	nodes := frontierNodes(g, []model.Ticket{ticket}, true)
+	byID := make(map[model.TicketID]frontierNode, len(nodes))
+	for _, n := range nodes {
+		byID[n.id] = n
+	}
+	if got := frontierBadgeLine(byID["#1"], g, 60); got != "BLOCKER UNKNOWN" {
+		t.Errorf("outside unresolved blocker badge = %q, want BLOCKER UNKNOWN", got)
+	}
+	if got := frontierBadgeLine(byID[outside.ID], g, 26); got != "NOT IN WATCHLIST" {
+		t.Errorf("ordinary outside-Watchlist badge = %q", got)
+	}
+	if got := frontierBadgeLine(byID[outside.ID], g, 15); got != "NOT LISTED" {
+		t.Errorf("compact outside-Watchlist badge = %q", got)
+	}
+	for _, width := range []int{10, 15, 16, 26} {
+		label := frontierBadgeLine(byID[outside.ID], g, width)
+		if lipgloss.Width(label) > width {
+			t.Errorf("badge %q is wider than %d", label, width)
+		}
+		if strings.Contains(label, "…") {
+			t.Errorf("semantic badge was clipped at %d columns: %q", width, label)
 		}
 	}
 }
@@ -324,8 +1886,8 @@ func TestFrontierBadgeCountsAnonymousBlockers(t *testing.T) {
 	})
 	nodes := frontierNodes(g, tickets, true)
 
-	if got := frontierBadgeLine(nodes[0], g, 60); got != "UNVERIFIED +2 unnamed blockers" {
-		t.Errorf("badge line = %q, want an unverified card carrying the unnamed blocker count", got)
+	if got := frontierBadgeLine(nodes[0], g, 60); got != "BLOCKER UNKNOWN +2 unnamed blockers" {
+		t.Errorf("badge line = %q, want blocker uncertainty with the unnamed blocker count", got)
 	}
 }
 
@@ -344,7 +1906,7 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 	if _, drawn := l.nodeAt[ghost]; !drawn {
 		t.Fatalf("%s is not on the canvas, so this test proves nothing", ghost)
 	}
-	if got := l.columnOf[ghost]; got != l.columnOf["acme/widgets#112"]+1 {
+	if got := l.rankOf[ghost]; got != l.rankOf["acme/widgets#112"]+1 {
 		t.Errorf("the Ghost sits in column %d, want the column right of the member that blocks it",
 			got)
 	}
@@ -353,27 +1915,20 @@ func TestFrontierLayoutConnectsAGhostReachedAsADependent(t *testing.T) {
 	for i, id := range l.order {
 		index[id] = i
 	}
-	for _, e := range frontierEdges(g, index) {
-		if l.order[e.from] == ghost && l.order[e.to] == "acme/widgets#112" {
+	for _, edge := range frontierEdges(g, index) {
+		if l.order[edge.dependent] == ghost && l.order[edge.blocker] == "acme/widgets#112" {
 			return
 		}
 	}
 	t.Errorf("no edge joins %s to the member that blocks it: it is drawn floating", ghost)
 }
 
-// An overflow arrow must never land on the continuation cell of a double-width
-// rune. The cell holds no rune of its own, so it reads as blank, but writing
-// there defaces the glyph beside it and makes the assembled row one column too
-// wide — which the line's own truncation then pays for by dropping a column of
-// content off the right. No fixture Ticket has a double-width rune, so this
-// layout brings its own.
+// Overflow chrome never shares an inner-canvas cell, including a continuation
+// cell owned by a double-width rune.
 func TestFrontierOverflowGlyphsNeverLandOnADoubleWidthRune(t *testing.T) {
 	wide := func(id, title string) model.Ticket {
 		return model.Ticket{
-			ID:     model.TicketID(id),
-			Key:    id,
-			Title:  title,
-			Status: model.StatusTodo,
+			ID: model.TicketID(id), Key: id, Title: title, Status: model.StatusTodo,
 		}
 	}
 	tickets := []model.Ticket{
@@ -383,54 +1938,38 @@ func TestFrontierOverflowGlyphsNeverLandOnADoubleWidthRune(t *testing.T) {
 		wide("#4", "シャードの安全な退避"),
 		wide("#5", "ロールアウト手順書の公開"),
 	}
-	g, l := layoutOf(tickets, map[model.TicketID][]model.Link{
-		"#1": blockedBy("#2"),
-		"#2": blockedBy("#3"),
-		"#3": nil,
-		"#4": blockedBy("#3"),
-		"#5": blockedBy("#3"),
+	_, l := layoutOf(tickets, map[model.TicketID][]model.Link{
+		"#1": blockedBy("#2"), "#2": blockedBy("#3"), "#3": nil,
+		"#4": blockedBy("#3"), "#5": blockedBy("#3"),
 	})
-	if len(g.Members()) != len(tickets) {
-		t.Fatalf("Members() = %d, want the %d the layout was built from",
-			len(g.Members()), len(tickets))
-	}
 
-	// A window smaller than the canvas in both axes, walked over every offset
-	// that has somewhere to overflow to, so every edge places an arrow on every
-	// row and column the cards occupy.
 	const width, height = 40, 9
-	if l.width <= width || l.height <= height {
-		t.Fatalf("canvas is %dx%d, which fits in the %dx%d window: no arrow is drawn",
-			l.width, l.height, width, height)
+	inner := frontierInnerRect(width, height)
+	if l.width <= inner.W || l.height <= inner.H {
+		t.Fatalf("canvas is %dx%d, which fits inner %dx%d: no chrome is drawn",
+			l.width, l.height, inner.W, inner.H)
 	}
 	placed := 0
-	for offsetY := 0; offsetY <= l.height-height; offsetY++ {
-		for offsetX := 0; offsetX <= l.width-width; offsetX++ {
-			glyphs := frontierOverflowGlyphs(l, map[[2]int]frontierCell{},
-				offsetX, offsetY, width, height)
-			for at := range glyphs {
+	for offsetY := 0; offsetY <= l.height-inner.H; offsetY++ {
+		for offsetX := 0; offsetX <= l.width-inner.W; offsetX++ {
+			for at := range frontierChromeGlyphs(l, inner, offsetX, offsetY, width, height) {
 				placed++
-				y, x := at[1]+offsetY, at[0]+offsetX
-				if y < 0 || y >= l.height || x < 0 || x >= l.width {
-					continue
-				}
-				if cell := l.cells[y][x]; cell.r != ' ' {
-					t.Fatalf("at offset %d,%d an arrow was placed on canvas cell %d,%d, "+
-						"which holds %q (continuation %v), not a blank",
-						offsetX, offsetY, x, y, cell.r, cell.continuation)
+				if at[0] >= inner.X && at[0] < inner.X+inner.W &&
+					at[1] >= inner.Y && at[1] < inner.Y+inner.H {
+					t.Fatalf("chrome %v landed inside inner rect %+v", at, inner)
 				}
 			}
-			for i, line := range renderFrontierCanvas(l, "", false,
+			for i, line := range renderFrontierBody(l, "", false,
 				offsetX, offsetY, width, height, DefaultStyles(true)) {
-				if got := lipgloss.Width(line); got > width {
-					t.Fatalf("at offset %d,%d line %d is %d columns wide, want at most %d: %q",
+				if got := lipgloss.Width(line); got != width {
+					t.Fatalf("at offset %d,%d line %d is %d columns wide, want exactly %d: %q",
 						offsetX, offsetY, i, got, width, line)
 				}
 			}
 		}
 	}
 	if placed == 0 {
-		t.Fatal("no arrow was placed anywhere, so this test asserts nothing")
+		t.Fatal("no ring chrome was placed anywhere, so this test asserts nothing")
 	}
 }
 
@@ -458,9 +1997,8 @@ func TestFrontierBadgeLineGivesTheNativeStatusWhatIsLeft(t *testing.T) {
 	})
 	node := frontierNodes(g, tickets, true)[0]
 	const badge = "blocked by 3"
-	if node.emphasis.badge != badge {
-		t.Fatalf("badge = %q, want %q: this test asserts the wrong thing otherwise",
-			node.emphasis.badge, badge)
+	if got := frontierBadgeLine(node, g, 60); !strings.HasSuffix(got, badge) {
+		t.Fatalf("badge line = %q, want it to preserve %q: this test asserts the wrong thing otherwise", got, badge)
 	}
 
 	// Wide enough for both: the Native Status leads, in full.

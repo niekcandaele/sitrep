@@ -49,14 +49,14 @@ func TestRun(t *testing.T) {
 			name:         "unknown flag is a usage error on stderr",
 			args:         []string{"--nope"},
 			wantCode:     2,
-			wantStderr:   []string{"nope", "sitrep [flags] <ref>"},
+			wantStderr:   []string{"nope", "Run \"sitrep --help\" for usage."},
 			wantEmptyOut: true,
 		},
 		{
 			name:         "no arguments demands a ref",
 			args:         nil,
 			wantCode:     2,
-			wantStderr:   []string{"a Selector is required", "sitrep [flags] <ref>"},
+			wantStderr:   []string{"a Selector is required", "Run \"sitrep --help\" for usage."},
 			wantEmptyOut: true,
 		},
 		{
@@ -139,6 +139,144 @@ func TestRun(t *testing.T) {
 			}
 			if tt.wantEmptyError && stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestFakeProviderFlagsValidateBeforeRuntimeWork(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		message string
+	}{
+		{
+			name:    "fixture requires explicit fake Provider",
+			args:    []string{"--fake-fixture", "blocking", "111"},
+			message: "--fake-fixture requires --provider fake",
+		},
+		{
+			name:    "delay requires explicit fake Provider",
+			args:    []string{"--fake-delay", "1s", "111"},
+			message: "--fake-delay requires --provider fake",
+		},
+		{
+			name:    "fixture rejects a real Provider",
+			args:    []string{"--provider", "github", "--fake-fixture", "blocking", "111"},
+			message: "--fake-fixture requires --provider fake",
+		},
+		{
+			name:    "empty fixture",
+			args:    []string{"--provider", "fake", "--fake-fixture=", "111"},
+			message: `--fake-fixture must be "blocking" or "no-blocking-links"`,
+		},
+		{
+			name:    "unknown fixture",
+			args:    []string{"--provider", "fake", "--fake-fixture", "dense", "111"},
+			message: `--fake-fixture must be "blocking" or "no-blocking-links"`,
+		},
+		{
+			name:    "explicit zero delay",
+			args:    []string{"--provider", "fake", "--fake-delay=0", "111"},
+			message: "--fake-delay must be positive",
+		},
+		{
+			name:    "negative delay",
+			args:    []string{"--provider", "fake", "--fake-delay", "-1s", "111"},
+			message: "--fake-delay must be positive",
+		},
+		{
+			name:    "malformed delay",
+			args:    []string{"--provider", "fake", "--fake-delay=slow", "111"},
+			message: `invalid value "slow" for flag --fake-delay: parse error (durations need a unit: 60s, 2m)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{
+				Stdin:      panicReader{},
+				OpenTTY:    panicTTY,
+				ConfigPath: "/config/must-not-be-read",
+				RemoteLookup: func(context.Context, string, string) (string, error) {
+					panic("origin was read")
+				},
+			})
+			checkUsageError(t, code, &stdout, &stderr, tt.message)
+		})
+	}
+}
+
+func TestEveryUsageErrorRouteUsesCompactPointer(t *testing.T) {
+	baseDeps := cli.Deps{
+		Stdin:      panicReader{},
+		OpenTTY:    panicTTY,
+		ConfigPath: "/config/must-not-be-read",
+		RemoteLookup: func(context.Context, string, string) (string, error) {
+			panic("origin was read")
+		},
+	}
+	tests := []struct {
+		name    string
+		args    []string
+		message string
+		deps    cli.Deps
+	}{
+		{"unknown flag", []string{"--nope"}, "flag provided but not defined: --nope", baseDeps},
+		{"missing flag value", []string{"--query"}, "flag needs an argument: --query", baseDeps},
+		{"invalid interval duration", []string{"--interval=abc", "123"}, `invalid value "abc" for flag --interval: parse error (durations need a unit: 60s, 2m)`, baseDeps},
+		{"invalid fake delay duration", []string{"--provider", "fake", "--fake-delay=slow", "123"}, `invalid value "slow" for flag --fake-delay: parse error (durations need a unit: 60s, 2m)`, baseDeps},
+		{"zero interval", []string{"--interval", "0", "123"}, "refresh interval must be positive", baseDeps},
+		{"short interval", []string{"--interval", "1s", "123"}, "refresh interval must be at least 5s", baseDeps},
+		{"invalid fake fixture", []string{"--provider", "fake", "--fake-fixture", "dense", "123"}, `--fake-fixture must be "blocking" or "no-blocking-links"`, baseDeps},
+		{"incompatible render modes", []string{"--json", "--plain", "123"}, "--json and --plain are mutually exclusive", baseDeps},
+		{"links without json", []string{"--links", "123"}, "--links requires --json", baseDeps},
+		{"missing selector", nil, `a Selector is required: pass one or more Refs, "-" for stdin, or --query`, baseDeps},
+		{"query with positional ref", []string{"--query", "q", "123"}, `--query cannot be combined with positional Refs or "-"`, baseDeps},
+		{"stdin marker with positional ref", []string{"-", "123"}, `"-" reads Refs from stdin and must be the only positional argument`, baseDeps},
+		{"unknown Provider", []string{"--provider", "unknown", "123"}, `unknown provider "unknown"`, baseDeps},
+		{"fake fixture without fake Provider", []string{"--fake-fixture", "blocking", "123"}, "--fake-fixture requires --provider fake", baseDeps},
+		{"fake delay without fake Provider", []string{"--fake-delay", "1s", "123"}, "--fake-delay requires --provider fake", baseDeps},
+		{"links on decoded Ticket", []string{"112", "--json", "--links"}, "--links needs a Watchlist: #112 names a single Ticket", cli.Deps{Provider: decoder(), Stdin: panicReader{}, OpenTTY: panicTTY}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, tt.deps)
+			checkUsageError(t, code, &stdout, &stderr, tt.message)
+		})
+	}
+}
+
+func TestFakeProviderFlagsPreserveEarlierValidationAndEarlyResults(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "help", args: []string{"--help", "--fake-fixture", "blocking"}, wantCode: 0, wantStdout: "Usage:"},
+		{name: "version", args: []string{"--version", "--provider", "fake", "--fake-delay", "1s"}, wantCode: 0, wantStdout: "sitrep "},
+		{name: "mode conflict", args: []string{"--json", "--plain", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "mutually exclusive"},
+		{name: "links mode", args: []string{"--links", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "--links requires --json"},
+		{name: "monitor interval", args: []string{"--interval", "0", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "refresh interval must be positive"},
+		{name: "unknown Provider", args: []string{"--provider", "bogus", "--fake-fixture", "blocking", "111"}, wantCode: 2, wantStderr: "unknown provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.RunWith(tt.args, &stdout, &stderr, cli.Deps{Stdin: panicReader{}, OpenTTY: panicTTY})
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tt.wantCode)
+			}
+			if tt.wantStdout != "" && !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+			if tt.wantStderr != "" && !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
 			}
 		})
 	}
@@ -263,13 +401,8 @@ func TestStdinSentinelMustBeTheOnlyPositionalArgument(t *testing.T) {
 			OpenTTY:    panicTTY,
 		})
 
-		if code != 2 || stdout.Len() != 0 {
-			t.Fatalf("args %v: result = code %d stdout %q stderr %q", args, code, stdout.String(), stderr.String())
-		}
-		want := "sitrep: \"-\" reads Refs from stdin and must be the only positional argument\n\n"
-		if !strings.HasPrefix(stderr.String(), want) {
-			t.Errorf("args %v: stderr = %q, want prefix %q", args, stderr.String(), want)
-		}
+		checkUsageError(t, code, &stdout, &stderr,
+			`"-" reads Refs from stdin and must be the only positional argument`)
 		if p.ResolveCalls() != 0 {
 			t.Errorf("args %v: ResolveCalls = %d, want 0", args, p.ResolveCalls())
 		}
@@ -362,13 +495,8 @@ func TestQueryRejectsEveryPositionalSelectorBeforeRuntimeWork(t *testing.T) {
 				panic("origin was read")
 			},
 		})
-		if code != 2 || stdout.Len() != 0 {
-			t.Fatalf("args %v: result = code %d stdout %q stderr %q", args, code, stdout.String(), stderr.String())
-		}
-		want := "sitrep: --query cannot be combined with positional Refs or \"-\"\n\n"
-		if !strings.HasPrefix(stderr.String(), want) {
-			t.Errorf("args %v: stderr = %q, want prefix %q", args, stderr.String(), want)
-		}
+		checkUsageError(t, code, &stdout, &stderr,
+			`--query cannot be combined with positional Refs or "-"`)
 		if p.ResolveCalls() != 0 || p.DetailCalls() != 0 {
 			t.Errorf("args %v: Provider was called", args)
 		}

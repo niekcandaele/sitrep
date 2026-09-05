@@ -45,11 +45,15 @@ func TestDocumentationContract(t *testing.T) {
 		"Mouse capture is on by default",
 		"Shift-drag",
 		"`--no-mouse`",
+		"`--provider fake` is a development and demo affordance, not a supported Tracker",
+		"--fake-fixture blocking",
+		"--fake-fixture no-blocking-links",
+		"--fake-delay 750ms",
 		"`tab` and `shift+tab` to focus Links",
 		"session-local **Trail**",
 		"Press `v` to open the **Frontier**",
 		"**Filters do not apply on the Frontier**",
-		"**Ghost Ticket**",
+		"**Ticket outside the Watchlist**",
 		"OSC 8 terminal hyperlinks",
 		"Watchlist documents use schema version 3",
 		"Decoded Ticket/Detail documents remain schema version 1",
@@ -120,9 +124,10 @@ func TestREADMEStructuredExamplesUseRealContracts(t *testing.T) {
 		t.Fatal("fake fixture no longer contains the README Ticket acme/widgets#115")
 	}
 	snapshot := model.WatchlistSnapshot{
-		Tickets:      []model.Ticket{ticket},
-		Capabilities: fixture.Capabilities,
-		FetchedAt:    time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
+		Tickets:         []model.Ticket{ticket},
+		Capabilities:    fixture.Capabilities,
+		FetchedAt:       time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC),
+		RateLimitBudget: fixture.RateLimitBudget,
 	}
 	selector := provider.RefListSelector{Refs: []ref.Ref{{
 		Tracker: ref.TrackerGitHub,

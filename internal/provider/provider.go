@@ -6,12 +6,14 @@
 //
 // The interface is split by view, not by entity (ADR-0003). Resolve is the
 // cheap batched hot path: one logical read returning a Watchlist's lightweight
-// Tickets, re-run on every refresh. FetchDetail is the lazy per-ticket call made
-// only when a human opens a Ticket. Detail data — descriptions, comments, links
-// — must never migrate into Resolve's result, however convenient it looks: a
-// list refresh that drags full descriptions along turns one request into N and
-// is exactly what this split exists to prevent. If a view seems to need Detail
-// while listing, that is a FetchDetail call, not a wider Ticket.
+// Tickets, re-run on every refresh. Detail data is lazy: FetchDetail reads one
+// Ticket for drill-in, while FetchDetails serves an explicit whole-Watchlist
+// request and may use FetchDetail as its generic fallback. Descriptions,
+// comments, and links must never migrate into Resolve's result, however
+// convenient it looks: a list refresh that drags full descriptions along turns
+// one request into N and is exactly what this split exists to prevent. If a view
+// seems to need Detail while listing, use the explicit Detail methods rather
+// than widening Ticket.
 //
 // A Resolve answers what the Selector points at, whatever that turns out to be.
 // A Ref naming a plain Ticket comes back as a snapshot with no Tickets, carrying
@@ -32,11 +34,15 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/ref"
+	"github.com/niekcandaele/sitrep/internal/termtext"
 )
 
 // DefaultMaxTickets is the membership budget used for Query Selectors when a
@@ -134,14 +140,180 @@ type Provider interface {
 	// selector. A REST Provider may make multiple HTTP requests inside that one
 	// invocation. Selectors are constructed after Ref resolution and reused on
 	// every poll, so implementations must not repeat cwd git or Profile work.
-	// Every returned Ticket is thin list data; FetchDetail remains the only Detail
-	// path. Implementations return Tickets in stable Selector order and leave the
-	// snapshot's FetchedAt zero for the caller to stamp.
+	// Every returned Ticket is thin list data; Detail reads remain exclusive
+	// to FetchDetail and FetchDetails. Implementations return Tickets in stable
+	// Selector order and leave the snapshot's FetchedAt zero for the caller to
+	// stamp.
 	Resolve(ctx context.Context, selector Selector) (model.WatchlistSnapshot, error)
 
-	// FetchDetail returns the expensive per-ticket data for one Ticket. It is
-	// called only on drill-in, never during a list refresh.
+	// FetchDetail returns the expensive per-ticket data for one Ticket. Drill-in
+	// calls it directly, and the generic FetchDetails fallback calls it for each
+	// canonical ID. Neither path runs during a list refresh.
 	FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error)
+
+	// FetchDetails returns expensive Detail data for requested Tickets. It may
+	// use singular reads or a Tracker-native batch, but it never widens a list
+	// refresh path. Implementations canonicalize first-seen, non-empty IDs;
+	// empty input performs no I/O and returns a non-nil empty map. Successful
+	// entries retain their requested TicketID. A partial result is reported with
+	// a *DetailFailures error. A rate refusal stops internal fallback/chunk work
+	// and is attributed to later unissued IDs. Cancellation returns completed
+	// successes with an error matching the context and does not invent per-Ticket
+	// cancellation failures for incomplete IDs. If a paid-for callback also returns
+	// a rate refusal, that aggregate remains inspectable for Tracker admission.
+	FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error)
+}
+
+// DetailFailures reports failures for individual Tickets in a plural Detail
+// read. Successful siblings remain in the result map. Consumers inspect
+// Failures rather than parsing Error. errors.Is reaches every child in an
+// aggregate of at most 64 failures; a larger untrusted aggregate exposes only a
+// bounds sentinel through error traversal.
+type DetailFailures struct {
+	Failures map[model.TicketID]error
+}
+
+const maxDetailFailureUnwrapChildren = 64
+
+var errDetailFailuresExceedSafeBounds = errors.New("provider: DetailFailures exceeds safe unwrap bounds")
+
+// DetailFailuresByTicket exposes the constituent map to plural-boundary
+// normalization without requiring errors.As to traverse a potentially malformed
+// error graph first.
+func (e *DetailFailures) DetailFailuresByTicket() map[model.TicketID]error {
+	if e == nil {
+		return nil
+	}
+	return e.Failures
+}
+
+func (e *DetailFailures) Error() string {
+	if e == nil {
+		return "provider: typed-nil DetailFailures"
+	}
+	if len(e.Failures) > maxDetailFailureUnwrapChildren {
+		return errDetailFailuresExceedSafeBounds.Error()
+	}
+	ids := make([]string, 0, len(e.Failures))
+	for id := range e.Failures {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("details could not be read for %s", strings.Join(ids, ", "))
+}
+
+// Unwrap exposes every per-Ticket error for an ordinary bounded aggregate. An
+// oversized third-party aggregate exposes only a deterministic sentinel; callers
+// can inspect Failures directly when they already trust its provenance.
+func (e *DetailFailures) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	if len(e.Failures) > maxDetailFailureUnwrapChildren {
+		return []error{errDetailFailuresExceedSafeBounds}
+	}
+	ids := make([]string, 0, len(e.Failures))
+	for id := range e.Failures {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	errs := make([]error, 0, len(ids))
+	for _, rawID := range ids {
+		id := model.TicketID(rawID)
+		err := e.Failures[id]
+		switch {
+		case termtext.IsTypedNilError(err):
+			errs = append(errs, fmt.Errorf("provider: FetchDetails returned a typed-nil failure for %q", id))
+		case err != nil:
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+type detailFailuresWithRefusal struct {
+	failures *DetailFailures
+	refusal  error
+}
+
+func (e *detailFailuresWithRefusal) Error() string { return e.failures.Error() }
+func (e *detailFailuresWithRefusal) Unwrap() []error {
+	return []error{e.refusal, e.failures}
+}
+
+func newDetailFailuresError(failures map[model.TicketID]error, refusal error) error {
+	aggregate := &DetailFailures{Failures: failures}
+	if refusal == nil {
+		return aggregate
+	}
+	return &detailFailuresWithRefusal{failures: aggregate, refusal: refusal}
+}
+
+// FetchDetailsDefault supplies the generic plural implementation for Providers
+// without a Tracker-native batch. It canonicalizes first-seen non-empty IDs and
+// invokes fetch sequentially in canonical order. An empty input performs no I/O
+// and returns a non-nil empty map. Singular failures are accumulated as
+// DetailFailures. Ordinary failures continue, while the first rate refusal is
+// assigned to its attempted ID and all later unissued canonical IDs and stops
+// the loop. Caller cancellation is direct control flow for consumers, while a
+// rate refusal returned by the same paid-for callback remains in its aggregate
+// error for Tracker admission policy.
+func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(context.Context, model.TicketID) (model.Detail, error)) (map[model.TicketID]model.Detail, error) {
+	canonical := canonicalDetailIDs(ids)
+	details := make(map[model.TicketID]model.Detail, len(canonical))
+	failures := make(map[model.TicketID]error)
+	var rateRefusal error
+	for i, id := range canonical {
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+		detail, err := fetch(ctx, id)
+		if err != nil {
+			if refusal, limited := InspectRateLimitRefusal(err, time.Time{}); limited {
+				rateRefusal = err
+				for _, unissued := range canonical[i:] {
+					failures[unissued] = refusal.Err
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return details, errors.Join(ctxErr, newDetailFailuresError(failures, rateRefusal))
+				}
+				break
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return details, ctxErr
+			}
+			failures[id] = err
+			continue
+		}
+		if detail.TicketID != id {
+			failures[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+			if err := ctx.Err(); err != nil {
+				return details, err
+			}
+			continue
+		}
+		details[id] = detail
+		if err := ctx.Err(); err != nil {
+			return details, err
+		}
+	}
+	if len(failures) != 0 {
+		return details, newDetailFailuresError(failures, rateRefusal)
+	}
+	return details, nil
+}
+
+func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
+	canonical := make([]model.TicketID, 0, len(ids))
+	seen := make(map[model.TicketID]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		canonical = append(canonical, id)
+	}
+	return canonical
 }
 
 // StampSnapshot completes a snapshot a Provider just returned, so it is ready

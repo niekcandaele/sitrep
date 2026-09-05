@@ -115,31 +115,43 @@ func (m Model) listMouseHandler() func(tea.MouseMsg) tea.Cmd {
 // ignored when its epoch is stale.
 func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 	width, height := m.width, m.height
-	bodyHeight := m.frontierBodyHeight()
+	canvasHeight := m.frontierCanvasOuterHeight()
+	inner := frontierInnerRect(width, canvasHeight)
 	offsetX, offsetY := m.frontier.offsetX, m.frontier.offsetY
 	epoch := m.mouseEpoch
 	layout := m.frontier.layout
+	keys := m.effectiveFrontierKeys()
+	density := m.frontierDensity
 
 	return func(msg tea.MouseMsg) tea.Cmd {
+		if inner.W <= 0 || inner.H <= 0 {
+			return nil
+		}
 		switch msg := msg.(type) {
 		case tea.MouseClickMsg:
 			// Modified primary clicks are reserved for terminal gestures such as
 			// shift-drag text selection, and are transparent here.
-			if msg.Button != tea.MouseLeft || msg.Mod != 0 {
+			if !keys.MouseSelect.Enabled() || msg.Button != tea.MouseLeft || msg.Mod != 0 {
 				return nil
 			}
-			if msg.X < 0 || msg.X >= width ||
-				msg.Y < headerHeight || msg.Y >= headerHeight+bodyHeight {
+			bodyY := msg.Y - headerHeight
+			if msg.X < inner.X || msg.X >= inner.X+inner.W ||
+				bodyY < inner.Y || bodyY >= inner.Y+inner.H {
+				// Reserved chrome is inert: it does not even clear a pending click.
 				return nil
 			}
-			id, ok := layout.nodeAtPoint(msg.X+offsetX, msg.Y-headerHeight+offsetY)
+			id, ok := layout.nodeAtPoint(
+				msg.X-inner.X+offsetX, bodyY-inner.Y+offsetY)
 			if !ok {
 				return nil
 			}
 			return mouseCmd(frontierMouseClickMsg{epoch: epoch, id: id})
 
 		case tea.MouseWheelMsg:
-			if msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height {
+			bodyY := msg.Y - headerHeight
+			if !keys.MouseWheel.Enabled() ||
+				msg.X < 0 || msg.X >= width || msg.Y < 0 || msg.Y >= height ||
+				(density == frontierDensityDense && (bodyY < 0 || bodyY >= canvasHeight)) {
 				return nil
 			}
 			switch msg.Button {
@@ -154,6 +166,10 @@ func (m Model) frontierMouseHandler() func(tea.MouseMsg) tea.Cmd {
 }
 
 func (m Model) onFrontierMouseClick(msg frontierMouseClickMsg) (tea.Model, tea.Cmd) {
+	keys := m.effectiveFrontierKeys()
+	if !keys.MouseSelect.Enabled() {
+		return m, nil
+	}
 	if _, drawn := m.frontier.layout.nodeAt[msg.id]; !drawn {
 		return m.clearPendingClick(), nil
 	}
@@ -169,12 +185,19 @@ func (m Model) onFrontierMouseClick(msg frontierMouseClickMsg) (tea.Model, tea.C
 		m.lastClickAt = now
 		return m, nil
 	}
-	return m.clearPendingClick().openFrontierNode()
+	m = m.clearPendingClick()
+	if !keys.MouseOpen.Enabled() {
+		return m, nil
+	}
+	return m.openFrontierNode()
 }
 
 // onFrontierMouseWheel scrolls the canvas rather than moving focus: a graph's
 // rows are six lines tall, and moving focus by wheel would feel broken.
 func (m Model) onFrontierMouseWheel(msg frontierMouseWheelMsg) Model {
+	if !m.effectiveFrontierKeys().MouseWheel.Enabled() {
+		return m
+	}
 	m = m.clearPendingClick()
 	m.frontier.offsetY += msg.delta
 	return m.reconcileFrontier(false)

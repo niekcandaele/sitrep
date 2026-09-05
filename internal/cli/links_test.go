@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -41,6 +42,12 @@ type linksBloker struct {
 	StatusKnown bool   `json:"status_known"`
 }
 
+const (
+	singularLinksNotice     = "sitrep: 1 Ticket's Links could not be read; anything it blocks is not Actionable\n"
+	pluralLinksNotice       = "sitrep: 2 Tickets' Links could not be read; anything they block is not Actionable\n"
+	noLinksCapabilityNotice = "sitrep: --links: blocking keys are absent because this Provider does not declare the blocking_links Capability\n"
+)
+
 func decodeLinks(t *testing.T, raw string) map[string]linksTicket {
 	t.Helper()
 
@@ -55,7 +62,7 @@ func decodeLinks(t *testing.T, raw string) map[string]linksTicket {
 	return byKey
 }
 
-func blockingRun(t *testing.T, args ...string) (result, *fake.Provider) {
+func blockingRun(t *testing.T, wantStderr string, args ...string) (result, *fake.Provider) {
 	t.Helper()
 
 	p := fake.New(fake.WithBlockingFixture())
@@ -63,8 +70,8 @@ func blockingRun(t *testing.T, args ...string) (result, *fake.Provider) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want empty: a failed Detail fetch is said in the document, not on stderr", got.stderr)
+	if got.stderr != wantStderr {
+		t.Errorf("stderr = %q, want %q", got.stderr, wantStderr)
 	}
 	return got, p
 }
@@ -72,7 +79,7 @@ func blockingRun(t *testing.T, args ...string) (result, *fake.Provider) {
 // The headline document: --json --links over the blocking fixture, byte for
 // byte, plus the specific rows that pin each case of the computation.
 func TestJSONLinksDocument(t *testing.T) {
-	got, p := blockingRun(t, "200", "--json", "--links")
+	got, p := blockingRun(t, singularLinksNotice, "200", "--json", "--links")
 	checkGolden(t, "blocking.golden.json", []byte(got.stdout))
 
 	// The fan-out is exactly one Detail read per member, on top of the one
@@ -191,11 +198,125 @@ func TestJSONLinksDocument(t *testing.T) {
 	}
 }
 
+func TestJSONLinksBlockingFixtureThroughCLIConstruction(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{
+		"--provider", "fake", "--fake-fixture", "blocking", "--json", "--links", "200",
+	}, &stdout, &stderr, cli.Deps{Now: fixedClock})
+	if code != 0 || stderr.String() != singularLinksNotice {
+		t.Fatalf("result = code %d stderr %q, want 0/%q", code, stderr.String(), singularLinksNotice)
+	}
+	checkGolden(t, "blocking.golden.json", stdout.Bytes())
+
+	var doc linksWire
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Blocking == nil || len(doc.Blocking.Cycles) == 0 {
+		t.Fatalf("blocking cycles = %+v, want non-empty", doc.Blocking)
+	}
+	var ghost bool
+	for _, ticket := range doc.Tickets {
+		for _, blocker := range ticket.UnmetBlockers {
+			ghost = ghost || !blocker.Member
+		}
+	}
+	if !ghost {
+		t.Error("document has no non-member unmet blocker")
+	}
+}
+
+func TestJSONLinksPipeOmitsProgressAndPreservesDocument(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	var stdout bytes.Buffer
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, writer, cli.Deps{
+		Provider: fake.New(fake.WithBlockingFixture()),
+		Now:      fixedClock,
+	})
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	status, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if bytes.Contains(status, []byte{'\r'}) {
+		t.Errorf("stderr = %q, want no carriage-return progress on a pipe", status)
+	}
+	if got := string(status); got != singularLinksNotice {
+		t.Errorf("stderr = %q, want %q", got, singularLinksNotice)
+	}
+	checkGolden(t, "blocking.golden.json", stdout.Bytes())
+}
+
+type rejectingStatusWriter struct{}
+
+func (rejectingStatusWriter) Write([]byte) (int, error) {
+	return 0, errors.New("status sink closed")
+}
+
+func TestJSONLinksStatusWriteFailureDoesNotReplaceReport(t *testing.T) {
+	var stdout bytes.Buffer
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, rejectingStatusWriter{}, cli.Deps{
+		Provider: fake.New(fake.WithBlockingFixture()),
+		Now:      fixedClock,
+	})
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	checkGolden(t, "blocking.golden.json", stdout.Bytes())
+}
+
+func TestJSONLinksNoBlockingCapabilityThroughCLIConstruction(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{
+		"--provider", "fake", "--fake-fixture", "no-blocking-links", "--json", "--links", "200",
+	}, &stdout, &stderr, cli.Deps{Now: fixedClock})
+	if code != 0 || stderr.String() != noLinksCapabilityNotice {
+		t.Fatalf("result = code %d stderr %q, want 0/%q", code, stderr.String(), noLinksCapabilityNotice)
+	}
+	checkGolden(t, "blocking_no_capability.golden.json", stdout.Bytes())
+
+	var doc struct {
+		Provider struct {
+			Capabilities map[string]any `json:"capabilities"`
+		} `json:"provider"`
+		Blocking any              `json:"blocking"`
+		Tickets  []map[string]any `json:"tickets"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, present := doc.Provider.Capabilities["blocking_links"]; !present || got != false {
+		t.Errorf("blocking_links = %v, present=%t; want false", got, present)
+	}
+	if doc.Blocking != nil {
+		t.Errorf("blocking = %v, want absent", doc.Blocking)
+	}
+	for _, ticket := range doc.Tickets {
+		for _, key := range []string{"actionable", "links_known", "in_cycle", "unmet_blockers"} {
+			if _, present := ticket[key]; present {
+				t.Errorf("ticket %v carries %q without blocking_links", ticket["key"], key)
+			}
+		}
+	}
+}
+
 // The ADR-0003 acceptance criterion: without --links the default --json run is
 // still one batched Resolve and no Detail read at all, and the document carries
 // no blocking keys.
 func TestJSONWithoutLinksFetchesNoDetailAndEmitsNoBlockingKeys(t *testing.T) {
-	got, p := blockingRun(t, "200", "--json")
+	got, p := blockingRun(t, "", "200", "--json")
 	checkGolden(t, "blocking_no_links.golden.json", []byte(got.stdout))
 
 	if n := p.ResolveCalls(); n != 1 {
@@ -224,26 +345,25 @@ func TestJSONWithoutLinksFetchesNoDetailAndEmitsNoBlockingKeys(t *testing.T) {
 	}
 }
 
-// An undeclared Capability is silent, exactly like pull_requests: no keys, no
-// warning, no fetch, exit 0. BuildBlockingGraph claims nothing without it, so
-// emitting actionable: false everywhere would read as a computed negative.
-func TestJSONLinksIsSilentWithoutTheBlockingLinksCapability(t *testing.T) {
-	p := fake.New(fake.WithBlockingFixture(), fake.WithCapabilities(model.Capabilities{
-		Hierarchy: true,
-		Selectors: model.SelectorCapabilities{Epic: true, RefList: true, Query: true},
-	}))
+// An undeclared Capability leaves the blocking keys absent and fetches no
+// Details, while stderr explains why the explicit request produced no keys.
+func TestJSONLinksExplainsMissingBlockingLinksCapability(t *testing.T) {
+	caps := fake.FixtureBlockingSnapshot().Capabilities
+	caps.BlockingLinks = false
+	p := fake.New(fake.WithBlockingFixture(), fake.WithCapabilities(caps))
 
 	got := run([]string{"200", "--json", "--links"}, p)
 
 	if got.code != 0 {
 		t.Errorf("exit code = %d, want 0 (stderr: %q)", got.code, got.stderr)
 	}
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want empty: a missing optional Capability is silent", got.stderr)
+	if got.stderr != noLinksCapabilityNotice {
+		t.Errorf("stderr = %q, want %q", got.stderr, noLinksCapabilityNotice)
 	}
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls() = %d, want 0: nothing to compute means nothing to fetch", n)
 	}
+	checkGolden(t, "blocking_no_capability.golden.json", []byte(got.stdout))
 
 	var doc struct {
 		Blocking any              `json:"blocking"`
@@ -262,15 +382,136 @@ func TestJSONLinksIsSilentWithoutTheBlockingLinksCapability(t *testing.T) {
 	}
 }
 
+type interruptingResolveProvider struct {
+	*fake.Provider
+}
+
+func (p interruptingResolveProvider) Resolve(ctx context.Context, selector provider.Selector) (model.WatchlistSnapshot, error) {
+	snapshot, err := p.Provider.Resolve(ctx, selector)
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	<-ctx.Done()
+	return snapshot, nil
+}
+
+func TestJSONLinksCancellationBeforeCapabilityNoticeIsQuiet(t *testing.T) {
+	caps := fake.FixtureBlockingSnapshot().Capabilities
+	caps.BlockingLinks = false
+	p := fake.New(fake.WithBlockingFixture(), fake.WithCapabilities(caps))
+	var stdout, stderr bytes.Buffer
+
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, &stderr, cli.Deps{
+		Provider: interruptingResolveProvider{Provider: p},
+		Now:      fixedClock,
+	})
+
+	if code != 130 {
+		t.Errorf("exit code = %d, want 130", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want no document", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want no Capability notice after interruption", stderr.String())
+	}
+	if p.DetailCalls() != 0 {
+		t.Errorf("DetailCalls() = %d, want 0", p.DetailCalls())
+	}
+}
+
+type failingDetailProvider struct {
+	*fake.Provider
+	fail model.TicketID
+}
+
+func (p failingDetailProvider) FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error) {
+	if id == p.fail {
+		return model.Detail{}, provider.Errorf(provider.KindUnavailable, "fake: forced Detail failure")
+	}
+	return p.Provider.FetchDetail(ctx, id)
+}
+
+func (p failingDetailProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
+func TestJSONLinksAggregatesMultipleDetailFailures(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, &stderr, cli.Deps{
+		Provider: failingDetailProvider{Provider: p, fail: "acme/widgets#202"},
+		Now:      fixedClock,
+	})
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if got := stderr.String(); got != pluralLinksNotice {
+		t.Errorf("stderr = %q, want one aggregate line %q", got, pluralLinksNotice)
+	}
+	tickets := decodeLinks(t, stdout.String())
+	for key, ticket := range map[string]linksTicket{
+		"#202": tickets["#202"],
+		"#211": tickets["#211"],
+	} {
+		if ticket.LinksKnown == nil || *ticket.LinksKnown {
+			t.Errorf("%s links_known = %v, want false", key, ticket.LinksKnown)
+		}
+		if ticket.Actionable == nil || *ticket.Actionable {
+			t.Errorf("%s actionable = %v, want false", key, ticket.Actionable)
+		}
+	}
+}
+
+type unexpectedDetailsProvider struct {
+	*fake.Provider
+}
+
+func (p unexpectedDetailsProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	details, err := p.Provider.FetchDetails(ctx, ids)
+	details["unrequested"] = model.Detail{TicketID: "unrequested"}
+	return details, err
+}
+
+func TestJSONLinksReportsInvalidBatchWithoutPoisoningValidDetails(t *testing.T) {
+	p := fake.New(fake.WithBlockingFixture())
+	var stdout, stderr bytes.Buffer
+	code := cli.RunWith([]string{"200", "--json", "--links"}, &stdout, &stderr, cli.Deps{
+		Provider: unexpectedDetailsProvider{Provider: p},
+		Now:      fixedClock,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %q)", code, stderr.String())
+	}
+	if got, want := stderr.String(), "sitrep: --links: Provider returned an invalid Details response; unrequested data was ignored\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	tickets := decodeLinks(t, stdout.String())
+	if _, present := tickets["unrequested"]; present {
+		t.Error("JSON emitted the unrequested native Detail")
+	}
+	if len(tickets) != len(fake.FixtureBlockingSnapshot().Tickets) {
+		t.Errorf("tickets = %d, want only %d requested Watchlist members", len(tickets), len(fake.FixtureBlockingSnapshot().Tickets))
+	}
+	if got := tickets["#201"].LinksKnown; got == nil || !*got {
+		t.Errorf("#201 links_known = %v, want true for its valid Detail", got)
+	}
+	if got := tickets["#211"].LinksKnown; got == nil || *got {
+		t.Errorf("#211 links_known = %v, want false for its actual failed Detail", got)
+	}
+	if tickets["#211"].UnmetBlockers != nil {
+		t.Errorf("#211 unmet_blockers = %+v, want absent because no Links were read", tickets["#211"].UnmetBlockers)
+	}
+}
+
 // --links is only ever present because someone typed it, and typing it means
 // "give me blocking data". Neither --plain nor the monitor produces any, so
 // both are a usage error rather than a silently dropped request.
 func TestLinksRequiresJSON(t *testing.T) {
-	help, err := os.ReadFile("testdata/help.golden.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, args := range [][]string{
 		{"200", "--links"},
 		{"200", "--links", "--plain"},
@@ -281,17 +522,7 @@ func TestLinksRequiresJSON(t *testing.T) {
 				Provider: fake.New(fake.WithBlockingFixture()),
 				Now:      fixedClock,
 			})
-
-			if code != 2 {
-				t.Errorf("exit code = %d, want 2", code)
-			}
-			if stdout.Len() != 0 {
-				t.Errorf("stdout = %q, want empty", stdout.String())
-			}
-			want := "sitrep: --links requires --json\n\n" + string(help)
-			if got := stderr.String(); got != want {
-				t.Errorf("stderr does not append exact help\n--- got ---\n%s\n--- want ---\n%s", got, want)
-			}
+			checkUsageError(t, code, &stdout, &stderr, "--links requires --json")
 		})
 	}
 }
@@ -313,8 +544,9 @@ func TestLinksFailsOnADecodedTicket(t *testing.T) {
 	if got.stdout != "" {
 		t.Errorf("stdout = %q, want no document at all", got.stdout)
 	}
-	if !strings.HasPrefix(got.stderr, "sitrep: --links needs a Watchlist: #112 names a single Ticket\n") {
-		t.Errorf("stderr = %q, want it to name --links and the Ticket", got.stderr)
+	want := "sitrep: --links needs a Watchlist: #112 names a single Ticket\n" + usagePointer
+	if got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
 	}
 }
 
@@ -330,6 +562,10 @@ func (p interruptingDetailProvider) FetchDetail(ctx context.Context, id model.Ti
 	}
 	<-ctx.Done()
 	return model.Detail{}, provider.Errorf(provider.KindUnavailable, "fake: reading Detail: %w", ctx.Err())
+}
+
+func (p interruptingDetailProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
 }
 
 // A half-fetched fan-out must never be emitted as if it were complete: a

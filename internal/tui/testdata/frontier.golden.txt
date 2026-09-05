@@ -1,40 +1,45 @@
-#200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 16 nodes · 3 ghosts · 3 actionable                                                                   just now
+#200  Shard rebalancer rollout                                                                                                                                                                                                                                 https://tracker.example.test/acme/widgets/200
+frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic evidence) · budget 4870 · resets 2030-01-02T03:04:05Z                                                                                                                                                                     just now
 
-┌──────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌─────────────────────────
-│▸ #205                Done│─┼───▶┃  #201                Todo┃─▶│  #202                Todo│─▶│  #207         In Progres
-│Compute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu
-│                          │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1
-└──────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └─────────────────────────
-                             │
-┌──────────────────────────┐ │    ┌──────────────────────────┐
-│  #206           Cancelled│─┘┌──▶│  #203                Todo│
-│Legacy weight table       │  │   │Backfill shard weights    │
-│                          │  │   │blocked by 1              │
-└──────────────────────────┘  │   └──────────────────────────┘
-                              │
-╔══════════════════════════╗  │   ┌──────────────────────────┐
-║  #208                Todo║  │┌─▶│  #204                Todo│
-║Split the rebalancer queue║  ││  │Drain a shard safely      │
-║CYCLE                     ║  ││  │UNVERIFIED                │
-╚══════════════════════════╝  ││  └──────────────────────────┘                                                         ›
-                              ││
-╔══════════════════════════╗  ││  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-║  #209                Todo║  ││┌▶┃  #213                Todo┃
-║Merge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
-║CYCLE                     ║  │││ ┃ACTIONABLE                ┃
-╚══════════════════════════╝  │││ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-                              │││
-╔══════════════════════════╗  │││
-║  #210                Todo║  │││
-║Deduplicate shard moves   ║  │││
-║CYCLE                     ║  │││
-╚══════════════════════════╝  │││
-                              │││
-┌──────────────────────────┐  │││
-│  #211                Todo│  │││
-│Publish the rollout runbo…│  │││                           ▼
-                                                                                                          x 0/2 · y 0/27
+
+ ┌──────────────────────────┐┌──────────────────────────┐╔══════════════════════════╗╔══════════════════════════╗╔══════════════════════════╗┌──────────────────────────┐┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮╭╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╮
+ │▸ #205                Done││  #206           Cancelled│║  #208                Todo║║  #209                Todo║║  #210                Todo║│  #211                Todo│┃  #212                Todo┃╎  #401                Todo╎╎  #402             Unknown╎╎  #403                Done╎
+ │Compute shard weights     ││Legacy weight table       │║Split the rebalancer queue║║Merge the rebalancer queue║║Deduplicate shard moves   ║│Publish the rollout runbo…│┃Chart rebalancer latency  ┃╎Approve the rebalancing R…╎╎Vendor capacity sign-off  ╎╎Ops capacity ticket       ╎
+ │                          ││                          │║CYCLE                     ║║CYCLE                     ║║CYCLE                     ║│LINKS FAILED              │┃ACTIONABLE                ┃╎NOT IN WATCHLIST          ╎╎NOT IN WATCHLIST          ╎╎NOT IN WATCHLIST          ╎
+ └──────────────────────────┘└──────────────────────────┘╚══════════════════════════╝╚══════════════════════════╝╚══════════════════════════╝└──────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
+               ┃                           │                                                                                                                                                                       │                           │                           │
+               ╋───────────────────────────┘                                                                                                                                                                       │                           │                           │
+               ┃                           ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘                           │                           │
+               ┃                           │                           ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘                           │
+               ┃                           │                           │                           ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+               ┃                           │                           │                           │
+               ▼                           ▼                           ▼                           ▼
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌──────────────────────────┐┌──────────────────────────┐┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ ┃  #201                Todo┃│  #203                Todo││  #204                Todo│┃  #213                Todo┃
+ ┃Ship the rebalancer CLI   ┃│Backfill shard weights    ││Drain a shard safely      │┃Rotate rebalancer credent…┃
+ ┃ACTIONABLE                ┃│blocked by 1              ││BLOCKER UNKNOWN           │┃ACTIONABLE                ┃
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────┘└──────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+               │
+               │
+               ▼
+ ┌──────────────────────────┐
+ │  #202                Todo│
+ │Wire the rebalancer into …│
+ │blocked by 1              │
+ └──────────────────────────┘
+               │
+               │
+               ▼
+ ┌──────────────────────────┐
+ │  #207         In Progress│
+ │Rewrite the placement heu…│
+ │[In Review] blocked by 1  │
+ └──────────────────────────┘
+
+
+
+
+
 1 Ticket's Links could not be read; anything it blocks is not Actionable
-read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
-v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …
+read failed for #211: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text • ↑/k blocker side • ↓/j dependent side • ←/h previous node • →/l next node

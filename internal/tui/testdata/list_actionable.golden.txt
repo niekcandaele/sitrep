@@ -1,5 +1,5 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-██░░░░░░░░░░░░░░░░░░░░░░░░░░  1/12 done · 1 cancelled · 8% · 4 actionable                                       just now
+█░░░░░░░░░░░░░  1/12 done · 1 cancelled · 8% · 4 actionable · budget 4870 · actionable as of · read just now    just now
 
 IN PROGRESS (1)
 ▸ #207       Rewrite the placement heuristic
@@ -22,6 +22,8 @@ DONE (1)
 
 CANCELLED (1)
   #206       Legacy weight table
+Legend · L hide
+● — actionable — all known blockers are satisfied
 
 
 
@@ -35,6 +37,4 @@ CANCELLED (1)
 
 
 
-
-
-m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help

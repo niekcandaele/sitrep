@@ -1,40 +1,40 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 16 nodes · 3 ghosts · 3 actionable                                                                   just now
+frontier · 16 nodes · 3 ghosts · 3 actionable · 2 blocking cycles (cyclic evidence) · budget 4870               just now
 
-─────────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌──────────────────────────┐
- #205                Done│─┼───▶┃  #201                Todo┃─▶│  #202                Todo│─▶│▸ #207         In Progress│
-ompute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu…│
-                         │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1  │
-─────────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └──────────────────────────┘
+
+ ───────────────────────┐      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┌──────────────────────────┐  ┌──────────────────────────┐
+ 205                Done│─┼───▶┃  #201                Todo┃─▶│  #202                Todo│━▶│▸ #207         In Progress│
+ pute shard weights     │ │    ┃Ship the rebalancer CLI   ┃  │Wire the rebalancer into …│  │Rewrite the placement heu…│
+                        │ │    ┃ACTIONABLE                ┃  │blocked by 1              │  │[In Review] blocked by 1  │
+ ───────────────────────┘ │    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛  └──────────────────────────┘  └──────────────────────────┘
+                          │
+ ───────────────────────┐ │    ┌──────────────────────────┐
+ 206           Cancelled│─┘┌──▶│  #203                Todo│
+ acy weight table       │  │   │Backfill shard weights    │
+                        │  │   │blocked by 1              │
+‹───────────────────────┘  │   └──────────────────────────┘
                            │
-─────────────────────────┐ │    ┌──────────────────────────┐
- #206           Cancelled│─┘┌──▶│  #203                Todo│
-egacy weight table       │  │   │Backfill shard weights    │
-                         │  │   │blocked by 1              │
-─────────────────────────┘  │   └──────────────────────────┘
-‹                           │
-═════════════════════════╗  │   ┌──────────────────────────┐
- #208                Todo║  │┌─▶│  #204                Todo│
-plit the rebalancer queue║  ││  │Drain a shard safely      │
-YCLE                     ║  ││  │UNVERIFIED                │
-═════════════════════════╝  ││  └──────────────────────────┘
-                            ││
-═════════════════════════╗  ││  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
- #209                Todo║  ││┌▶┃  #213                Todo┃
-erge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
-YCLE                     ║  │││ ┃ACTIONABLE                ┃
-═════════════════════════╝  │││ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-                            │││
-═════════════════════════╗  │││                             ▼
+ ═══════════════════════╗  │   ┌──────────────────────────┐
+ 208                Todo║  │┌─▶│  #204                Todo│
+ it the rebalancer queue║  ││  │Drain a shard safely      │
+ LE                     ║  ││  │BLOCKER UNKNOWN           │
+ ═══════════════════════╝  ││  └──────────────────────────┘
+                           ││
+ ═══════════════════════╗  ││  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ 209                Todo║  ││┌▶┃  #213                Todo┃
+ ge the rebalancer queue║  │││ ┃Rotate rebalancer credent…┃
+                                                            ▼
 
 1 Ticket's Links could not be read; anything it blocks is not Actionable
-read failed: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
-m            release · shift-drag to select text    ↑/k previous node
-click        select node                            ↓/j next node
-double-click open Ticket                            ←/h blocker side
-wheel        scroll                                 →/l dependent side
-enter        open Ticket                            g   first node
-v/esc        list                                   G   last node
-r            re-read Details
+read failed for #211: fake: no detail for ticket "acme/widgets#211" — press r to retry the Tickets that failed
+m            release · shift-drag to select text    ↑/k  previous node
+click        select node                            ↓/j  next node
+double-click open Ticket                            ←/h  blocker side
+wheel        scroll                                 →/l  dependent side
+enter        open Ticket                            pgup page up
+v/esc        list                                   pgdn page down
+V            dense/full cards                       g    first node
+r            re-read Details                        G    last node
 ?            help
-q            quit                                                                                         x 2/2 · y 0/35
+L            legend
+q            quit                                                                                         x 4/4 · y 0/39

@@ -675,37 +675,177 @@ func TestDuplicateMembersShareOneBlockingAnswer(t *testing.T) {
 	}
 }
 
-// A member with no ID is not an identity. Before, it was indexed like any other
-// member, so every anonymous blocker Link in the Watchlist resolved to it and it
-// came back Actionable: fail-open on an unidentified blocker, which is the exact
-// inverse of the rule Actionable exists to enforce.
-func TestAnEmptyIDMemberAbsorbsNoAnonymousBlockers(t *testing.T) {
-	anonymous := model.Link{
-		Kind:        model.LinkBlockedBy,
-		NativeLabel: "is blocked by",
-		Target:      model.LinkTarget{Key: "an unresolvable blocker"},
-	}
+func TestBlocksLinksCanonicalizeDuplicateMemberBlocker(t *testing.T) {
 	g := model.BuildBlockingGraph(
-		[]model.Ticket{ticket("", model.StatusTodo, "open"), ticket("b", model.StatusTodo, "open")},
-		// No key for the empty ID: detailfanout.Plan skips it, so nothing ever
-		// reads a nameless member's Links and it is unverified by construction.
-		map[model.TicketID][]model.Link{"b": {anonymous}}, allCaps)
+		[]model.Ticket{
+			ticket("a", model.StatusTodo, "open"),
+			ticket("a", model.StatusTodo, "open"),
+			ticket("c", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"a": {blocks(target("c", model.StatusTodo))},
+			"c": {},
+		}, allCaps)
 
-	members := g.Members()
-	if len(members) != 2 {
-		t.Fatalf("Members() = %d rows, want one per input Ticket", len(members))
+	c := forID(t, g, "c")
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers, want the duplicate a rows to name one blocker", got)
 	}
-	if got := len(members[0].Blockers); got != 0 {
-		t.Errorf("the empty-ID member carries %d blockers, want the anonymous Link to have gone to b", got)
+	if blocker := c.Blockers[0]; blocker.Target.ID != "a" || !blocker.Member {
+		t.Errorf("c's blocker = %+v, want member a", blocker)
 	}
-	if members[0].Actionable {
-		t.Error("the empty-ID member is Actionable; a Ticket with no identity is never verified")
+	if got := blockerKeys(c.Unmet()); len(got) != 1 || got[0] != "a" {
+		t.Errorf("c's unmet blockers = %v, want a", got)
 	}
-	if got := len(members[1].Blockers); got != 1 {
-		t.Fatalf("b carries %d blockers, want its own anonymous one", got)
+	if c.Actionable {
+		t.Error("c is Actionable behind the Todo blocker a")
 	}
-	if members[1].Actionable {
-		t.Error("b is Actionable behind an anonymous blocker")
+}
+
+func TestBlocksLinksUseCanonicalStatusForDuplicateMembers(t *testing.T) {
+	tickets := []model.Ticket{
+		ticket("a", model.StatusDone, "closed"),
+		ticket("a", model.StatusTodo, "open"),
+		ticket("c", model.StatusTodo, "open"),
+	}
+	throughBlocks := model.BuildBlockingGraph(tickets, map[model.TicketID][]model.Link{
+		"a": {blocks(target("c", model.StatusTodo))},
+		"c": {},
+	}, allCaps)
+	throughBlockedBy := model.BuildBlockingGraph(tickets, map[model.TicketID][]model.Link{
+		"a": {},
+		"c": {blockedBy(target("a", model.StatusDone))},
+	}, allCaps)
+
+	c := forID(t, throughBlocks, "c")
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers through Blocks, want one", got)
+	}
+	if blocker := c.Blockers[0]; blocker.Target.ID != "a" || !blocker.Member || blocker.Status != model.StatusDone {
+		t.Errorf("c's blocker through Blocks = %+v, want canonical member a at Done", blocker)
+	}
+	if !c.Actionable {
+		t.Error("c is not Actionable although canonical a is Done")
+	}
+	mirror := forID(t, throughBlockedBy, "c")
+	if c.Actionable != mirror.Actionable {
+		t.Errorf("Blocks Actionable = %v, BlockedBy Actionable = %v for the same relation", c.Actionable, mirror.Actionable)
+	}
+}
+
+func TestBlocksLinksCanonicalizeDuplicateGhostBlocker(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{
+			ticket("a", model.StatusTodo, "open"),
+			ticket("a", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"a": {blocks(target("ghost", model.StatusTodo))},
+		}, allCaps)
+
+	ghosts := g.Ghosts()
+	if got := len(ghosts); got != 1 {
+		t.Fatalf("Ghosts() = %d, want one ghost", got)
+	}
+	if got := len(ghosts[0].Blockers); got != 1 {
+		t.Fatalf("the Ghost carries %d blockers, want one canonical a", got)
+	}
+	if blocker := ghosts[0].Blockers[0]; blocker.Target.ID != "a" || !blocker.Member {
+		t.Errorf("the Ghost's blocker = %+v, want member a", blocker)
+	}
+}
+
+// A member with no ID is not an identity and is not indexed. An anonymous
+// blocker remains unresolved, so its dependent is not Actionable.
+func TestBlocksLinksTreatEmptyIDBlockerAsAnonymous(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{
+			ticket("", model.StatusDone, "closed"),
+			ticket("c", model.StatusTodo, "open"),
+		},
+		map[model.TicketID][]model.Link{
+			"":  {blocks(target("c", model.StatusTodo))},
+			"c": {},
+		}, allCaps)
+
+	c := forID(t, g, "c")
+	if c.Actionable {
+		t.Error("c is Actionable behind an anonymous blocker")
+	}
+	if got := len(c.Blockers); got != 1 {
+		t.Fatalf("c carries %d blockers, want the anonymous reverse blocker", got)
+	}
+	blocker := c.Blockers[0]
+	if blocker.Member || blocker.Target.ID != "" || blocker.StatusKnown {
+		t.Errorf("c's blocker = %+v, want an anonymous member-unknown blocker", blocker)
+	}
+	if blocker.Satisfied() {
+		t.Error("the anonymous blocker is satisfied by the empty-ID row's Done status")
+	}
+	if got := len(c.Unmet()); got != 1 {
+		t.Errorf("c has %d unmet blockers, want the anonymous blocker", got)
+	}
+}
+
+func TestEmptyIDNamesNoMember(t *testing.T) {
+	g := model.BuildBlockingGraph(
+		[]model.Ticket{ticket("", model.StatusTodo, "open")},
+		map[model.TicketID][]model.Link{"": nil}, allCaps)
+
+	if _, ok := g.For(""); ok {
+		t.Error("For(\"\") found an empty-ID member")
+	}
+}
+
+func TestEmptyIDMembersRemainDistinctRows(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		statuses   []model.StatusCategory
+		actionable []bool
+	}{
+		{
+			name:       "Done then Todo",
+			statuses:   []model.StatusCategory{model.StatusDone, model.StatusTodo},
+			actionable: []bool{false, true},
+		},
+		{
+			name:       "Todo then Done",
+			statuses:   []model.StatusCategory{model.StatusTodo, model.StatusDone},
+			actionable: []bool{true, false},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// This direct model fixture reaches the defensive invariant ordinary
+			// detailfanout cannot produce because empty IDs are skipped.
+			g := model.BuildBlockingGraph(
+				[]model.Ticket{
+					ticket("", tt.statuses[0], ""),
+					ticket("", tt.statuses[1], ""),
+				},
+				map[model.TicketID][]model.Link{"": nil}, allCaps)
+
+			members := g.Members()
+			if len(members) != 2 {
+				t.Fatalf("Members() = %d rows, want two positional rows", len(members))
+			}
+			for i, member := range members {
+				if member.TicketID != "" {
+					t.Errorf("row %d TicketID = %q, want empty", i, member.TicketID)
+				}
+				if member.Status != tt.statuses[i] {
+					t.Errorf("row %d Status = %v, want %v", i, member.Status, tt.statuses[i])
+				}
+				if !member.LinksKnown {
+					t.Errorf("row %d has unknown Links, want known", i)
+				}
+				if got := len(member.Blockers); got != 0 {
+					t.Errorf("row %d has %d Blockers, want none", i, got)
+				}
+				if member.Actionable != tt.actionable[i] {
+					t.Errorf("row %d Actionable = %v, want %v", i, member.Actionable, tt.actionable[i])
+				}
+			}
+		})
 	}
 }
 

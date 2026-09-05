@@ -273,10 +273,11 @@ func (p *Provider) Name() string { return "gitlab" }
 // Capabilities declares what this driver actually returns today.
 func (p *Provider) Capabilities() model.Capabilities {
 	return model.Capabilities{
-		Hierarchy:     true, // an epic's or milestone's child issues are how an Epic is assembled
-		BlockingLinks: true, // the issue links endpoint, with its own link_type
-		Comments:      true, // notes, minus GitLab's system notes
-		PullRequests:  true, // related merge requests, with review posture and pipeline status
+		Hierarchy:       true, // an epic's or milestone's child issues are how an Epic is assembled
+		BlockingLinks:   true, // the issue links endpoint, with its own link_type
+		Comments:        true, // notes, minus GitLab's system notes
+		PullRequests:    true, // related merge requests, with review posture and pipeline status
+		RateLimitBudget: true,
 		Selectors: model.SelectorCapabilities{
 			Epic: true, RefList: true, Query: true,
 		},
@@ -291,16 +292,27 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 	if err := provider.CheckSelectorSupport(p.Name(), p.Capabilities(), selector); err != nil {
 		return model.WatchlistSnapshot{}, err
 	}
+	collector := &provider.RateLimitBudgetCollector{}
+	ctx = withRateLimitCollector(ctx, collector)
+	var (
+		snap model.WatchlistSnapshot
+		err  error
+	)
 	switch s := selector.(type) {
 	case provider.EpicSelector:
-		return p.resolveEpic(ctx, s)
+		snap, err = p.resolveEpic(ctx, s)
 	case provider.RefListSelector:
-		return p.resolveRefList(ctx, s)
+		snap, err = p.resolveRefList(ctx, s)
 	case provider.QuerySelector:
-		return p.resolveQuery(ctx, s.Query)
+		snap, err = p.resolveQuery(ctx, s.Query)
 	default:
 		panic("provider.CheckSelectorSupport accepted an unknown Selector")
 	}
+	if err != nil {
+		return model.WatchlistSnapshot{}, err
+	}
+	snap.RateLimitBudget = collector.Budget()
+	return snap, nil
 }
 
 // resolveEpic expands a group Epic or milestone by one child level. A project
@@ -845,6 +857,7 @@ func (p *Provider) doQuery(ctx context.Context, path, rawQuery, query string, ou
 		return nil, provider.Errorf(provider.KindUnavailable,
 			"gitlab: decoding the response from %s: %w", apiBase+path, err)
 	}
+	observeRateLimit(ctx, res.Header)
 	return res.Header, nil
 }
 
@@ -1100,6 +1113,11 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	}, nil
 }
 
+// FetchDetails delegates to the generic sequential fallback.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // fetchEpicDetail reads a group epic's Detail, which a Ref naming an epic with
 // no children decodes to.
 //
@@ -1208,6 +1226,7 @@ func (p *Provider) do(ctx context.Context, path string, query url.Values, resour
 		return nil, provider.Errorf(provider.KindUnavailable,
 			"gitlab: decoding the response from %s: %w", apiBase+path, err)
 	}
+	observeRateLimit(ctx, res.Header)
 	return res.Header, nil
 }
 
@@ -1282,7 +1301,7 @@ func statusMessage(res *http.Response, resource, path, host string) error {
 	case http.StatusNotFound:
 		return provider.Errorf(provider.KindBadRef, "gitlab: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(rateLimitRefusalMetadata(res),
 			"gitlab: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
@@ -1344,6 +1363,27 @@ func retryAfter(res *http.Response) string {
 		}
 	}
 	return "an unknown time"
+}
+
+// rateLimitRefusalMetadata mirrors the documented refusal-header precedence.
+// It is intentionally separate from successful-response budget collection.
+func rateLimitRefusalMetadata(res *http.Response) provider.RateLimitMetadata {
+	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
+		if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 {
+			return provider.RateLimitMetadata{RetryAfter: time.Duration(secs) * time.Second}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("ratelimit-reset")); value != "" {
+		if unix, err := strconv.ParseInt(value, 10, 64); err == nil && unix > 0 {
+			return provider.RateLimitMetadata{ResetAt: time.Unix(unix, 0)}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("ratelimit-resettime")); value != "" {
+		if reset, err := http.ParseTime(value); err == nil {
+			return provider.RateLimitMetadata{ResetAt: reset}
+		}
+	}
+	return provider.RateLimitMetadata{}
 }
 
 // resolveToken resolves the token once and then reuses it for the process

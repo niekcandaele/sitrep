@@ -1,40 +1,40 @@
 #200  Shard rebalancer rollout                                             https://tracker.example.test/acme/widgets/200
-frontier · 13 nodes · reading Detail 0/13                                                                       just now
+frontier · 13 nodes · reading Details… · budget 4870 · resets 2030-01-02T03:04:05Z                              just now
 
-┌──────────────────────────┐                                ▲
-│  #202                Todo│
-│Wire the rebalancer into …│
-│                          │
-└──────────────────────────┘
+                                                            ▲
+ │Wire the rebalancer into …│
+ │PENDING                   │
+ └──────────────────────────┘
 
-┌──────────────────────────┐
-│  #203                Todo│
-│Backfill shard weights    │
-│                          │
-└──────────────────────────┘
+ ┌──────────────────────────┐
+ │  #203                Todo│
+ │Backfill shard weights    │
+ │PENDING                   │
+ └──────────────────────────┘
 
-┌──────────────────────────┐
-│  #204                Todo│
-│Drain a shard safely      │
-│                          │
-└──────────────────────────┘
+ ┌──────────────────────────┐
+ │  #204                Todo│
+ │Drain a shard safely      │
+ │PENDING                   │
+ └──────────────────────────┘
 
-┌──────────────────────────┐
-│  #205                Done│
-│Compute shard weights     │
-│                          │
-└──────────────────────────┘
+ ┌──────────────────────────┐
+ │  #205                Done│
+ │Compute shard weights     │
+ │PENDING                   │
+ └──────────────────────────┘
 
-┌──────────────────────────┐
-│  #206           Cancelled│
-│Legacy weight table       │
-│                          │
-└──────────────────────────┘
+ ┌──────────────────────────┐
+ │  #206           Cancelled│
+ │Legacy weight table       │
+ │PENDING                   │
+ └──────────────────────────┘
 
-┌──────────────────────────┐
-│▸ #207         In Progress│
-│Rewrite the placement heu…│
-│[In Review]               │
-└──────────────────────────┘                                ▼
+ ┌──────────────────────────┐
+ │▸ #207         In Progress│
+ │Rewrite the placement heu…│
+ │[In Review] PENDING       │
+ └──────────────────────────┘
+                                                            ▼
 
-v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 6/43
+v/esc list • r re-read Details • ? help • q quit • enter open Ticket • m release · shift-drag to select text …    y 8/45

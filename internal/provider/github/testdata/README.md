@@ -138,6 +138,7 @@ gh api graphql -f query='{ __type(name:"Issue") { fields { name } } }' | grep -i
 | Fixture | proves |
 |---|---|
 | `ticket_with_parent.json` | no Tickets, a same-repo parent keyed `#2`, and the root issue's own assignees and open pull request landing on the Epic, whose `totalCount: 12` proves the total rides onto the Epic too |
+| `ticket_with_parent_ratelimit.json` | the same hand-written Ticket response with a valid zero GraphQL `rateLimit`, proving that a successful Resolve preserves zero remaining and its UTC reset |
 | `ticket_cross_repo_parent.json` | a parent in another repository keyed `owner/repo#N`, with a null `closedByPullRequestsReferences` and no assignees |
 | `ticket_no_parent.json` | `parent: null` — a Ticket that hangs off nothing, which is an ordinary state and not an error |
 
@@ -195,6 +196,22 @@ not read as an error.
 no inline fragment and so decodes with no fields at all. The NOT_FOUND, 401, rate-limit and
 malformed-JSON paths reuse the epic query's files and the test server, because `FetchDetail`
 goes through exactly the same handling.
+
+### Batched Ticket detail
+
+`detail_batch_partial.json` was added on **2026-08-31** and is a wholly **hand-written**
+aliased `node(id:)` response. It was never captured from GitHub and contains no token or
+personal data. Its object members are deliberately ordered `detail2`, `detail0`, `detail1`
+so decoding cannot depend on JSON object order. Aliases 0 and 2 are complete successful
+Issues. Alias 1 carries recognizable partial data plus two nested `FORBIDDEN` errors, proving
+the whole failed Detail is discarded, both errors stay attributed to the requested ID, and
+successful siblings survive. Alias 0 also contains a synthetic ANSI escape so the
+`provider.Sanitized` integration test can prove sanitation remains outside the GitHub driver.
+
+The 100-alias and chunk-boundary responses are generated only by `httptest` from synthetic
+node IDs. They are not fixtures because their purpose is request cardinality and deterministic
+alias/variable alignment, not payload provenance. The benchmark uses the same localhost-only
+response generator; it never resolves a real token or contacts GitHub.
 
 ## Extending
 

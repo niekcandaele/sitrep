@@ -156,8 +156,27 @@ normalize or retry them as another language.
 
 The monitor groups Tickets by Status Category with a progress bar, assignees, and correlated
 pull or merge requests. It refreshes every 60 seconds by default and shows how old the last
-good reading is. `--interval` overrides the cadence down to a 5-second floor. A failed
-refresh leaves the last good Watchlist on screen and reports the failure in the footer.
+good reading is. When a Provider reports a request budget, the List and Frontier headers show
+it beside staleness: wide terminals include its UTC reset, medium terminals show the remaining
+count, and narrow terminals preserve progress and staleness instead. `--interval` overrides the
+cadence down to a 5-second floor. A failed refresh leaves the last good Watchlist on screen and
+reports the failure in the footer. Rate-limit refusals with a supplied reset hold automatic and
+manual refresh until that deadline; a refusal without one disables automatic refresh and lets `r`
+try once more. A valid exhausted budget is the same hard hold. A remaining budget of 1–100 slows
+only automatic refreshes to spread calls across its reset window, while `r` remains available.
+These decisions are local to the monitor session; Providers only report the headers they receive.
+
+When a supporting terminal reports that it has lost focus, sitrep pauses only future automatic
+Watchlist refreshes and keeps the displayed age advancing. Existing requests are allowed to finish.
+On focus regain, an already-due refresh starts only when the normal cadence and rate policy permit
+it. List `r` remains available while unfocused subject to that same rate policy. Terminals and
+multiplexers that do not report focus keep the existing automatic-refresh behavior.
+
+Press List `p` to hold automatic Watchlist refresh for this session without losing the current
+filter, selection, Trail, or Frontier. The heartbeat and displayed age keep advancing, and work
+already in flight is allowed to finish. List `r` still performs one refresh without releasing the
+hold, subject to the same rate policy. Press `p` again to release the hold; an overdue refresh starts
+promptly when focus and rate policy permit it. The hold is not saved to a Profile.
 
 Mouse capture is on by default. Click a Ticket row to select it, double-click one to open its
 Detail, and use the wheel to move one Ticket at a time in the list or three lines at a time in
@@ -185,15 +204,22 @@ navigation.
 Press `v` to open the **Frontier**, and `v` or `esc` to return to the list. The Frontier
 renders the same Watchlist as nodes with BlockedBy and Blocks edges, so you can see which
 Tickets can be picked up right now. Opening it fetches every Ticket's Detail once — a bulk
-per-Ticket read, which is why it shows a progress count and why `esc` interrupts it
-(`--json --links` is the other one) — and Details already read this session are reused.
+per-Ticket read, which is why it shows a progress count (`--json --links` is the other one).
+The read is cancellable: returning to the list, a Watchlist refresh that reseats the Frontier,
+or quitting stops requests still in flight. Cancelled reads are not reported as Ticket Link
+failures. Details that finished successfully remain in the session cache, so re-entry fetches
+only those still absent. Opening a node's Detail preserves the Frontier and its read behind it,
+because root `esc` returns to that same seat; `u` abandons and cancels both.
 Colour carries the Status Category, exactly as it does on the list, while border weight and
 a badge word carry whether a Ticket is Actionable or blocked, so an in-progress Ticket that
 is also blocked shows both.
-A Ticket blocked by something outside the Watchlist is drawn as a **Ghost Ticket**, so it
-never looks Actionable; cycles of BlockedBy Links are shown rather than hidden; and a Ticket
-whose Links could not be read is marked unverified, which leaves anything it blocks not
-Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
+A Ticket blocked by something outside the Watchlist is drawn as a **Ticket outside the
+Watchlist** (`NOT IN WATCHLIST`, or `NOT LISTED` on compact cards), so it never looks
+Actionable; cycles of BlockedBy Links are shown rather than hidden. `LINKS FAILED` means
+that Ticket's own Links could not be read and corresponds to the Frontier's existing `r`
+retry remedy. `BLOCKER UNKNOWN` instead means a blocker-side Status could not be resolved;
+it does not claim that this Ticket's Detail read failed. Both facts leave affected Tickets
+not Actionable. **Filters do not apply on the Frontier** — hiding a node would delete an edge and
 could make a blocked Ticket look Actionable — so it always renders the whole Watchlist and
 says so in the footer. A Provider that does not report blocking links opens a screen that
 explains why there is no graph to draw.
@@ -231,6 +257,7 @@ The footer shows currently applicable keys, and `?` expands it.
 | `/` | open fuzzy find |
 | `esc` | clear filters, or quit when none are active |
 | `r` | refresh now |
+| `p` | hold or resume automatic refresh for this session |
 | `m` | turn mouse capture off or on |
 | `?` | expand help |
 | `q`, `ctrl+c` | quit |
@@ -275,8 +302,8 @@ rather than quitting.
 | click | focus a node |
 | double-click | open a node's Ticket |
 | wheel | scroll the canvas |
-| `enter` | open the focused Ticket, Ghost Tickets included |
-| `v`, `esc` | return to the list, interrupting any Detail reads still in flight |
+| `enter` | open the focused Ticket, including Tickets outside the Watchlist |
+| `v`, `esc` | return to the list, cancelling Detail reads still in flight |
 | `r` | re-read the Details that never succeeded |
 | `m` | turn mouse capture off or on |
 | `?` | expand help |
@@ -355,6 +382,30 @@ possible. `--provider` can correct an otherwise ambiguous self-managed origin, b
 contradict a Ref whose Tracker is known. `--profile` resolves routing ambiguity and is the
 recommended explicit route for native Queries. One Watchlist has at most one selected Profile
 and uses one Provider, host, connection, credential scope, Capability set, and staleness clock.
+
+### Fake Provider demo fixtures
+
+`--provider fake` is a development and demo affordance, not a supported Tracker. With no
+fake-only flags it retains the ten-Ticket v0.1 fixture. Two named scenarios expose Frontier
+states through the shipped binary:
+
+```sh
+sitrep --provider fake 111
+sitrep --provider fake --fake-fixture blocking 200
+sitrep --provider fake --fake-fixture blocking --fake-delay 750ms 200
+sitrep --provider fake --fake-fixture no-blocking-links 200
+sitrep --provider fake --fake-fixture blocking --fake-delay 750ms --json --links 200
+sitrep --provider fake --fake-fixture no-blocking-links --json --links 200
+```
+
+The `blocking` fixture includes member blockers, Tickets outside the Watchlist, an unknown blocker status, an
+unreadable Detail, a two-Ticket cycle, and a self-cycle. The delayed `--json --links` command
+shows its one-shot stderr progress at human speed. `no-blocking-links` serves the same
+Watchlist without declaring that Capability: the Frontier explains that no graph is available,
+and its `--json --links` command demonstrates the explanatory stderr notice while blocking
+and actionability keys stay absent. `--fake-delay` adds cancellable latency to fake reads so
+progress and interruption can be watched at human speed. Both `--fake-fixture` and
+`--fake-delay` require an explicit `--provider fake`.
 
 ### Independent membership and cadence knobs
 
@@ -443,7 +494,10 @@ instances.
 
 `--json` is the machine-readable contract. Keys are snake_case; timestamps are RFC 3339 UTC
 at second precision; `tickets` is always an array. Optional and Capability-gated fields are
-omitted, never `null`.
+omitted, never `null`. Watchlist and decoded Ticket documents always state the
+`rate_limit_budget` Capability; their top-level `rate_limit_budget` object appears only when
+that Capability is true and the Resolve observed a valid budget. Standalone Detail documents
+never include request-budget data.
 
 There are two independently versioned document families:
 
@@ -464,6 +518,7 @@ There are two independently versioned document families:
 | `watchlist.epic` | Epic identity, present only for an Epic Selector |
 | `watchlist.limit_reached` | optional `true`, present only for a truncated Query |
 | `progress` | Status Category arithmetic over the fetched Tickets |
+| `rate_limit_budget` | optional remaining request budget and UTC reset time; present only when the Provider declares and observed a valid value |
 | `blocking` | `--links` only: `cycles`, always an array |
 | `tickets` | current thin Tickets, flat and in Provider order |
 
@@ -489,6 +544,7 @@ non-Epic shape:
       "blocking_links": true,
       "comments": true,
       "pull_requests": true,
+      "rate_limit_budget": true,
       "selectors": {
         "epic": true,
         "ref_list": true,
@@ -511,6 +567,10 @@ non-Epic shape:
     "total": 1,
     "denominator": 1,
     "percent_done": 0
+  },
+  "rate_limit_budget": {
+    "remaining": 4870,
+    "resets_at": "2030-01-02T03:04:05Z"
   },
   "tickets": [
     {
@@ -576,8 +636,8 @@ be incomplete; it never means a listed blocker was guessed at.
 and the document gains `blocking.cycles`: each cycle's Ticket IDs, always an array.
 
 Each unmet blocker is a Ticket object — `id`, `key`, `title`, `url`, `status`, optional
-`native_status` — plus `member` (`false` for a **Ghost Ticket**, a Link target that is not
-a Watchlist member) and `status_known`. Satisfied blockers are not listed; the question is
+`native_status` — plus `member` (`false` for a **Ticket outside the Watchlist**, a Link target that is not
+in this Watchlist) and `status_known`. Satisfied blockers are not listed; the question is
 what is holding the Ticket. A blocker with no identity at all is still emitted, with empty
 identity fields, because dropping it would make a blocked Ticket look actionable.
 
@@ -587,13 +647,23 @@ with `status: "todo", status_known: true` is honestly blocked; one with
 the Ticket not actionable, and a consumer can tell which is which.
 
 These keys are **absent, not null**, when they were not computed — without `--links`, or
-when the Provider does not declare the `blocking_links` Capability (which is silent, like
-every other optional Capability, and issues no fetch). Absence means "not computed"; a
-`false` under `--links` is a computed answer, and the two must never look alike.
+when the Provider does not declare the `blocking_links` Capability. Absence means "not
+computed"; a `false` under `--links` is a computed answer, and the two must never look alike.
+An explicit `--links` request against a Provider without that Capability makes no Detail
+fetches, exits `0`, and writes one explanatory `sitrep:` line to stderr while those keys remain
+absent.
 
-A failed Detail fetch is not fatal: the run still exits `0` and the affected Ticket carries
-`links_known: false`. An interrupted run emits nothing at all and exits `130` rather than
-passing a half-fetched Watchlist off as complete.
+Status reporting never changes the JSON document or its schema. With stderr attached to a
+terminal, sitrep redraws one transient `reading Detail N/M` line in place and erases it when
+the fan-out finishes. Redirected or piped stderr receives no progress or carriage-return
+sequences. If one or more Detail reads fail, both transports receive one durable aggregate
+singular/plural notice after the completed fan-out; individual Provider errors are not printed.
+The failed reads remain non-fatal: the run exits `0` and each affected Ticket carries
+`links_known: false`.
+
+An interrupted run erases transient terminal progress, emits no aggregate warning or JSON,
+and exits `130` rather than passing a half-fetched Watchlist off as complete. Piped stderr
+therefore remains quiet on interrupt.
 
 A single Ref that resolves to a plain Ticket fails with `--links` rather than exiting `0`
 with a document missing every key that was asked for: Actionable is a Watchlist-level
@@ -641,7 +711,9 @@ not `--links` was given.
 ## When something fails
 
 Every runtime failure is one sanitized line on stderr prefixed `sitrep:` and, for Tracker
-failures, the Provider name. sitrep exits `1`. CLI usage failures print help and exit `2`.
+failures, the Provider name. sitrep exits `1`. CLI usage failures write a concise stderr
+diagnostic followed by `Run "sitrep --help" for usage.` and exit `2`; `sitrep --help` and
+`-h` instead write the full help to stdout and exit `0`.
 
 - **Bad Ref or membership**: check the quoted Ref, exact-list member, or native Query. A bare
   number uses the current clone's origin; use an owner/repository Ref or full URL elsewhere.

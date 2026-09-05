@@ -34,7 +34,8 @@ func TestHelpMatchesGolden(t *testing.T) {
 		"sitrep [flags] <ref> <ref>...\n",
 		"sitrep [flags] -\n",
 		"sitrep [flags] --query <query>\n",
-		"--plain", "--json", "--links", "--profile", "--provider", "--interval", "--no-mouse",
+		"--plain", "--json", "--links", "--profile", "--provider", "--fake-fixture", "--fake-delay", "--interval", "--no-mouse",
+		"blocking", "no-blocking-links", "omission keeps the legacy fixture",
 		"A sole \"-\" reads whitespace-separated Refs", "one stdin Ref keeps exact Ref-list semantics",
 	} {
 		if !strings.Contains(help, marker) {
@@ -46,42 +47,51 @@ func TestHelpMatchesGolden(t *testing.T) {
 	}
 }
 
-func TestUsageErrorsAppendExactHelp(t *testing.T) {
-	help, err := os.ReadFile("testdata/help.golden.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
+const usagePointer = "Run \"sitrep --help\" for usage.\n"
 
+func checkUsageError(t *testing.T, code int, stdout, stderr *bytes.Buffer, message string) {
+	t.Helper()
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	want := "sitrep: " + message + "\n" + usagePointer
+	if got := stderr.String(); got != want {
+		t.Errorf("stderr = %q, want exact compact usage error %q", got, want)
+	}
+	if strings.Count(stderr.String(), "\n") != 2 || strings.Contains(stderr.String(), "\n\n") {
+		t.Errorf("stderr = %q, want exactly two non-blank physical lines", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Usage:") {
+		t.Errorf("stderr = %q, must not contain full help", stderr.String())
+	}
+}
+
+func TestUsageErrorsUseCompactPointer(t *testing.T) {
 	tests := []struct {
-		name   string
-		args   []string
-		prefix string
+		name    string
+		args    []string
+		message string
 	}{
 		{
-			name:   "unknown flag",
-			args:   []string{"--nope"},
-			prefix: "sitrep: flag provided but not defined: --nope\n\n",
+			name:    "unknown flag",
+			args:    []string{"--nope"},
+			message: "flag provided but not defined: --nope",
 		},
 		{
-			name: "missing Selector",
-			prefix: "sitrep: a Selector is required: pass one or more Refs, \"-\" for stdin, " +
-				"or --query\n\n",
+			name:    "missing Selector",
+			message: "a Selector is required: pass one or more Refs, \"-\" for stdin, or --query",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := cli.Run(tt.args, &stdout, &stderr); code != 2 {
-				t.Fatalf("exit code = %d, want 2", code)
-			}
-			if stdout.Len() != 0 {
-				t.Errorf("stdout = %q, want empty", stdout.String())
-			}
-			want := tt.prefix + string(help)
-			if got := stderr.String(); got != want {
-				t.Errorf("stderr does not append exact help\n--- got ---\n%s\n--- want ---\n%s", got, want)
-			}
+			code := cli.Run(tt.args, &stdout, &stderr)
+			checkUsageError(t, code, &stdout, &stderr, tt.message)
 		})
 	}
 }

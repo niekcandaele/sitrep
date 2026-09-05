@@ -149,12 +149,11 @@ func TestEveryScreenStaysBalancedWhenTruncated(t *testing.T) {
 		m := seat(t)
 		updated, _ := m.Update(keyPress("v"))
 		m = updated.(Model)
-		updated, _ = m.Update(frontierDetailMsg{
-			generation: m.frontierGeneration, id: ticket.ID,
+		updated, _ = m.Update(frontierResultMsg(
+			m.frontierGeneration, 0, ticket.ID,
 			// A hostile answer arriving through the fan-out, which never
 			// crossed the seat funnels.
-			detail: detail, caps: in.Capabilities,
-		})
+			detail, in.Capabilities, nil))
 		m = updated.(Model)
 		if m.mode != modeFrontier {
 			t.Fatalf("mode = %v, want the Frontier", m.mode)

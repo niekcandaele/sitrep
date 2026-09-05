@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/niekcandaele/sitrep/internal/provider"
 )
@@ -218,6 +219,29 @@ func TestRedactQueryErrorReturnsOriginalWhenNothingChanges(t *testing.T) {
 	original := provider.Errorf(provider.KindAuth, "github: authentication failed (401) — retry after 60s")
 	if got := provider.RedactQueryError(original, "q=1"); !errors.Is(got, original) {
 		t.Errorf("RedactQueryError returned %T %v, want original error", got, got)
+	}
+}
+
+func TestRateLimitMetadataSurvivesWrappingAndRedaction(t *testing.T) {
+	reset := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	original := provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: reset},
+		"github: query q=secret was rate limited")
+	redacted := provider.RedactQueryError(fmt.Errorf("while polling: %w", original), "q=secret")
+
+	metadata, ok := provider.RateLimitMetadataOf(redacted)
+	if !ok || !metadata.ResetAt.Equal(reset) || metadata.RetryAfter != 0 {
+		t.Fatalf("RateLimitMetadataOf(redacted) = %+v, %t; want reset %s", metadata, ok, reset)
+	}
+	if provider.KindOf(redacted) != provider.KindRateLimit || !errors.Is(redacted, original) {
+		t.Fatalf("redaction lost classification or wrapping: %v", redacted)
+	}
+}
+
+func TestRateLimitMetadataResolvesRelativeTimeWithCallerClock(t *testing.T) {
+	at := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	metadata := provider.RateLimitMetadata{RetryAfter: 45 * time.Second}
+	if got, ok := metadata.Deadline(at); !ok || !got.Equal(at.Add(45*time.Second)) {
+		t.Fatalf("Deadline = %s, %t", got, ok)
 	}
 }
 

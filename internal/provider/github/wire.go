@@ -1,8 +1,11 @@
 package github
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +31,7 @@ type graphQLResponse struct {
 				TypeName string `json:"__typename"`
 			} `json:"kind"`
 		} `json:"repository"`
+		RateLimit rateLimitNode `json:"rateLimit"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`
 }
@@ -42,6 +46,7 @@ type queryResponse struct {
 			} `json:"pageInfo"`
 			Nodes []queryMembershipNode `json:"nodes"`
 		} `json:"search"`
+		RateLimit rateLimitNode `json:"rateLimit"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`
 }
@@ -85,8 +90,35 @@ func isNativeQueryError(graphErr graphQLError) bool {
 }
 
 type refListResponse struct {
-	Data   map[string]*refListRepository `json:"data"`
-	Errors []graphQLError                `json:"errors"`
+	Data      map[string]*refListRepository `json:"data"`
+	RateLimit rateLimitNode                 `json:"-"`
+	Errors    []graphQLError                `json:"errors"`
+}
+
+func (r *refListResponse) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Data   map[string]json.RawMessage `json:"data"`
+		Errors []graphQLError             `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	r.Data = make(map[string]*refListRepository, len(envelope.Data))
+	r.Errors = envelope.Errors
+	for key, raw := range envelope.Data {
+		if key == "rateLimit" {
+			if err := json.Unmarshal(raw, &r.RateLimit); err != nil {
+				return err
+			}
+			continue
+		}
+		var repository *refListRepository
+		if err := json.Unmarshal(raw, &repository); err != nil {
+			return err
+		}
+		r.Data[key] = repository
+	}
+	return nil
 }
 
 type refListRepository struct {
@@ -156,6 +188,182 @@ type detailResponse struct {
 		Node *detailNode `json:"node"`
 	} `json:"data"`
 	Errors []graphQLError `json:"errors"`
+}
+
+// detailBatchResponse is keyed by the generated detailN aliases. A map keeps
+// response-object order irrelevant while allowing missing and unexpected aliases
+// to be distinguished explicitly.
+type detailBatchResponse struct {
+	Data   map[string]*detailNode `json:"data"`
+	Errors []graphQLError         `json:"errors"`
+}
+
+// decode classifies a completed aliased response. An error attributable to one
+// alias invalidates that Detail while successful siblings survive. A response-wide
+// ordinary failure invalidates the chunk, but an attributed failure remains more
+// precise for its alias. A rate refusal is deliberately returned alongside local
+// failures and malformed-extra-alias evidence: it preserves every validated
+// requested sibling and must remain inspectable even when every alias has already
+// failed locally. Alias-local rate refusals are returned separately so the caller
+// never has to rediscover them by traversing an aggregate failure map.
+func (r detailBatchResponse) decode(ids []model.TicketID, endpoint string, header http.Header) (map[model.TicketID]model.Detail, map[model.TicketID]error, error, error) {
+	aliases := make(map[string]struct{}, len(ids))
+	for i := range ids {
+		aliases["detail"+strconv.Itoa(i)] = struct{}{}
+	}
+
+	unexpectedAliases := make([]string, 0)
+	for alias := range r.Data {
+		if _, expected := aliases[alias]; !expected {
+			unexpectedAliases = append(unexpectedAliases, alias)
+		}
+	}
+	sort.Strings(unexpectedAliases)
+
+	attributedErrors := make(map[string][]graphQLError)
+	unattributedErrors := make([]graphQLError, 0, len(r.Errors))
+	for _, graphErr := range r.Errors {
+		if len(graphErr.Path) == 0 {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		alias, ok := graphErr.Path[0].(string)
+		if !ok {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		if _, expected := aliases[alias]; !expected {
+			unattributedErrors = append(unattributedErrors, graphErr)
+			continue
+		}
+		attributedErrors[alias] = append(attributedErrors[alias], graphErr)
+	}
+
+	var protocolErr error
+	if len(unexpectedAliases) != 0 {
+		protocolErr = provider.Errorf(provider.KindUnavailable,
+			"github: malformed Detail response from %s: unexpected data alias %q", endpoint, unexpectedAliases[0])
+	}
+	var responseErr error
+	if len(unattributedErrors) != 0 {
+		responseErr = detailBatchUnattributedError(unattributedErrors, ids[0], endpoint, header)
+	}
+	chunkErr := joinDetailBatchErrors(responseErr, protocolErr)
+	_, responseLimited := provider.InspectRateLimitRefusal(responseErr, time.Time{})
+	chunkLimited := responseLimited
+	attributedFailures := make(map[string]error, len(attributedErrors))
+	var aliasRefusals []error
+	for i, id := range ids {
+		alias := "detail" + strconv.Itoa(i)
+		graphErrs := attributedErrors[alias]
+		if len(graphErrs) == 0 {
+			continue
+		}
+		failure := graphQLErrors(graphErrs, detailNotFound(id), endpoint, header)
+		attributedFailures[alias] = failure
+		if refusal, limited := provider.InspectRateLimitRefusal(failure, time.Time{}); limited {
+			aliasRefusals = append(aliasRefusals, refusal.Err)
+			chunkLimited = true
+		}
+	}
+
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	failures := make(map[model.TicketID]error)
+	for i, id := range ids {
+		alias := "detail" + strconv.Itoa(i)
+		if failure := attributedFailures[alias]; failure != nil {
+			failures[id] = failure
+			continue
+		}
+
+		node, present := r.Data[alias]
+		if !present {
+			if responseLimited {
+				failures[id] = responseErr
+			} else {
+				failures[id] = provider.Errorf(provider.KindUnavailable,
+					"github: malformed Detail response from %s: missing data alias %q for %q", endpoint, alias, id)
+			}
+			continue
+		}
+		if node == nil || node.ID == "" {
+			if responseLimited {
+				failures[id] = responseErr
+			} else {
+				failures[id] = provider.Errorf(provider.KindBadRef, "%s", detailNotFound(id))
+			}
+			continue
+		}
+		if (responseErr != nil && !responseLimited) || (protocolErr != nil && !chunkLimited) {
+			failures[id] = detailBatchErrorForID(chunkErr, id, endpoint)
+			continue
+		}
+		detail := newDetail(*node)
+		if detail.TicketID != id {
+			failures[id] = fmt.Errorf("provider: detail for %q returned TicketID %q", id, detail.TicketID)
+			continue
+		}
+		details[id] = detail
+	}
+	return details, failures, chunkErr, errors.Join(aliasRefusals...)
+}
+
+// joinDetailBatchErrors keeps raw response causes reachable while making a rate
+// refusal the outer classification whenever one accompanied malformed data.
+func joinDetailBatchErrors(errs ...error) error {
+	var rateErrors, ordinaryErrors []error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if _, limited := provider.InspectRateLimitRefusal(err, time.Time{}); limited {
+			rateErrors = append(rateErrors, err)
+			continue
+		}
+		ordinaryErrors = append(ordinaryErrors, err)
+	}
+	return errors.Join(append(rateErrors, ordinaryErrors...)...)
+}
+
+func detailBatchErrorForID(err error, id model.TicketID, endpoint string) error {
+	if provider.KindOf(err) != provider.KindUnavailable {
+		return err
+	}
+	return provider.Errorf(provider.KindUnavailable,
+		"github: malformed Detail response for %q from %s: %w", id, endpoint, err)
+}
+
+// detailBatchUnattributedError classifies only errors that cannot belong to a
+// generated alias. NOT_FOUND has no authoritative Ticket identity on this path,
+// so it is malformed response data rather than a bad requested ID. Native
+// request-wide auth and rate-limit classifications still take precedence.
+func detailBatchUnattributedError(errs []graphQLError, id model.TicketID, endpoint string, header http.Header) error {
+	normalized := append([]graphQLError(nil), errs...)
+	hasNotFound := false
+	for i := range normalized {
+		if strings.EqualFold(normalized[i].Type, "NOT_FOUND") {
+			hasNotFound = true
+			normalized[i].Type = ""
+		}
+	}
+	classified := graphQLErrors(normalized, detailNotFound(id), endpoint, header)
+	if !hasNotFound || provider.KindOf(classified) != provider.KindUnknown {
+		return classified
+	}
+
+	messages := make([]string, 0, len(errs))
+	for _, graphErr := range errs {
+		if graphErr.Message != "" {
+			messages = append(messages, graphErr.Message)
+		}
+	}
+	explanation := strings.Join(messages, "; ")
+	if explanation == "" {
+		explanation = "the API returned no explanation"
+	}
+	return provider.Errorf(provider.KindUnavailable,
+		"github: malformed Detail response for %q from %s: unattributable NOT_FOUND error: %s",
+		id, endpoint, explanation)
 }
 
 type detailNode struct {
@@ -259,7 +467,7 @@ func graphQLErrors(errs []graphQLError, notFound, endpoint string, header http.H
 	for _, e := range errs {
 		switch {
 		case strings.EqualFold(e.Type, "RATE_LIMITED"):
-			return provider.Errorf(provider.KindRateLimit,
+			return provider.RateLimitErrorf(provider.RateLimitMetadata{ResetAt: rateLimitResetAt(header)},
 				"github: API rate limit exceeded; resets at %s", rateLimitReset(header))
 		case strings.EqualFold(e.Type, "NOT_FOUND"):
 			return provider.Errorf(provider.KindBadRef, "%s", notFound)

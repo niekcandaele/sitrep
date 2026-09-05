@@ -1,0 +1,46 @@
+{
+  "data": {
+    "detail2": {
+      "id": "batch-node-c",
+      "number": 103,
+      "url": "https://example.test/acme/widgets/issues/103",
+      "body": "third sibling survives",
+      "repository": {"nameWithOwner": "acme/widgets"},
+      "comments": {"totalCount": 0, "nodes": []},
+      "blockedBy": {"nodes": []},
+      "blocking": {"nodes": []}
+    },
+    "detail0": {
+      "id": "batch-node-a",
+      "number": 101,
+      "url": "https://example.test/acme/widgets/issues/101",
+      "body": "alpha \u001b[31mred\u001b[0m",
+      "repository": {"nameWithOwner": "acme/widgets"},
+      "comments": {"totalCount": 0, "nodes": []},
+      "blockedBy": {"nodes": []},
+      "blocking": {"nodes": []}
+    },
+    "detail1": {
+      "id": "batch-node-b",
+      "number": 102,
+      "url": "https://example.test/acme/widgets/issues/102",
+      "body": "THIS PARTIAL DETAIL MUST BE DISCARDED",
+      "repository": {"nameWithOwner": "acme/widgets"},
+      "comments": null,
+      "blockedBy": null,
+      "blocking": {"nodes": []}
+    }
+  },
+  "errors": [
+    {
+      "type": "FORBIDDEN",
+      "message": "comments unavailable",
+      "path": ["detail1", "comments", "nodes"]
+    },
+    {
+      "type": "FORBIDDEN",
+      "message": "dependencies unavailable",
+      "path": ["detail1", "blockedBy"]
+    }
+  ]
+}

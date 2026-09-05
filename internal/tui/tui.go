@@ -15,12 +15,12 @@
 //
 // # The terminal-text boundary
 //
-// Model data enters this package through exactly four funnels — Options.Initial,
-// Options.Open, Options.Source and Options.DetailSource — and none of them has
-// to come from a Provider: a Source is any closure the caller wrote. So the
-// screens do not trust their caller. Everything entering Model state crosses
-// intake.go, which applies internal/termtext to whole model values, and the
-// renderers below are therefore free of sanitizing calls (ADR-0006).
+// Model data enters this package through exactly five funnels — Options.Initial,
+// Options.Open, Options.Source, Options.DetailSource and Options.DetailFanout —
+// and none of them has to come from a Provider: a Source is any closure the
+// caller wrote. So the screens do not trust their caller. Everything entering
+// Model state crosses intake.go, which applies internal/termtext to whole model
+// values, and the renderers below are therefore free of sanitizing calls (ADR-0006).
 //
 // A new screen inherits that by consuming a ListInput or a DetailInput: both
 // can only be seated through those funnels or through DetailFromTicket, which
@@ -106,14 +106,20 @@
 // order, cache skipping, bounded concurrency, and the rule that only a
 // successful read is recorded — lives in internal/detailfanout, which the
 // one-shot renderers share. Results land in the same per-Ticket Detail cache a
-// drill-in uses, so a Ticket already opened this session costs nothing.
+// drill-in uses, so a Ticket already opened this session costs nothing. Each
+// explicit fan-out has a generation-scoped child context: leaving or reseating
+// the Frontier, abandoning it with u, or quitting cancels its Provider reads.
+// Opening a node keeps that lifetime alive behind Detail because root esc returns
+// to the same Frontier seat. A successful read still warms the shared cache even
+// when it races with cancellation.
 //
 // Emphasis is withheld until every planned read has answered. Fail-closed plus
 // a progressive fetch means a half-loaded Frontier would give wrong answers to
 // anyone glancing at it, so the cards draw in Status Category colours with no
-// badge and the header counts the reads still outstanding. Leaving the screen
-// advances frontierGeneration, which drops every outstanding answer: that is
-// what makes the fan-out interruptible.
+// badge and the header counts the reads still outstanding. Generation checks
+// remain the correctness guard against Providers that race with or ignore
+// cancellation; contexts stop the actual work rather than merely dropping its
+// eventual answer.
 //
 // # The program can start in Detail, and can be seeded
 //
@@ -145,11 +151,10 @@
 //
 // # One clock, one timer
 //
-// Model.now is the only clock in the package: nothing else may call time.Now,
-// because the staleness indicator is the one place a clock reaches the screen
-// and golden frames need it fixed. A single one-second heartbeat drives both
-// that indicator and the decision to refresh, so the label and the refresh can
-// never disagree about how old the data is.
+// Constructed Models always install Model.now as the package clock; policyNow's
+// time.Now fallback exists only for focused tests that use zero-value fixtures.
+// A single one-second heartbeat drives both the staleness indicator and the
+// decision to refresh, so the label and refresh cannot disagree about age.
 package tui
 
 import (
@@ -159,7 +164,9 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/term"
+
+	"github.com/niekcandaele/sitrep/internal/detailfanout"
+	"github.com/niekcandaele/sitrep/internal/terminal"
 )
 
 // Options are the monitor's injectable dependencies. Every zero value that has
@@ -173,6 +180,12 @@ type Options struct {
 	// when the user explicitly re-reads it. A monitor without one still lists
 	// Tickets; enter then says why it cannot open them.
 	DetailSource DetailSource
+	// DetailFanout reads the canonical missing Details for one explicit Frontier
+	// generation. Production callers adapt the same Provider through
+	// detailfanout.FromProvider, allowing native plural transport without teaching
+	// the TUI about Tracker implementations. When nil, New preserves custom/test
+	// DetailSource callers with a deterministic sequential fallback.
+	DetailFanout detailfanout.Fetch
 	// Open, when non-nil, starts the program on one Ticket's Detail instead of
 	// the list: the decoder entry point for a Ref that named a Ticket. The
 	// Detail itself is read from DetailSource on the first frame, the same way a
@@ -184,11 +197,17 @@ type Options struct {
 	// caller just fetched. The refresh clock starts from the reading's own
 	// FetchedAt, not from startup.
 	Initial *ListInput
+	// InitialError carries a retryable pre-flight rate-limit refusal into the
+	// monitor so its policy can hold the first TUI fetch until the known reset.
+	InitialError error
 	// Interval is how long the monitor waits between automatic refreshes.
 	Interval time.Duration
 	// Now reads the clock the staleness indicator and the refresh schedule are
 	// measured against. When nil it is time.Now.
 	Now func() time.Time
+	// Heartbeat schedules the next monitor heartbeat. Nil uses the production
+	// one-second tick; tests can inject a no-op command and deliver beats directly.
+	Heartbeat tea.Cmd
 	// NoMouse starts the monitor without terminal mouse capture. The user can
 	// enable it at runtime with m.
 	NoMouse bool
@@ -221,7 +240,7 @@ func Run(ctx context.Context, opts Options) error {
 	// never arrive. So the question "am I interactive?" is answered here, once,
 	// before the program exists — rather than left to a caller that would have
 	// to ask it again.
-	if !isTerminal(opts.Input) || !isTerminal(opts.Output) {
+	if !terminal.Is(opts.Input) || !terminal.Is(opts.Output) {
 		return ErrNoTerminal
 	}
 
@@ -239,11 +258,4 @@ func Run(ctx context.Context, opts Options) error {
 		return ErrInterrupted
 	}
 	return nil
-}
-
-// isTerminal reports whether v is a real terminal. Anything without a file
-// descriptor — a buffer, a pipe, a test's reader — is not.
-func isTerminal(v any) bool {
-	f, ok := v.(interface{ Fd() uintptr })
-	return ok && term.IsTerminal(f.Fd())
 }

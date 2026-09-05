@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/cli"
+	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/fake"
 	"github.com/niekcandaele/sitrep/internal/tui"
@@ -52,15 +53,36 @@ func TestOneShotModesIgnoreNoMouse(t *testing.T) {
 	}
 }
 
-func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
+type nativeDetailFanoutSpy struct {
+	provider.Provider
+	singularCalls int
+	pluralCalls   int
+}
+
+func (p *nativeDetailFanoutSpy) FetchDetail(ctx context.Context, id model.TicketID) (model.Detail, error) {
+	p.singularCalls++
+	return p.Provider.FetchDetail(ctx, id)
+}
+
+func (p *nativeDetailFanoutSpy) FetchDetails(_ context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	p.pluralCalls++
+	details := make(map[model.TicketID]model.Detail, len(ids))
+	for _, id := range ids {
+		details[id] = model.Detail{TicketID: id}
+	}
+	return details, nil
+}
+
+func TestMonitorOptionsReachEveryEntryPath(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		provider   provider.Provider
-		stdin      io.Reader
-		stdinEntry bool
-		wantOpen   bool
-		wantSeed   bool
+		name             string
+		args             []string
+		provider         provider.Provider
+		stdin            io.Reader
+		stdinEntry       bool
+		wantOpen         bool
+		wantSeed         bool
+		wantInitialError bool
 	}{
 		{
 			name:     "ordinary seeded monitor",
@@ -77,10 +99,11 @@ func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 			wantOpen: true,
 		},
 		{
-			name:     "retryable preflight monitor",
-			args:     []string{"--no-mouse", "acme/widgets#111"},
-			provider: fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down"))),
-			stdin:    strings.NewReader(""),
+			name:             "retryable preflight monitor",
+			args:             []string{"--no-mouse", "acme/widgets#111"},
+			provider:         fake.New(fake.WithResolveError(provider.Errorf(provider.KindUnavailable, "network down"))),
+			stdin:            strings.NewReader(""),
+			wantInitialError: true,
 		},
 		{
 			name:       "stdin-selected monitor",
@@ -96,8 +119,9 @@ func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var captured *tui.Options
 			var tty *trackedReadCloser
+			providerSpy := &nativeDetailFanoutSpy{Provider: tt.provider}
 			deps := cli.Deps{
-				Provider: tt.provider,
+				Provider: providerSpy,
 				Stdin:    tt.stdin,
 				RunMonitor: func(_ context.Context, opts tui.Options) error {
 					captured = &opts
@@ -125,6 +149,21 @@ func TestNoMouseReachesEveryMonitorEntryPath(t *testing.T) {
 			}
 			if (captured.Initial != nil) != tt.wantSeed {
 				t.Errorf("Initial present = %t, want %t", captured.Initial != nil, tt.wantSeed)
+			}
+			if (captured.InitialError != nil) != tt.wantInitialError {
+				t.Errorf("InitialError present = %t, want %t", captured.InitialError != nil, tt.wantInitialError)
+			}
+			if captured.DetailFanout == nil {
+				t.Fatal("native DetailFanout was lost before the monitor runner")
+			}
+			const probe = model.TicketID("frontier-probe")
+			details, caps, err := captured.DetailFanout(t.Context(), []model.TicketID{probe})
+			if err != nil || details[probe].TicketID != probe || caps != providerSpy.Capabilities() {
+				t.Errorf("DetailFanout = details:%#v caps:%#v err:%v, want native probe and Provider capabilities",
+					details, caps, err)
+			}
+			if providerSpy.pluralCalls != 1 || providerSpy.singularCalls != 0 {
+				t.Errorf("Detail calls = plural:%d singular:%d, want 1/0", providerSpy.pluralCalls, providerSpy.singularCalls)
 			}
 			if tty != nil && !tty.closed {
 				t.Error("stdin-selected monitor did not close its controlling terminal")

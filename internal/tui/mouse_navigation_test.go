@@ -122,15 +122,22 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 	base := scrollableDetailMouseModel(t)
 	msg := queuedDetailWheel(t, base)
 
-	t.Run("same-seat resize remains valid", func(t *testing.T) {
+	t.Run("resize rejects the stale callback and fresh frame scrolls", func(t *testing.T) {
 		next, _ := base.Update(tea.WindowSizeMsg{Width: 72, Height: 10})
 		resized := next.(Model)
-		if resized.mouseEpoch != base.mouseEpoch {
-			t.Fatalf("resize advanced mouse epoch from %d to %d", base.mouseEpoch, resized.mouseEpoch)
+		if resized.mouseEpoch != base.mouseEpoch+1 {
+			t.Fatalf("resize epoch = %d, want %d", resized.mouseEpoch, base.mouseEpoch+1)
 		}
+		beforeDetail := resized.detail
 		got := applyDetailWheel(t, resized, msg)
+		if !reflect.DeepEqual(got.detail, beforeDetail) || got.mouseEpoch != resized.mouseEpoch {
+			t.Errorf("stale resize wheel changed Detail: detail=%+v epoch=%d", got.detail, got.mouseEpoch)
+		}
+
+		fresh := queuedDetailWheel(t, resized)
+		got = applyDetailWheel(t, resized, fresh)
 		if got.detail.offset != resized.detail.offset+3 {
-			t.Errorf("same-seat resize wheel offset = %d, want %d", got.detail.offset, resized.detail.offset+3)
+			t.Errorf("fresh resize wheel offset = %d, want %d", got.detail.offset, resized.detail.offset+3)
 		}
 	})
 
@@ -194,7 +201,7 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 
 	t.Run("another seated root rejects wheel", func(t *testing.T) {
 		next, _ := base.seatDetail(model.Ticket{ID: "other-root", Key: "OTHER-1", Title: "Other root"},
-			base.detail.input.Parent, allCaps)
+			base.detail.input.Parent, allCaps, false)
 		other := next.(Model)
 		other.detail.loaded = true
 		other.detail.loading = false

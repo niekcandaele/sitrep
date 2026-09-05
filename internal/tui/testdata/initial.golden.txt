@@ -1,29 +1,29 @@
 #111  Widget sync v2: shards, retries & telemetry                          https://tracker.example.test/acme/widgets/111
-█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
+█████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33% · budget 4870 · resets 2030-01-02T03:04:05Z          just now
 
 IN PROGRESS (3)
-▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos  #501 open ci ok changes req +3 more
-  #113     Retry & backoff for the sync worker
-           @mara-vos @tobias  #502 open ci FAIL review pending
-  #7       Teach the gadget agent to speak sync v2
-           #18 draft ci ...
+▸ #112       Draft the shard sync protocol
+             [In Review]  @mara-vos  #501 open ci ok changes req +3 more
+  #113       Retry & backoff for the sync worker
+             @mara-vos @tobias  #502 open ci FAIL review pending
+  #7         Teach the gadget agent to speak sync v2
+             #18 draft ci ...
 
 TODO (3)
-  #115     Reconcile widget IDs across shards
-  #116     Protocol conformance tests
-           [Selected for Development]  @tobias
-  #117     Renseigner la métrique « éclair » du tableau de bord
+  #115       Reconcile widget IDs across shards
+  #116       Protocol conformance tests
+             [Selected for Development]  @tobias
+  #117       Renseigner la métrique « éclair » du tableau de bord
 
 DONE (3)
-  #118     Cache shard lookups
-           @mara-vos  #504 merged
-  #119     Emit sync telemetry
-           @tobias
-  #120     Write the sync v2 runbook
+  #118       Cache shard lookups
+             @mara-vos  #504 merged
+  #119       Emit sync telemetry
+             @tobias
+  #120       Write the sync v2 runbook
 
 CANCELLED (1)
-  #121     Mirror shards to the legacy feed
+  #121       Mirror shards to the legacy feed
 
 
 
@@ -37,4 +37,4 @@ CANCELLED (1)
 
 
 
-m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help

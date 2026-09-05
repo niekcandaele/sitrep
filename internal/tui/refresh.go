@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // heartbeatInterval is the monitor's single timer. One beat drives both the
@@ -18,13 +20,13 @@ const heartbeatInterval = time.Second
 type heartbeatMsg time.Time
 
 // refreshedMsg carries the outcome of one Source call. generation is the
-// refresh's sequence number: a reading whose generation is no longer the
-// Model's current one is stale and gets dropped, so a slow auto-refresh cannot
-// land on top of the answer to a manual `r`.
+// refresh's sequence number: a stale reading cannot replace semantic List state,
+// but every generation still contributes Tracker-wide request-policy evidence.
 type refreshedMsg struct {
-	generation int
-	input      ListInput
-	err        error
+	generation    int
+	input         ListInput
+	err           error
+	requestPolicy provider.RequestPolicy
 }
 
 // heartbeat schedules the next beat. tea.Tick rather than tea.Every: the beat

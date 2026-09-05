@@ -127,6 +127,11 @@ Flags:
       --provider <name>   Provider to read from: "auto" (the default) detects
                           from the route or Refs; "github", "gitlab", or "jira"
                           forces that driver; "fake" serves a fixture Watchlist
+      --fake-fixture <name>
+                          with --provider fake, use "blocking" or
+                          "no-blocking-links"; omission keeps the legacy fixture
+      --fake-delay <dur>  with --provider fake, add artificial per-read latency
+                          for observing loading and progress
       --query <query>     exact tracker-native Query selecting a Watchlist
       --version           show version information and exit
 `
@@ -261,6 +266,8 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	withLinks := fs.Bool("links", false, "with --json, add Actionable and unmet blockers (per-Ticket fetch)")
 	providerName := fs.String("provider", defaultProviderName, "Provider to read from")
 	profileName := fs.String("profile", "", "the Profile to connect with")
+	fakeFixture := fs.String("fake-fixture", "", "fake fixture: blocking or no-blocking-links")
+	fakeDelay := fs.Duration("fake-delay", 0, "artificial latency for fake Provider reads")
 	query := fs.String("query", "", "Tracker-native Watchlist query")
 	interval := fs.Duration("interval", defaultRefreshInterval, "how often the monitor refreshes")
 	noMouse := fs.Bool("no-mouse", false, "start the monitor without mouse capture")
@@ -305,6 +312,17 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	if !knownProviderName(*providerName) {
 		return usageError(stderr, fmt.Sprintf("unknown provider %q", *providerName))
+	}
+
+	fakeSettings := fakeProviderSettings{
+		fixture:    *fakeFixture,
+		fixtureSet: isFlagSet(fs, "fake-fixture"),
+		delay:      *fakeDelay,
+		delaySet:   isFlagSet(fs, "fake-delay"),
+	}
+	if code, ok := checkFakeProviderSettings(stderr,
+		isFlagSet(fs, "provider") && *providerName == providerFake, fakeSettings); !ok {
+		return code
 	}
 
 	querySelected := isFlagSet(fs, "query")
@@ -355,7 +373,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	p := deps.Provider
 	if p == nil {
-		if p, err = deps.newProvider(*providerName, selection.route, prof, cfg.Path); err != nil {
+		if p, err = deps.newProvider(*providerName, selection.route, prof, cfg.Path, fakeSettings); err != nil {
 			return runtimeError(stderr, err)
 		}
 	}
@@ -394,6 +412,8 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 		return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
 			Source:       tui.SelectorSource(p, selector, deps.clock()),
 			DetailSource: tui.TicketDetailSource(p),
+			DetailFanout: detailfanout.FromProvider(p),
+			InitialError: err,
 			Interval:     refresh,
 			NoMouse:      *noMouse,
 		})
@@ -423,13 +443,19 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 
 	switch {
 	case *asJSON:
-		blocking := blockingGraphFor(ctx, p, snap, *withLinks)
+		blocking, linksStatus := blockingGraphFor(ctx, p, snap, *withLinks, stderr)
 		// A ctrl+c during the fan-out ends the run. Emitting the half-fetched
 		// document would be a lie by omission: most Tickets would say
 		// links_known: false because the user pressed a key, not because the
 		// Tracker could not answer.
 		if code, ok := interrupted(ctx); ok {
 			return code
+		}
+		// Durable status starts after the interrupt check: this is the one-shot
+		// run's commit point. A signal after it does not turn a completed report
+		// into exit 130 with a warning but no document.
+		if linksStatus != nil {
+			linksStatus.report()
 		}
 		return writeReport(stdout, stderr, func(w io.Writer) error {
 			return jsonout.RenderWatchlist(w, jsonout.WatchlistDocument{
@@ -449,6 +475,7 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 	return runMonitor(ctx, stdout, stderr, deps, stdinSelected, tui.Options{
 		Source:       tui.SelectorSource(p, selector, deps.clock()),
 		DetailSource: tui.TicketDetailSource(p),
+		DetailFanout: detailfanout.FromProvider(p),
 		Initial:      &initial,
 		Interval:     refresh,
 		NoMouse:      *noMouse,
@@ -456,39 +483,47 @@ func RunWith(args []string, stdout, stderr io.Writer, deps Deps) int {
 }
 
 // blockingGraphFor reads every member's Detail and derives the Watchlist's
-// blocking graph, or returns nil when the caller did not ask for one or the
-// Provider cannot express blocking at all.
+// blocking graph. It returns nil without issuing Detail reads when the caller
+// did not request Links or the Provider does not declare blocking support.
 //
 // nil is what makes --json's default free: ADR-0003 still forbids a render from
-// fanning FetchDetail out, and Amendment 4 permits it here only because --links
-// is an explicit user action. An undeclared BlockingLinks Capability is silent
-// rather than an error, the same way pull_requests is: the keys are simply
-// absent, and emitting actionable: false everywhere would read as a computed
-// negative when BuildBlockingGraph in fact claims nothing.
+// fanning Detail reads out, and Amendment 4 permits it here only because --links
+// is an explicit user action. An undeclared BlockingLinks Capability leaves the
+// keys absent and is explained on stderr; emitting actionable: false everywhere
+// would read as a computed negative when BuildBlockingGraph in fact claims
+// nothing.
 //
-// A failed FetchDetail is not fatal and is not reported: the Ticket is left out
-// of the links map, which is exactly the unreadable-Links tri-state, and the
-// document says so per Ticket with links_known: false.
-func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.WatchlistSnapshot, withLinks bool) *model.BlockingGraph {
-	if !withLinks || !snap.Capabilities.BlockingLinks {
-		return nil
+// A failed Detail read is non-fatal and produces one aggregate stderr notice.
+// The Ticket remains absent from the links map, which is exactly the
+// unreadable-Links tri-state, and the document carries links_known: false.
+func blockingGraphFor(ctx context.Context, p provider.Provider, snap model.WatchlistSnapshot,
+	withLinks bool, stderr io.Writer,
+) (*model.BlockingGraph, *linksStatus) {
+	if !withLinks {
+		return nil, nil
+	}
+	if !snap.Capabilities.BlockingLinks {
+		return nil, newMissingBlockingLinksStatus(stderr)
 	}
 
 	// A one-shot run holds no Detail cache, so nothing is skipped; Plan is still
 	// the way in, for its canonical order and its empty-ID skip.
 	ids := detailfanout.Plan(snap.Tickets, nil)
+	status := newLinksStatus(stderr, len(ids))
 	details := make(map[model.TicketID]model.Detail, len(ids))
-	//nolint:errcheck // Run's only error is ctx.Err(), which RunWith reads back
-	// through interrupted(ctx) so that an interrupt stays an interrupt rather
-	// than becoming a rendering failure.
-	_ = detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
+	runErr := detailfanout.Run(ctx, detailfanout.FromProvider(p), ids, func(o detailfanout.Outcome) {
 		if o.Err == nil {
 			details[o.ID] = o.Detail
 		}
+		status.record(o)
 	})
+	if runErr != nil && ctx.Err() == nil {
+		status.recordBatchFailure()
+	}
+	status.complete()
 
 	graph := model.BuildBlockingGraph(snap.Tickets, detailfanout.Links(details), snap.Capabilities)
-	return &graph
+	return &graph, status
 }
 
 // stdinSelection recognizes the transport sentinel only in argv. It must be
@@ -590,6 +625,31 @@ func checkInterval(stderr io.Writer, d time.Duration) (int, bool) {
 	default:
 		return exitOK, true
 	}
+}
+
+func checkFakeProviderSettings(stderr io.Writer, explicitFake bool, settings fakeProviderSettings) (int, bool) {
+	if !explicitFake {
+		switch {
+		case settings.fixtureSet:
+			return usageError(stderr, "--fake-fixture requires --provider fake"), false
+		case settings.delaySet:
+			return usageError(stderr, "--fake-delay requires --provider fake"), false
+		default:
+			return exitOK, true
+		}
+	}
+	if settings.fixtureSet {
+		switch settings.fixture {
+		case fakeFixtureBlocking, fakeFixtureNoBlockingLinks:
+		default:
+			return usageError(stderr,
+				`--fake-fixture must be "blocking" or "no-blocking-links"`), false
+		}
+	}
+	if settings.delaySet && settings.delay <= 0 {
+		return usageError(stderr, "--fake-delay must be positive"), false
+	}
+	return exitOK, true
 }
 
 // writeReport writes one rendered report to stdout. render is the mode's
@@ -1142,15 +1202,14 @@ func flagErrorMessage(fs *flag.FlagSet, err error) string {
 	// An undeclared flag is not in that list, and the flag package strips the
 	// second dash off whatever the user typed.
 	msg = strings.Replace(msg, "not defined: -", "not defined: --", 1)
-	if strings.Contains(msg, "--interval") {
+	if strings.Contains(msg, "--interval") || strings.Contains(msg, "--fake-delay") {
 		msg += " (durations need a unit: 60s, 2m)"
 	}
 	return msg
 }
 
 func usageError(stderr io.Writer, msg string) int {
-	fmt.Fprintf(stderr, "%s: %s\n\n", buildinfo.Name, msg)
-	fmt.Fprint(stderr, usage)
+	fmt.Fprintf(stderr, "%s: %s\nRun \"%s --help\" for usage.\n", buildinfo.Name, msg, buildinfo.Name)
 	return exitUsage
 }
 
@@ -1212,7 +1271,17 @@ const (
 	providerGitLab = "gitlab"
 	providerJira   = "jira"
 	providerFake   = "fake"
+
+	fakeFixtureBlocking        = "blocking"
+	fakeFixtureNoBlockingLinks = "no-blocking-links"
 )
+
+type fakeProviderSettings struct {
+	fixture    string
+	fixtureSet bool
+	delay      time.Duration
+	delaySet   bool
+}
 
 // defaultProviderName auto-detects the Provider from the Ref: sitrep can
 // tell a GitHub URL from a GitLab one, so it should not make the user say.
@@ -1251,10 +1320,12 @@ func (d Deps) resolveRef(ctx context.Context, raw, providerName string) (ref.Ref
 //
 // This is where a Profile is consumed and where it stops existing: everything
 // past this call sees a Provider and a Ref.
-func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string) (provider.Provider, error) {
+func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profile, configPath string,
+	fakeSettings fakeProviderSettings,
+) (provider.Provider, error) {
 	maxTickets := effectiveMaxTickets(prof)
 	if name == providerFake {
-		return fake.New(fake.WithMaxTickets(maxTickets)), nil
+		return newFakeProvider(maxTickets, fakeSettings), nil
 	}
 
 	switch route.tracker {
@@ -1267,6 +1338,25 @@ func (d Deps) newProvider(name string, route connectionRoute, prof *config.Profi
 	default:
 		return nil, fmt.Errorf("cannot tell which tracker serves %q", route.raw)
 	}
+}
+
+func newFakeProvider(maxTickets int, settings fakeProviderSettings) *fake.Provider {
+	options := []fake.Option{fake.WithMaxTickets(maxTickets)}
+	switch settings.fixture {
+	case "":
+	case fakeFixtureBlocking:
+		options = append(options, fake.WithBlockingFixture())
+	case fakeFixtureNoBlockingLinks:
+		caps := fake.FixtureBlockingSnapshot().Capabilities
+		caps.BlockingLinks = false
+		options = append(options, fake.WithBlockingFixture(), fake.WithCapabilities(caps))
+	default:
+		panic("unvalidated fake fixture " + settings.fixture)
+	}
+	if settings.delay > 0 {
+		options = append(options, fake.WithDelay(settings.delay))
+	}
+	return fake.New(options...)
 }
 
 // forceTracker applies an explicit --provider to a Ref, which is the one thing

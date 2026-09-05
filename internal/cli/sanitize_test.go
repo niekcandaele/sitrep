@@ -71,6 +71,10 @@ func (*hostileProvider) FetchDetail(context.Context, model.TicketID) (model.Deta
 	}, nil
 }
 
+func (p *hostileProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 // internal/render/plain's package doc and README both promise that a --plain
 // report contains no ANSI escape sequence of any kind. The promise has to hold
 // for text an attacker wrote, not only for text nobody attacked, which is what

@@ -72,6 +72,35 @@ func TestDecodedImmediateQuitAtRoot(t *testing.T) {
 	}
 }
 
+func TestDecodedRootQuitCancelsInFlightDetailRead(t *testing.T) {
+	for _, quit := range []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{name: "q", key: keyPress("q")},
+		{name: "ctrl-c", key: ctrlCKey},
+		{name: "esc", key: escKey},
+	} {
+		t.Run(quit.name, func(t *testing.T) {
+			const rootID model.TicketID = "ROOT-1"
+			reads := newControlledDetailReads()
+			c := newClock()
+			s := startWith(t, c, Options{
+				Open:         &OpenTicket{Ticket: model.Ticket{ID: rootID, Key: "ROOT-1", Title: "Decoded root"}},
+				DetailSource: reads.source,
+				Interval:     time.Minute,
+				Now:          c.now,
+			})
+			call := reads.next(t, rootID)
+			m, _ := s.finishWith(t, quit.key)
+			assertDetailCallCanceled(t, call)
+			if !m.quitting {
+				t.Errorf("%s did not quit a decoded root", quit.name)
+			}
+		})
+	}
+}
+
 func TestDecodedCachedRefollowAndImmediateQuitAtTrailDepth(t *testing.T) {
 	for _, quit := range []struct {
 		name string
@@ -187,8 +216,8 @@ func TestDecodedEmptyIdentityFailsLocallyWithoutDetailCall(t *testing.T) {
 	s.waitFor(t, "has no Ticket identity")
 	s.tm.Send(keyPress("r"))
 	m, _ := s.finish(t)
-	if calls != 0 || m.detail.loading || !errors.Is(m.detail.lastErr, errEmptyLinkTargetID) || m.detailGeneration != 2 {
-		t.Errorf("decoded empty identity = calls:%d loading:%v err:%v generation:%d, want repeated local failure at generation 2",
+	if calls != 0 || m.detail.loading || !errors.Is(m.detail.lastErr, errEmptyLinkTargetID) || m.detailGeneration != 3 {
+		t.Errorf("decoded empty identity = calls:%d loading:%v err:%v generation:%d, want local retry plus quit retirement at generation 3",
 			calls, m.detail.loading, m.detail.lastErr, m.detailGeneration)
 	}
 }
@@ -201,6 +230,7 @@ type controlledDetailReply struct {
 
 type controlledDetailCall struct {
 	id    model.TicketID
+	ctx   context.Context
 	reply chan controlledDetailReply
 }
 
@@ -213,7 +243,7 @@ func newControlledDetailReads() *controlledDetailReads {
 }
 
 func (r *controlledDetailReads) source(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
-	call := controlledDetailCall{id: id, reply: make(chan controlledDetailReply, 1)}
+	call := controlledDetailCall{id: id, ctx: ctx, reply: make(chan controlledDetailReply, 1)}
 	select {
 	case r.calls <- call:
 	case <-ctx.Done():
@@ -227,6 +257,21 @@ func (r *controlledDetailReads) source(ctx context.Context, id model.TicketID) (
 	}
 }
 
+// sourceIgnoringCancellation models a Provider that has accepted a request but
+// cannot stop it. It makes stale-success tests deterministic: cancellation closes
+// the captured context, while the supplied reply still becomes the command's
+// result and must be rejected by the generation guard.
+func (r *controlledDetailReads) sourceIgnoringCancellation(ctx context.Context, id model.TicketID) (model.Detail, model.Capabilities, error) {
+	call := controlledDetailCall{id: id, ctx: ctx, reply: make(chan controlledDetailReply, 1)}
+	select {
+	case r.calls <- call:
+	case <-ctx.Done():
+		return model.Detail{}, model.Capabilities{}, ctx.Err()
+	}
+	response := <-call.reply
+	return response.detail, response.caps, response.err
+}
+
 func (r *controlledDetailReads) next(t *testing.T, want model.TicketID) controlledDetailCall {
 	t.Helper()
 	select {
@@ -238,6 +283,74 @@ func (r *controlledDetailReads) next(t *testing.T, want model.TicketID) controll
 	case <-time.After(waitTimeout):
 		t.Fatalf("timed out waiting for Detail read %q", want)
 		return controlledDetailCall{}
+	}
+}
+
+func assertDetailCallCanceled(t *testing.T, call controlledDetailCall) {
+	t.Helper()
+	select {
+	case <-call.ctx.Done():
+		if !errors.Is(call.ctx.Err(), context.Canceled) {
+			t.Errorf("Detail context for %s ended with %v, want context.Canceled", call.id, call.ctx.Err())
+		}
+	case <-time.After(waitTimeout):
+		t.Fatalf("Detail context for %s was not cancelled", call.id)
+	}
+}
+
+func TestDetailNavigationCancelsEachAbandonedRead(t *testing.T) {
+	const (
+		rootID  model.TicketID = "acme/widgets#207"
+		childID model.TicketID = "CHILD-1"
+	)
+	p := fake.New(fake.WithBlockingFixture())
+	reads := newControlledDetailReads()
+	c := newClock()
+	s := startWith(t, c, Options{
+		Source:       selectorSource(p, c),
+		DetailSource: reads.source,
+		Interval:     time.Minute,
+		Now:          c.now,
+	})
+	s.waitFor(t, "Shard rebalancer rollout")
+	s.tm.Send(enterKey)
+	initial := reads.next(t, rootID)
+	initial.reply <- controlledDetailReply{detail: testNavigationDetail(
+		rootID,
+		"ROOT BODY FOR CANCELLATION",
+		model.Link{Kind: model.LinkRelates, Target: model.LinkTarget{ID: childID, Key: "CHILD-1", Title: "Child"}},
+	)}
+	s.waitFor(t, "ROOT BODY FOR CANCELLATION")
+
+	// Following a Link retires the reread owned by the seat it replaces.
+	s.tm.Send(keyPress("r"))
+	rereadBeforeFollow := reads.next(t, rootID)
+	s.tm.Send(tea.KeyPressMsg{Code: tea.KeyTab})
+	s.tm.Send(enterKey)
+	childRead := reads.next(t, childID)
+	assertDetailCallCanceled(t, rereadBeforeFollow)
+
+	// Popping the Trail retires the child read and restores the stable root.
+	s.tm.Send(escKey)
+	assertDetailCallCanceled(t, childRead)
+
+	// Walking up abandons a root reread along with the Detail screen.
+	s.tm.Send(keyPress("r"))
+	rereadBeforeWalkUp := reads.next(t, rootID)
+	s.tm.Send(keyPress("u"))
+	s.waitFor(t, "TODO")
+	assertDetailCallCanceled(t, rereadBeforeWalkUp)
+
+	// The root Detail is cached, but a manual reread still gets its own lifetime;
+	// quitting cancels both it and the derived session context.
+	s.tm.Send(enterKey)
+	s.waitFor(t, "ROOT BODY FOR CANCELLATION")
+	s.tm.Send(keyPress("r"))
+	rereadBeforeQuit := reads.next(t, rootID)
+	m, _ := s.finish(t)
+	assertDetailCallCanceled(t, rereadBeforeQuit)
+	if !m.quitting {
+		t.Error("q did not quit from Detail")
 	}
 }
 
@@ -256,7 +369,7 @@ func TestOpenSessionDropsReorderedRootRereadAfterChildPop(t *testing.T) {
 	c := newClock()
 	s := startWith(t, c, Options{
 		Open:         &OpenTicket{Ticket: rootTicket},
-		DetailSource: reads.source,
+		DetailSource: reads.sourceIgnoringCancellation,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
@@ -277,6 +390,7 @@ func TestOpenSessionDropsReorderedRootRereadAfterChildPop(t *testing.T) {
 	s.tm.Send(escKey)
 	s.waitFor(t, "ROOT BODY ORIGINAL")
 
+	assertDetailCallCanceled(t, delayedRoot)
 	delayedRoot.reply <- controlledDetailReply{detail: testNavigationDetail(rootID, "STALE ROOT REPLACEMENT")}
 	c.advance(time.Second)
 	s.beat()
@@ -307,7 +421,7 @@ func TestOpenSessionDropsDelayedChildAfterPopAndRestoresOffset(t *testing.T) {
 	c := newClock()
 	s := startWith(t, c, Options{
 		Open:         &OpenTicket{Ticket: model.Ticket{ID: rootID, Key: "A", Title: "Root A"}},
-		DetailSource: reads.source,
+		DetailSource: reads.sourceIgnoringCancellation,
 		Interval:     time.Minute,
 		Now:          c.now,
 	})
@@ -325,6 +439,7 @@ func TestOpenSessionDropsDelayedChildAfterPopAndRestoresOffset(t *testing.T) {
 	childRead := reads.next(t, childID)
 	s.tm.Send(escKey)
 	s.waitFor(t, "root body")
+	assertDetailCallCanceled(t, childRead)
 	childRead.reply <- controlledDetailReply{detail: testNavigationDetail(childID, "ABANDONED CHILD BODY")}
 	c.advance(time.Second)
 	s.beat()
@@ -432,8 +547,8 @@ func TestOpenSessionRetriesFailureToSuccess(t *testing.T) {
 	if got := m.details[id].detail.Description; got != "RETRY SUCCEEDED" {
 		t.Errorf("successful retry cache = %q", got)
 	}
-	if m.detailGeneration != 2 {
-		t.Errorf("Detail generation = %d, want initial read plus retry", m.detailGeneration)
+	if m.detailGeneration != 3 {
+		t.Errorf("Detail generation = %d, want initial read, retry, and quit retirement", m.detailGeneration)
 	}
 }
 

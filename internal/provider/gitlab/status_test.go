@@ -212,9 +212,8 @@ func TestUsableWontDoLabel(t *testing.T) {
 		"workflow::wontfix": true,
 		"ausgemustert":      true,
 		"404":               true,
-		// A label is usable in whatever writing system the site uses it in.
-		// An ASCII-only rule rejected the Profile outright, so a Japanese,
-		// Cyrillic, Arabic or Chinese site could not configure this at all.
+		// A label is usable in the site's writing system because normalizeLabel
+		// retains Unicode letters and digits.
 		"見送り":                true,
 		"не будет":           true,
 		"لن يتم":             true,

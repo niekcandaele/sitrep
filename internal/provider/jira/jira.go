@@ -27,12 +27,13 @@
 // Children are found through fields.parent, never through the deprecated Epic
 // Link custom field, the `"Epic Link" = ABC-1` JQL form, or the agile API.
 //
-// # Link types are discovered once
+// # Link types are coalesced
 //
-// The instance's issue link types are read once per process, lazily, and mapped
-// onto BlockedBy / Blocks / Relates by their wording. An unrecognized type falls
-// back to Relates carrying the instance's own label, and a failed discovery
-// falls back to the type object Jira inlines on every link.
+// The instance's issue link types are read lazily and mapped onto BlockedBy /
+// Blocks / Relates by their wording. Successful discovery and an ordinary
+// discovery failure are terminal for the Provider session; the latter keeps the
+// inline-label fallback. A rate refusal forms an admitted-epoch barrier so work
+// already launched under stale policy cannot continue into issue requests.
 package jira
 
 import (
@@ -43,6 +44,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -111,13 +113,19 @@ type Provider struct {
 	credentialSource CredentialSource
 	userAgent        string
 	maxTickets       int
+	now              func() time.Time
 
 	credentialsOnce sync.Once
 	credentialsErr  error
 
-	linkTypesOnce  sync.Once
-	linkTypesCache map[string]linkType
-	linkTypesErr   error
+	linkTypesMu           sync.Mutex
+	linkTypesState        linkTypesState
+	linkTypesAttempt      *linkTypesAttempt
+	linkTypesCache        map[string]linkType
+	linkTypesErr          error
+	linkTypesBarrier      error
+	linkTypesBarrierEpoch uint64
+	linkTypesBarrierReset time.Time
 }
 
 // Option configures a Provider.
@@ -135,6 +143,7 @@ func New(host string, opts ...Option) *Provider {
 		httpClient: &http.Client{Timeout: requestTimeout},
 		userAgent:  buildinfo.Name + "/" + buildinfo.Version,
 		maxTickets: provider.DefaultMaxTickets,
+		now:        time.Now,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -195,6 +204,16 @@ func WithMaxTickets(maxTickets int) Option {
 	return func(p *Provider) {
 		if maxTickets > 0 {
 			p.maxTickets = maxTickets
+		}
+	}
+}
+
+// WithNow replaces the clock used for transient rate-limit barriers. It keeps
+// timeout-free provider tests deterministic.
+func WithNow(now func() time.Time) Option {
+	return func(p *Provider) {
+		if now != nil {
+			p.now = now
 		}
 	}
 }
@@ -434,8 +453,9 @@ func (p *Provider) resolveEpic(ctx context.Context, r ref.Ref) (model.WatchlistS
 // This is three requests where the polled path is two, and that is the point of
 // the split in ADR-0003: a drill-in happens once, deliberately, when a human
 // presses Enter, so it can afford the catalogue, the issue and the discussion.
-// The catalogue is read at most once per process, so the second drill-in is two
-// requests.
+// Once the catalogue reaches success or ordinary fallback, later drill-ins make
+// only the issue and discussion requests. An admitted retry after a catalogue
+// rate barrier may perform the catalogue request again.
 //
 // An empty description, no comments and no links are the ordinary state of a
 // freshly filed Ticket and produce a zero-ish Detail, never an error.
@@ -446,9 +466,12 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 			"jira: %q does not name a Jira issue", string(id))
 	}
 
-	// A failed discovery is not a failed Detail: the links fall back to the type
-	// object Jira inlines on every entry.
-	types, _ := p.linkTypes(ctx)
+	// Ordinary catalogue failures use the inline link type object. A refusal or
+	// cancellation stops before the issue and comments requests.
+	types, err := p.linkTypes(ctx)
+	if err != nil {
+		return model.Detail{}, err
+	}
 
 	issue, err := p.fetchIssue(ctx, key, detailFields)
 	if err != nil {
@@ -465,6 +488,11 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 	}
 
 	return newDetail(issue, comments.Comments, types, p.host), nil
+}
+
+// FetchDetails delegates to the generic sequential fallback.
+func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
 }
 
 // checkRef rejects a Ref this driver cannot serve before any network call, and
@@ -790,7 +818,7 @@ func checkStatus(res *http.Response, resource, path, host string) error {
 	case http.StatusNotFound:
 		return provider.Errorf(provider.KindBadRef, "jira: %s not found (or you lack access)", resource)
 	case http.StatusTooManyRequests:
-		return provider.Errorf(provider.KindRateLimit,
+		return provider.RateLimitErrorf(rateLimitRefusalMetadata(res),
 			"jira: API rate limit exceeded; retry after %s", retryAfter(res))
 	}
 
@@ -856,6 +884,20 @@ func retryAfter(res *http.Response) string {
 		}
 	}
 	return "an unknown time"
+}
+
+func rateLimitRefusalMetadata(res *http.Response) provider.RateLimitMetadata {
+	if value := strings.TrimSpace(res.Header.Get("Retry-After")); value != "" {
+		if secs, err := strconv.ParseInt(value, 10, 64); err == nil && secs > 0 {
+			return provider.RateLimitMetadata{RetryAfter: time.Duration(secs) * time.Second}
+		}
+	}
+	if value := strings.TrimSpace(res.Header.Get("X-RateLimit-Reset")); value != "" {
+		if reset, err := time.Parse(time.RFC3339, value); err == nil {
+			return provider.RateLimitMetadata{ResetAt: reset}
+		}
+	}
+	return provider.RateLimitMetadata{}
 }
 
 // resolveCredentials resolves the email + token pair once per Provider. A 60s

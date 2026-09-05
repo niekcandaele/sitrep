@@ -187,6 +187,10 @@ func (interruptingProvider) FetchDetail(context.Context, model.TicketID) (model.
 	return model.Detail{}, errors.New("fake: not reached")
 }
 
+func (p interruptingProvider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
+	return provider.FetchDetailsDefault(ctx, ids, p.FetchDetail)
+}
+
 func (interruptingProvider) Resolve(ctx context.Context, _ provider.Selector) (model.WatchlistSnapshot, error) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		return model.WatchlistSnapshot{}, err

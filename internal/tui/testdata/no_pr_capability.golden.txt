@@ -2,27 +2,27 @@
 █████████░░░░░░░░░░░░░░░░░░░  3/9 done · 1 cancelled · 33%                                                      just now
 
 IN PROGRESS (3)
-▸ #112     Draft the shard sync protocol
-           [In Review]  @mara-vos
-  #113     Retry & backoff for the sync worker
-           @mara-vos @tobias
-  #7       Teach the gadget agent to speak sync v2
+▸ #112       Draft the shard sync protocol
+             [In Review]  @mara-vos
+  #113       Retry & backoff for the sync worker
+             @mara-vos @tobias
+  #7         Teach the gadget agent to speak sync v2
 
 TODO (3)
-  #115     Reconcile widget IDs across shards
-  #116     Protocol conformance tests
-           [Selected for Development]  @tobias
-  #117     Renseigner la métrique « éclair » du tableau de bord
+  #115       Reconcile widget IDs across shards
+  #116       Protocol conformance tests
+             [Selected for Development]  @tobias
+  #117       Renseigner la métrique « éclair » du tableau de bord
 
 DONE (3)
-  #118     Cache shard lookups
-           @mara-vos
-  #119     Emit sync telemetry
-           @tobias
-  #120     Write the sync v2 runbook
+  #118       Cache shard lookups
+             @mara-vos
+  #119       Emit sync telemetry
+             @tobias
+  #120       Write the sync v2 runbook
 
 CANCELLED (1)
-  #121     Mirror shards to the legacy feed
+  #121       Mirror shards to the legacy feed
 
 
 
@@ -37,4 +37,4 @@ CANCELLED (1)
 
 
 
-m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help …
+m release · shift-drag to select text • enter open • q quit • ↑/k up • ↓/j down • d hide finished • / find • ? help

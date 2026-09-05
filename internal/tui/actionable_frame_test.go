@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func warmTheDetailCache(t *testing.T, s *session) {
 	t.Helper()
 	s.waitFor(t, "Shard rebalancer rollout")
 	s.tm.Send(keyPress("v"))
-	s.waitFor(t, "actionable")
+	s.waitFor(t, "ACTIONABLE")
 	s.tm.Send(keyPress("v"))
 }
 
@@ -124,8 +125,8 @@ func titleColumn(t *testing.T, frame, key string) int {
 }
 
 // Before the Frontier has been opened, the list knows nothing about
-// Actionability and pays nothing to find out: no marker column, no header
-// segment, and not one FetchDetail call.
+// Actionability and pays nothing to find out: the marker gutter is blank, no
+// header segment appears, and not one FetchDetail call is made.
 func TestListBeforeTheDetailCacheIsWarm(t *testing.T) {
 	p := completeBlockingProvider()
 	c := newClock()
@@ -162,14 +163,69 @@ func TestListMarksActionableRowsOnceTheDetailCacheIsWarm(t *testing.T) {
 		t.Errorf("the header does not count the Actionable Tickets:\n%s", frame)
 	}
 
-	// The reserved column moves the title, and the meta line with it, so the
-	// list does not look ragged.
+	// Warmth paints only the reserved cells; title and meta geometry stay fixed.
 	cold := listSession(t, newClock(), completeBlockingProvider())
 	cold.waitFor(t, "Shard rebalancer rollout")
 	_, coldFrame := cold.finish(t)
-	warm, chilly := titleColumn(t, frame, "#201"), titleColumn(t, string(coldFrame), "#201")
-	if warm-chilly != actionableColumn {
-		t.Errorf("the title sits %d columns further right, want %d", warm-chilly, actionableColumn)
+	warmColumn, coldColumn := titleColumn(t, frame, "#201"), titleColumn(t, string(coldFrame), "#201")
+	if warmColumn != coldColumn {
+		t.Errorf("title column = %d warm and %d cold, want stable geometry", warmColumn, coldColumn)
+	}
+}
+
+func TestActionableEvidenceClockIsIndependentOfWatchlistStaleness(t *testing.T) {
+	p := completeBlockingProvider()
+	c := newClock()
+	s := listSession(t, c, p)
+	warmTheDetailCache(t, s)
+	m, _ := s.finish(t)
+	m.input.FetchedAt = c.now().Add(-3 * time.Minute)
+	m.width = 160
+	m.help.SetWidth(m.width)
+
+	got := string(frame(m.View().Content))
+	if !strings.Contains(got, "actionable as of"+separator+"read just now") ||
+		!strings.Contains(got, "updated 3m ago") {
+		t.Fatalf("independent initial clocks are missing:\n%s", got)
+	}
+
+	c.advance(4 * time.Minute)
+	later := string(frame(m.View().Content))
+	if !strings.Contains(later, "actionable as of"+separator+"read 4m ago") ||
+		!strings.Contains(later, "updated 7m ago") {
+		t.Fatalf("fixed anchors did not age independently:\n%s", later)
+	}
+	if n := p.DetailCalls(); n != len(m.input.Tickets) {
+		t.Errorf("DetailCalls = %d, want only the explicit Frontier fan-out's %d", n, len(m.input.Tickets))
+	}
+}
+
+func TestActionableListViewReadsTheInjectedClockOnceWithoutMovingEvidence(t *testing.T) {
+	at := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	ticket := ticket("#1", model.StatusTodo)
+	m := mouseListModel(t, Options{}, []model.Ticket{ticket}, 160, 20)
+	m.input.Capabilities.BlockingLinks = true
+	m.input.FetchedAt = at
+	m.details[ticket.ID] = detailEntry{
+		detail:            model.Detail{TicketID: ticket.ID},
+		fetchedAt:         at,
+		frontierDetail:    model.Detail{TicketID: ticket.ID},
+		frontierFetchedAt: at,
+		frontierEvidence:  true,
+	}
+	calls := 0
+	m.now = func() time.Time {
+		calls++
+		return at.Add(4 * time.Minute)
+	}
+
+	_ = m.View()
+
+	if calls != 1 {
+		t.Errorf("injected clock reads = %d, want one frozen frame snapshot", calls)
+	}
+	if got := m.details[ticket.ID].frontierFetchedAt; !got.Equal(at) {
+		t.Errorf("View moved evidence anchor from %v to %v", at, got)
 	}
 }
 
@@ -205,7 +261,7 @@ func TestListMarkersSurviveARefreshAndCostNoDetailCall(t *testing.T) {
 
 	s.clock.advance(61 * time.Second)
 	s.beat()
-	s.waitFor(t, separator+"3 actionable")
+	waitUntil(t, "the refresh Resolve", func() bool { return p.ResolveCalls() == 2 })
 
 	_, got := s.finish(t)
 
@@ -250,6 +306,69 @@ func TestARefreshThatAddsAnUncachedTicketDropsEveryMarker(t *testing.T) {
 	assertNoMarkers(t, string(got))
 	if n := p.DetailCalls(); n != fetched {
 		t.Errorf("DetailCalls = %d, want the fan-out's %d: the list fetched to fill the gap", n, fetched)
+	}
+}
+
+func TestFailedWatchlistRefreshPreservesEvidenceClockAndColdTransitionsRemoveIt(t *testing.T) {
+	at := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	now := at
+	ticket := ticket("#1", model.StatusTodo)
+	m := mouseListModel(t, Options{Now: func() time.Time { return now }}, []model.Ticket{ticket}, 160, 20)
+	m.input.FetchedAt = at
+	m.input.Capabilities.BlockingLinks = true
+	m.details[ticket.ID] = detailEntry{
+		detail:            model.Detail{TicketID: ticket.ID},
+		fetchedAt:         at,
+		frontierDetail:    model.Detail{TicketID: ticket.ID},
+		frontierFetchedAt: at,
+		frontierEvidence:  true,
+	}
+
+	initial := string(frame(m.View().Content))
+	if !strings.Contains(initial, "actionable as of"+separator+"read just now") {
+		t.Fatalf("warm fixture omitted its evidence clock:\n%s", initial)
+	}
+
+	now = at.Add(4 * time.Minute)
+	m.generation++
+	m.refreshing = true
+	m = m.onRefreshed(refreshedMsg{generation: m.generation, err: errors.New("offline")})
+	failed := string(frame(m.View().Content))
+	if !strings.Contains(failed, "updated 4m ago") ||
+		!strings.Contains(failed, "actionable as of"+separator+"read 4m ago") {
+		t.Fatalf("failed refresh did not preserve and age both fixed anchors:\n%s", failed)
+	}
+	if got := m.details[ticket.ID].frontierFetchedAt; !got.Equal(at) {
+		t.Fatalf("failed refresh moved evidence anchor to %v, want %v", got, at)
+	}
+
+	capabilityLost := m
+	capabilityLost.generation++
+	capabilityLost.refreshing = true
+	capabilityLost = capabilityLost.onRefreshed(refreshedMsg{
+		generation: capabilityLost.generation,
+		input: ListInput{
+			Tickets:      []model.Ticket{ticket},
+			FetchedAt:    now,
+			Capabilities: model.Capabilities{},
+		},
+	})
+	assertNoMarkers(t, string(frame(capabilityLost.View().Content)))
+
+	empty := m
+	empty.generation++
+	empty.refreshing = true
+	empty = empty.onRefreshed(refreshedMsg{
+		generation: empty.generation,
+		input: ListInput{
+			FetchedAt:    now,
+			Capabilities: model.Capabilities{BlockingLinks: true},
+		},
+	})
+	emptyFrame := string(frame(empty.View().Content))
+	assertNoMarkers(t, emptyFrame)
+	if strings.Contains(emptyFrame, "actionable as of") {
+		t.Fatalf("empty Watchlist retained the evidence clock:\n%s", emptyFrame)
 	}
 }
 
@@ -353,5 +472,112 @@ func TestListMarksNothingWithoutTheBlockingLinksCapability(t *testing.T) {
 	assertNoMarkers(t, string(got))
 	if n := p.DetailCalls(); n != 0 {
 		t.Errorf("DetailCalls = %d, want 0", n)
+	}
+}
+
+func TestColdExpandedListHelpExplainsActionabilityComputation(t *testing.T) {
+	at := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	ticket := ticket("#1", model.StatusTodo)
+	m := mouseListModel(t, Options{NoMouse: true, Now: func() time.Time { return at }},
+		[]model.Ticket{ticket}, 120, 40)
+	m.input.Capabilities.BlockingLinks = true
+	m.help.SetWidth(m.width)
+	m.help.ShowAll = true
+
+	cold := m.help.View(m.helpKeys())
+	requireHelpText(t, cold, "v compute actionability", "V dense Frontier", "p hold refresh")
+	if strings.Contains(strings.Join(strings.Fields(cold), " "), "v frontier") {
+		t.Errorf("cold expanded help retained the generic Frontier description:\n%s", cold)
+	}
+
+	entry := detailEntry{
+		detail:            model.Detail{TicketID: ticket.ID},
+		fetchedAt:         at,
+		frontierDetail:    model.Detail{TicketID: ticket.ID},
+		frontierFetchedAt: at,
+		frontierEvidence:  true,
+	}
+	m.details[ticket.ID] = entry
+	warm := m.help.View(m.helpKeys())
+	requireHelpText(t, warm, "v frontier", "p hold refresh")
+	if strings.Contains(strings.Join(strings.Fields(warm), " "), "compute actionability") {
+		t.Errorf("warm expanded help still promises computation:\n%s", warm)
+	}
+
+	m.details = make(map[model.TicketID]detailEntry)
+	m.width, m.height = 42, 40
+	m.help.SetWidth(m.width)
+	coldBodyHeight, coldFooterLines := m.bodyHeight(), len(m.footerLines())
+	cold = m.help.View(m.helpKeys())
+	requireHelpText(t, cold,
+		"m capture", "enter open", "v compute actionability", "V dense", "r refresh", "p hold refresh", "? help", "L legend", "q quit",
+		"↑/k up", "↓/j down", "pgup page up", "pgdn page down", "g first", "G last", "d hide finished", "/ find")
+
+	m.details[ticket.ID] = entry
+	warmBodyHeight, warmFooterLines := m.bodyHeight(), len(m.footerLines())
+	warm = m.help.View(m.helpKeys())
+	requireHelpText(t, warm, "v frontier", "p hold refresh")
+	if coldBodyHeight != warmBodyHeight || coldFooterLines != warmFooterLines ||
+		len(strings.Split(cold, "\n")) != len(strings.Split(warm, "\n")) {
+		t.Errorf("42-column cold Help changed geometry: body/footer/help=%d/%d/%d, warm=%d/%d/%d",
+			coldBodyHeight, coldFooterLines, len(strings.Split(cold, "\n")),
+			warmBodyHeight, warmFooterLines, len(strings.Split(warm, "\n")))
+	}
+
+	next, cmd := m.Update(keyPress("p"))
+	m = next.(Model)
+	if cmd != nil || !m.refreshHeld {
+		t.Fatalf("p did not hold the cold/warm Help fixture: held=%t cmd=%v", m.refreshHeld, cmd)
+	}
+	heldWarmBodyHeight, heldWarmFooterLines := m.bodyHeight(), len(m.footerLines())
+	heldWarm := m.help.View(m.helpKeys())
+	requireHelpText(t, heldWarm, "v frontier", "p resume refresh")
+	m.details = make(map[model.TicketID]detailEntry)
+	heldColdBodyHeight, heldColdFooterLines := m.bodyHeight(), len(m.footerLines())
+	heldCold := m.help.View(m.helpKeys())
+	requireHelpText(t, heldCold, "v compute actionability", "V dense", "p resume refresh")
+	if heldColdBodyHeight != heldWarmBodyHeight || heldColdFooterLines != heldWarmFooterLines ||
+		len(strings.Split(heldCold, "\n")) != len(strings.Split(heldWarm, "\n")) ||
+		heldColdBodyHeight != coldBodyHeight || heldColdFooterLines != coldFooterLines {
+		t.Errorf("42-column held/resumed cold/warm geometry changed: cold=%d/%d/%d warm=%d/%d/%d baseline=%d/%d",
+			heldColdBodyHeight, heldColdFooterLines, len(strings.Split(heldCold, "\n")),
+			heldWarmBodyHeight, heldWarmFooterLines, len(strings.Split(heldWarm, "\n")), coldBodyHeight, coldFooterLines)
+	}
+	next, cmd = m.Update(keyPress("p"))
+	m = next.(Model)
+	if cmd != nil || m.refreshHeld {
+		t.Fatalf("p did not resume the cold/warm Help fixture: held=%t cmd=%v", m.refreshHeld, cmd)
+	}
+
+	m.details = make(map[model.TicketID]detailEntry)
+	m.height = 16
+	requireHelpText(t, m.help.View(m.helpKeys()), "v compute actionability", "V dense", "L/?/q/p legend/help/quit/hold")
+
+	m.input.Capabilities.BlockingLinks = false
+	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {
+		t.Errorf("no-capability help promises Actionability computation:\n%s", got)
+	}
+	m.input.Capabilities.BlockingLinks = true
+	m.keys.Frontier.SetEnabled(false)
+	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {
+		t.Errorf("disabled Frontier binding promises Actionability computation:\n%s", got)
+	}
+	m.keys.Frontier.SetEnabled(true)
+	m.input.Tickets = nil
+	m = m.rebuildRows()
+	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {
+		t.Errorf("empty Watchlist help promises Actionability computation:\n%s", got)
+	}
+	m.input.Tickets = []model.Ticket{{Title: "identityless"}}
+	m = m.rebuildRows()
+	if got := m.help.View(m.helpKeys()); strings.Contains(strings.Join(strings.Fields(got), " "), "compute actionability") {
+		t.Errorf("identityless Watchlist help promises Actionability computation:\n%s", got)
+	}
+
+	keys := DefaultKeyMap()
+	keys.Frontier.SetEnabled(true)
+	short := keys.ShortHelp()
+	if got := short[len(short)-1].Help(); got.Key != "v" || got.Desc != "frontier" {
+		t.Errorf("ShortHelp tail = %+v, want unchanged v frontier", got)
 	}
 }

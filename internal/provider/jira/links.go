@@ -2,9 +2,11 @@ package jira
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/niekcandaele/sitrep/internal/model"
+	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
 // linkType is one of the instance's issue link types, classified: sitrep's Kind
@@ -16,37 +18,174 @@ type linkType struct {
 	outward     string
 }
 
-// linkTypes returns the instance's issue link type catalogue, discovered once
-// per process and read-only afterwards.
-//
-// Discovery is lazy, on the first FetchDetail, rather than in the constructor:
-// construction must stay free of side effects (`sitrep --help` may not call
-// Jira) and Resolve is the polled hot path, which must not carry a catalogue
-// request. Once per process, before the first link is mapped, is the only
-// moment that satisfies both — do not "fix" this into a constructor request.
-//
-// A failed discovery is not a failed Detail. The error is recorded and the
-// caller falls back to the type object Jira inlines on every issuelinks entry:
-// the catalogue's job is consistency, not availability, and a Detail rendering
-// its links through their inline labels is strictly better than one that
-// refuses to open.
+type linkTypesState uint8
+
+const (
+	linkTypesUninitialized linkTypesState = iota
+	linkTypesLoading
+	linkTypesSuccess
+	linkTypesOrdinaryFallback
+	linkTypesRateBarrier
+)
+
+type linkTypesAttempt struct {
+	done    chan struct{}
+	barrier error
+}
+
+// linkTypes returns the instance's coalesced issue link type catalogue.
+// Discovery stays lazy so constructors and Resolve remain free of this Detail
+// cost. A successful catalogue and an ordinary-failure inline-label fallback
+// are terminal for the Provider session. A rate refusal instead forms a barrier:
+// callers admitted in the refusing or an older policy epoch share it without
+// I/O. A caller already waiting on the refusing attempt shares that barrier
+// regardless of epoch; only a fresh entry may use newer admission to replace it.
+// A known future deadline blocks every epoch until it expires; after that, as for
+// an unknown reset, only a strictly newer admitted epoch may replace the retained
+// barrier.
 func (p *Provider) linkTypes(ctx context.Context) (map[string]linkType, error) {
-	p.linkTypesOnce.Do(func() {
-		var resp linkTypesResponse
-		if err := p.do(ctx, linkTypesPath, nil, "the issue link types", &resp); err != nil {
-			p.linkTypesErr = err
-			return
+	policy := provider.RequestPolicyFromContext(ctx)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		types := make(map[string]linkType, len(resp.IssueLinkTypes))
-		for _, t := range resp.IssueLinkTypes {
-			if t.ID == "" {
+		p.linkTypesMu.Lock()
+		switch p.linkTypesState {
+		case linkTypesUninitialized:
+			if p.linkTypesBarrier != nil && policy.Epoch <= p.linkTypesBarrierEpoch {
+				err := p.linkTypesBarrier
+				p.linkTypesMu.Unlock()
+				return nil, err
+			}
+			attempt := p.startLinkTypesAttemptLocked()
+			p.linkTypesMu.Unlock()
+			return p.loadLinkTypes(ctx, policy, attempt)
+
+		case linkTypesLoading:
+			attempt := p.linkTypesAttempt
+			p.linkTypesMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-attempt.done:
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if attempt.barrier != nil {
+					return nil, attempt.barrier
+				}
 				continue
 			}
-			types[t.ID] = newLinkType(t)
+
+		case linkTypesSuccess:
+			if p.linkTypesBarrier != nil && policy.Epoch <= p.linkTypesBarrierEpoch {
+				err := p.linkTypesBarrier
+				p.linkTypesMu.Unlock()
+				return nil, err
+			}
+			types := p.linkTypesCache
+			p.linkTypesMu.Unlock()
+			return types, nil
+
+		case linkTypesOrdinaryFallback:
+			if p.linkTypesBarrier != nil && policy.Epoch <= p.linkTypesBarrierEpoch {
+				err := p.linkTypesBarrier
+				p.linkTypesMu.Unlock()
+				return nil, err
+			}
+			p.linkTypesMu.Unlock()
+			return nil, nil
+
+		case linkTypesRateBarrier:
+			if (p.linkTypesBarrierReset.IsZero() || !p.now().Before(p.linkTypesBarrierReset)) &&
+				policy.Epoch > p.linkTypesBarrierEpoch {
+				attempt := p.startLinkTypesAttemptLocked()
+				p.linkTypesMu.Unlock()
+				return p.loadLinkTypes(ctx, policy, attempt)
+			}
+			err := p.linkTypesBarrier
+			p.linkTypesMu.Unlock()
+			return nil, err
 		}
+	}
+}
+
+func (p *Provider) startLinkTypesAttemptLocked() *linkTypesAttempt {
+	attempt := &linkTypesAttempt{done: make(chan struct{})}
+	p.linkTypesState = linkTypesLoading
+	p.linkTypesAttempt = attempt
+	return attempt
+}
+
+func retainedLinkTypesBarrier(refusal provider.RateLimitRefusal) error {
+	if !refusal.KnownReset {
+		return refusal.Err
+	}
+	classified := refusal.Err.(*provider.Error) //nolint:errorlint // InspectRateLimitRefusal returns its direct classified representative.
+	return &provider.Error{
+		Kind: classified.Kind,
+		Err:  classified.Err,
+		RateLimit: provider.RateLimitMetadata{
+			ResetAt: refusal.ResetAt.UTC(),
+		},
+	}
+}
+
+func (p *Provider) loadLinkTypes(ctx context.Context, policy provider.RequestPolicy, attempt *linkTypesAttempt) (map[string]linkType, error) {
+	var resp linkTypesResponse
+	err := p.do(ctx, linkTypesPath, nil, "the issue link types", &resp)
+	var types map[string]linkType
+	if err == nil {
+		types = make(map[string]linkType, len(resp.IssueLinkTypes))
+		for _, candidate := range resp.IssueLinkTypes {
+			if candidate.ID != "" {
+				types[candidate.ID] = newLinkType(candidate)
+			}
+		}
+	}
+	refusal, rateLimited := provider.InspectRateLimitRefusal(err, p.now())
+
+	p.linkTypesMu.Lock()
+	switch {
+	case err == nil:
+		p.linkTypesState = linkTypesSuccess
 		p.linkTypesCache = types
-	})
-	return p.linkTypesCache, p.linkTypesErr
+		p.linkTypesErr = nil
+	case rateLimited:
+		// Even an already-elapsed refusal stops this paid-for operation and
+		// remains an epoch barrier. The Model advances its admission epoch after
+		// observing the refusal; only that freshly authorized entry may replace
+		// the attempt, while current waiters share this exact evidence.
+		p.linkTypesState = linkTypesRateBarrier
+		p.linkTypesCache = nil
+		p.linkTypesErr = nil
+		p.linkTypesBarrier = retainedLinkTypesBarrier(refusal)
+		p.linkTypesBarrierEpoch = policy.Epoch
+		p.linkTypesBarrierReset = refusal.ResetAt
+		attempt.barrier = p.linkTypesBarrier
+	case ctx.Err() != nil:
+		p.linkTypesState = linkTypesUninitialized
+	case err != nil:
+		p.linkTypesState = linkTypesOrdinaryFallback
+		p.linkTypesCache = nil
+		p.linkTypesErr = err
+	}
+	p.linkTypesAttempt = nil
+	close(attempt.done)
+	p.linkTypesMu.Unlock()
+
+	switch {
+	case err == nil:
+		return types, nil
+	case ctx.Err() != nil && rateLimited:
+		return nil, errors.Join(ctx.Err(), refusal.Err)
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case rateLimited:
+		return nil, refusal.Err
+	default:
+		return nil, nil
+	}
 }
 
 // newLinkType classifies one wire link type and keeps the instance's own

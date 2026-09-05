@@ -1,4 +1,15 @@
-// Package plain renders sitrep's one-shot text snapshot: the --plain report.
+// Package plain has two responsibilities: it owns sitrep's one-shot --plain
+// reports through RenderWatchlist and RenderTicket, and it provides shared,
+// renderer-independent terminal-shaping vocabulary. The TUI consumes applicable
+// text and layout shaping, measurement, and display-policy members; the two
+// report entry points are not shared rendering APIs.
+//
+// Display-policy callers supply their frame context. ShowsNativeStatus applies
+// only to Ticket rows under a Status Category heading; heading-less Ticket
+// frames use StatusField. Link-target rows are exempt because they have no such
+// heading. This is terminal presentation policy, not model state or a Provider
+// or JSON contract. plain may depend on model values and terminal-text utilities,
+// but never on TUI screens, styles, input, geometry, or lifecycle.
 //
 // The report is plain text and nothing else. It contains no ANSI escape
 // sequence of any kind, never switches to the alternate screen, and never
@@ -16,9 +27,6 @@
 // renderer, and it is why RenderWatchlist takes a snapshot and an io.Writer and
 // nothing else. RenderTicket, the report a Ref that named a Ticket
 // produces, obeys the same rules on the same terms.
-//
-// The shaping functions here are the rendering vocabulary the TUI reuses: it
-// styles these shapes rather than inventing its own.
 package plain
 
 import (

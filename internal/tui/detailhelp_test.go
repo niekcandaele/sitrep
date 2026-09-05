@@ -56,6 +56,7 @@ func TestDetailHelpRolesMapEveryBindingByName(t *testing.T) {
 		"parent":        roles.parent.Help().Key,
 		"refresh":       roles.refresh.Help().Key,
 		"help":          roles.help.Help().Key,
+		"L":             roles.legend.Help().Key,
 		"up":            roles.up.Help().Key,
 		"down":          roles.down.Help().Key,
 		"page-up":       roles.pageUp.Help().Key,
@@ -93,7 +94,7 @@ func TestDetailHelpGroupsAreBuiltFromNamedRoles(t *testing.T) {
 	groups := roles.fullGroups()
 	if got, want := detailHelpKeysOf(groups[0]), []string{
 		"mouse", "mouse-wheel", "mouse-follow", "back", "follow", "next-link", "previous-link",
-		"parent", "refresh", "help", "quit",
+		"parent", "refresh", "help", "L", "quit",
 	}; !reflect.DeepEqual(got, want) {
 		t.Errorf("action roles = %v, want %v", got, want)
 	}

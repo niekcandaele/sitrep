@@ -1,0 +1,74 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOT_WhQ88AAAABNqYEOA",
+        "number": 11,
+        "title": "Ticket decoder mode: non-epic refs open Detail",
+        "url": "https://github.com/niekcandaele/sitrep/issues/11",
+        "state": "OPEN",
+        "stateReason": null,
+        "repository": {
+          "nameWithOwner": "niekcandaele/sitrep"
+        },
+        "parent": {
+          "id": "I_kwDOT_WhQ88AAAABNqX_5Q",
+          "number": 2,
+          "title": "Epic: sitrep v1 — cross-tracker epic monitor",
+          "url": "https://github.com/niekcandaele/sitrep/issues/2",
+          "repository": {
+            "nameWithOwner": "niekcandaele/sitrep"
+          }
+        },
+        "assignees": {
+          "nodes": [
+            {
+              "login": "niekcandaele",
+              "name": "Niek Candaele",
+              "avatarUrl": "https://avatars.githubusercontent.com/u/26802365?v=4"
+            }
+          ]
+        },
+        "closedByPullRequestsReferences": {
+          "totalCount": 12,
+          "nodes": [
+            {
+              "number": 25,
+              "title": "Ticket decoder mode",
+              "url": "https://github.com/niekcandaele/sitrep/pull/25",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "REVIEW_REQUIRED",
+              "repository": {
+                "nameWithOwner": "niekcandaele/sitrep"
+              },
+              "commits": {
+                "nodes": [
+                  {
+                    "commit": {
+                      "statusCheckRollup": {
+                        "state": "SUCCESS"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "subIssues": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    },
+    "rateLimit": {
+      "remaining": 0,
+      "resetAt": "2030-01-02T03:04:05Z"
+    }
+  }
+}
