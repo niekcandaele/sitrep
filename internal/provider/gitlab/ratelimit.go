@@ -11,14 +11,8 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
-type rateLimitCollectorKey struct{}
-
-func withRateLimitCollector(ctx context.Context, collector *provider.RateLimitBudgetCollector) context.Context {
-	return context.WithValue(ctx, rateLimitCollectorKey{}, collector)
-}
-
 func observeRateLimit(ctx context.Context, header http.Header) {
-	collector, _ := ctx.Value(rateLimitCollectorKey{}).(*provider.RateLimitBudgetCollector)
+	collector := provider.RateLimitCollectorFromContext(ctx)
 	if collector == nil {
 		return
 	}

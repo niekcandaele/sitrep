@@ -177,13 +177,17 @@ func actionabilityListFullHelp(k KeyMap) [][]key.Binding {
 	}
 }
 
-func compactListFullHelp(k KeyMap) [][]key.Binding {
+// compactListFullHelp lays the List help out for the smallest terminals.
+// refreshHeld and computesActionability are passed in rather than recovered from
+// rendered help text: the labels are UI copy, and rewording one must not change
+// which layout this returns.
+func compactListFullHelp(k KeyMap, refreshHeld, computesActionability bool) [][]key.Binding {
 	mouse := k.ToggleMouse
 	if mouse.Help().Desc == mouseEnabledHelp {
 		mouse.SetHelp("m", mouseEnabledCompactHelp)
 	}
 	refreshAction := "hold"
-	if k.ToggleRefreshHold.Help().Desc == "resume refresh" {
+	if refreshHeld {
 		refreshAction = "resume"
 	}
 	bindings := []key.Binding{
@@ -199,8 +203,7 @@ func compactListFullHelp(k KeyMap) [][]key.Binding {
 		helpOnlyBinding("L/?/q/p", "legend/help/quit/"+refreshAction),
 	}
 	switch {
-	case k.Frontier.Enabled() && k.DenseFrontier.Enabled() &&
-		k.Frontier.Help().Desc == "compute actionability":
+	case k.Frontier.Enabled() && k.DenseFrontier.Enabled() && computesActionability:
 		bindings = append(bindings, helpOnlyBinding("v", "compute actionability · V dense"))
 	case k.Frontier.Enabled() && k.DenseFrontier.Enabled():
 		bindings = append(bindings, helpOnlyBinding("v/V", "frontier/dense Frontier"))

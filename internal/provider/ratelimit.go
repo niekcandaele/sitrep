@@ -35,6 +35,22 @@ func RequestPolicyFromContext(ctx context.Context) RequestPolicy {
 	return policy
 }
 
+type rateLimitCollectorKey struct{}
+
+// WithRateLimitCollector attaches the budget collector a driver reports into.
+// Drivers differ in wire format, so each parses its own headers or fields, but
+// every one of them converges on this single context key.
+func WithRateLimitCollector(ctx context.Context, collector *RateLimitBudgetCollector) context.Context {
+	return context.WithValue(ctx, rateLimitCollectorKey{}, collector)
+}
+
+// RateLimitCollectorFromContext returns the collector attached by the caller, or
+// nil when nothing is collecting.
+func RateLimitCollectorFromContext(ctx context.Context) *RateLimitBudgetCollector {
+	collector, _ := ctx.Value(rateLimitCollectorKey{}).(*RateLimitBudgetCollector)
+	return collector
+}
+
 // RateLimitRefusal is the conservative policy meaning of the bounded portion of
 // one Provider error graph. Err is a representative classified refusal that
 // remains inspectable. KnownReset is true only when ResetAt is strictly after the

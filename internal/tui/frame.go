@@ -196,20 +196,6 @@ func (f rateLimitHeaderFact) fragments() (compact, full string) {
 	return compact, compact + separator + "resets " + f.budget.ResetsAt.UTC().Format(time.RFC3339)
 }
 
-func (f rateLimitHeaderFact) appendTo(counts, staleness string, width int) string {
-	compact, full := f.fragments()
-	if compact == "" {
-		return counts
-	}
-	if headerFactsFit(counts+separator+full, staleness, width) {
-		return counts + separator + full
-	}
-	if headerFactsFit(counts+separator+compact, staleness, width) {
-		return counts + separator + compact
-	}
-	return counts
-}
-
 func (f rateLimitHeaderFact) appendToLine(counts, staleness string, width int) string {
 	if !f.valid {
 		return counts

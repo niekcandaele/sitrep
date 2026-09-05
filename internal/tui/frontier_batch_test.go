@@ -177,7 +177,7 @@ func TestFrontierPluralResultsAtTUIBoundary(t *testing.T) {
 		{
 			name: "typed-nil DetailFailures", err: typedNil,
 			wantFailed: []model.TicketID{"A", "B"}, wantDone: 2,
-			wantLastText: "typed-nil DetailFailures", wantRawText: "typed-nil DetailFailures",
+			wantLastText: "typed-nil error", wantRawText: "typed-nil error",
 			wantResolved: true,
 		},
 		{

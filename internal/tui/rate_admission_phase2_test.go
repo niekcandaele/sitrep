@@ -810,7 +810,7 @@ func TestPhase2StaleRefusalChangesPolicyWithoutChangingReplacementSeat(t *testin
 		t.Fatal("fixture did not start first Detail read")
 	}
 	oldGeneration, oldPolicy := m.detailGeneration, m.detailRequestPolicy
-	second, secondCmd := m.seatDetail(model.Ticket{ID: "B", Key: "B", Title: "second", Status: model.StatusTodo}, Header{}, m.input.Capabilities, true)
+	second, secondCmd := m.seatDetail(model.Ticket{ID: "B", Key: "B", Title: "second", Status: model.StatusTodo}, Header{}, m.input.Capabilities, detailListMember)
 	m = second.(Model)
 	if secondCmd == nil || m.detail.ticket.ID != "B" || !m.detail.loading {
 		t.Fatal("fixture did not replace Detail seat")
@@ -1144,7 +1144,7 @@ func TestPhase2DenialLeavesSameSeatButRetiresReplacement(t *testing.T) {
 	default:
 	}
 
-	nextSeat, cmd := m.seatDetail(model.Ticket{ID: "B", Key: "B"}, Header{}, m.input.Capabilities, true)
+	nextSeat, cmd := m.seatDetail(model.Ticket{ID: "B", Key: "B"}, Header{}, m.input.Capabilities, detailListMember)
 	replacement := nextSeat.(Model)
 	if cmd != nil || replacement.detailGeneration != 8 || replacement.detailContext != nil || replacement.detail.loading || replacement.detail.ticket.ID != "B" {
 		t.Fatalf("denied replacement did not retire and reseat: generation=%d context=%v loading=%t ticket=%q cmd=%v",

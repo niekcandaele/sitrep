@@ -194,12 +194,18 @@ func (e *DetailFailures) Error() string {
 	if len(e.Failures) > maxDetailFailureUnwrapChildren {
 		return errDetailFailuresExceedSafeBounds.Error()
 	}
+	return fmt.Sprintf("details could not be read for %s", strings.Join(e.sortedFailureIDs(), ", "))
+}
+
+// sortedFailureIDs orders the failed Ticket IDs so a message and its unwrapped
+// children always agree on order.
+func (e *DetailFailures) sortedFailureIDs() []string {
 	ids := make([]string, 0, len(e.Failures))
 	for id := range e.Failures {
 		ids = append(ids, string(id))
 	}
 	sort.Strings(ids)
-	return fmt.Sprintf("details could not be read for %s", strings.Join(ids, ", "))
+	return ids
 }
 
 // Unwrap exposes every per-Ticket error for an ordinary bounded aggregate. An
@@ -212,11 +218,7 @@ func (e *DetailFailures) Unwrap() []error {
 	if len(e.Failures) > maxDetailFailureUnwrapChildren {
 		return []error{errDetailFailuresExceedSafeBounds}
 	}
-	ids := make([]string, 0, len(e.Failures))
-	for id := range e.Failures {
-		ids = append(ids, string(id))
-	}
-	sort.Strings(ids)
+	ids := e.sortedFailureIDs()
 	errs := make([]error, 0, len(ids))
 	for _, rawID := range ids {
 		id := model.TicketID(rawID)
@@ -259,7 +261,7 @@ func newDetailFailuresError(failures map[model.TicketID]error, refusal error) er
 // rate refusal returned by the same paid-for callback remains in its aggregate
 // error for Tracker admission policy.
 func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(context.Context, model.TicketID) (model.Detail, error)) (map[model.TicketID]model.Detail, error) {
-	canonical := canonicalDetailIDs(ids)
+	canonical := CanonicalDetailIDs(ids)
 	details := make(map[model.TicketID]model.Detail, len(canonical))
 	failures := make(map[model.TicketID]error)
 	var rateRefusal error
@@ -303,7 +305,9 @@ func FetchDetailsDefault(ctx context.Context, ids []model.TicketID, fetch func(c
 	return details, nil
 }
 
-func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
+// CanonicalDetailIDs returns the requested IDs in input order, skipping empty
+// IDs and duplicates. Every plural Detail path orders its work by this slice.
+func CanonicalDetailIDs(ids []model.TicketID) []model.TicketID {
 	canonical := make([]model.TicketID, 0, len(ids))
 	seen := make(map[model.TicketID]bool, len(ids))
 	for _, id := range ids {

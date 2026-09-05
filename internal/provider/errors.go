@@ -122,11 +122,21 @@ type Error struct {
 	RateLimit RateLimitMetadata
 }
 
-func (e *Error) Error() string { return e.Err.Error() }
+func (e *Error) Error() string {
+	if e == nil {
+		return "provider: typed-nil Error"
+	}
+	return e.Err.Error()
+}
 
 // Unwrap keeps everything the driver wrapped reachable, so errors.Is still
 // finds a context.Canceled through a *url.Error through a classified error.
-func (e *Error) Unwrap() error { return e.Err }
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // Errorf builds a classified error. The format string carries the driver's own
 // prefix ("github: …"), exactly as fmt.Errorf did before it, so classifying a

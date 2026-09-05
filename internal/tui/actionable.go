@@ -62,7 +62,7 @@ func actionableMarkers(tickets []model.Ticket, links map[model.TicketID][]model.
 // one canonical member whose Detail the Frontier can read. An empty Watchlist
 // and rows without identity have no computation for expanded Help to promise.
 func hasActionabilityMembers(tickets []model.Ticket) bool {
-	return len(detailfanout.Plan(tickets, nil)) > 0
+	return detailfanout.HasPlan(tickets, nil)
 }
 
 // actionableEvidenceSnapshot returns when the last required current member's

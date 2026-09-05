@@ -201,7 +201,7 @@ func TestDetailMouseWheelDomainMessageRevalidatesSeat(t *testing.T) {
 
 	t.Run("another seated root rejects wheel", func(t *testing.T) {
 		next, _ := base.seatDetail(model.Ticket{ID: "other-root", Key: "OTHER-1", Title: "Other root"},
-			base.detail.input.Parent, allCaps, false)
+			base.detail.input.Parent, allCaps, detailDisplayOnly)
 		other := next.(Model)
 		other.detail.loaded = true
 		other.detail.loading = false

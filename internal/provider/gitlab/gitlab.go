@@ -293,7 +293,7 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		return model.WatchlistSnapshot{}, err
 	}
 	collector := &provider.RateLimitBudgetCollector{}
-	ctx = withRateLimitCollector(ctx, collector)
+	ctx = provider.WithRateLimitCollector(ctx, collector)
 	var (
 		snap model.WatchlistSnapshot
 		err  error

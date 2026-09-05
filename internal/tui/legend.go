@@ -301,8 +301,8 @@ func (m Model) detailLegendLines(doc detailDocument) []string {
 		return nil
 	}
 	id := m.detail.ticket.ID
-	facts := frontierLegendFactsForID(m.frontier, id, m.detail.frontierMember)
-	cycles := detailLegendCycles(frontierCyclesForLegend(m.frontier), id, m.detail.frontierMember)
+	facts := frontierLegendFactsForID(m.frontier, id, m.detail.provenance.fromFrontier())
+	cycles := detailLegendCycles(frontierCyclesForLegend(m.frontier), id, m.detail.provenance.fromFrontier())
 	if len(cycles) > 0 {
 		hasCycleFact := false
 		for _, fact := range facts {
@@ -330,13 +330,6 @@ func replaceTrailingBodyLines(body string, used int, legend []string, style func
 		lines[used+i] = style(line)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// frontierCycleHeaderCounts preserves the pre-#100 no-cycle chain exactly. A
-// cycle changes the line only when the graph reports one; the count is the
-// number of SCC sets, never their members or cards.
-func (m Model) frontierCycleHeaderCounts(nodes, ghosts, actionable, known int) string {
-	return m.frontierCycleHeaderCountsWithCycles(nodes, ghosts, actionable, known, m.frontier.graph.Cycles())
 }
 
 func (m Model) frontierCycleHeaderCountsWithCycles(nodes, ghosts, actionable, known int, cycles [][]model.TicketID) string {
