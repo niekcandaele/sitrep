@@ -320,7 +320,7 @@ func New(ctx context.Context, opts Options) Model {
 		for id, detail := range details {
 			cleaned[id] = safeDetail(detail)
 		}
-		return cleaned, caps, safeDetailFanoutError(err)
+		return cleaned, caps, safeErr(err)
 	}
 
 	// The box draws no cursor of its own: the real terminal cursor is placed
@@ -410,7 +410,7 @@ func New(ctx context.Context, opts Options) Model {
 			m.listArmed = false
 		}
 		entry := safeOpen(*opts.Open)
-		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities, false)
+		next, _ := m.seatDetail(entry.Ticket, entry.Parent, entry.Capabilities, detailDisplayOnly)
 		m = next.(Model)
 	}
 	return m
@@ -1954,7 +1954,7 @@ func (m Model) responsiveHelpKeys(keys help.KeyMap, markerSnapshot ...listMarker
 	}
 	if isList && m.help.ShowAll &&
 		m.width > 0 && m.width <= 42 && m.height > 0 && m.height <= 16 {
-		full = compactListFullHelp(fullKeys.(KeyMap))
+		full = compactListFullHelp(fullKeys.(KeyMap), m.refreshHeld, computesActionability)
 	} else if m.width > 0 && lipgloss.Width(unbounded.FullHelpView(full)) > m.width {
 		if computesActionability {
 			candidate := actionabilityListFullHelp(fullKeys.(KeyMap))

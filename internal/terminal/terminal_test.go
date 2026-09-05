@@ -2,30 +2,39 @@ package terminal_test
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"testing"
 
 	"github.com/niekcandaele/sitrep/internal/terminal"
 )
 
-func TestIsRejectsValueWithoutFileDescriptor(t *testing.T) {
-	if terminal.Is(&bytes.Buffer{}) {
-		t.Error("Is(buffer) = true, want false")
-	}
-}
-
-func TestIsRejectsPipe(t *testing.T) {
+// TestIsRejectsNonTerminals covers the branch this package owns: a value only
+// qualifies when it exposes an Fd. The positive case needs a real terminal and
+// lives in the linux-only PTY test beside this one.
+func TestIsRejectsNonTerminals(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
-	defer writer.Close()
+	t.Cleanup(func() {
+		reader.Close()
+		writer.Close()
+	})
 
-	if terminal.Is(reader) {
-		t.Error("Is(pipe reader) = true, want false")
-	}
-	if terminal.Is(writer) {
-		t.Error("Is(pipe writer) = true, want false")
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{"no file descriptor", &bytes.Buffer{}},
+		{"pipe reader", reader},
+		{"pipe writer", writer},
+		{"nil-ish reader", io.Reader(&bytes.Buffer{})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if terminal.Is(test.value) {
+				t.Errorf("Is(%s) = true, want false", test.name)
+			}
+		})
 	}
 }

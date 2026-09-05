@@ -11,19 +11,13 @@ import (
 	"github.com/niekcandaele/sitrep/internal/provider"
 )
 
-type rateLimitCollectorKey struct{}
-
 type rateLimitNode struct {
 	Remaining json.RawMessage `json:"remaining"`
 	ResetAt   json.RawMessage `json:"resetAt"`
 }
 
-func withRateLimitCollector(ctx context.Context, collector *provider.RateLimitBudgetCollector) context.Context {
-	return context.WithValue(ctx, rateLimitCollectorKey{}, collector)
-}
-
 func observeRateLimit(ctx context.Context, node rateLimitNode) {
-	collector, _ := ctx.Value(rateLimitCollectorKey{}).(*provider.RateLimitBudgetCollector)
+	collector := provider.RateLimitCollectorFromContext(ctx)
 	if collector == nil {
 		return
 	}

@@ -66,7 +66,7 @@ func TestFrontierCycleHeaderCountsSetsNotMembers(t *testing.T) {
 		graph: graph,
 		input: FrontierInput{Tickets: tickets, Links: links, Capabilities: model.Capabilities{BlockingLinks: true}},
 	}}
-	got := m.frontierCycleHeaderCounts(3, 0, 1, 3)
+	got := m.frontierCycleHeaderCountsWithCycles(3, 0, 1, 3, m.frontier.graph.Cycles())
 	if !strings.Contains(got, "1 blocking cycle") || strings.Contains(got, "2 blocking cycles") || strings.Contains(got, "nothing in them can start") {
 		t.Fatalf("cycle header = %q", got)
 	}
@@ -241,7 +241,7 @@ func TestLegendDispatchAndDetailSlackEligibility(t *testing.T) {
 		legendVisible: true,
 		detailKeys:    DefaultDetailKeyMap(),
 		detailReturn:  modeFrontier,
-		detail:        detailState{ticket: model.Ticket{ID: "one", Key: "ONE"}, frontierMember: true, input: DetailInput{Detail: model.Detail{TicketID: "one"}}},
+		detail:        detailState{ticket: model.Ticket{ID: "one", Key: "ONE"}, provenance: detailFrontierMember, input: DetailInput{Detail: model.Detail{TicketID: "one"}}},
 		frontier:      frontier,
 	}
 	updated, cmd := m.onDetailKey(keyPress("L"))
@@ -285,7 +285,7 @@ func TestUnresolvedFrontierDetailOmitsAllLegendFacts(t *testing.T) {
 	}
 
 	m.frontier = resolvedLegendFrontier()
-	m.detail = detailState{ticket: model.Ticket{ID: "one"}, frontierMember: true, input: DetailInput{Detail: model.Detail{TicketID: "one"}}}
+	m.detail = detailState{ticket: model.Ticket{ID: "one"}, provenance: detailFrontierMember, input: DetailInput{Detail: model.Detail{TicketID: "one"}}}
 	if got := m.detailLegendLines(detailDocument{}); len(got) == 0 {
 		t.Fatal("resolved Frontier Detail omitted its applicable legend")
 	}
@@ -298,7 +298,7 @@ func TestLoadingFrontierDetailUsesStableSeatIdentity(t *testing.T) {
 		legendVisible: true,
 		detailReturn:  modeFrontier,
 		detail: detailState{
-			ticket: model.Ticket{ID: "one", Key: "ONE"}, frontierMember: true,
+			ticket: model.Ticket{ID: "one", Key: "ONE"}, provenance: detailFrontierMember,
 			input: DetailInput{}, loading: true,
 		},
 		frontier: resolvedLegendFrontier(),
@@ -322,7 +322,7 @@ func TestFrontierDetailLegendRefreshesResolvedGraphWithoutLayout(t *testing.T) {
 		detailFanoutInflight: 1,
 		details:              make(map[model.TicketID]detailEntry),
 		now:                  time.Now,
-		detail:               detailState{ticket: ticket, frontierMember: true},
+		detail:               detailState{ticket: ticket, provenance: detailFrontierMember},
 		frontier: frontierState{
 			graph:   model.BuildBlockingGraph([]model.Ticket{ticket}, nil, capabilities),
 			input:   FrontierInput{Tickets: []model.Ticket{ticket}, Capabilities: capabilities},
@@ -362,7 +362,7 @@ func TestFrontierDetailLegendRefreshesNewCycleEvidenceWithoutLayout(t *testing.T
 		detailFanoutInflight: 1,
 		details:              make(map[model.TicketID]detailEntry),
 		now:                  time.Now,
-		detail:               detailState{ticket: tickets[0], frontierMember: true},
+		detail:               detailState{ticket: tickets[0], provenance: detailFrontierMember},
 		frontier: frontierState{
 			graph:   model.BuildBlockingGraph(tickets, nil, capabilities),
 			input:   FrontierInput{Tickets: tickets, Capabilities: capabilities},
@@ -414,9 +414,9 @@ func TestFrontierDetailRefreshReplacesEvidenceWithoutLayout(t *testing.T) {
 		details:          make(map[model.TicketID]detailEntry),
 		now:              time.Now,
 		detail: detailState{
-			ticket:         tickets[0],
-			frontierMember: true,
-			loading:        true,
+			ticket:     tickets[0],
+			provenance: detailFrontierMember,
+			loading:    true,
 		},
 		frontier: frontierState{
 			graph:   model.BuildBlockingGraph(tickets, links, capabilities),
@@ -501,7 +501,7 @@ func TestNativeFrontierOpenRefreshesFollowedAliasCache(t *testing.T) {
 	}
 	opened, cmd := m.openFrontierNode()
 	m = opened.(Model)
-	if cmd == nil || !m.detail.loaded || !m.detail.loading || !m.detail.frontierMember || !m.detail.watchlistMember {
+	if cmd == nil || !m.detail.loaded || !m.detail.loading || !m.detail.provenance.fromFrontier() {
 		t.Fatalf("native open did not refresh followed cache: detail=%#v cmd=%v", m.detail, cmd)
 	}
 	native := model.Detail{}
@@ -573,7 +573,7 @@ func TestFrontierDetailRefreshNamesOnlyRemainingFailure(t *testing.T) {
 		detailGeneration: 2,
 		details:          make(map[model.TicketID]detailEntry),
 		now:              time.Now,
-		detail:           detailState{ticket: tickets[0], frontierMember: true, loading: true},
+		detail:           detailState{ticket: tickets[0], provenance: detailFrontierMember, loading: true},
 		frontier: frontierState{
 			graph:  model.BuildBlockingGraph(tickets, links, capabilities),
 			input:  FrontierInput{Tickets: tickets, Links: links, Capabilities: capabilities},
@@ -636,7 +636,7 @@ func TestFrontierDetailRefreshAddsCycleWithoutLayout(t *testing.T) {
 		detailGeneration: 5,
 		details:          make(map[model.TicketID]detailEntry),
 		now:              time.Now,
-		detail:           detailState{ticket: tickets[0], frontierMember: true, loading: true},
+		detail:           detailState{ticket: tickets[0], provenance: detailFrontierMember, loading: true},
 		frontier: frontierState{
 			graph: model.BuildBlockingGraph(tickets, links, capabilities),
 			input: FrontierInput{Tickets: tickets, Links: links, Capabilities: capabilities},
@@ -701,7 +701,7 @@ func TestFrontierFanoutDoesNotOverwriteNewerDetailEvidence(t *testing.T) {
 				detailFanoutInflight: 1,
 				details:              make(map[model.TicketID]detailEntry),
 				now:                  time.Now,
-				detail:               detailState{ticket: tickets[0], frontierMember: true, loading: true},
+				detail:               detailState{ticket: tickets[0], provenance: detailFrontierMember, loading: true},
 				frontier: frontierState{
 					graph:   model.BuildBlockingGraph(tickets, links, capabilities),
 					input:   FrontierInput{Tickets: tickets, Links: links, Capabilities: capabilities},
@@ -790,7 +790,7 @@ func TestFrontierFanoutPreservesNewerDirectDetailAcrossModes(t *testing.T) {
 				details:              make(map[model.TicketID]detailEntry),
 				now:                  time.Now,
 				detail: detailState{
-					ticket: tickets[0], frontierMember: tc.detailReturn == modeFrontier, loading: true,
+					ticket: tickets[0], provenance: frontierSeatProvenance(tc.detailReturn == modeFrontier), loading: true,
 				},
 				frontier: frontierState{
 					input: FrontierInput{Tickets: tickets, Links: map[model.TicketID][]model.Link{"one": nil, "two": nil}, Capabilities: capabilities},
@@ -1038,7 +1038,7 @@ func TestFrontierDetailRefreshLeavesGhostAndEmptyMemberEvidenceAlone(t *testing.
 				detailGeneration: 1,
 				details:          make(map[model.TicketID]detailEntry),
 				now:              time.Now,
-				detail:           detailState{ticket: tc.ticket, frontierMember: tc.member, loading: true},
+				detail:           detailState{ticket: tc.ticket, provenance: frontierSeatProvenance(tc.member), loading: true},
 				frontier: frontierState{
 					graph: model.BuildBlockingGraph([]model.Ticket{member}, links, capabilities),
 					input: FrontierInput{Tickets: []model.Ticket{member}, Links: links, Capabilities: capabilities},
@@ -1098,7 +1098,7 @@ func TestFollowedWatchlistAliasNeverSeedsFrontierEvidence(t *testing.T) {
 			Tickets: []model.Ticket{source, alias}, Capabilities: capabilities,
 		},
 		detail: detailState{
-			ticket: source, loaded: true, frontierMember: true,
+			ticket: source, loaded: true, provenance: detailFrontierMember,
 			input: DetailInput{Detail: model.Detail{Links: sourceLinks}, Capabilities: capabilities},
 		},
 		frontier: frontierState{
@@ -1111,8 +1111,8 @@ func TestFollowedWatchlistAliasNeverSeedsFrontierEvidence(t *testing.T) {
 
 	followed, cmd := m.followDetailLink(detailLinkIdentity{TargetID: alias.ID, Kind: model.LinkBlockedBy})
 	m = followed.(Model)
-	if cmd == nil || m.detail.ticket.ID != alias.ID || m.detail.frontierMember {
-		t.Fatalf("followed Detail = ticket:%q member:%t cmd:%v, want alias/non-member/fetch", m.detail.ticket.ID, m.detail.frontierMember, cmd)
+	if cmd == nil || m.detail.ticket.ID != alias.ID || m.detail.provenance.fromFrontier() {
+		t.Fatalf("followed Detail = ticket:%q member:%t cmd:%v, want alias/non-member/fetch", m.detail.ticket.ID, m.detail.provenance.fromFrontier(), cmd)
 	}
 	updated, cmd := m.Update(detailFetchedMsg{
 		generation: m.detailGeneration, id: alias.ID, caps: capabilities,
@@ -1186,7 +1186,7 @@ func TestEligibleDetailReadsSeedFrontierCache(t *testing.T) {
 			m := Model{
 				mode: modeDetail, detailReturn: tc.returnMode, detailGeneration: 1,
 				details: make(map[model.TicketID]detailEntry), now: func() time.Time { return fetchedAt },
-				detail: detailState{ticket: ticket, frontierMember: tc.member, watchlistMember: true, loading: true},
+				detail: detailState{ticket: ticket, provenance: watchlistSeatProvenance(tc.member), loading: true},
 				frontier: frontierState{input: FrontierInput{
 					Tickets: []model.Ticket{ticket}, Links: make(map[model.TicketID][]model.Link), Capabilities: capabilities,
 				}},
@@ -1223,7 +1223,7 @@ func TestListDetailOriginDoesNotTransferToFollowedAlias(t *testing.T) {
 	})
 	opened, cmd := m.openDetail()
 	m = opened.(Model)
-	if cmd == nil || !m.detail.watchlistMember {
+	if cmd == nil || !m.detail.provenance.watchlistMember() {
 		t.Fatalf("List root did not establish native origin: detail=%#v cmd=%v", m.detail, cmd)
 	}
 	sourceLinks := []model.Link{{
@@ -1239,7 +1239,7 @@ func TestListDetailOriginDoesNotTransferToFollowedAlias(t *testing.T) {
 
 	followed, cmd := m.followDetailLink(detailLinkIdentity{TargetID: alias.ID, Kind: model.LinkBlockedBy})
 	m = followed.(Model)
-	if cmd == nil || m.detail.watchlistMember {
+	if cmd == nil || m.detail.provenance.watchlistMember() {
 		t.Fatalf("List followed alias inherited native origin: detail=%#v cmd=%v", m.detail, cmd)
 	}
 	aliasLinks := []model.Link{{
@@ -1350,7 +1350,7 @@ func TestUnresolvedFrontierLegendIncludesRenderedOutsideWatchlistFact(t *testing
 
 func TestFrontierNoCycleHeaderPreservesEstablishedSegments(t *testing.T) {
 	m := Model{frontier: resolvedLegendFrontier()}
-	if got, want := m.frontierCycleHeaderCounts(4, 2, 0, 0), "frontier · 4 nodes · 2 ghosts · actionable unknown"; got != want {
+	if got, want := m.frontierCycleHeaderCountsWithCycles(4, 2, 0, 0, m.frontier.graph.Cycles()), "frontier · 4 nodes · 2 ghosts · actionable unknown"; got != want {
 		t.Fatalf("no-cycle header = %q, want %q", got, want)
 	}
 }
@@ -1375,7 +1375,7 @@ func TestEmptyIDFrontierDetailNeverClaimsOutsideWatchlist(t *testing.T) {
 		height:        30,
 		legendVisible: true,
 		detailReturn:  modeFrontier,
-		detail:        detailState{ticket: model.Ticket{}, frontierMember: true, input: DetailInput{Detail: model.Detail{TicketID: ""}}},
+		detail:        detailState{ticket: model.Ticket{}, provenance: detailFrontierMember, input: DetailInput{Detail: model.Detail{TicketID: ""}}},
 		frontier: frontierState{
 			graph: model.BuildBlockingGraph(tickets, links, capabilities),
 			input: FrontierInput{Tickets: tickets, Links: links, Capabilities: capabilities},
@@ -1414,7 +1414,7 @@ func TestAnonymousFrontierDetailDoesNotBorrowEmptyMemberFacts(t *testing.T) {
 	if !strings.Contains(anonymous, "NOT IN WATCHLIST") || strings.Contains(anonymous, "PENDING") || strings.Contains(anonymous, "CYCLE") || strings.Contains(anonymous, "cycle 1:") {
 		t.Fatalf("anonymous Frontier Detail legend = %q", anonymous)
 	}
-	m.detail.frontierMember = true
+	m.detail.provenance = detailFrontierMember
 	member := strings.Join(m.detailLegendLines(detailDocument{}), "\n")
 	if member == "" || strings.Contains(member, "GHOST") || strings.Contains(member, "NOT IN WATCHLIST") {
 		t.Fatalf("empty member Frontier Detail legend = %q", member)
@@ -1425,11 +1425,11 @@ func TestFrontierMemberOriginSurvivesDetailTrail(t *testing.T) {
 	m := New(context.Background(), Options{Now: time.Now})
 	m.width = 120
 	m.height = 30
-	m.detail = detailState{ticket: model.Ticket{ID: ""}, frontierMember: true}
+	m.detail = detailState{ticket: model.Ticket{ID: ""}, provenance: detailFrontierMember}
 	m.trail = []detailTrailEntry{m.detailTrailSnapshot()}
 	m.detail = detailState{}
 	m = m.popDetailTrail()
-	if !m.detail.frontierMember {
+	if !m.detail.provenance.fromFrontier() {
 		t.Fatal("Detail trail lost Frontier member origin")
 	}
 }
@@ -1513,4 +1513,22 @@ func TestFrontierCycleSnapshotFeedsHeaderAndLegend(t *testing.T) {
 			t.Fatalf("shared cycle snapshot frame omitted %q: %q", want, frame)
 		}
 	}
+}
+
+// frontierSeatProvenance builds the seat provenance a Frontier-origin test case
+// expects: a member opened from the canvas, or a display-only seat.
+func frontierSeatProvenance(member bool) detailProvenance {
+	if member {
+		return detailFrontierMember
+	}
+	return detailDisplayOnly
+}
+
+// watchlistSeatProvenance builds the provenance of a Watchlist member seat,
+// opened either from the Frontier canvas or from the List.
+func watchlistSeatProvenance(fromFrontier bool) detailProvenance {
+	if fromFrontier {
+		return detailFrontierMember
+	}
+	return detailListMember
 }

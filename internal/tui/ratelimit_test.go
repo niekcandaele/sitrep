@@ -17,15 +17,15 @@ func TestRateLimitHeaderPreservesPrimaryFactsAtResponsiveWidths(t *testing.T) {
 	counts := "3/9 done · 1 cancelled · 33%"
 	staleness := "just now"
 
-	wide := fact.appendTo(counts, staleness, 160)
+	wide := fact.appendToLine(counts, staleness, 160)
 	if !strings.Contains(wide, "budget 0 · resets 2030-01-02T03:04:05Z") {
 		t.Errorf("wide header = %q, want complete budget", wide)
 	}
-	medium := fact.appendTo(counts, staleness, 90)
+	medium := fact.appendToLine(counts, staleness, 60)
 	if !strings.Contains(medium, "budget 0") || strings.Contains(medium, "resets") {
 		t.Errorf("medium header = %q, want compact budget", medium)
 	}
-	narrow := fact.appendTo(counts, staleness, 60)
+	narrow := fact.appendToLine(counts, staleness, 40)
 	if narrow != counts {
 		t.Errorf("narrow header = %q, want primary facts unchanged %q", narrow, counts)
 	}
@@ -42,8 +42,8 @@ func TestRateLimitHeaderGatesInvalidAndUnsupportedBudget(t *testing.T) {
 		{"invalid", rateLimitHeader(model.Capabilities{RateLimitBudget: true}, model.RateLimitBudget{Remaining: -1, ResetsAt: reset})},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := test.fact.appendTo(counts, "just now", 160); got != counts {
-				t.Errorf("appendTo() = %q, want unchanged %q", got, counts)
+			if got := test.fact.appendToLine(counts, "just now", 160); got != counts {
+				t.Errorf("appendToLine() = %q, want unchanged %q", got, counts)
 			}
 		})
 	}

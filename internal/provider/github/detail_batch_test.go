@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/niekcandaele/sitrep/internal/detailfanout"
 	"github.com/niekcandaele/sitrep/internal/model"
 	"github.com/niekcandaele/sitrep/internal/provider"
 	"github.com/niekcandaele/sitrep/internal/provider/github"
@@ -731,9 +730,8 @@ func TestFetchDetailsSurfacesLateAliasRateRefusalOutsideAggregateSafetyWindow(t 
 			t.Errorf("successful sibling %q received a fabricated failure", id)
 		}
 	}
-	normalized := detailfanout.NormalizeError(err)
-	if refusal, ok := provider.InspectRateLimitRefusal(normalized, time.Unix(1, 0)); !ok || !refusal.KnownReset {
-		t.Fatalf("normalized late refusal = %+v/%t, want known reset", refusal, ok)
+	if refusal, ok := provider.InspectRateLimitRefusal(err, time.Unix(1, 0)); !ok || !refusal.KnownReset {
+		t.Fatalf("raw late refusal = %+v/%t, want known reset", refusal, ok)
 	}
 	if requests.Load() != 1 {
 		t.Errorf("requests = %d, want refusal to stop before chunk two", requests.Load())

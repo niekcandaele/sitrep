@@ -405,7 +405,7 @@ func (m Model) seatFanoutLinks(id model.TicketID, links []model.Link) Model {
 // member into the hidden Frontier seat. A followed Ghost or anonymous Detail is
 // never evidence for a Watchlist member, and anonymous members are non-fetchable.
 func (m Model) refreshFrontierDetailEvidence(links []model.Link) (Model, tea.Cmd) {
-	if m.mode != modeDetail || m.detailReturn != modeFrontier || !m.detail.frontierMember || m.detail.ticket.ID == "" {
+	if m.mode != modeDetail || m.detailReturn != modeFrontier || !m.detail.provenance.fromFrontier() || m.detail.ticket.ID == "" {
 		return m, nil
 	}
 	id := m.detail.ticket.ID
@@ -481,7 +481,6 @@ func (m Model) frontierFetchCmd(generation, detailEvidenceVersion int, ids []mod
 		var rawErr error
 		runErr := detailfanout.Run(ctx, func(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, model.Capabilities, error) {
 			details, caps, err := fetch(ctx, ids)
-			err = detailfanout.NormalizeError(err)
 			rawErr = err
 			return details, caps, err
 		}, runIDs, func(outcome detailfanout.Outcome) {
@@ -502,12 +501,12 @@ func (m Model) frontierFetchCmd(generation, detailEvidenceVersion int, ids []mod
 // policy. The generation guard protects only per-seat progress, failures, Links,
 // graph, and layout from raced or cancellation-ignoring answers.
 func (m Model) onFrontierDetails(msg frontierDetailsMsg) (tea.Model, tea.Cmd) {
-	msg.rawErr = safeDetailFanoutError(msg.rawErr)
-	msg.err = safeDetailFanoutError(msg.err)
+	msg.rawErr = safeErr(msg.rawErr)
+	msg.err = safeErr(msg.err)
 	requestErrors := make([]error, 0, len(msg.outcomes)+2)
 	requestErrors = append(requestErrors, msg.rawErr)
 	for index := range msg.outcomes {
-		msg.outcomes[index].Err = safeDetailFanoutError(msg.outcomes[index].Err)
+		msg.outcomes[index].Err = safeErr(msg.outcomes[index].Err)
 		requestErrors = append(requestErrors, msg.outcomes[index].Err)
 	}
 	requestErrors = append(requestErrors, msg.err)
@@ -918,10 +917,12 @@ func (m Model) openFrontierNode() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-	updated, cmd := m.seatDetail(t, m.frontier.input.Header, m.frontier.input.Capabilities, member)
-	next := updated.(Model)
-	next.detail.frontierMember = member
-	return next, cmd
+	provenance := detailDisplayOnly
+	if member {
+		provenance = detailFrontierMember
+	}
+	updated, cmd := m.seatDetail(t, m.frontier.input.Header, m.frontier.input.Capabilities, provenance)
+	return updated.(Model), cmd
 }
 
 // frontierTicket resolves a node to the Ticket its Detail is seated from.

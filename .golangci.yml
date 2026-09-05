@@ -7,7 +7,22 @@ linters:
     - misspell
     - bodyclose
     - errorlint
+    - depguard
   settings:
+    depguard:
+      rules:
+        shared-shaping-layer:
+          files:
+            - "**/internal/render/plain/*.go"
+          deny:
+            - pkg: github.com/niekcandaele/sitrep/internal/tui
+              desc: "ADR-0007: the shared terminal-shaping layer must not depend on the TUI"
+        thin-model:
+          files:
+            - "**/internal/model/*.go"
+          deny:
+            - pkg: github.com/niekcandaele/sitrep/internal/render/plain
+              desc: "ADR-0007: the thin model must not depend on render policy"
     revive:
       rules:
         - name: exported

@@ -169,7 +169,7 @@ func (p *Provider) Resolve(ctx context.Context, selector provider.Selector) (mod
 		return model.WatchlistSnapshot{}, err
 	}
 	collector := &provider.RateLimitBudgetCollector{}
-	ctx = withRateLimitCollector(ctx, collector)
+	ctx = provider.WithRateLimitCollector(ctx, collector)
 	var (
 		snap model.WatchlistSnapshot
 		err  error
@@ -496,7 +496,7 @@ func (p *Provider) FetchDetail(ctx context.Context, id model.TicketID) (model.De
 // every later unissued ID and stops before another request; caller cancellation
 // also stops before further I/O.
 func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, error) {
-	canonical := canonicalDetailIDs(ids)
+	canonical := provider.CanonicalDetailIDs(ids)
 	details := make(map[model.TicketID]model.Detail, len(canonical))
 	if len(canonical) == 0 {
 		return details, nil
@@ -510,7 +510,9 @@ func (p *Provider) FetchDetails(ctx context.Context, ids []model.TicketID) (map[
 	for start := 0; start < len(canonical); start += maxQueryAliases {
 		end := min(start+maxQueryAliases, len(canonical))
 		chunk := canonical[start:end]
-		chunkDetails, chunkFailures, chunkErr, chunkRefusal := p.fetchDetailChunk(ctx, chunk)
+		result := p.fetchDetailChunk(ctx, chunk)
+		chunkDetails, chunkFailures := result.details, result.failures
+		chunkErr, chunkRefusal := result.err, result.refusal
 		for id, detail := range chunkDetails {
 			details[id] = detail
 		}
@@ -597,7 +599,17 @@ func hasDirectRateLimitChild(err error) bool {
 	return false
 }
 
-func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (map[model.TicketID]model.Detail, map[model.TicketID]error, error, error) {
+// chunkResult is one aliased Detail request's outcome. The two errors are not
+// interchangeable: err is the response-wide cause, refusal is an already
+// inspected rate refusal that must stay reachable for Tracker admission policy.
+type chunkResult struct {
+	details  map[model.TicketID]model.Detail
+	failures map[model.TicketID]error
+	err      error
+	refusal  error
+}
+
+func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) chunkResult {
 	variables := make(map[string]any, len(ids))
 	for i, id := range ids {
 		variables["id"+strconv.Itoa(i)] = string(id)
@@ -606,22 +618,10 @@ func (p *Provider) fetchDetailChunk(ctx context.Context, ids []model.TicketID) (
 	var resp detailBatchResponse
 	header, err := p.do(ctx, buildDetailBatchQuery(len(ids)), variables, &resp)
 	if err != nil {
-		return nil, nil, err, nil
+		return chunkResult{err: err}
 	}
-	return resp.decode(ids, p.endpoint, header)
-}
-
-func canonicalDetailIDs(ids []model.TicketID) []model.TicketID {
-	canonical := make([]model.TicketID, 0, len(ids))
-	seen := make(map[model.TicketID]bool, len(ids))
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		canonical = append(canonical, id)
-	}
-	return canonical
+	details, failures, decodeErr, refusal := resp.decode(ids, p.endpoint, header)
+	return chunkResult{details: details, failures: failures, err: decodeErr, refusal: refusal}
 }
 
 // checkRef rejects a Ref this driver cannot serve before any network call.

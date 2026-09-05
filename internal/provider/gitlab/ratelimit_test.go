@@ -31,7 +31,7 @@ func TestObserveRateLimitUsesDocumentedHeadersOnly(t *testing.T) {
 				header.Set(key, value)
 			}
 			collector := &provider.RateLimitBudgetCollector{}
-			observeRateLimit(withRateLimitCollector(context.Background(), collector), header)
+			observeRateLimit(provider.WithRateLimitCollector(context.Background(), collector), header)
 			if got := collector.Budget(); got != test.want {
 				t.Errorf("Budget() = %+v, want %+v", got, test.want)
 			}
