@@ -228,7 +228,7 @@ func TestPullRequestConnectionDecodesTotalCountAndCreatedAt(t *testing.T) {
 	if conn.TotalCount != 25 {
 		t.Errorf("TotalCount = %d, want 25: the Ticket has more than the cap", conn.TotalCount)
 	}
-	if got := len(newPullRequests(&conn, nil)); got != 20 {
+	if got := len(newPullRequests(44, &conn, nil)); got != 20 {
 		t.Errorf("newPullRequests returned %d pull requests, want the 20 the cap allowed", got)
 	}
 	if conn.Nodes[0].CreatedAt.IsZero() {
@@ -238,13 +238,14 @@ func TestPullRequestConnectionDecodesTotalCountAndCreatedAt(t *testing.T) {
 
 func pullRequestWire(number int, repository, state string, draft bool, created time.Time) pullRequestNode {
 	node := pullRequestNode{
-		TypeName:  "PullRequest",
-		Number:    number,
-		Title:     fmt.Sprintf("PR %d", number),
-		URL:       fmt.Sprintf("https://github.com/%s/pull/%d", repository, number),
-		State:     state,
-		IsDraft:   draft,
-		CreatedAt: created,
+		HeadRefName: "feat/44-work",
+		TypeName:    "PullRequest",
+		Number:      number,
+		Title:       fmt.Sprintf("PR %d", number),
+		URL:         fmt.Sprintf("https://github.com/%s/pull/%d", repository, number),
+		State:       state,
+		IsDraft:     draft,
+		CreatedAt:   created,
 	}
 	if repository != "" {
 		node.Repository = &repositoryRef{NameWithOwner: repository}
@@ -263,10 +264,11 @@ func crossReferenceEvents(nodes ...*pullRequestNode) *crossReferenceConnection {
 func TestPullRequestsDeduplicateStableIdentityFirstOccurrenceWins(t *testing.T) {
 	closingNode := pullRequestWire(51, "Acme/Widgets", "CLOSED", false, time.Time{})
 	closingNode.Title = "closing relationship payload"
+	closingNode.HeadRefName = "unrelated-branch"
 	timelineNode := pullRequestWire(51, "acme/widgets", "OPEN", false, time.Now())
 	timelineNode.Title = "timeline payload"
 
-	got := newPullRequests(
+	got := newPullRequests(44,
 		&pullRequestConnection{Nodes: []pullRequestNode{closingNode}},
 		crossReferenceEvents(&timelineNode, &timelineNode),
 	)
@@ -285,7 +287,7 @@ func TestPullRequestsDeduplicateRepeatedTimelineEvents(t *testing.T) {
 	repeated := first
 	repeated.Title = "later event payload"
 
-	got := newPullRequests(nil, crossReferenceEvents(&first, &repeated))
+	got := newPullRequests(44, nil, crossReferenceEvents(&first, &repeated))
 
 	if len(got) != 1 || got[0].Title != "first event payload" {
 		t.Errorf("PullRequests = %+v, want one PR retaining the first timeline event payload", got)
@@ -296,7 +298,7 @@ func TestPullRequestsKeepEqualNumbersFromDifferentRepositories(t *testing.T) {
 	first := pullRequestWire(7, "acme/widgets", "MERGED", false, time.Time{})
 	second := pullRequestWire(7, "niekcandaele/sitrep", "MERGED", false, time.Time{})
 
-	got := newPullRequests(
+	got := newPullRequests(44,
 		&pullRequestConnection{Nodes: []pullRequestNode{first}},
 		crossReferenceEvents(&second),
 	)
@@ -316,7 +318,7 @@ func TestPullRequestsPreserveRelationshipOrderBeforeLeadSelection(t *testing.T) 
 	timelineOne := pullRequestWire(3, "acme/widgets", "MERGED", false, time.Time{})
 	timelineTwo := pullRequestWire(4, "acme/widgets", "MERGED", false, time.Time{})
 
-	got := newPullRequests(
+	got := newPullRequests(44,
 		&pullRequestConnection{Nodes: []pullRequestNode{closingOne, closingTwo}},
 		crossReferenceEvents(&timelineOne, &timelineTwo),
 	)
@@ -338,7 +340,7 @@ func TestPullRequestsChooseLeadAfterUnion(t *testing.T) {
 	timelineDraft := pullRequestWire(4, "niekcandaele/sitrep", "OPEN", true, newer)
 	timelineClosed := pullRequestWire(5, "niekcandaele/sitrep", "CLOSED", false, newer.Add(time.Hour))
 
-	got := newPullRequests(
+	got := newPullRequests(44,
 		&pullRequestConnection{Nodes: []pullRequestNode{closingMerged, closingClosed}},
 		crossReferenceEvents(&timelineOpen, &timelineDraft, &timelineClosed),
 	)
@@ -370,7 +372,7 @@ func TestPullRequestsPreserveLegacyIdentitylessClosingNode(t *testing.T) {
 	legacyClosing := pullRequestWire(51, "", "MERGED", false, time.Time{})
 	timeline := pullRequestWire(51, "acme/widgets", "MERGED", false, time.Time{})
 
-	got := newPullRequests(
+	got := newPullRequests(44,
 		&pullRequestConnection{Nodes: []pullRequestNode{legacyClosing}},
 		crossReferenceEvents(&timeline),
 	)
@@ -404,24 +406,27 @@ func TestCrossReferenceSourcesRequirePullRequestIdentity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := newPullRequests(nil, tt.connection); got != nil {
+			if got := newPullRequests(44, nil, tt.connection); got != nil {
 				t.Errorf("PullRequests = %+v, want nil without a usable PullRequest source", got)
 			}
 		})
 	}
 }
 
-// GitHub exposes no implementation-specific discriminator for a PR-sourced
-// mention whose willCloseTarget is false. Including every valid PullRequest
-// source deliberately admits incidental mentions rather than guessing from a
-// branch name, PR text, or any unrequested field.
-func TestCrossReferenceIncludesAmbiguousPullRequestMention(t *testing.T) {
-	mention := pullRequestWire(51, "acme/integration", "OPEN", false, time.Time{})
-
-	got := newPullRequests(nil, crossReferenceEvents(&mention))
-
-	if len(got) != 1 || got[0].Number != 51 || got[0].Repository != "acme/integration" {
-		t.Errorf("PullRequests = %+v, want the valid PR-sourced mention included", got)
+func TestCrossReferenceRequiresMatchingHeadBranch(t *testing.T) {
+	for _, branch := range []string{"feat/44-work", "feat/45-work", ""} {
+		t.Run(branch, func(t *testing.T) {
+			mention := pullRequestWire(51, "acme/integration", "OPEN", false, time.Time{})
+			mention.HeadRefName = branch
+			got := newPullRequests(44, nil, crossReferenceEvents(&mention))
+			if branch == "feat/44-work" {
+				if len(got) != 1 || got[0].Number != 51 {
+					t.Fatalf("PullRequests = %+v, want matching PR", got)
+				}
+			} else if got != nil {
+				t.Fatalf("PullRequests = %+v, want prose-only mention dropped", got)
+			}
+		})
 	}
 }
 
@@ -445,9 +450,9 @@ func TestCrossReferenceConnectionDecodesBoundedWindowMetadata(t *testing.T) {
 		connection.PageInfo.StartCursor != "oldest-retained" {
 		t.Errorf("connection metadata = %+v, want explicit retained-window evidence", connection)
 	}
-	got := newPullRequests(nil, &connection)
-	if len(got) != 1 || got[0].Number != 51 {
-		t.Errorf("PullRequests = %+v, want only the usable PullRequest source", got)
+	got := newPullRequests(44, nil, &connection)
+	if got != nil {
+		t.Errorf("PullRequests = %+v, want no PR without a head branch", got)
 	}
 }
 
@@ -561,6 +566,44 @@ func TestPullRequestTotal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := pullRequestTotal(tc.closing, tc.prs); got != tc.want {
 				t.Errorf("pullRequestTotal = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBranchContainsTicket(t *testing.T) {
+	tests := []struct {
+		branch string
+		number int
+		want   bool
+	}{
+		{"feat/3617-mcp-endpoint-skeleton", 3617, true},
+		{"feat/3617x", 361, false},
+		{"feat/03617-work", 3617, false},
+		{"v03", 3, false},
+		{"renovate/node-24.x", 24, false},
+		{"renovate/sharp-0.x", 0, false},
+		{"release-v3", 3, false},
+		{"release-V3", 3, false},
+		{"release-1.24", 24, false},
+		{"fix/pr-image-publication-3666", 3666, true},
+		{"docs/static-checks-3490-followup", 3490, true},
+		{"fix/3584-3574-vi-id-sweep", 3584, true},
+		{"fix/3584-3574-vi-id-sweep", 3574, true},
+		{"feat/GH-3677-private-takaro-project", 3677, true},
+		{"hermes/gh-25-hermes-langfuse-project", 25, true},
+		{"epic-116/issue-115-rate-limit-budget", 116, true},
+		{"epic-116/issue-115-rate-limit-budget", 115, true},
+		{"114-terminal-focus-pause", 114, true},
+		{"3617", 3617, true},
+		{"", 3617, false},
+		{"feat/no-number", 3617, false},
+		{"v3/issue-3", 3, true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%d", tt.branch, tt.number), func(t *testing.T) {
+			if got := branchContainsTicket(tt.branch, tt.number); got != tt.want {
+				t.Errorf("branchContainsTicket(%q, %d) = %v, want %v", tt.branch, tt.number, got, tt.want)
 			}
 		})
 	}

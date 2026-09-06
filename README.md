@@ -435,14 +435,18 @@ exact lists.
 
 GitHub issue sub-issues form an Epic Watchlist. A bare number is completed from the current
 origin; full issue URLs and `owner/repository#number` work elsewhere. GitHub pull request
-information comes from the closing pull-request references GitHub returns for each issue,
-including state, review decision, and head checks. sitrep does not infer additional
-relationships from branch names.
+information includes state, review decision, and head checks. A PR correlates through either
+GitHub’s closing references or a PR-sourced timeline mention whose head branch contains the
+Ticket number as a complete digit run. Version-like runs and leading zeros do not match.
+Prose-only mentions are dropped. This supports PRs targeting non-default epic branches,
+where GitHub does not create closing links. See [ADR-0008](docs/adr/0008-pull-requests-correlate-by-head-branch.md)
+for the rule and its limitations.
 
 sitrep reads a bounded window of a Ticket's pull requests and never paginates it, so a Ticket
 with more than the window holds shows one of them and counts the rest. The `+N more` figure
-uses GitHub's own count of all of a Ticket's pull requests, so it stays honest about what was
-left out; on a Tracker that reports no total it degrades to counting what was fetched. Under
+uses the larger of GitHub’s closing-reference count and the retained, deduplicated PR count.
+This is a lower bound when closing references are truncated; timeline event totals cannot
+count correlated PRs. On a Tracker that reports no total it counts what was fetched. Under
 `--json` the same figure is `pull_request_total`.
 
 For github.com, an ambient `$GH_TOKEN` or `$GITHUB_TOKEN` is scoped to github.com and sitrep
@@ -594,7 +598,8 @@ non-Epic shape:
 listed below.
 
 `pull_request_total` is a lower bound on how many pull requests the Ticket has: never below
-the length of `pull_requests`, never above the Tracker's own count. It is omitted at zero,
+the length of `pull_requests`. For GitHub it is the larger of that length and the closing-reference
+count, so branch-matched PRs can raise it above the closing count. It is omitted at zero,
 and so is `pull_requests`, so an absent pair does not distinguish a Provider that does not
 report pull requests from one that found none — read `capabilities.pull_requests` for that.
 

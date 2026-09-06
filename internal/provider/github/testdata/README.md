@@ -68,9 +68,9 @@ The shapes and what each one proves:
 row reproduces the observed relationship between `niekcandaele/sitrep#44` and PR
 `#50`: the closing connection was empty while a PR-sourced
 `CrossReferencedEvent` linked the two. In the observed case, PR #50 targeted
-`epic/sitrep-v0.2`, a non-default integration branch. The fixture deliberately
-omits `baseRefName` and every other branch field because the native relationship,
-not a branch-name heuristic, is the behavior under test.
+`epic/sitrep-v0.2`, a non-default integration branch. The fixture includes synthetic `headRefName` values naming each Ticket
+to exercise branch-based correlation when closing links are absent. `baseRefName`
+is omitted because membership does not depend on the target branch.
 
 The #44/#50 payload is deliberately edited to an open, review-required state so
 list normalization can be asserted after the historical PR merged. The remaining
