@@ -37,15 +37,11 @@ const queryMembershipDocument = `query($query:String!, $first:Int!, $after:Strin
 // relationships, not a second request per Ticket: the epic query is polled,
 // and turning one request into N is exactly what ADR-0003's split exists to
 // prevent. closedByPullRequestsReferences is GitHub's own "this pull request
-// will close this issue" linkage, which is what a `Closes #N` body produces;
-// includeClosedPrs keeps rejected work visible. The newest twenty
-// CrossReferencedEvent timeline items add PR-sourced mentions that GitHub does
-// not classify as closing — notably references from non-default integration
-// branches. GitHub exposes no reliable native discriminator between an
-// implementation reference and an incidental PR mention when willCloseTarget
-// is false, so every usable PullRequest source is deliberately included. Issue
-// sources are ignored, and branch-name, title, body, and willCloseTarget
-// heuristics are deliberately rejected.
+// will close this issue" linkage; includeClosedPrs keeps rejected work visible.
+// Closing keywords only create links for PRs targeting the default branch.
+// The newest twenty CrossReferencedEvent timeline items supply candidates for
+// other bases, retained only when headRefName contains the Ticket number under
+// ADR-0008's digit-run rule. Prose-only mentions and Issue sources are ignored.
 //
 // Each relationship is capped at twenty per Ticket and neither paginates. The
 // closing connection keeps GitHub's first-twenty order; timelineItems(last:20)
@@ -56,10 +52,10 @@ const queryMembershipDocument = `query($query:String!, $first:Int!, $after:Strin
 // union therefore contains at most forty pull requests. Older events and nodes
 // past either bound are silently absent: this Provider cap is not a Query
 // membership LimitReached condition. The closing connection's totalCount is
-// decoded and reported: it becomes model.Ticket's PullRequestTotal, so a
-// truncated row counts all of a Ticket's pull requests rather than the twenty
-// that were fetched. The timeline totalCount and pageInfo are decoded only so
-// the bounds stay explicit in this package; no renderer reports those.
+// decoded and reported: PullRequestTotal is the larger of that count and
+// the retained union size, a lower bound when closing references are truncated.
+// The timeline totalCount and pageInfo are decoded only so the bounds stay
+// explicit in this package; no renderer reports those.
 //
 // The shared PullRequest fragment contains only thin list fields. Its aggregate
 // head-commit statusCheckRollup — rather than per-check detail — keeps the
@@ -120,7 +116,7 @@ const issuePullRequestRelationshipsFragment = `fragment IssuePullRequestRelation
 }`
 
 const pullRequestListFragment = `fragment PullRequestListFields on PullRequest {
-  number title url state isDraft reviewDecision createdAt
+  number title url state isDraft reviewDecision createdAt headRefName
   repository { nameWithOwner }
   commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
 }`

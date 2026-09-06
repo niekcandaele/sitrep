@@ -1121,7 +1121,7 @@ func TestResolveRefListCorrelatesCrossReferencePullRequests(t *testing.T) {
 		"closedByPullRequestsReferences(first:20, includeClosedPrs:true)",
 		"crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT])",
 		"pageInfo { hasPreviousPage startCursor }",
-		"source {", "__typename", "... on PullRequest { ...PullRequestListFields }",
+		"source {", "__typename", "headRefName", "... on PullRequest { ...PullRequestListFields }",
 	} {
 		if !strings.Contains(document, token) {
 			t.Errorf("exact-read document omits %q: %s", token, document)
@@ -1133,7 +1133,7 @@ func TestResolveRefListCorrelatesCrossReferencePullRequests(t *testing.T) {
 		t.Errorf("exact-read document does not define each shared fragment exactly once: %s", document)
 	}
 	for _, forbidden := range []string{
-		"willCloseTarget", "baseRefName", "headRefName", "body", "comments", "blockedBy", "blocking",
+		"willCloseTarget", "baseRefName", "body", "comments", "blockedBy", "blocking",
 	} {
 		if strings.Contains(document, forbidden) {
 			t.Errorf("exact-read document contains forbidden branch/Detail field %q: %s", forbidden, document)
@@ -1779,7 +1779,7 @@ func TestCrossReferencePullRequestsMapOnEpicRootAndChild(t *testing.T) {
 				"assignees": {"nodes": []},
 				"closedByPullRequestsReferences": {"totalCount": 0, "nodes": []},
 				"crossReferences": {"totalCount": 1, "nodes": [{"source": {
-					"__typename": "PullRequest", "number": 50, "title": "Root work",
+					"__typename": "PullRequest", "number": 50, "title": "Root work", "headRefName": "feat/44-root",
 					"url": "https://github.com/acme/widgets/pull/50", "state": "OPEN", "isDraft": false,
 					"createdAt": "2026-08-22T08:00:00Z", "repository": {"nameWithOwner": "acme/widgets"}
 				}}]},
@@ -1789,7 +1789,7 @@ func TestCrossReferencePullRequestsMapOnEpicRootAndChild(t *testing.T) {
 					"assignees": {"nodes": []},
 					"closedByPullRequestsReferences": {"totalCount": 0, "nodes": []},
 					"crossReferences": {"totalCount": 1, "nodes": [{"source": {
-						"__typename": "PullRequest", "number": 150, "title": "Child work",
+						"__typename": "PullRequest", "number": 150, "title": "Child work", "headRefName": "feat/45-child",
 						"url": "https://github.com/acme/integration/pull/150", "state": "OPEN", "isDraft": true,
 						"createdAt": "2026-08-22T09:00:00Z", "repository": {"nameWithOwner": "acme/integration"}
 					}}]}
@@ -1834,7 +1834,7 @@ func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
 		for _, token := range []string{
 			"closedByPullRequestsReferences(first:20, includeClosedPrs:true)",
 			"crossReferences: timelineItems(last:20, itemTypes:[CROSS_REFERENCED_EVENT])",
-			"source {", "__typename", "statusCheckRollup",
+			"source {", "__typename", "headRefName", "statusCheckRollup",
 		} {
 			if !strings.Contains(r.query, token) {
 				t.Errorf("request %d omits pull request correlation shape %q: %s", i, token, r.query)
@@ -1847,7 +1847,7 @@ func TestPullRequestsRideOnTheEpicQuery(t *testing.T) {
 			strings.Count(r.query, "fragment PullRequestListFields") != 1 {
 			t.Errorf("request %d does not define each correlation fragment exactly once: %s", i, r.query)
 		}
-		for _, forbidden := range []string{"willCloseTarget", "baseRefName", "headRefName", "body", "comments"} {
+		for _, forbidden := range []string{"willCloseTarget", "baseRefName", "body", "comments"} {
 			if strings.Contains(r.query, forbidden) {
 				t.Errorf("request %d contains forbidden correlation/Detail field %q: %s", i, forbidden, r.query)
 			}

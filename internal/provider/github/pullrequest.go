@@ -50,6 +50,7 @@ type crossReferencedEventNode struct {
 }
 
 type pullRequestNode struct {
+	HeadRefName    string         `json:"headRefName"`
 	TypeName       string         `json:"__typename"`
 	Number         int            `json:"number"`
 	Title          string         `json:"title"`
@@ -73,13 +74,9 @@ type pullRequestNode struct {
 	} `json:"commits"`
 }
 
-// newPullRequests unions GitHub's two native PR relationships before mapping
-// them onto sitrep's model. Closing references precede usable PR-sourced timeline
-// mentions, and each source preserves its API order. GitHub cannot distinguish an
-// implementation reference from an incidental PR mention when willCloseTarget is
-// false, so every PullRequest source with stable repository-plus-number identity
-// is included. Issue, null, inaccessible, and identity-less timeline sources are
-// ignored.
+// newPullRequests keeps authoritative closing references and timeline PRs whose
+// head branch names the Ticket. Prose-only mentions contribute no relationship.
+// Issue, null, inaccessible, and identity-less timeline sources are ignored.
 //
 // Stable identities deduplicate case-insensitively across and within both paths;
 // first occurrence wins. Closing nodes without repository identity cannot prove
@@ -87,6 +84,7 @@ type pullRequestNode struct {
 // with no candidates gets nil, the model's documented "none", rather than an
 // empty slice.
 func newPullRequests(
+	ticketNumber int,
 	closing *pullRequestConnection,
 	crossReferences *crossReferenceConnection,
 ) []model.PullRequest {
@@ -121,6 +119,9 @@ func newPullRequests(
 				continue
 			}
 			candidate := *event.Source
+			if !branchContainsTicket(candidate.HeadRefName, ticketNumber) {
+				continue
+			}
 			identity, ok := stablePullRequestIdentity(candidate)
 			if !ok {
 				continue
@@ -159,8 +160,8 @@ func newPullRequests(
 //   - the closing connection truncated at twenty of thirty-four: the total is
 //     thirty-four, which is the fact worth reporting;
 //   - truncated and the cross-reference path contributed extra pull requests:
-//     the total is an honest lower bound — never above GitHub's own count and
-//     never below what is held — rather than a guess at the union's true size;
+//     the total is an honest lower bound — at least GitHub's closing count and
+//     at least what is held — rather than a guess at the union's true size;
 //   - no pull requests at all: zero, the model's documented "no total".
 func pullRequestTotal(closing *pullRequestConnection, prs []model.PullRequest) int {
 	total := 0
@@ -168,6 +169,32 @@ func pullRequestTotal(closing *pullRequestConnection, prs []model.PullRequest) i
 		total = closing.TotalCount
 	}
 	return max(total, len(prs))
+}
+
+// branchContainsTicket compares maximal ASCII digit runs, excluding version-like
+// runs. Ordinal suffixes can still collide with low ticket numbers (ADR-0008).
+func branchContainsTicket(branch string, number int) bool {
+	ticket := strconv.Itoa(number)
+	for i := 0; i < len(branch); {
+		if branch[i] < '0' || branch[i] > '9' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(branch) && branch[i] >= '0' && branch[i] <= '9' {
+			i++
+		}
+		if start > 0 && (branch[start-1] == '.' || branch[start-1] == 'v' || branch[start-1] == 'V') {
+			continue
+		}
+		if i < len(branch) && branch[i] == '.' {
+			continue
+		}
+		if branch[start:i] == ticket {
+			return true
+		}
+	}
+	return false
 }
 
 func stablePullRequestIdentity(n pullRequestNode) (string, bool) {
